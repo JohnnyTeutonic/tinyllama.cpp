@@ -4,8 +4,8 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Main executable (add all .cpp files here as you modularize)
-add_executable(tinyllama main.cpp safetensors_loader.cpp tokenizer.cpp logger.cpp)
-# In the future, add model.cpp, prompt.cpp, etc.
+add_executable(tinyllama main.cpp safetensors_loader.cpp tokenizer.cpp logger.cpp prompt.cpp)
+# In the future, add model.cpp, etc.
 
 # nlohmann_json (header-only)
 find_package(nlohmann_json 3.2.0 REQUIRED)

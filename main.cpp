@@ -10,6 +10,7 @@
 #include "safetensors_loader.h"
 #include "tokenizer.h"
 #include "logger.h"
+#include "prompt.h"
 
 // TODO: Implement safetensors loader
 // TODO: Implement TinyLlama model and inference
@@ -62,6 +63,13 @@ int main(int argc, char** argv) {
         Logger::info("Tokenized: " + idstr);
         std::string detok = tokenizer.detokenize(ids);
         Logger::info("Detokenized: " + detok);
+
+        // Prompt formatting example
+        std::string system = "You are a helpful assistant.";
+        std::vector<std::string> user_msgs = {"What is the capital of France?"};
+        std::vector<std::string> assistant_msgs; // empty for next turn
+        std::string prompt = format_prompt(system, user_msgs, assistant_msgs, tokenizer.chat_template());
+        Logger::info("Formatted prompt: " + prompt);
     } catch (const std::exception& e) {
         Logger::error(std::string("Tokenizer error: ") + e.what());
         return 1;

@@ -2,6 +2,12 @@
 [INFO] Loading config: data/config.json
 [INFO] Tokenized: 15043 29892 3186 29991 
 [INFO] Detokenized: Hello, world!
+[INFO] Formatted prompt: <|system|>
+You are a helpful assistant.</s>
+<|user|>
+What is the capital of France?</s>
+<|assistant|>
+
 [INFO] Loaded 201 tensors from model.safetensors:
 [INFO]   lm_head.weight | dtype: BF16, shape: [32000, 2048]
 [INFO]   model.embed_tokens.weight | dtype: BF16, shape: [32000, 2048]
