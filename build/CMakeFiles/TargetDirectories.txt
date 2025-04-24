@@ -1,0 +1,3 @@
+/mnt/c/Users/jonat/OneDrive/Documents/tinyllama.cpp/build/CMakeFiles/tinyllama.dir
+/mnt/c/Users/jonat/OneDrive/Documents/tinyllama.cpp/build/CMakeFiles/edit_cache.dir
+/mnt/c/Users/jonat/OneDrive/Documents/tinyllama.cpp/build/CMakeFiles/rebuild_cache.dir
