@@ -1,1 +1,0 @@
-/usr/bin/c++ CMakeFiles/tinyllama.dir/main.cpp.o CMakeFiles/tinyllama.dir/safetensors_loader.cpp.o -o tinyllama  /usr/lib/x86_64-linux-gnu/libsentencepiece.so 
