@@ -8,6 +8,8 @@
 #include <sentencepiece_processor.h>
 #include <map>
 #include "safetensors_loader.h"
+#include "tokenizer.h"
+#include "logger.h"
 
 // TODO: Implement safetensors loader
 // TODO: Implement TinyLlama model and inference
@@ -29,8 +31,8 @@ int main(int argc, char** argv) {
     std::string tokenizer_path = data_dir + "/tokenizer.model";
     std::string safetensors_path = data_dir + "/model.safetensors";
 
-    std::cout << "Using data directory: " << data_dir << std::endl;
-    std::cout << "Loading config: " << config_path << std::endl;
+    Logger::info("Using data directory: " + data_dir);
+    Logger::info("Loading config: " + config_path);
 
     // 1. Load config.json
     nlohmann::json config;
@@ -38,7 +40,7 @@ int main(int argc, char** argv) {
         std::string config_str = read_file(config_path);
         config = nlohmann::json::parse(config_str);
     } catch (const std::exception& e) {
-        std::cerr << "Error loading config.json: " << e.what() << std::endl;
+        Logger::error(std::string("Error loading config.json: ") + e.what());
         return 1;
     }
 
@@ -46,7 +48,22 @@ int main(int argc, char** argv) {
     sentencepiece::SentencePieceProcessor sp;
     auto sp_status = sp.Load(tokenizer_path);
     if (!sp_status.ok()) {
-        std::cerr << "Failed to load SentencePiece model: " << sp_status.ToString() << std::endl;
+        Logger::error("Failed to load SentencePiece model: " + sp_status.ToString());
+        return 1;
+    }
+
+    // Tokenizer usage example
+    try {
+        Tokenizer tokenizer(data_dir);
+        std::string sample = "Hello, world!";
+        auto ids = tokenizer.tokenize(sample);
+        std::string idstr;
+        for (int id : ids) idstr += std::to_string(id) + " ";
+        Logger::info("Tokenized: " + idstr);
+        std::string detok = tokenizer.detokenize(ids);
+        Logger::info("Detokenized: " + detok);
+    } catch (const std::exception& e) {
+        Logger::error(std::string("Tokenizer error: ") + e.what());
         return 1;
     }
 
@@ -54,18 +71,19 @@ int main(int argc, char** argv) {
     try {
         SafeTensorsLoader st_loader(safetensors_path);
         auto names = st_loader.tensor_names();
-        std::cout << "Loaded " << names.size() << " tensors from model.safetensors:\n";
+        Logger::info("Loaded " + std::to_string(names.size()) + " tensors from model.safetensors:");
         for (const auto& n : names) {
             const auto& info = st_loader.get_tensor_info(n);
-            std::cout << "  " << n << " | dtype: " << info.dtype << ", shape: [";
+            std::string shape_str = "[";
             for (size_t i = 0; i < info.shape.size(); ++i) {
-                std::cout << info.shape[i];
-                if (i + 1 < info.shape.size()) std::cout << ", ";
+                shape_str += std::to_string(info.shape[i]);
+                if (i + 1 < info.shape.size()) shape_str += ", ";
             }
-            std::cout << "]\n";
+            shape_str += "]";
+            Logger::info("  " + n + " | dtype: " + info.dtype + ", shape: " + shape_str);
         }
     } catch (const std::exception& e) {
-        std::cerr << "Error loading model.safetensors: " << e.what() << std::endl;
+        Logger::error(std::string("Error loading model.safetensors: ") + e.what());
         return 1;
     }
 
@@ -74,6 +92,6 @@ int main(int argc, char** argv) {
     // 6. TODO: Run inference
     // 7. TODO: Detokenize output
 
-    std::cout << "Pipeline skeleton initialized.\n";
+    Logger::info("Pipeline skeleton initialized.\n");
     return 0;
 } 
