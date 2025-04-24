@@ -11,6 +11,7 @@
 #include "tokenizer.h"
 #include "logger.h"
 #include "prompt.h"
+#include "model.h"
 
 // TODO: Implement safetensors loader
 // TODO: Implement TinyLlama model and inference
@@ -89,6 +90,16 @@ int main(int argc, char** argv) {
             }
             shape_str += "]";
             Logger::info("  " + n + " | dtype: " + info.dtype + ", shape: " + shape_str);
+        }
+
+        // Model weight loading example
+        try {
+            ModelConfig mcfg = parse_model_config(config);
+            TinyLlamaModel model(mcfg, st_loader);
+            Logger::info("TinyLlamaModel weights loaded successfully.");
+        } catch (const std::exception& e) {
+            Logger::error(std::string("Model weight loading error: ") + e.what());
+            return 1;
         }
     } catch (const std::exception& e) {
         Logger::error(std::string("Error loading model.safetensors: ") + e.what());
