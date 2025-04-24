@@ -97,6 +97,29 @@ int main(int argc, char** argv) {
             ModelConfig mcfg = parse_model_config(config);
             TinyLlamaModel model(mcfg, st_loader);
             Logger::info("TinyLlamaModel weights loaded successfully.");
+
+            // Forward pass test
+            std::string sample = "Hello, world!";
+            Tokenizer tokenizer(data_dir);
+            auto ids = tokenizer.tokenize(sample);
+            if (!ids.empty()) {
+                int token_id = ids[0];
+                auto logits = model.forward(token_id);
+                Logger::info("Logits size: " + std::to_string(logits.size()));
+                std::string logit_str;
+                for (int i = 0; i < 10 && i < logits.size(); ++i) logit_str += std::to_string(logits[i]) + " ";
+                Logger::info("First 10 logits: " + logit_str);
+                float minv = *std::min_element(logits.begin(), logits.end());
+                float maxv = *std::max_element(logits.begin(), logits.end());
+                float mean = std::accumulate(logits.begin(), logits.end(), 0.0f) / logits.size();
+                Logger::info("Logits min: " + std::to_string(minv) + ", max: " + std::to_string(maxv) + ", mean: " + std::to_string(mean));
+                bool all_finite = std::all_of(logits.begin(), logits.end(), [](float v) { return std::isfinite(v); });
+                Logger::info(std::string("All logits finite: ") + (all_finite ? "yes" : "no"));
+                bool all_same = std::all_of(logits.begin(), logits.end(), [&](float v) { return v == logits[0]; });
+                Logger::info(std::string("All logits same: ") + (all_same ? "yes" : "no"));
+            } else {
+                Logger::error("Tokenizer produced no tokens for forward pass test.");
+            }
         } catch (const std::exception& e) {
             Logger::error(std::string("Model weight loading error: ") + e.what());
             return 1;
