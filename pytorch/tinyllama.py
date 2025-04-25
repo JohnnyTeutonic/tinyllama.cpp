@@ -1,0 +1,250 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import math
+import re
+import logging
+
+# Configure logging
+logging.basicConfig(filename='pytorch/debugging.log', level=logging.INFO, 
+                    format='%(asctime)s - %(levelname)s - %(message)s', 
+                    filemode='w') # 'w' to overwrite the file each run
+
+class RMSNorm(nn.Module):
+    def __init__(self, dim, eps=1e-5):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(dim))
+        self.eps = eps
+
+    def forward(self, x):
+        # Standard float32 RMSNorm calculation
+        norm = x.norm(2, dim=-1, keepdim=True)
+        output = x * (self.weight / (norm / math.sqrt(x.shape[-1]) + self.eps))
+        return output
+
+# Real RoPE implementation (matches HuggingFace Llama)
+def precompute_freqs_cis(dim, end, theta=10000.0, device=None):
+    """Precompute complex exponentials for RoPE."""
+    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2, device=device).float() / dim))
+    t = torch.arange(end, device=device).float()
+    freqs = torch.outer(t, freqs)  # (seq_len, dim/2)
+    freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
+    return freqs_cis  # (seq_len, dim/2)
+
+def apply_rotary_emb(x, freqs_cis):
+    # x: (batch, seq, n_heads, head_dim)
+    x_ = x.float().reshape(*x.shape[:-1], -1, 2)
+    x_ = torch.view_as_complex(x_)
+    freqs_cis = freqs_cis.unsqueeze(0).unsqueeze(2)  # (1, seq, 1, head_dim/2)
+    x_out = x_ * freqs_cis
+    x_out = torch.view_as_real(x_out).reshape_as(x)
+    return x_out.type_as(x)
+
+def repeat_kv(x, n_rep):
+    """Repeat K/V heads for GQA compatibility."""
+    bs, slen, n_kv_heads, head_dim = x.shape
+    if n_rep == 1:
+        return x
+    return (
+        x.unsqueeze(3)
+        .expand(bs, slen, n_kv_heads, n_rep, head_dim)
+        .reshape(bs, slen, n_kv_heads * n_rep, head_dim)
+    )
+
+class Llama2Block(nn.Module):
+    def __init__(self, hidden_size, num_q_heads, num_kv_heads, mlp_hidden_size, rope_theta=10000.0, max_seq_len=2048, rms_norm_eps=1e-5):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.num_q_heads = num_q_heads
+        self.num_kv_heads = num_kv_heads
+        self.num_key_value_groups = num_q_heads // num_kv_heads
+        self.head_dim = hidden_size // num_q_heads
+        self.max_seq_len = max_seq_len
+        self.rope_theta = rope_theta
+        self.rms_norm_eps = rms_norm_eps
+        # Norms (default to float32)
+        self.rmsnorm1 = RMSNorm(hidden_size, eps=rms_norm_eps)
+        self.rmsnorm2 = RMSNorm(hidden_size, eps=rms_norm_eps)
+        # Attention projections (no bias, default to float32)
+        self.q_proj = nn.Linear(hidden_size, num_q_heads * self.head_dim, bias=False)
+        self.k_proj = nn.Linear(hidden_size, num_kv_heads * self.head_dim, bias=False)
+        self.v_proj = nn.Linear(hidden_size, num_kv_heads * self.head_dim, bias=False)
+        self.o_proj = nn.Linear(num_q_heads * self.head_dim, hidden_size, bias=False)
+        # MLP (default to float32)
+        self.gate_proj = nn.Linear(hidden_size, mlp_hidden_size, bias=False)
+        self.up_proj = nn.Linear(hidden_size, mlp_hidden_size, bias=False)
+        self.down_proj = nn.Linear(mlp_hidden_size, hidden_size, bias=False)
+        # Precompute RoPE frequencies
+        self.register_buffer("freqs_cis", precompute_freqs_cis(self.head_dim, self.max_seq_len, self.rope_theta), persistent=False)
+
+    def load_weights(self, weights, prefix):
+        def copy_weight(param, tensor, name):
+            logging.info(f"Loading {name}:")
+            logging.info(f"  - Tensor shape: {tensor.shape}, dtype: {tensor.dtype}")
+            logging.info(f"  - Param shape: {param.shape}, dtype: {param.dtype}")
+            if param.shape != tensor.shape:
+                if param.shape == tensor.t().shape:
+                    logging.info(f"  - Transposing tensor to match parameter shape.")
+                    param.data.copy_(tensor.t())
+                else:
+                    logging.error(f"Shape mismatch for {name}: param {param.shape}, tensor {tensor.shape}")
+                    raise ValueError(f"Shape mismatch for {name}: param {param.shape}, tensor {tensor.shape}")
+            else:
+                param.data.copy_(tensor)
+            logging.info(f"  - Copied. Param mean: {param.data.mean():.4f}, std: {param.data.std():.4f}")
+        # RMSNorms
+        copy_weight(self.rmsnorm1.weight, weights[prefix + "input_layernorm.weight"], f"{prefix}input_layernorm.weight")
+        copy_weight(self.rmsnorm2.weight, weights[prefix + "post_attention_layernorm.weight"], f"{prefix}post_attention_layernorm.weight")
+        # Attention projections
+        copy_weight(self.q_proj.weight, weights[prefix + "self_attn.q_proj.weight"], f"{prefix}self_attn.q_proj.weight")
+        copy_weight(self.k_proj.weight, weights[prefix + "self_attn.k_proj.weight"], f"{prefix}self_attn.k_proj.weight")
+        copy_weight(self.v_proj.weight, weights[prefix + "self_attn.v_proj.weight"], f"{prefix}self_attn.v_proj.weight")
+        copy_weight(self.o_proj.weight, weights[prefix + "self_attn.o_proj.weight"], f"{prefix}self_attn.o_proj.weight")
+        # MLP projections
+        copy_weight(self.gate_proj.weight, weights[prefix + "mlp.gate_proj.weight"], f"{prefix}mlp.gate_proj.weight")
+        copy_weight(self.up_proj.weight, weights[prefix + "mlp.up_proj.weight"], f"{prefix}mlp.up_proj.weight")
+        copy_weight(self.down_proj.weight, weights[prefix + "mlp.down_proj.weight"], f"{prefix}mlp.down_proj.weight")
+
+    def forward(self, x, attn_mask=None):
+        # x is expected to be float32 now
+        bsz, seq_len, _ = x.size()
+        # Attention
+        h = self.rmsnorm1(x)
+        q = self.q_proj(h).view(bsz, seq_len, self.num_q_heads, self.head_dim)
+        k = self.k_proj(h).view(bsz, seq_len, self.num_kv_heads, self.head_dim)
+        v = self.v_proj(h).view(bsz, seq_len, self.num_kv_heads, self.head_dim)
+        # RoPE
+        freqs_cis = self.freqs_cis[:seq_len]
+        q = apply_rotary_emb(q, freqs_cis)
+        k = apply_rotary_emb(k, freqs_cis)
+        # Repeat K/V heads for GQA
+        k = repeat_kv(k, self.num_key_value_groups)
+        v = repeat_kv(v, self.num_key_value_groups)
+        # Attention scores
+        q = q.permute(0, 2, 1, 3)  # (bsz, n_q_heads, seq, head_dim)
+        k = k.permute(0, 2, 1, 3)  # (bsz, n_q_heads, seq, head_dim)
+        v = v.permute(0, 2, 1, 3)  # (bsz, n_q_heads, seq, head_dim)
+        attn_scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        if attn_mask is not None:
+            # Reshape mask for broadcasting: [1, 1, seq_len, seq_len]
+            attn_mask = attn_mask.unsqueeze(0).unsqueeze(0)
+            attn_scores = attn_scores.masked_fill(~attn_mask, float('-inf'))
+        attn_probs = F.softmax(attn_scores, dim=-1, dtype=q.dtype)
+        attn_out = torch.matmul(attn_probs, v)  # (bsz, n_q_heads, seq, head_dim)
+        attn_out = attn_out.permute(0, 2, 1, 3).contiguous().view(bsz, seq_len, self.hidden_size)
+        attn_out = self.o_proj(attn_out)
+        x = x + attn_out
+        # MLP
+        h = self.rmsnorm2(x)
+        gate = F.silu(self.gate_proj(h))
+        up = self.up_proj(h)
+        mlp_out = self.down_proj(gate * up)
+        x = x + mlp_out
+        return x
+
+class TinyLlama(nn.Module):
+    """TinyLlama model: embedding, transformer stack, output head. Uses config for hyperparameters."""
+    def __init__(self, config=None, weights=None):
+        super().__init__()
+        # Get hyperparameters from config
+        vocab_size = config.get('vocab_size')
+        hidden_size = config.get('hidden_size')
+        num_layers = config.get('num_hidden_layers')
+        num_q_heads = config.get('num_attention_heads')
+        num_kv_heads = config.get('num_key_value_heads')
+        mlp_hidden_size = config.get('intermediate_size')
+        max_seq_len = config.get('max_position_embeddings', 2048)
+        rope_theta = config.get('rope_theta', 10000.0) # Get rope_theta or default
+        rms_norm_eps = config.get('rms_norm_eps', 1e-5) # Get norm eps or default
+        # torch_dtype_str = config.get('torch_dtype', 'float32') # REMOVED
+        # self.dtype = getattr(torch, torch_dtype_str) # REMOVED
+
+        # Build model (defaulting to float32)
+        self.embedding = nn.Embedding(vocab_size, hidden_size)
+        self.blocks = nn.ModuleList([
+            Llama2Block(hidden_size, num_q_heads, num_kv_heads, mlp_hidden_size, 
+                        rope_theta=rope_theta, max_seq_len=max_seq_len, rms_norm_eps=rms_norm_eps)
+            for _ in range(num_layers)
+        ])
+        self.norm = RMSNorm(hidden_size, eps=rms_norm_eps)
+        self.output_head = nn.Linear(hidden_size, vocab_size, bias=False)
+        
+        # NO explicit weight tying here based on config
+
+        # Load weights if provided (will load into float32 params)
+        if weights is not None:
+            # Load embedding weights 
+            embed_weight = None
+            embed_key = None
+            for key in ["model.embed_tokens.weight", "embed_tokens.weight", "embedding.weight"]:
+                 if key in weights:
+                    embed_weight = weights[key]
+                    embed_key = key
+                    break
+            if embed_weight is not None:
+                 logging.info(f"Loading {embed_key}:")
+                 logging.info(f"  - Tensor shape: {embed_weight.shape}, dtype: {embed_weight.dtype}")
+                 logging.info(f"  - Param shape: {self.embedding.weight.shape}, dtype: {self.embedding.weight.dtype}")
+                 self.embedding.weight.data.copy_(embed_weight)
+                 logging.info(f"  - Copied (Embedding). Param mean: {self.embedding.weight.data.mean():.4f}, std: {self.embedding.weight.data.std():.4f}")
+            else:
+                 logging.warning("Warning: Embedding weights not found in safetensors file.")
+
+            # Load output head weights separately if they exist and aren't tied
+            output_head_key = "lm_head.weight" # Common key for untied head
+            if output_head_key in weights:
+                 output_weight = weights[output_head_key]
+                 logging.info(f"Loading {output_head_key}:")
+                 logging.info(f"  - Tensor shape: {output_weight.shape}, dtype: {output_weight.dtype}")
+                 logging.info(f"  - Param shape: {self.output_head.weight.shape}, dtype: {self.output_head.weight.dtype}")
+                 if self.output_head.weight.shape == output_weight.shape:
+                    self.output_head.weight.data.copy_(output_weight)
+                 elif self.output_head.weight.shape == output_weight.t().shape:
+                     logging.info("  - Transposing tensor to match parameter shape.")
+                     self.output_head.weight.data.copy_(output_weight.t())
+                 else:
+                      logging.error(f"Shape mismatch for {output_head_key}: param {self.output_head.weight.shape}, tensor {output_weight.shape}")
+                      raise ValueError(f"Shape mismatch for {output_head_key}: param {self.output_head.weight.shape}, tensor {output_weight.shape}")
+                 logging.info(f"  - Copied (Output Head). Param mean: {self.output_head.weight.data.mean():.4f}, std: {self.output_head.weight.data.std():.4f}")
+            else:
+                 # If lm_head.weight doesn't exist, and tie_word_embeddings was false, 
+                 # it implies the model expects the output head initialized but potentially not used?
+                 # Or maybe another key is used? For now, just warn.
+                 logging.warning(f"Warning: Output head weights ({output_head_key}) not found. Output head will use initial weights.")
+
+            # Load final norm weights
+            norm_key = "model.norm.weight"
+            if norm_key in weights:
+                norm_weight = weights[norm_key]
+                logging.info(f"Loading {norm_key}:")
+                logging.info(f"  - Tensor shape: {norm_weight.shape}, dtype: {norm_weight.dtype}")
+                logging.info(f"  - Param shape: {self.norm.weight.shape}, dtype: {self.norm.weight.dtype}")
+                self.norm.weight.data.copy_(norm_weight)
+                logging.info(f"  - Copied (Final Norm). Param mean: {self.norm.weight.data.mean():.4f}, std: {self.norm.weight.data.std():.4f}")
+            else:
+                logging.warning(f"Warning: Final norm weights ({norm_key}) not found.")
+            # Load transformer block weights
+            for i, block in enumerate(self.blocks):
+                prefix = f"model.layers.{i}."
+                block.load_weights(weights, prefix)
+
+    def forward(self, input_ids, attention_mask=None):
+        if not torch.is_tensor(input_ids):
+            input_ids = torch.tensor(input_ids, dtype=torch.long)
+        # Ensure input_ids is on the same device as embedding weights
+        input_ids = input_ids.to(self.embedding.weight.device)
+        
+        x = self.embedding(input_ids) # Output will be float32
+        # Add batch dimension if needed
+        if x.dim() == 2:
+            x = x.unsqueeze(0)
+
+        # Ensure attention_mask is on the correct device and dtype if provided
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(x.device)
+
+        for block in self.blocks:
+            x = block(x, attn_mask=attention_mask)
+        x = self.norm(x)
+        logits = self.output_head(x)
+        return logits # Return float32 logits 
