@@ -6,6 +6,8 @@
 #include <unordered_map>
 #include <nlohmann/json.hpp>
 #include "safetensors_loader.h"
+#include <functional>
+#include <cstdint> // Include for uint16_t
 
 struct ModelConfig {
     int hidden_size;
@@ -23,13 +25,27 @@ struct ModelConfig {
     int eos_token_id;
 };
 
+// KVCache for autoregressive inference
+struct KVCache {
+    struct LayerKV {
+        std::vector<float> k; // [num_kv_heads, seq_len, head_dim] (flattened)
+        std::vector<float> v; // [num_kv_heads, seq_len, head_dim] (flattened)
+    };
+    std::vector<LayerKV> layers; // num_hidden_layers
+    int seq_len = 0;
+};
+
+// Forward diagnostic callback type
+using ForwardDiagCallback = std::function<void(int layer, const std::string& name, const std::vector<float>& v)>;
+
 class TinyLlamaModel {
 public:
     // Construct from config and safetensors loader
     TinyLlamaModel(const ModelConfig& config, const SafeTensorsLoader& loader);
 
-    // Forward pass: input_ids (single token for now), kv_cache (to be defined), returns logits
-    std::vector<float> forward(int input_id /*, kv_cache */);
+    // Forward pass: input_id, token_idx, kv_cache, returns logits
+    // Optionally accepts a diagnostic callback for per-layer logging
+    std::vector<float> forward(int input_id, int token_idx, KVCache* cache, ForwardDiagCallback diag_cb = nullptr);
 
     // Get model config
     const ModelConfig& get_config() const { return config_; }
@@ -37,28 +53,28 @@ public:
 private:
     ModelConfig config_;
 
-    // Weight storage
-    std::vector<float> embed_tokens; // [vocab_size, hidden_size]
-    std::vector<float> lm_head;      // [vocab_size, hidden_size]
-    std::vector<float> final_norm;   // [hidden_size]
+    // Weight storage (changed to uint16_t for bfloat16)
+    std::vector<uint16_t> embed_tokens; // [vocab_size, hidden_size]
+    std::vector<uint16_t> lm_head;      // [vocab_size, hidden_size]
+    std::vector<uint16_t> final_norm;   // [hidden_size]
 
     struct LayerWeights {
-        std::vector<float> input_layernorm;         // [hidden_size]
-        std::vector<float> post_attention_layernorm;// [hidden_size]
+        std::vector<uint16_t> input_layernorm;         // [hidden_size]
+        std::vector<uint16_t> post_attention_layernorm;// [hidden_size]
         // Attention
-        std::vector<float> q_proj; // [hidden_size, hidden_size]
-        std::vector<float> k_proj; // [hidden_size, hidden_size/num_attention_heads*num_key_value_heads]
-        std::vector<float> v_proj; // [hidden_size, hidden_size/num_attention_heads*num_key_value_heads]
-        std::vector<float> o_proj; // [hidden_size, hidden_size]
+        std::vector<uint16_t> q_proj; // [hidden_size, hidden_size]
+        std::vector<uint16_t> k_proj; // [hidden_size, kv_dim]
+        std::vector<uint16_t> v_proj; // [hidden_size, kv_dim]
+        std::vector<uint16_t> o_proj; // [hidden_size, hidden_size]
         // MLP
-        std::vector<float> gate_proj; // [intermediate_size, hidden_size]
-        std::vector<float> up_proj;   // [intermediate_size, hidden_size]
-        std::vector<float> down_proj; // [hidden_size, intermediate_size]
+        std::vector<uint16_t> gate_proj; // [intermediate_size, hidden_size]
+        std::vector<uint16_t> up_proj;   // [intermediate_size, hidden_size]
+        std::vector<uint16_t> down_proj; // [hidden_size, intermediate_size]
     };
     std::vector<LayerWeights> layers; // num_hidden_layers
 
-    // Helper: convert bfloat16 bytes to float32 vector
-    static std::vector<float> bfloat16_to_float32(const std::vector<uint8_t>& b16, size_t numel);
+    // REMOVED old helper, new helpers will be static in .cpp
+    // static std::vector<float> bfloat16_to_float32(const std::vector<uint8_t>& b16, size_t numel);
 };
 
 // Utility: parse ModelConfig from nlohmann::json

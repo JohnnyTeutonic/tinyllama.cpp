@@ -1,1290 +1,5 @@
 [INFO] Using data directory: data
 [INFO] Loading config: data/config.json
-[INFO] Tokenized: 15043 29892 3186 29991 
-[INFO] Detokenized: Hello, world!
-[INFO] Formatted prompt: <|system|>
-You are a helpful assistant.</s>
-<|user|>
-What is the capital of France?</s>
-<|assistant|>
-
-[INFO] Loaded 201 tensors from model.safetensors:
-[INFO]   lm_head.weight | dtype: BF16, shape: [32000, 2048]
-[INFO]   model.embed_tokens.weight | dtype: BF16, shape: [32000, 2048]
-[INFO]   model.layers.0.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.0.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.0.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.0.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.0.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.0.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.0.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.0.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.0.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.1.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.1.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.1.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.1.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.1.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.1.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.1.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.1.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.1.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.10.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.10.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.10.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.10.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.10.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.10.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.10.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.10.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.10.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.11.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.11.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.11.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.11.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.11.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.11.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.11.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.11.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.11.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.12.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.12.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.12.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.12.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.12.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.12.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.12.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.12.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.12.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.13.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.13.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.13.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.13.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.13.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.13.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.13.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.13.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.13.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.14.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.14.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.14.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.14.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.14.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.14.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.14.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.14.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.14.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.15.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.15.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.15.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.15.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.15.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.15.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.15.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.15.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.15.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.16.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.16.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.16.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.16.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.16.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.16.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.16.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.16.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.16.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.17.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.17.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.17.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.17.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.17.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.17.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.17.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.17.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.17.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.18.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.18.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.18.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.18.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.18.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.18.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.18.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.18.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.18.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.19.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.19.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.19.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.19.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.19.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.19.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.19.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.19.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.19.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.2.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.2.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.2.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.2.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.2.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.2.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.2.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.2.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.2.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.20.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.20.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.20.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.20.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.20.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.20.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.20.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.20.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.20.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.21.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.21.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.21.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.21.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.21.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.21.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.21.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.21.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.21.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.3.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.3.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.3.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.3.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.3.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.3.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.3.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.3.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.3.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.4.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.4.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.4.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.4.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.4.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.4.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.4.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.4.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.4.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.5.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.5.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.5.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.5.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.5.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.5.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.5.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.5.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.5.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.6.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.6.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.6.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.6.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.6.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.6.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.6.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.6.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.6.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.7.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.7.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.7.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.7.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.7.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.7.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.7.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.7.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.7.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.8.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.8.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.8.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.8.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.8.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.8.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.8.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.8.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.8.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.9.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.9.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.9.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.9.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.9.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.9.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.9.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.9.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.9.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.norm.weight | dtype: BF16, shape: [2048]
-[INFO] Pipeline skeleton initialized.
-
-[INFO] Using data directory: data
-[INFO] Loading config: data/config.json
-[INFO] Tokenized: 15043 29892 3186 29991 
-[INFO] Detokenized: Hello, world!
-[INFO] Formatted prompt: <|system|>
-You are a helpful assistant.</s>
-<|user|>
-What is the capital of France?</s>
-<|assistant|>
-
-[INFO] Loaded 201 tensors from model.safetensors:
-[INFO]   lm_head.weight | dtype: BF16, shape: [32000, 2048]
-[INFO]   model.embed_tokens.weight | dtype: BF16, shape: [32000, 2048]
-[INFO]   model.layers.0.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.0.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.0.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.0.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.0.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.0.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.0.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.0.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.0.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.1.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.1.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.1.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.1.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.1.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.1.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.1.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.1.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.1.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.10.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.10.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.10.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.10.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.10.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.10.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.10.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.10.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.10.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.11.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.11.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.11.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.11.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.11.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.11.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.11.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.11.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.11.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.12.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.12.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.12.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.12.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.12.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.12.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.12.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.12.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.12.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.13.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.13.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.13.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.13.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.13.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.13.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.13.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.13.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.13.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.14.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.14.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.14.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.14.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.14.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.14.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.14.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.14.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.14.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.15.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.15.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.15.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.15.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.15.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.15.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.15.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.15.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.15.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.16.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.16.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.16.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.16.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.16.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.16.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.16.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.16.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.16.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.17.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.17.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.17.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.17.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.17.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.17.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.17.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.17.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.17.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.18.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.18.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.18.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.18.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.18.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.18.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.18.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.18.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.18.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.19.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.19.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.19.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.19.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.19.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.19.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.19.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.19.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.19.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.2.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.2.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.2.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.2.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.2.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.2.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.2.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.2.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.2.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.20.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.20.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.20.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.20.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.20.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.20.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.20.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.20.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.20.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.21.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.21.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.21.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.21.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.21.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.21.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.21.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.21.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.21.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.3.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.3.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.3.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.3.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.3.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.3.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.3.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.3.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.3.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.4.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.4.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.4.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.4.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.4.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.4.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.4.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.4.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.4.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.5.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.5.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.5.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.5.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.5.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.5.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.5.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.5.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.5.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.6.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.6.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.6.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.6.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.6.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.6.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.6.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.6.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.6.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.7.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.7.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.7.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.7.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.7.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.7.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.7.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.7.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.7.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.8.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.8.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.8.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.8.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.8.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.8.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.8.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.8.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.8.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.9.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.9.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.9.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.9.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.9.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.9.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.9.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.9.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.9.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.norm.weight | dtype: BF16, shape: [2048]
-[INFO] All model weights loaded.
-[INFO] TinyLlamaModel weights loaded successfully.
-[INFO] Pipeline skeleton initialized.
-
-[INFO] Using data directory: data
-[INFO] Loading config: data/config.json
-[INFO] Tokenized: 15043 29892 3186 29991 
-[INFO] Detokenized: Hello, world!
-[INFO] Formatted prompt: <|system|>
-You are a helpful assistant.</s>
-<|user|>
-What is the capital of France?</s>
-<|assistant|>
-
-[INFO] Loaded 201 tensors from model.safetensors:
-[INFO]   lm_head.weight | dtype: BF16, shape: [32000, 2048]
-[INFO]   model.embed_tokens.weight | dtype: BF16, shape: [32000, 2048]
-[INFO]   model.layers.0.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.0.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.0.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.0.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.0.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.0.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.0.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.0.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.0.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.1.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.1.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.1.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.1.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.1.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.1.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.1.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.1.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.1.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.10.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.10.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.10.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.10.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.10.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.10.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.10.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.10.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.10.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.11.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.11.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.11.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.11.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.11.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.11.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.11.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.11.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.11.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.12.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.12.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.12.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.12.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.12.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.12.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.12.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.12.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.12.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.13.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.13.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.13.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.13.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.13.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.13.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.13.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.13.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.13.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.14.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.14.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.14.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.14.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.14.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.14.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.14.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.14.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.14.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.15.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.15.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.15.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.15.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.15.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.15.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.15.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.15.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.15.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.16.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.16.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.16.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.16.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.16.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.16.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.16.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.16.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.16.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.17.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.17.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.17.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.17.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.17.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.17.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.17.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.17.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.17.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.18.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.18.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.18.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.18.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.18.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.18.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.18.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.18.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.18.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.19.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.19.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.19.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.19.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.19.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.19.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.19.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.19.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.19.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.2.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.2.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.2.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.2.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.2.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.2.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.2.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.2.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.2.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.20.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.20.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.20.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.20.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.20.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.20.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.20.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.20.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.20.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.21.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.21.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.21.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.21.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.21.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.21.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.21.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.21.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.21.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.3.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.3.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.3.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.3.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.3.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.3.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.3.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.3.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.3.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.4.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.4.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.4.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.4.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.4.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.4.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.4.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.4.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.4.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.5.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.5.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.5.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.5.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.5.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.5.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.5.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.5.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.5.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.6.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.6.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.6.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.6.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.6.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.6.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.6.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.6.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.6.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.7.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.7.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.7.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.7.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.7.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.7.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.7.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.7.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.7.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.8.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.8.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.8.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.8.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.8.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.8.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.8.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.8.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.8.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.9.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.9.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.9.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.9.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.9.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.9.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.9.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.9.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.9.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.norm.weight | dtype: BF16, shape: [2048]
-[INFO] All model weights loaded.
-[INFO] TinyLlamaModel weights loaded successfully.
-[INFO] Embedding lookup complete.
-[INFO] Q/K/V projections complete for layer 0
-[INFO] RoPE applied for layer 0
-[INFO] Attention output projection complete for layer 0
-[INFO] Q/K/V projections complete for layer 1
-[INFO] RoPE applied for layer 1
-[INFO] Attention output projection complete for layer 1
-[INFO] Q/K/V projections complete for layer 2
-[INFO] RoPE applied for layer 2
-[INFO] Attention output projection complete for layer 2
-[INFO] Q/K/V projections complete for layer 3
-[INFO] RoPE applied for layer 3
-[INFO] Attention output projection complete for layer 3
-[INFO] Q/K/V projections complete for layer 4
-[INFO] RoPE applied for layer 4
-[INFO] Attention output projection complete for layer 4
-[INFO] Q/K/V projections complete for layer 5
-[INFO] RoPE applied for layer 5
-[INFO] Attention output projection complete for layer 5
-[INFO] Q/K/V projections complete for layer 6
-[INFO] RoPE applied for layer 6
-[INFO] Attention output projection complete for layer 6
-[INFO] Q/K/V projections complete for layer 7
-[INFO] RoPE applied for layer 7
-[INFO] Attention output projection complete for layer 7
-[INFO] Q/K/V projections complete for layer 8
-[INFO] RoPE applied for layer 8
-[INFO] Attention output projection complete for layer 8
-[INFO] Q/K/V projections complete for layer 9
-[INFO] RoPE applied for layer 9
-[INFO] Attention output projection complete for layer 9
-[INFO] Q/K/V projections complete for layer 10
-[INFO] RoPE applied for layer 10
-[INFO] Attention output projection complete for layer 10
-[INFO] Q/K/V projections complete for layer 11
-[INFO] RoPE applied for layer 11
-[INFO] Attention output projection complete for layer 11
-[INFO] Q/K/V projections complete for layer 12
-[INFO] RoPE applied for layer 12
-[INFO] Attention output projection complete for layer 12
-[INFO] Q/K/V projections complete for layer 13
-[INFO] RoPE applied for layer 13
-[INFO] Attention output projection complete for layer 13
-[INFO] Q/K/V projections complete for layer 14
-[INFO] RoPE applied for layer 14
-[INFO] Attention output projection complete for layer 14
-[INFO] Q/K/V projections complete for layer 15
-[INFO] RoPE applied for layer 15
-[INFO] Attention output projection complete for layer 15
-[INFO] Q/K/V projections complete for layer 16
-[INFO] RoPE applied for layer 16
-[INFO] Attention output projection complete for layer 16
-[INFO] Q/K/V projections complete for layer 17
-[INFO] RoPE applied for layer 17
-[INFO] Attention output projection complete for layer 17
-[INFO] Q/K/V projections complete for layer 18
-[INFO] RoPE applied for layer 18
-[INFO] Attention output projection complete for layer 18
-[INFO] Q/K/V projections complete for layer 19
-[INFO] RoPE applied for layer 19
-[INFO] Attention output projection complete for layer 19
-[INFO] Q/K/V projections complete for layer 20
-[INFO] RoPE applied for layer 20
-[INFO] Attention output projection complete for layer 20
-[INFO] Q/K/V projections complete for layer 21
-[INFO] RoPE applied for layer 21
-[INFO] Attention output projection complete for layer 21
-[INFO] Transformer blocks complete.
-[INFO] Forward pass complete.
-[INFO] Logits size: 32000
-[INFO] First 10 logits: -nan -nan -nan -nan -nan -nan -nan -nan -nan -nan 
-[INFO] Logits min: -nan, max: -nan, mean: -nan
-[INFO] All logits finite: no
-[INFO] All logits same: no
-[INFO] Pipeline skeleton initialized.
-
-[INFO] Using data directory: data
-[INFO] Loading config: data/config.json
-[INFO] Tokenized: 15043 29892 3186 29991 
-[INFO] Detokenized: Hello, world!
-[INFO] Formatted prompt: <|system|>
-You are a helpful assistant.</s>
-<|user|>
-What is the capital of France?</s>
-<|assistant|>
-
-[INFO] Loaded 201 tensors from model.safetensors:
-[INFO]   lm_head.weight | dtype: BF16, shape: [32000, 2048]
-[INFO]   model.embed_tokens.weight | dtype: BF16, shape: [32000, 2048]
-[INFO]   model.layers.0.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.0.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.0.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.0.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.0.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.0.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.0.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.0.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.0.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.1.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.1.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.1.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.1.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.1.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.1.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.1.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.1.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.1.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.10.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.10.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.10.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.10.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.10.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.10.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.10.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.10.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.10.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.11.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.11.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.11.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.11.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.11.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.11.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.11.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.11.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.11.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.12.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.12.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.12.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.12.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.12.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.12.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.12.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.12.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.12.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.13.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.13.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.13.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.13.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.13.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.13.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.13.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.13.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.13.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.14.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.14.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.14.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.14.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.14.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.14.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.14.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.14.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.14.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.15.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.15.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.15.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.15.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.15.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.15.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.15.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.15.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.15.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.16.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.16.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.16.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.16.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.16.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.16.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.16.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.16.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.16.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.17.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.17.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.17.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.17.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.17.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.17.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.17.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.17.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.17.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.18.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.18.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.18.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.18.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.18.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.18.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.18.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.18.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.18.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.19.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.19.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.19.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.19.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.19.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.19.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.19.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.19.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.19.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.2.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.2.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.2.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.2.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.2.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.2.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.2.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.2.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.2.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.20.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.20.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.20.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.20.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.20.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.20.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.20.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.20.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.20.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.21.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.21.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.21.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.21.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.21.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.21.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.21.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.21.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.21.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.3.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.3.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.3.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.3.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.3.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.3.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.3.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.3.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.3.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.4.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.4.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.4.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.4.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.4.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.4.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.4.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.4.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.4.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.5.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.5.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.5.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.5.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.5.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.5.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.5.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.5.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.5.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.6.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.6.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.6.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.6.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.6.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.6.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.6.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.6.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.6.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.7.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.7.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.7.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.7.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.7.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.7.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.7.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.7.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.7.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.8.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.8.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.8.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.8.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.8.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.8.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.8.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.8.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.8.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.9.input_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.9.mlp.down_proj.weight | dtype: BF16, shape: [2048, 5632]
-[INFO]   model.layers.9.mlp.gate_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.9.mlp.up_proj.weight | dtype: BF16, shape: [5632, 2048]
-[INFO]   model.layers.9.post_attention_layernorm.weight | dtype: BF16, shape: [2048]
-[INFO]   model.layers.9.self_attn.k_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.layers.9.self_attn.o_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.9.self_attn.q_proj.weight | dtype: BF16, shape: [2048, 2048]
-[INFO]   model.layers.9.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
-[INFO]   model.norm.weight | dtype: BF16, shape: [2048]
-[INFO] All model weights loaded.
-[INFO] TinyLlamaModel weights loaded successfully.
-[INFO] Embedding lookup complete.
-[INFO] embedding: min=-0.045898, max=0.043457, mean=0.000201, all_finite=yes
-[INFO] layer 0 input RMSNorm: min=-1.347940, max=0.883525, mean=-0.000670, all_finite=yes
-[INFO] Q/K/V projections complete for layer 0
-[INFO] layer 0 Q: min=-5.249785, max=4.220218, mean=-0.008903, all_finite=yes
-[INFO] layer 0 K: min=-1448806744555044980576392570346668032.000000, max=5366285706367952798574123334267568128.000000, mean=-nan, all_finite=no
-[INFO] layer 0 V: min=-22586237804506454538227359691466342400.000000, max=1898818746227940704890842531057631232.000000, mean=-nan, all_finite=no
-[INFO] RoPE applied for layer 0
-[INFO] layer 0 Q_rope: min=-5.249785, max=4.220218, mean=-0.008903, all_finite=yes
-[INFO] layer 0 K_rope: min=-1448806744555044980576392570346668032.000000, max=5366285706367952798574123334267568128.000000, mean=-nan, all_finite=no
-[INFO] layer 0 attn_out: min=-22586237804506454538227359691466342400.000000, max=1898818746227940704890842531057631232.000000, mean=-nan, all_finite=no
-[INFO] Attention output projection complete for layer 0
-[INFO] layer 0 attn_proj: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 0 after attn residual: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 0 post-attn RMSNorm: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 0 ffn_out: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 0 after ffn residual: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 1 input RMSNorm: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] Q/K/V projections complete for layer 1
-[INFO] layer 1 Q: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 1 K: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 1 V: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] RoPE applied for layer 1
-[INFO] layer 1 Q_rope: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 1 K_rope: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 1 attn_out: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] Attention output projection complete for layer 1
-[INFO] layer 1 attn_proj: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 1 after attn residual: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 1 post-attn RMSNorm: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 1 ffn_out: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 1 after ffn residual: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 2 input RMSNorm: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] Q/K/V projections complete for layer 2
-[INFO] layer 2 Q: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 2 K: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 2 V: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] RoPE applied for layer 2
-[INFO] layer 2 Q_rope: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 2 K_rope: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 2 attn_out: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] Attention output projection complete for layer 2
-[INFO] layer 2 attn_proj: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 2 after attn residual: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 2 post-attn RMSNorm: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 2 ffn_out: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 2 after ffn residual: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 3 input RMSNorm: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] Q/K/V projections complete for layer 3
-[INFO] layer 3 Q: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 3 K: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 3 V: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] RoPE applied for layer 3
-[INFO] layer 3 Q_rope: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 3 K_rope: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 3 attn_out: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] Attention output projection complete for layer 3
-[INFO] layer 3 attn_proj: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 3 after attn residual: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 3 post-attn RMSNorm: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 3 ffn_out: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 3 after ffn residual: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 4 input RMSNorm: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] Q/K/V projections complete for layer 4
-[INFO] layer 4 Q: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 4 K: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 4 V: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] RoPE applied for layer 4
-[INFO] layer 4 Q_rope: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 4 K_rope: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 4 attn_out: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] Attention output projection complete for layer 4
-[INFO] layer 4 attn_proj: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 4 after attn residual: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 4 post-attn RMSNorm: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 4 ffn_out: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 4 after ffn residual: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 5 input RMSNorm: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] Q/K/V projections complete for layer 5
-[INFO] layer 5 Q: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 5 K: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 5 V: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] RoPE applied for layer 5
-[INFO] layer 5 Q_rope: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 5 K_rope: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 5 attn_out: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] Attention output projection complete for layer 5
-[INFO] layer 5 attn_proj: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 5 after attn residual: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 5 post-attn RMSNorm: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 5 ffn_out: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 5 after ffn residual: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 6 input RMSNorm: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] Q/K/V projections complete for layer 6
-[INFO] layer 6 Q: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 6 K: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 6 V: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] RoPE applied for layer 6
-[INFO] layer 6 Q_rope: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 6 K_rope: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 6 attn_out: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] Attention output projection complete for layer 6
-[INFO] layer 6 attn_proj: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 6 after attn residual: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 6 post-attn RMSNorm: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 6 ffn_out: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 6 after ffn residual: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 7 input RMSNorm: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] Q/K/V projections complete for layer 7
-[INFO] layer 7 Q: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 7 K: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 7 V: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] RoPE applied for layer 7
-[INFO] layer 7 Q_rope: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 7 K_rope: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 7 attn_out: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] Attention output projection complete for layer 7
-[INFO] layer 7 attn_proj: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 7 after attn residual: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 7 post-attn RMSNorm: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 7 ffn_out: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 7 after ffn residual: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 8 input RMSNorm: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] Q/K/V projections complete for layer 8
-[INFO] layer 8 Q: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 8 K: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 8 V: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] RoPE applied for layer 8
-[INFO] layer 8 Q_rope: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 8 K_rope: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 8 attn_out: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] Attention output projection complete for layer 8
-[INFO] layer 8 attn_proj: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 8 after attn residual: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 8 post-attn RMSNorm: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 8 ffn_out: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 8 after ffn residual: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 9 input RMSNorm: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] Q/K/V projections complete for layer 9
-[INFO] layer 9 Q: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 9 K: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 9 V: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] RoPE applied for layer 9
-[INFO] layer 9 Q_rope: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 9 K_rope: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 9 attn_out: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] Attention output projection complete for layer 9
-[INFO] layer 9 attn_proj: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 9 after attn residual: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 9 post-attn RMSNorm: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 9 ffn_out: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 9 after ffn residual: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 10 input RMSNorm: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] Q/K/V projections complete for layer 10
-[INFO] layer 10 Q: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 10 K: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 10 V: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] RoPE applied for layer 10
-[INFO] layer 10 Q_rope: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 10 K_rope: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 10 attn_out: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] Attention output projection complete for layer 10
-[INFO] layer 10 attn_proj: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 10 after attn residual: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 10 post-attn RMSNorm: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 10 ffn_out: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 10 after ffn residual: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 11 input RMSNorm: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] Q/K/V projections complete for layer 11
-[INFO] layer 11 Q: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 11 K: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 11 V: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] RoPE applied for layer 11
-[INFO] layer 11 Q_rope: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 11 K_rope: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 11 attn_out: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] Attention output projection complete for layer 11
-[INFO] layer 11 attn_proj: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 11 after attn residual: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 11 post-attn RMSNorm: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 11 ffn_out: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 11 after ffn residual: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 12 input RMSNorm: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] Q/K/V projections complete for layer 12
-[INFO] layer 12 Q: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 12 K: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 12 V: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] RoPE applied for layer 12
-[INFO] layer 12 Q_rope: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 12 K_rope: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 12 attn_out: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] Attention output projection complete for layer 12
-[INFO] layer 12 attn_proj: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 12 after attn residual: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 12 post-attn RMSNorm: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 12 ffn_out: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 12 after ffn residual: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 13 input RMSNorm: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] Q/K/V projections complete for layer 13
-[INFO] layer 13 Q: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 13 K: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 13 V: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] RoPE applied for layer 13
-[INFO] layer 13 Q_rope: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 13 K_rope: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 13 attn_out: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] Attention output projection complete for layer 13
-[INFO] layer 13 attn_proj: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 13 after attn residual: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 13 post-attn RMSNorm: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 13 ffn_out: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 13 after ffn residual: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 14 input RMSNorm: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] Q/K/V projections complete for layer 14
-[INFO] layer 14 Q: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 14 K: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 14 V: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] RoPE applied for layer 14
-[INFO] layer 14 Q_rope: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 14 K_rope: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 14 attn_out: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] Attention output projection complete for layer 14
-[INFO] layer 14 attn_proj: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 14 after attn residual: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 14 post-attn RMSNorm: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 14 ffn_out: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 14 after ffn residual: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 15 input RMSNorm: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] Q/K/V projections complete for layer 15
-[INFO] layer 15 Q: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 15 K: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 15 V: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] RoPE applied for layer 15
-[INFO] layer 15 Q_rope: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 15 K_rope: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 15 attn_out: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] Attention output projection complete for layer 15
-[INFO] layer 15 attn_proj: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 15 after attn residual: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 15 post-attn RMSNorm: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 15 ffn_out: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 15 after ffn residual: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 16 input RMSNorm: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] Q/K/V projections complete for layer 16
-[INFO] layer 16 Q: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 16 K: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 16 V: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] RoPE applied for layer 16
-[INFO] layer 16 Q_rope: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 16 K_rope: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 16 attn_out: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] Attention output projection complete for layer 16
-[INFO] layer 16 attn_proj: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 16 after attn residual: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 16 post-attn RMSNorm: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 16 ffn_out: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 16 after ffn residual: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 17 input RMSNorm: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] Q/K/V projections complete for layer 17
-[INFO] layer 17 Q: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 17 K: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 17 V: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] RoPE applied for layer 17
-[INFO] layer 17 Q_rope: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 17 K_rope: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 17 attn_out: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] Attention output projection complete for layer 17
-[INFO] layer 17 attn_proj: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 17 after attn residual: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 17 post-attn RMSNorm: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 17 ffn_out: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 17 after ffn residual: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 18 input RMSNorm: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] Q/K/V projections complete for layer 18
-[INFO] layer 18 Q: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 18 K: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 18 V: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] RoPE applied for layer 18
-[INFO] layer 18 Q_rope: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 18 K_rope: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 18 attn_out: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] Attention output projection complete for layer 18
-[INFO] layer 18 attn_proj: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 18 after attn residual: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 18 post-attn RMSNorm: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 18 ffn_out: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 18 after ffn residual: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 19 input RMSNorm: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] Q/K/V projections complete for layer 19
-[INFO] layer 19 Q: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 19 K: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 19 V: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] RoPE applied for layer 19
-[INFO] layer 19 Q_rope: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 19 K_rope: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 19 attn_out: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] Attention output projection complete for layer 19
-[INFO] layer 19 attn_proj: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 19 after attn residual: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 19 post-attn RMSNorm: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 19 ffn_out: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 19 after ffn residual: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 20 input RMSNorm: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] Q/K/V projections complete for layer 20
-[INFO] layer 20 Q: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 20 K: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 20 V: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] RoPE applied for layer 20
-[INFO] layer 20 Q_rope: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 20 K_rope: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 20 attn_out: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] Attention output projection complete for layer 20
-[INFO] layer 20 attn_proj: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 20 after attn residual: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 20 post-attn RMSNorm: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 20 ffn_out: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 20 after ffn residual: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 21 input RMSNorm: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] Q/K/V projections complete for layer 21
-[INFO] layer 21 Q: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 21 K: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 21 V: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] RoPE applied for layer 21
-[INFO] layer 21 Q_rope: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 21 K_rope: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 21 attn_out: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] Attention output projection complete for layer 21
-[INFO] layer 21 attn_proj: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 21 after attn residual: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 21 post-attn RMSNorm: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 21 ffn_out: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] layer 21 after ffn residual: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] Transformer blocks complete.
-[INFO] final RMSNorm: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] logits: min=-nan, max=-nan, mean=-nan, all_finite=no
-[INFO] Forward pass complete.
-[INFO] Logits size: 32000
-[INFO] First 10 logits: -nan -nan -nan -nan -nan -nan -nan -nan -nan -nan 
-[INFO] Logits min: -nan, max: -nan, mean: -nan
-[INFO] All logits finite: no
-[INFO] All logits same: no
-[INFO] Pipeline skeleton initialized.
-
-[INFO] Using data directory: data
-[INFO] Loading config: data/config.json
-[INFO] Tokenized: 15043 29892 3186 29991 
-[INFO] Detokenized: Hello, world!
-[INFO] Formatted prompt: <|system|>
-You are a helpful assistant.</s>
-<|user|>
-What is the capital of France?</s>
-<|assistant|>
-
 [INFO] Loaded 201 tensors from model.safetensors:
 [INFO]   lm_head.weight | dtype: BF16, shape: [32000, 2048]
 [INFO]   model.embed_tokens.weight | dtype: BF16, shape: [32000, 2048]
@@ -1488,348 +203,347 @@ What is the capital of France?</s>
 [INFO]   model.layers.9.self_attn.v_proj.weight | dtype: BF16, shape: [256, 2048]
 [INFO]   model.norm.weight | dtype: BF16, shape: [2048]
 [INFO] K/V projection kv_dim: 256
-[INFO] All model weights loaded.
+[INFO] C++ layer 0 q_proj first 5 (uint16_t): 47811 47904 48115 48230 47934 
+[INFO] C++ layer 1 q_proj first 5 (uint16_t): 15059 48280 48138 48155 48000 
+[INFO] C++ layer 2 q_proj first 5 (uint16_t): 14922 48459 48472 48576 15772 
+[INFO] C++ layer 3 q_proj first 5 (uint16_t): 48131 15496 15499 48386 48178 
+[INFO] C++ layer 4 q_proj first 5 (uint16_t): 15525 48162 15624 48259 15506 
+[INFO] C++ layer 5 q_proj first 5 (uint16_t): 48089 48208 14953 48173 15201 
+[INFO] C++ layer 6 q_proj first 5 (uint16_t): 15593 15366 48306 48351 48160 
+[INFO] C++ layer 7 q_proj first 5 (uint16_t): 47413 15232 48000 48252 48345 
+[INFO] C++ layer 8 q_proj first 5 (uint16_t): 48278 15308 48296 15593 15196 
+[INFO] C++ layer 9 q_proj first 5 (uint16_t): 15407 15468 15434 47968 48014 
+[INFO] C++ layer 10 q_proj first 5 (uint16_t): 48433 48201 48280 48138 48417 
+[INFO] C++ layer 11 q_proj first 5 (uint16_t): 47943 47993 15390 47863 15361 
+[INFO] C++ layer 12 q_proj first 5 (uint16_t): 48414 48324 48399 15744 47940 
+[INFO] C++ layer 13 q_proj first 5 (uint16_t): 48379 48305 47985 48179 48052 
+[INFO] C++ layer 14 q_proj first 5 (uint16_t): 15160 15068 48140 47905 48257 
+[INFO] C++ layer 15 q_proj first 5 (uint16_t): 15645 15162 48326 15115 48174 
+[INFO] C++ layer 16 q_proj first 5 (uint16_t): 15215 15364 15619 15409 15640 
+[INFO] C++ layer 17 q_proj first 5 (uint16_t): 48160 48061 47960 48228 48161 
+[INFO] C++ layer 18 q_proj first 5 (uint16_t): 48383 15502 48071 15142 15359 
+[INFO] C++ layer 19 q_proj first 5 (uint16_t): 15446 15375 48405 48452 14486 
+[INFO] C++ layer 20 q_proj first 5 (uint16_t): 47982 15236 15057 15388 15571 
+[INFO] C++ layer 21 q_proj first 5 (uint16_t): 48291 48322 48404 15675 48290 
+[INFO] All model weights loaded (as bfloat16/uint16_t).
 [INFO] TinyLlamaModel weights loaded successfully.
-[INFO] Embedding lookup complete.
-[INFO] embedding: min=-0.045898, max=0.043457, mean=0.000201, all_finite=yes
-[INFO] layer 0 input RMSNorm: min=-1.347940, max=0.883525, mean=-0.000670, all_finite=yes
-[INFO] Q/K/V projections complete for layer 0
-[INFO] layer 0 Q: min=-5.249785, max=4.220218, mean=-0.008903, all_finite=yes
-[INFO] layer 0 K: min=-7.499652, max=2.692131, mean=-0.107303, all_finite=yes
-[INFO] layer 0 V: min=-0.058088, max=0.073148, mean=0.000989, all_finite=yes
-[INFO] RoPE applied for layer 0
-[INFO] layer 0 Q_rope: min=-5.249785, max=4.220218, mean=-0.008903, all_finite=yes
-[INFO] layer 0 K_rope: min=-7.499652, max=2.692131, mean=-0.107303, all_finite=yes
-[INFO] layer 0 attn_out: min=-0.058088, max=0.073148, mean=0.000989, all_finite=yes
-[INFO] Attention output projection complete for layer 0
-[INFO] layer 0 attn_proj: min=-0.065077, max=0.057291, mean=-0.000097, all_finite=yes
-[INFO] layer 0 after attn residual: min=-0.065265, max=0.057429, mean=0.000073, all_finite=yes
-[INFO] layer 0 post-attn RMSNorm: min=-1.069074, max=0.433415, mean=-0.001114, all_finite=yes
-[INFO] layer 0 ffn_out: min=-0.178670, max=0.066033, mean=-0.000073, all_finite=yes
-[INFO] layer 0 after ffn residual: min=-0.172488, max=0.049066, mean=-0.000000, all_finite=yes
-[INFO] layer 1 input RMSNorm: min=-5.237579, max=1.524422, mean=-0.004233, all_finite=yes
-[INFO] Q/K/V projections complete for layer 1
-[INFO] layer 1 Q: min=-3.987225, max=4.709272, mean=0.092901, all_finite=yes
-[INFO] layer 1 K: min=-6.344602, max=7.328476, mean=0.048373, all_finite=yes
-[INFO] layer 1 V: min=-0.182006, max=0.135058, mean=-0.002574, all_finite=yes
-[INFO] RoPE applied for layer 1
-[INFO] layer 1 Q_rope: min=-3.987225, max=4.709272, mean=0.092901, all_finite=yes
-[INFO] layer 1 K_rope: min=-6.344602, max=7.328476, mean=0.048373, all_finite=yes
-[INFO] layer 1 attn_out: min=-0.182006, max=0.135058, mean=-0.002574, all_finite=yes
-[INFO] Attention output projection complete for layer 1
-[INFO] layer 1 attn_proj: min=-0.140704, max=0.161646, mean=0.000199, all_finite=yes
-[INFO] layer 1 after attn residual: min=-0.141119, max=0.144049, mean=0.000141, all_finite=yes
-[INFO] layer 1 post-attn RMSNorm: min=-1.507332, max=1.304952, mean=0.000723, all_finite=yes
-[INFO] layer 1 ffn_out: min=-0.379658, max=0.363219, mean=-0.000111, all_finite=yes
-[INFO] layer 1 after ffn residual: min=-0.314881, max=0.291475, mean=0.000021, all_finite=yes
-[INFO] layer 2 input RMSNorm: min=-1.915109, max=2.544483, mean=0.001158, all_finite=yes
-[INFO] Q/K/V projections complete for layer 2
-[INFO] layer 2 Q: min=-3.400826, max=2.989025, mean=0.000387, all_finite=yes
-[INFO] layer 2 K: min=-5.896569, max=4.476112, mean=-0.129608, all_finite=yes
-[INFO] layer 2 V: min=-0.314051, max=0.417602, mean=-0.002301, all_finite=yes
-[INFO] RoPE applied for layer 2
-[INFO] layer 2 Q_rope: min=-3.400826, max=2.989025, mean=0.000387, all_finite=yes
-[INFO] layer 2 K_rope: min=-5.896569, max=4.476112, mean=-0.129608, all_finite=yes
-[INFO] layer 2 attn_out: min=-0.314051, max=0.417602, mean=-0.002301, all_finite=yes
-[INFO] Attention output projection complete for layer 2
-[INFO] layer 2 attn_proj: min=-0.175023, max=0.181855, mean=0.000097, all_finite=yes
-[INFO] layer 2 after attn residual: min=-0.194846, max=0.173425, mean=0.000084, all_finite=yes
-[INFO] layer 2 post-attn RMSNorm: min=-1.134380, max=1.041033, mean=0.000042, all_finite=yes
-[INFO] layer 2 ffn_out: min=-0.107163, max=0.169664, mean=0.000564, all_finite=yes
-[INFO] layer 2 after ffn residual: min=-0.112552, max=0.140385, mean=0.000458, all_finite=yes
-[INFO] layer 3 input RMSNorm: min=-2.242472, max=3.513839, mean=0.006669, all_finite=yes
-[INFO] Q/K/V projections complete for layer 3
-[INFO] layer 3 Q: min=-3.696040, max=4.086444, mean=0.024623, all_finite=yes
-[INFO] layer 3 K: min=-8.617300, max=5.115103, mean=-0.049929, all_finite=yes
-[INFO] layer 3 V: min=-0.296178, max=0.285450, mean=-0.000507, all_finite=yes
-[INFO] RoPE applied for layer 3
-[INFO] layer 3 Q_rope: min=-3.696040, max=4.086444, mean=0.024623, all_finite=yes
-[INFO] layer 3 K_rope: min=-8.617300, max=5.115103, mean=-0.049929, all_finite=yes
-[INFO] layer 3 attn_out: min=-0.296178, max=0.285450, mean=-0.000507, all_finite=yes
-[INFO] Attention output projection complete for layer 3
-[INFO] layer 3 attn_proj: min=-0.321831, max=0.427714, mean=0.000455, all_finite=yes
-[INFO] layer 3 after attn residual: min=-0.212567, max=0.287873, mean=0.000645, all_finite=yes
-[INFO] layer 3 post-attn RMSNorm: min=-0.867337, max=0.599604, mean=0.002902, all_finite=yes
-[INFO] layer 3 ffn_out: min=-0.189384, max=0.141808, mean=0.000008, all_finite=yes
-[INFO] layer 3 after ffn residual: min=-0.245624, max=0.165922, mean=0.000462, all_finite=yes
-[INFO] layer 4 input RMSNorm: min=-1.673187, max=3.053769, mean=0.005764, all_finite=yes
-[INFO] Q/K/V projections complete for layer 4
-[INFO] layer 4 Q: min=-2.644556, max=2.220116, mean=0.044835, all_finite=yes
-[INFO] layer 4 K: min=-6.242936, max=2.686837, mean=-0.155618, all_finite=yes
-[INFO] layer 4 V: min=-0.517279, max=0.506912, mean=-0.015027, all_finite=yes
-[INFO] RoPE applied for layer 4
-[INFO] layer 4 Q_rope: min=-2.644556, max=2.220116, mean=0.044835, all_finite=yes
-[INFO] layer 4 K_rope: min=-6.242936, max=2.686837, mean=-0.155618, all_finite=yes
-[INFO] layer 4 attn_out: min=-0.517279, max=0.506912, mean=-0.015027, all_finite=yes
-[INFO] Attention output projection complete for layer 4
-[INFO] layer 4 attn_proj: min=-0.322865, max=0.375700, mean=-0.000345, all_finite=yes
-[INFO] layer 4 after attn residual: min=-0.258150, max=0.272336, mean=0.000082, all_finite=yes
-[INFO] layer 4 post-attn RMSNorm: min=-0.648095, max=0.751099, mean=0.000741, all_finite=yes
-[INFO] layer 4 ffn_out: min=-0.135919, max=0.077585, mean=-0.000118, all_finite=yes
-[INFO] layer 4 after ffn residual: min=-0.265758, max=0.213245, mean=-0.000025, all_finite=yes
-[INFO] layer 5 input RMSNorm: min=-1.378112, max=2.280995, mean=0.000601, all_finite=yes
-[INFO] Q/K/V projections complete for layer 5
-[INFO] layer 5 Q: min=-2.493053, max=3.077717, mean=-0.017653, all_finite=yes
-[INFO] layer 5 K: min=-4.877771, max=6.135049, mean=-0.008841, all_finite=yes
-[INFO] layer 5 V: min=-0.370944, max=0.981828, mean=0.020460, all_finite=yes
-[INFO] RoPE applied for layer 5
-[INFO] layer 5 Q_rope: min=-2.493053, max=3.077717, mean=-0.017653, all_finite=yes
-[INFO] layer 5 K_rope: min=-4.877771, max=6.135049, mean=-0.008841, all_finite=yes
-[INFO] layer 5 attn_out: min=-0.370944, max=0.981828, mean=0.020460, all_finite=yes
-[INFO] Attention output projection complete for layer 5
-[INFO] layer 5 attn_proj: min=-0.358345, max=0.324565, mean=-0.001286, all_finite=yes
-[INFO] layer 5 after attn residual: min=-0.267681, max=0.324855, mean=-0.000927, all_finite=yes
-[INFO] layer 5 post-attn RMSNorm: min=-0.711401, max=0.851988, mean=-0.001628, all_finite=yes
-[INFO] layer 5 ffn_out: min=-0.113084, max=0.151080, mean=-0.001928, all_finite=yes
-[INFO] layer 5 after ffn residual: min=-0.211041, max=0.243963, mean=-0.002019, all_finite=yes
-[INFO] layer 6 input RMSNorm: min=-1.929423, max=2.360519, mean=-0.009605, all_finite=yes
-[INFO] Q/K/V projections complete for layer 6
-[INFO] layer 6 Q: min=-2.977562, max=3.440356, mean=0.027070, all_finite=yes
-[INFO] layer 6 K: min=-6.600758, max=5.173121, mean=-0.031078, all_finite=yes
-[INFO] layer 6 V: min=-0.781967, max=0.657011, mean=-0.021733, all_finite=yes
-[INFO] RoPE applied for layer 6
-[INFO] layer 6 Q_rope: min=-2.977562, max=3.440356, mean=0.027070, all_finite=yes
-[INFO] layer 6 K_rope: min=-6.600758, max=5.173121, mean=-0.031078, all_finite=yes
-[INFO] layer 6 attn_out: min=-0.781967, max=0.657011, mean=-0.021733, all_finite=yes
-[INFO] Attention output projection complete for layer 6
-[INFO] layer 6 attn_proj: min=-0.499326, max=0.585771, mean=0.003060, all_finite=yes
-[INFO] layer 6 after attn residual: min=-0.337459, max=0.328058, mean=0.000736, all_finite=yes
-[INFO] layer 6 post-attn RMSNorm: min=-0.826149, max=0.673487, mean=0.001693, all_finite=yes
-[INFO] layer 6 ffn_out: min=-0.292859, max=0.146024, mean=0.000142, all_finite=yes
-[INFO] layer 6 after ffn residual: min=-0.287736, max=0.257225, mean=0.000621, all_finite=yes
-[INFO] layer 7 input RMSNorm: min=-1.259749, max=2.294193, mean=0.003768, all_finite=yes
-[INFO] Q/K/V projections complete for layer 7
-[INFO] layer 7 Q: min=-3.224380, max=3.443147, mean=0.019400, all_finite=yes
-[INFO] layer 7 K: min=-8.205265, max=4.840581, mean=0.020399, all_finite=yes
-[INFO] layer 7 V: min=-0.587516, max=0.665151, mean=-0.012948, all_finite=yes
-[INFO] RoPE applied for layer 7
-[INFO] layer 7 Q_rope: min=-3.224380, max=3.443147, mean=0.019400, all_finite=yes
-[INFO] layer 7 K_rope: min=-8.205265, max=4.840581, mean=0.020399, all_finite=yes
-[INFO] layer 7 attn_out: min=-0.587516, max=0.665151, mean=-0.012948, all_finite=yes
-[INFO] Attention output projection complete for layer 7
-[INFO] layer 7 attn_proj: min=-0.459395, max=0.499800, mean=-0.002093, all_finite=yes
-[INFO] layer 7 after attn residual: min=-0.344328, max=0.383809, mean=-0.001040, all_finite=yes
-[INFO] layer 7 post-attn RMSNorm: min=-0.741153, max=0.833180, mean=-0.001859, all_finite=yes
-[INFO] layer 7 ffn_out: min=-0.419896, max=0.136950, mean=-0.000140, all_finite=yes
-[INFO] layer 7 after ffn residual: min=-0.272753, max=0.268159, mean=-0.000834, all_finite=yes
-[INFO] layer 8 input RMSNorm: min=-2.470857, max=2.253537, mean=-0.002705, all_finite=yes
-[INFO] Q/K/V projections complete for layer 8
-[INFO] layer 8 Q: min=-2.941322, max=3.771168, mean=0.025267, all_finite=yes
-[INFO] layer 8 K: min=-6.374876, max=6.307030, mean=-0.084656, all_finite=yes
-[INFO] layer 8 V: min=-0.541047, max=0.538026, mean=-0.003270, all_finite=yes
-[INFO] RoPE applied for layer 8
-[INFO] layer 8 Q_rope: min=-2.941322, max=3.771168, mean=0.025267, all_finite=yes
-[INFO] layer 8 K_rope: min=-6.374876, max=6.307030, mean=-0.084656, all_finite=yes
-[INFO] layer 8 attn_out: min=-0.541047, max=0.538026, mean=-0.003270, all_finite=yes
-[INFO] Attention output projection complete for layer 8
-[INFO] layer 8 attn_proj: min=-0.505303, max=0.694137, mean=0.001049, all_finite=yes
-[INFO] layer 8 after attn residual: min=-0.382318, max=0.376657, mean=0.000152, all_finite=yes
-[INFO] layer 8 post-attn RMSNorm: min=-1.014567, max=0.845853, mean=-0.000799, all_finite=yes
-[INFO] layer 8 ffn_out: min=-0.121437, max=0.133995, mean=-0.000692, all_finite=yes
-[INFO] layer 8 after ffn residual: min=-0.292256, max=0.350081, mean=-0.000382, all_finite=yes
-[INFO] layer 9 input RMSNorm: min=-1.612018, max=1.439792, mean=-0.000870, all_finite=yes
-[INFO] Q/K/V projections complete for layer 9
-[INFO] layer 9 Q: min=-2.211160, max=2.512139, mean=0.021789, all_finite=yes
-[INFO] layer 9 K: min=-4.307101, max=3.887119, mean=0.129956, all_finite=yes
-[INFO] layer 9 V: min=-0.610822, max=0.440338, mean=-0.015677, all_finite=yes
-[INFO] RoPE applied for layer 9
-[INFO] layer 9 Q_rope: min=-2.211160, max=2.512139, mean=0.021789, all_finite=yes
-[INFO] layer 9 K_rope: min=-4.307101, max=3.887119, mean=0.129956, all_finite=yes
-[INFO] layer 9 attn_out: min=-0.610822, max=0.440338, mean=-0.015677, all_finite=yes
-[INFO] Attention output projection complete for layer 9
-[INFO] layer 9 attn_proj: min=-0.452629, max=0.436334, mean=-0.002328, all_finite=yes
-[INFO] layer 9 after attn residual: min=-0.398496, max=0.536618, mean=-0.001916, all_finite=yes
-[INFO] layer 9 post-attn RMSNorm: min=-1.104533, max=0.991164, mean=-0.006569, all_finite=yes
-[INFO] layer 9 ffn_out: min=-0.159900, max=0.204314, mean=0.001011, all_finite=yes
-[INFO] layer 9 after ffn residual: min=-0.254279, max=0.310883, mean=-0.000641, all_finite=yes
-[INFO] layer 10 input RMSNorm: min=-1.518717, max=1.773009, mean=-0.000876, all_finite=yes
-[INFO] Q/K/V projections complete for layer 10
-[INFO] layer 10 Q: min=-3.547599, max=3.858087, mean=0.002821, all_finite=yes
-[INFO] layer 10 K: min=-7.158169, max=6.013458, mean=0.040742, all_finite=yes
-[INFO] layer 10 V: min=-0.700545, max=0.741827, mean=0.000320, all_finite=yes
-[INFO] RoPE applied for layer 10
-[INFO] layer 10 Q_rope: min=-3.547599, max=3.858087, mean=0.002821, all_finite=yes
-[INFO] layer 10 K_rope: min=-7.158169, max=6.013458, mean=0.040742, all_finite=yes
-[INFO] layer 10 attn_out: min=-0.700545, max=0.741827, mean=0.000320, all_finite=yes
-[INFO] Attention output projection complete for layer 10
-[INFO] layer 10 attn_proj: min=-0.448739, max=0.451008, mean=-0.003119, all_finite=yes
-[INFO] layer 10 after attn residual: min=-0.363170, max=0.387357, mean=-0.002658, all_finite=yes
-[INFO] layer 10 post-attn RMSNorm: min=-1.038477, max=0.990993, mean=-0.008027, all_finite=yes
-[INFO] layer 10 ffn_out: min=-0.214103, max=0.174703, mean=0.001689, all_finite=yes
-[INFO] layer 10 after ffn residual: min=-0.233947, max=0.266854, mean=-0.000685, all_finite=yes
-[INFO] layer 11 input RMSNorm: min=-1.711935, max=2.602817, mean=-0.002395, all_finite=yes
-[INFO] Q/K/V projections complete for layer 11
-[INFO] layer 11 Q: min=-4.199618, max=5.056049, mean=0.020837, all_finite=yes
-[INFO] layer 11 K: min=-6.698706, max=10.194789, mean=-0.062717, all_finite=yes
-[INFO] layer 11 V: min=-0.676309, max=0.977544, mean=0.006687, all_finite=yes
-[INFO] RoPE applied for layer 11
-[INFO] layer 11 Q_rope: min=-4.199618, max=5.056049, mean=0.020837, all_finite=yes
-[INFO] layer 11 K_rope: min=-6.698706, max=10.194789, mean=-0.062717, all_finite=yes
-[INFO] layer 11 attn_out: min=-0.676309, max=0.977544, mean=0.006687, all_finite=yes
-[INFO] Attention output projection complete for layer 11
-[INFO] layer 11 attn_proj: min=-0.640376, max=0.613435, mean=0.001084, all_finite=yes
-[INFO] layer 11 after attn residual: min=-0.491937, max=0.465772, mean=0.000282, all_finite=yes
-[INFO] layer 11 post-attn RMSNorm: min=-1.022894, max=0.968488, mean=-0.000463, all_finite=yes
-[INFO] layer 11 ffn_out: min=-0.210368, max=0.295092, mean=0.000542, all_finite=yes
-[INFO] layer 11 after ffn residual: min=-0.357230, max=0.328900, mean=0.000583, all_finite=yes
-[INFO] layer 12 input RMSNorm: min=-1.899493, max=2.006922, mean=0.004876, all_finite=yes
-[INFO] Q/K/V projections complete for layer 12
-[INFO] layer 12 Q: min=-3.272103, max=3.146382, mean=-0.032251, all_finite=yes
-[INFO] layer 12 K: min=-7.131737, max=6.407839, mean=-0.090634, all_finite=yes
-[INFO] layer 12 V: min=-1.077143, max=0.757928, mean=-0.016009, all_finite=yes
-[INFO] RoPE applied for layer 12
-[INFO] layer 12 Q_rope: min=-3.272103, max=3.146382, mean=-0.032251, all_finite=yes
-[INFO] layer 12 K_rope: min=-7.131737, max=6.407839, mean=-0.090634, all_finite=yes
-[INFO] layer 12 attn_out: min=-1.077143, max=0.757928, mean=-0.016009, all_finite=yes
-[INFO] Attention output projection complete for layer 12
-[INFO] layer 12 attn_proj: min=-0.894794, max=0.832467, mean=-0.006777, all_finite=yes
-[INFO] layer 12 after attn residual: min=-0.699622, max=0.643109, mean=-0.004380, all_finite=yes
-[INFO] layer 12 post-attn RMSNorm: min=-1.279180, max=1.269058, mean=-0.006922, all_finite=yes
-[INFO] layer 12 ffn_out: min=-0.242054, max=0.254210, mean=-0.000430, all_finite=yes
-[INFO] layer 12 after ffn residual: min=-0.439936, max=0.397523, mean=-0.003401, all_finite=yes
-[INFO] layer 13 input RMSNorm: min=-1.883169, max=2.068998, mean=-0.008973, all_finite=yes
-[INFO] Q/K/V projections complete for layer 13
-[INFO] layer 13 Q: min=-3.724468, max=3.722104, mean=0.046289, all_finite=yes
-[INFO] layer 13 K: min=-6.513192, max=6.564148, mean=0.007323, all_finite=yes
-[INFO] layer 13 V: min=-0.988083, max=0.820605, mean=-0.012017, all_finite=yes
-[INFO] RoPE applied for layer 13
-[INFO] layer 13 Q_rope: min=-3.724468, max=3.722104, mean=0.046289, all_finite=yes
-[INFO] layer 13 K_rope: min=-6.513192, max=6.564148, mean=0.007323, all_finite=yes
-[INFO] layer 13 attn_out: min=-0.988083, max=0.820605, mean=-0.012017, all_finite=yes
-[INFO] Attention output projection complete for layer 13
-[INFO] layer 13 attn_proj: min=-0.825821, max=0.686516, mean=0.002010, all_finite=yes
-[INFO] layer 13 after attn residual: min=-0.623985, max=0.603879, mean=-0.000984, all_finite=yes
-[INFO] layer 13 post-attn RMSNorm: min=-1.143644, max=1.134814, mean=-0.000563, all_finite=yes
-[INFO] layer 13 ffn_out: min=-0.248541, max=0.337552, mean=0.001114, all_finite=yes
-[INFO] layer 13 after ffn residual: min=-0.528455, max=0.436602, mean=0.000092, all_finite=yes
-[INFO] layer 14 input RMSNorm: min=-2.364057, max=1.750071, mean=-0.000215, all_finite=yes
-[INFO] Q/K/V projections complete for layer 14
-[INFO] layer 14 Q: min=-3.831163, max=5.457024, mean=0.062081, all_finite=yes
-[INFO] layer 14 K: min=-7.872313, max=8.818117, mean=0.094664, all_finite=yes
-[INFO] layer 14 V: min=-0.856446, max=0.962575, mean=0.041275, all_finite=yes
-[INFO] RoPE applied for layer 14
-[INFO] layer 14 Q_rope: min=-3.831163, max=5.457024, mean=0.062081, all_finite=yes
-[INFO] layer 14 K_rope: min=-7.872313, max=8.818117, mean=0.094664, all_finite=yes
-[INFO] layer 14 attn_out: min=-0.856446, max=0.962575, mean=0.041275, all_finite=yes
-[INFO] Attention output projection complete for layer 14
-[INFO] layer 14 attn_proj: min=-0.635619, max=0.640911, mean=0.002406, all_finite=yes
-[INFO] layer 14 after attn residual: min=-0.503177, max=0.575652, mean=0.001766, all_finite=yes
-[INFO] layer 14 post-attn RMSNorm: min=-1.054282, max=1.206135, mean=0.004584, all_finite=yes
-[INFO] layer 14 ffn_out: min=-0.502871, max=0.305714, mean=-0.003241, all_finite=yes
-[INFO] layer 14 after ffn residual: min=-0.680142, max=0.412792, mean=-0.001042, all_finite=yes
-[INFO] layer 15 input RMSNorm: min=-1.727422, max=2.523778, mean=-0.001335, all_finite=yes
-[INFO] Q/K/V projections complete for layer 15
-[INFO] layer 15 Q: min=-4.242075, max=3.931569, mean=0.021406, all_finite=yes
-[INFO] layer 15 K: min=-9.185374, max=3.484658, mean=-0.262166, all_finite=yes
-[INFO] layer 15 V: min=-0.715321, max=0.772277, mean=0.016058, all_finite=yes
-[INFO] RoPE applied for layer 15
-[INFO] layer 15 Q_rope: min=-4.242075, max=3.931569, mean=0.021406, all_finite=yes
-[INFO] layer 15 K_rope: min=-9.185374, max=3.484658, mean=-0.262166, all_finite=yes
-[INFO] layer 15 attn_out: min=-0.715321, max=0.772277, mean=0.016058, all_finite=yes
-[INFO] Attention output projection complete for layer 15
-[INFO] layer 15 attn_proj: min=-0.668646, max=0.642019, mean=0.006702, all_finite=yes
-[INFO] layer 15 after attn residual: min=-0.621101, max=0.533740, mean=0.004002, all_finite=yes
-[INFO] layer 15 post-attn RMSNorm: min=-1.304159, max=1.237151, mean=0.010205, all_finite=yes
-[INFO] layer 15 ffn_out: min=-1.124013, max=0.327264, mean=0.000505, all_finite=yes
-[INFO] layer 15 after ffn residual: min=-1.233982, max=0.390916, mean=0.003187, all_finite=yes
-[INFO] layer 16 input RMSNorm: min=-1.982183, max=1.818544, mean=0.011342, all_finite=yes
-[INFO] Q/K/V projections complete for layer 16
-[INFO] layer 16 Q: min=-3.413659, max=2.965141, mean=-0.047835, all_finite=yes
-[INFO] layer 16 K: min=-6.594696, max=6.356087, mean=0.008570, all_finite=yes
-[INFO] layer 16 V: min=-1.032368, max=0.813936, mean=0.018038, all_finite=yes
-[INFO] RoPE applied for layer 16
-[INFO] layer 16 Q_rope: min=-3.413659, max=2.965141, mean=-0.047835, all_finite=yes
-[INFO] layer 16 K_rope: min=-6.594696, max=6.356087, mean=0.008570, all_finite=yes
-[INFO] layer 16 attn_out: min=-1.032368, max=0.813936, mean=0.018038, all_finite=yes
-[INFO] Attention output projection complete for layer 16
-[INFO] layer 16 attn_proj: min=-0.617336, max=0.642013, mean=0.001002, all_finite=yes
-[INFO] layer 16 after attn residual: min=-1.309080, max=0.587485, mean=0.002962, all_finite=yes
-[INFO] layer 16 post-attn RMSNorm: min=-1.324348, max=1.518107, mean=0.009495, all_finite=yes
-[INFO] layer 16 ffn_out: min=-0.484688, max=0.352613, mean=0.002113, all_finite=yes
-[INFO] layer 16 after ffn residual: min=-1.268385, max=0.354396, mean=0.003588, all_finite=yes
-[INFO] layer 17 input RMSNorm: min=-1.883480, max=1.729888, mean=0.014175, all_finite=yes
-[INFO] Q/K/V projections complete for layer 17
-[INFO] layer 17 Q: min=-4.243184, max=4.494967, mean=0.012436, all_finite=yes
-[INFO] layer 17 K: min=-4.786245, max=8.782524, mean=-0.008366, all_finite=yes
-[INFO] layer 17 V: min=-0.654663, max=1.191437, mean=0.022090, all_finite=yes
-[INFO] RoPE applied for layer 17
-[INFO] layer 17 Q_rope: min=-4.243184, max=4.494967, mean=0.012436, all_finite=yes
-[INFO] layer 17 K_rope: min=-4.786245, max=8.782524, mean=-0.008366, all_finite=yes
-[INFO] layer 17 attn_out: min=-0.654663, max=1.191437, mean=0.022090, all_finite=yes
-[INFO] Attention output projection complete for layer 17
-[INFO] layer 17 attn_proj: min=-0.739481, max=0.869221, mean=-0.006587, all_finite=yes
-[INFO] layer 17 after attn residual: min=-1.149420, max=0.679637, mean=-0.002120, all_finite=yes
-[INFO] layer 17 post-attn RMSNorm: min=-1.465897, max=1.674610, mean=-0.004116, all_finite=yes
-[INFO] layer 17 ffn_out: min=-0.309079, max=0.374194, mean=0.002503, all_finite=yes
-[INFO] layer 17 after ffn residual: min=-0.985634, max=0.516912, mean=0.000270, all_finite=yes
-[INFO] layer 18 input RMSNorm: min=-3.571098, max=2.265816, mean=0.002333, all_finite=yes
-[INFO] Q/K/V projections complete for layer 18
-[INFO] layer 18 Q: min=-4.421365, max=2.811515, mean=-0.020921, all_finite=yes
-[INFO] layer 18 K: min=-6.084213, max=2.836931, mean=-0.124809, all_finite=yes
-[INFO] layer 18 V: min=-0.844054, max=0.574936, mean=-0.021754, all_finite=yes
-[INFO] RoPE applied for layer 18
-[INFO] layer 18 Q_rope: min=-4.421365, max=2.811515, mean=-0.020921, all_finite=yes
-[INFO] layer 18 K_rope: min=-6.084213, max=2.836931, mean=-0.124809, all_finite=yes
-[INFO] layer 18 attn_out: min=-0.844054, max=0.574936, mean=-0.021754, all_finite=yes
-[INFO] Attention output projection complete for layer 18
-[INFO] layer 18 attn_proj: min=-0.653302, max=0.715942, mean=0.007791, all_finite=yes
-[INFO] layer 18 after attn residual: min=-1.148764, max=0.567978, mean=0.005700, all_finite=yes
-[INFO] layer 18 post-attn RMSNorm: min=-1.424724, max=1.563321, mean=0.017132, all_finite=yes
-[INFO] layer 18 ffn_out: min=-0.412049, max=0.429800, mean=0.000169, all_finite=yes
-[INFO] layer 18 after ffn residual: min=-1.103661, max=0.414921, mean=0.004150, all_finite=yes
-[INFO] layer 19 input RMSNorm: min=-1.585596, max=2.368342, mean=0.015573, all_finite=yes
-[INFO] Q/K/V projections complete for layer 19
-[INFO] layer 19 Q: min=-3.822655, max=3.709167, mean=0.044767, all_finite=yes
-[INFO] layer 19 K: min=-5.439060, max=4.189610, mean=0.014498, all_finite=yes
-[INFO] layer 19 V: min=-1.259842, max=1.204694, mean=0.025353, all_finite=yes
-[INFO] RoPE applied for layer 19
-[INFO] layer 19 Q_rope: min=-3.822655, max=3.709167, mean=0.044767, all_finite=yes
-[INFO] layer 19 K_rope: min=-5.439060, max=4.189610, mean=0.014498, all_finite=yes
-[INFO] layer 19 attn_out: min=-1.259842, max=1.204694, mean=0.025353, all_finite=yes
-[INFO] Attention output projection complete for layer 19
-[INFO] layer 19 attn_proj: min=-1.104254, max=1.004475, mean=0.001301, all_finite=yes
-[INFO] layer 19 after attn residual: min=-0.824229, max=0.705839, mean=0.003854, all_finite=yes
-[INFO] layer 19 post-attn RMSNorm: min=-1.915257, max=1.578029, mean=0.007857, all_finite=yes
-[INFO] layer 19 ffn_out: min=-0.792289, max=0.417964, mean=-0.008678, all_finite=yes
-[INFO] layer 19 after ffn residual: min=-0.699596, max=0.558530, mean=-0.003411, all_finite=yes
-[INFO] layer 20 input RMSNorm: min=-2.124350, max=2.779982, mean=-0.004801, all_finite=yes
-[INFO] Q/K/V projections complete for layer 20
-[INFO] layer 20 Q: min=-3.831419, max=3.336126, mean=-0.010953, all_finite=yes
-[INFO] layer 20 K: min=-5.431441, max=4.409080, mean=-0.001390, all_finite=yes
-[INFO] layer 20 V: min=-0.911082, max=1.102018, mean=0.032724, all_finite=yes
-[INFO] RoPE applied for layer 20
-[INFO] layer 20 Q_rope: min=-3.831419, max=3.336126, mean=-0.010953, all_finite=yes
-[INFO] layer 20 K_rope: min=-5.431441, max=4.409080, mean=-0.001390, all_finite=yes
-[INFO] layer 20 attn_out: min=-0.911082, max=1.102018, mean=0.032724, all_finite=yes
-[INFO] Attention output projection complete for layer 20
-[INFO] layer 20 attn_proj: min=-1.057765, max=1.217010, mean=-0.002890, all_finite=yes
-[INFO] layer 20 after attn residual: min=-0.858352, max=0.867745, mean=-0.004456, all_finite=yes
-[INFO] layer 20 post-attn RMSNorm: min=-1.785373, max=1.791738, mean=-0.009356, all_finite=yes
-[INFO] layer 20 ffn_out: min=-0.599537, max=0.542433, mean=0.005654, all_finite=yes
-[INFO] layer 20 after ffn residual: min=-0.764047, max=0.718950, mean=0.000847, all_finite=yes
-[INFO] layer 21 input RMSNorm: min=-1.676132, max=2.040571, mean=0.000348, all_finite=yes
-[INFO] Q/K/V projections complete for layer 21
-[INFO] layer 21 Q: min=-1.746741, max=1.983299, mean=-0.009745, all_finite=yes
-[INFO] layer 21 K: min=-3.259663, max=3.325004, mean=-0.004739, all_finite=yes
-[INFO] layer 21 V: min=-1.862973, max=1.415818, mean=-0.021750, all_finite=yes
-[INFO] RoPE applied for layer 21
-[INFO] layer 21 Q_rope: min=-1.746741, max=1.983299, mean=-0.009745, all_finite=yes
-[INFO] layer 21 K_rope: min=-3.259663, max=3.325004, mean=-0.004739, all_finite=yes
-[INFO] layer 21 attn_out: min=-1.862973, max=1.415818, mean=-0.021750, all_finite=yes
-[INFO] Attention output projection complete for layer 21
-[INFO] layer 21 attn_proj: min=-1.750545, max=1.899196, mean=0.001353, all_finite=yes
-[INFO] layer 21 after attn residual: min=-1.185158, max=1.545426, mean=0.001555, all_finite=yes
-[INFO] layer 21 post-attn RMSNorm: min=-1.814629, max=1.885949, mean=0.002598, all_finite=yes
-[INFO] layer 21 ffn_out: min=-0.658972, max=0.888039, mean=-0.003092, all_finite=yes
-[INFO] layer 21 after ffn residual: min=-0.949928, max=0.879899, mean=-0.001087, all_finite=yes
+[INFO] --- Deleting previous layer_0_cpp_outputs.log (if exists) ---
+[INFO] --- Running dedicated forward pass for token ID 1 for logging ---
+[INFO] Opened layer_0_cpp_outputs.log for Layer 0 logging (truncating).
+[INFO] Embedding lookup complete (converted to float32).
+[INFO] embedding (float32): min=-0.007629, max=0.006317, mean=0.000026, all_finite=yes
 [INFO] Transformer blocks complete.
-[INFO] final RMSNorm: min=-6.455937, max=7.784606, mean=-0.005944, all_finite=yes
-[INFO] logits: min=-10.310564, max=8.326736, mean=-0.275730, all_finite=yes
+[INFO] final RMSNorm: min=-9.025855, max=21.532234, mean=0.072847, all_finite=yes
+[INFO] logits: min=-9.590301, max=7.293433, mean=-0.684309, all_finite=yes
 [INFO] Forward pass complete.
-[INFO] Logits size: 32000
-[INFO] First 10 logits: 0.064666 0.186181 3.175470 0.160499 0.317716 0.143980 -2.060060 -0.313917 -1.489621 -1.087994 
-[INFO] Logits min: -10.310564, max: 8.326736, mean: -0.275730
-[INFO] All logits finite: yes
-[INFO] All logits same: no
-[INFO] Pipeline skeleton initialized.
+[INFO] --- Dedicated forward pass for token ID 1 complete ---
+[INFO] Prompt: Q: What is the capital of France?
+A:
+[INFO] Opened layer_0_cpp_outputs.log for Layer 0 logging (truncating).
+[INFO] Embedding lookup complete (converted to float32).
+[INFO] embedding (float32): min=-0.007629, max=0.006317, mean=0.000026, all_finite=yes
+[INFO] Transformer blocks complete.
+[INFO] final RMSNorm: min=-9.025855, max=21.532234, mean=0.072847, all_finite=yes
+[INFO] logits: min=-9.590301, max=7.293433, mean=-0.684309, all_finite=yes
+[INFO] Forward pass complete.
+[INFO] Embedding lookup complete (converted to float32).
+[INFO] embedding (float32): min=-0.040771, max=0.065430, mean=-0.000029, all_finite=yes
+[INFO] Transformer blocks complete.
+[INFO] final RMSNorm: min=-12.962433, max=8.653706, mean=-0.050697, all_finite=yes
+[INFO] logits: min=-13.668696, max=12.169840, mean=-2.472200, all_finite=yes
+[INFO] Forward pass complete.
+[INFO] Embedding lookup complete (converted to float32).
+[INFO] embedding (float32): min=-0.043457, max=0.069336, mean=-0.000270, all_finite=yes
+[INFO] Transformer blocks complete.
+[INFO] final RMSNorm: min=-26.976061, max=16.180563, mean=-0.066638, all_finite=yes
+[INFO] logits: min=-11.809195, max=8.516650, mean=-2.020373, all_finite=yes
+[INFO] Forward pass complete.
+[INFO] Embedding lookup complete (converted to float32).
+[INFO] embedding (float32): min=-0.038330, max=0.047852, mean=-0.000116, all_finite=yes
+[INFO] Transformer blocks complete.
+[INFO] final RMSNorm: min=-21.861652, max=18.451651, mean=0.001481, all_finite=yes
+[INFO] logits: min=-16.117912, max=8.641842, mean=-2.973732, all_finite=yes
+[INFO] Forward pass complete.
+[INFO] Embedding lookup complete (converted to float32).
+[INFO] embedding (float32): min=-0.051025, max=0.062500, mean=0.000167, all_finite=yes
+[INFO] Transformer blocks complete.
+[INFO] final RMSNorm: min=-20.918083, max=9.347968, mean=0.027274, all_finite=yes
+[INFO] logits: min=-14.184191, max=9.360126, mean=-2.567196, all_finite=yes
+[INFO] Forward pass complete.
+[INFO] Embedding lookup complete (converted to float32).
+[INFO] embedding (float32): min=-0.063965, max=0.075195, mean=0.000024, all_finite=yes
+[INFO] Transformer blocks complete.
+[INFO] final RMSNorm: min=-16.484877, max=13.738866, mean=0.023746, all_finite=yes
+[INFO] logits: min=-11.251940, max=7.330640, mean=-2.244394, all_finite=yes
+[INFO] Forward pass complete.
+[INFO] Embedding lookup complete (converted to float32).
+[INFO] embedding (float32): min=-0.047363, max=0.044189, mean=0.000409, all_finite=yes
+[INFO] Transformer blocks complete.
+[INFO] final RMSNorm: min=-20.974991, max=17.494303, mean=-0.043259, all_finite=yes
+[INFO] logits: min=-14.854976, max=9.006026, mean=-3.047163, all_finite=yes
+[INFO] Forward pass complete.
+[INFO] Embedding lookup complete (converted to float32).
+[INFO] embedding (float32): min=-0.041260, max=0.092285, mean=0.000121, all_finite=yes
+[INFO] Transformer blocks complete.
+[INFO] final RMSNorm: min=-22.725048, max=16.288898, mean=-0.033260, all_finite=yes
+[INFO] logits: min=-14.190132, max=8.725683, mean=-2.939806, all_finite=yes
+[INFO] Forward pass complete.
+[INFO] Embedding lookup complete (converted to float32).
+[INFO] embedding (float32): min=-0.060547, max=0.049805, mean=0.000282, all_finite=yes
+[INFO] Transformer blocks complete.
+[INFO] final RMSNorm: min=-14.874833, max=14.431788, mean=-0.047454, all_finite=yes
+[INFO] logits: min=-11.623332, max=6.504155, mean=-2.681132, all_finite=yes
+[INFO] Forward pass complete.
+[INFO] Embedding lookup complete (converted to float32).
+[INFO] embedding (float32): min=-0.037109, max=0.073730, mean=0.000024, all_finite=yes
+[INFO] Transformer blocks complete.
+[INFO] final RMSNorm: min=-28.782576, max=10.725630, mean=-0.024978, all_finite=yes
+[INFO] logits: min=-11.247627, max=7.756202, mean=-1.090377, all_finite=yes
+[INFO] Forward pass complete.
+[INFO] Embedding lookup complete (converted to float32).
+[INFO] embedding (float32): min=-0.062256, max=0.068848, mean=0.000024, all_finite=yes
+[INFO] Transformer blocks complete.
+[INFO] final RMSNorm: min=-8.890272, max=41.812748, mean=0.033557, all_finite=yes
+[INFO] logits: min=-3.614169, max=4.900682, mean=0.211579, all_finite=yes
+[INFO] Forward pass complete.
+[INFO] Embedding lookup complete (converted to float32).
+[INFO] embedding (float32): min=-0.057129, max=0.059082, mean=-0.000343, all_finite=yes
+[INFO] Transformer blocks complete.
+[INFO] final RMSNorm: min=-26.952883, max=10.816219, mean=-0.118220, all_finite=yes
+[INFO] logits: min=-10.925396, max=8.493412, mean=-2.178253, all_finite=yes
+[INFO] Forward pass complete.
+[INFO] Embedding lookup complete (converted to float32).
+[INFO] embedding (float32): min=-0.043457, max=0.069336, mean=-0.000270, all_finite=yes
+[INFO] Transformer blocks complete.
+[INFO] final RMSNorm: min=-26.976061, max=16.180563, mean=-0.066638, all_finite=yes
+[INFO] logits: min=-11.809195, max=8.516650, mean=-2.020373, all_finite=yes
+[INFO] Forward pass complete.
+[INFO] Embedding lookup complete (converted to float32).
+[INFO] embedding (float32): min=-0.043457, max=0.069336, mean=-0.000270, all_finite=yes
+[INFO] Transformer blocks complete.
+[INFO] final RMSNorm: min=-26.976061, max=16.180563, mean=-0.066638, all_finite=yes
+[INFO] logits: min=-11.809195, max=8.516650, mean=-2.020373, all_finite=yes
+[INFO] Forward pass complete.
+[INFO] Embedding lookup complete (converted to float32).
+[INFO] embedding (float32): min=-0.049805, max=0.068359, mean=0.000005, all_finite=yes
+[INFO] Transformer blocks complete.
+[INFO] final RMSNorm: min=-18.837311, max=21.167831, mean=0.011314, all_finite=yes
+[INFO] logits: min=-12.418781, max=9.678916, mean=-2.686197, all_finite=yes
+[INFO] Forward pass complete.
+[INFO] Embedding lookup complete (converted to float32).
+[INFO] embedding (float32): min=-0.066406, max=0.073242, mean=0.000010, all_finite=yes
+[INFO] Transformer blocks complete.
+[INFO] final RMSNorm: min=-30.180891, max=19.028980, mean=-0.000575, all_finite=yes
+[INFO] logits: min=-14.488927, max=7.726672, mean=-2.413382, all_finite=yes
+[INFO] Forward pass complete.
+[INFO] Embedding lookup complete (converted to float32).
+[INFO] embedding (float32): min=-0.041504, max=0.064941, mean=0.000110, all_finite=yes
+[INFO] Transformer blocks complete.
+[INFO] final RMSNorm: min=-24.095043, max=28.106806, mean=0.036470, all_finite=yes
+[INFO] logits: min=-14.406349, max=7.360050, mean=-2.864198, all_finite=yes
+[INFO] Forward pass complete.
+[INFO] Embedding lookup complete (converted to float32).
+[INFO] embedding (float32): min=-0.049316, max=0.047119, mean=-0.000161, all_finite=yes
+[INFO] Transformer blocks complete.
+[INFO] final RMSNorm: min=-20.880863, max=13.556460, mean=-0.048881, all_finite=yes
+[INFO] logits: min=-10.267921, max=7.952105, mean=-1.784684, all_finite=yes
+[INFO] Forward pass complete.
+[INFO] Embedding lookup complete (converted to float32).
+[INFO] embedding (float32): min=-0.041260, max=0.092285, mean=0.000121, all_finite=yes
+[INFO] Transformer blocks complete.
+[INFO] final RMSNorm: min=-22.725048, max=16.288898, mean=-0.033260, all_finite=yes
+[INFO] logits: min=-14.190132, max=8.725683, mean=-2.939806, all_finite=yes
+[INFO] Forward pass complete.
+[INFO] Embedding lookup complete (converted to float32).
+[INFO] embedding (float32): min=-0.063965, max=0.075195, mean=0.000024, all_finite=yes
+[INFO] Transformer blocks complete.
+[INFO] final RMSNorm: min=-16.484877, max=13.738866, mean=0.023746, all_finite=yes
+[INFO] logits: min=-11.251940, max=7.330640, mean=-2.244394, all_finite=yes
+[INFO] Forward pass complete.
+[INFO] Embedding lookup complete (converted to float32).
+[INFO] embedding (float32): min=-0.046631, max=0.041748, mean=0.000214, all_finite=yes
+[INFO] Transformer blocks complete.
+[INFO] final RMSNorm: min=-22.979549, max=13.153867, mean=-0.025924, all_finite=yes
+[INFO] logits: min=-12.772730, max=7.024331, mean=-2.359135, all_finite=yes
+[INFO] Forward pass complete.
+[INFO] Embedding lookup complete (converted to float32).
+[INFO] embedding (float32): min=-0.037109, max=0.094238, mean=0.000092, all_finite=yes
+[INFO] Transformer blocks complete.
+[INFO] final RMSNorm: min=-20.807467, max=21.305454, mean=-0.029532, all_finite=yes
+[INFO] logits: min=-9.928858, max=7.671634, mean=-1.733555, all_finite=yes
+[INFO] Forward pass complete.
+[INFO] Embedding lookup complete (converted to float32).
+[INFO] embedding (float32): min=-0.066406, max=0.073242, mean=0.000010, all_finite=yes
+[INFO] Transformer blocks complete.
+[INFO] final RMSNorm: min=-30.180891, max=19.028980, mean=-0.000575, all_finite=yes
+[INFO] logits: min=-14.488927, max=7.726672, mean=-2.413382, all_finite=yes
+[INFO] Forward pass complete.
+[INFO] Embedding lookup complete (converted to float32).
+[INFO] embedding (float32): min=-0.053711, max=0.055176, mean=-0.000011, all_finite=yes
+[INFO] Transformer blocks complete.
+[INFO] final RMSNorm: min=-14.733565, max=8.834928, mean=0.015447, all_finite=yes
+[INFO] logits: min=-10.432450, max=11.637203, mean=-1.554834, all_finite=yes
+[INFO] Forward pass complete.
+[INFO] Embedding lookup complete (converted to float32).
+[INFO] embedding (float32): min=-0.034424, max=0.040283, mean=0.000211, all_finite=yes
+[INFO] Transformer blocks complete.
+[INFO] final RMSNorm: min=-25.120325, max=12.729542, mean=-0.060070, all_finite=yes
+[INFO] logits: min=-10.407182, max=8.394503, mean=-1.863512, all_finite=yes
+[INFO] Forward pass complete.
+[INFO] Embedding lookup complete (converted to float32).
+[INFO] embedding (float32): min=-0.036865, max=0.109863, mean=0.000065, all_finite=yes
+[INFO] Transformer blocks complete.
+[INFO] final RMSNorm: min=-33.804386, max=17.463371, mean=-0.014377, all_finite=yes
+[INFO] logits: min=-15.003785, max=10.813818, mean=-2.864660, all_finite=yes
+[INFO] Forward pass complete.
+[INFO] Generated answer: " and other questions of theguard, anderased.
+[INFO] Prompt: Q: Who wrote Hamlet?
+A:
+[INFO] Opened layer_0_cpp_outputs.log for Layer 0 logging (truncating).
+[INFO] Embedding lookup complete (converted to float32).
+[INFO] embedding (float32): min=-0.007629, max=0.006317, mean=0.000026, all_finite=yes
+[INFO] Transformer blocks complete.
+[INFO] final RMSNorm: min=-9.025855, max=21.532234, mean=0.072847, all_finite=yes
+[INFO] logits: min=-9.590301, max=7.293433, mean=-0.684309, all_finite=yes
+[INFO] Forward pass complete.
+[INFO] Embedding lookup complete (converted to float32).
+[INFO] embedding (float32): min=-0.040771, max=0.065430, mean=-0.000029, all_finite=yes
+[INFO] Transformer blocks complete.
+[INFO] final RMSNorm: min=-12.962433, max=8.653706, mean=-0.050697, all_finite=yes
+[INFO] logits: min=-13.668696, max=12.169840, mean=-2.472200, all_finite=yes
+[INFO] Forward pass complete.
+[INFO] Embedding lookup complete (converted to float32).
+[INFO] embedding (float32): min=-0.043457, max=0.069336, mean=-0.000270, all_finite=yes
+[INFO] Transformer blocks complete.
+[INFO] final RMSNorm: min=-26.976061, max=16.180563, mean=-0.066638, all_finite=yes
+[INFO] logits: min=-11.809195, max=8.516650, mean=-2.020373, all_finite=yes
+[INFO] Forward pass complete.
+[INFO] Embedding lookup complete (converted to float32).
+[INFO] embedding (float32): min=-0.041504, max=0.044922, mean=-0.000227, all_finite=yes
+[INFO] Transformer blocks complete.
+[INFO] final RMSNorm: min=-11.312392, max=9.994235, mean=-0.039097, all_finite=yes
+[INFO] logits: min=-13.116803, max=8.513630, mean=-3.311059, all_finite=yes
+[INFO] Forward pass complete.
+[INFO] Embedding lookup complete (converted to float32).
+[INFO] embedding (float32): min=-0.043213, max=0.041992, mean=0.000466, all_finite=yes
+[INFO] Transformer blocks complete.
+[INFO] final RMSNorm: min=-20.815817, max=21.877731, mean=0.055407, all_finite=yes
+[INFO] logits: min=-11.974512, max=9.025077, mean=-3.107548, all_finite=yes
+[INFO] Forward pass complete.
+[INFO] Embedding lookup complete (converted to float32).
+[INFO] embedding (float32): min=-0.047119, max=0.051514, mean=0.000195, all_finite=yes
+[INFO] Transformer blocks complete.
+[INFO] final RMSNorm: min=-16.844975, max=6.278860, mean=0.012337, all_finite=yes
+[INFO] logits: min=-11.915450, max=12.307039, mean=-1.828620, all_finite=yes
+[INFO] Forward pass complete.
+[INFO] Embedding lookup complete (converted to float32).
+[INFO] embedding (float32): min=-0.038330, max=0.044922, mean=0.000191, all_finite=yes
+[INFO] Transformer blocks complete.
+[INFO] final RMSNorm: min=-28.650560, max=11.797604, mean=-0.077557, all_finite=yes
+[INFO] logits: min=-10.889550, max=9.607992, mean=-1.812803, all_finite=yes
+[INFO] Forward pass complete.
+[INFO] Embedding lookup complete (converted to float32).
+[INFO] embedding (float32): min=-0.037109, max=0.073730, mean=0.000024, all_finite=yes
+[INFO] Transformer blocks complete.
+[INFO] final RMSNorm: min=-28.782576, max=10.725630, mean=-0.024978, all_finite=yes
+[INFO] logits: min=-11.247627, max=7.756202, mean=-1.090377, all_finite=yes
+[INFO] Forward pass complete.
+[INFO] Embedding lookup complete (converted to float32).
+[INFO] embedding (float32): min=-0.062256, max=0.068848, mean=0.000024, all_finite=yes
+[INFO] Transformer blocks complete.
+[INFO] final RMSNorm: min=-8.890272, max=41.812748, mean=0.033557, all_finite=yes
+[INFO] logits: min=-3.614169, max=4.900682, mean=0.211579, all_finite=yes
+[INFO] Forward pass complete.
+[INFO] Embedding lookup complete (converted to float32).
+[INFO] embedding (float32): min=-0.057129, max=0.059082, mean=-0.000343, all_finite=yes
+[INFO] Transformer blocks complete.
+[INFO] final RMSNorm: min=-26.952883, max=10.816219, mean=-0.118220, all_finite=yes
+[INFO] logits: min=-10.925396, max=8.493412, mean=-2.178253, all_finite=yes
+[INFO] Forward pass complete.
+[INFO] Embedding lookup complete (converted to float32).
+[INFO] embedding (float32): min=-0.043457, max=0.069336, mean=-0.000270, all_finite=yes
+[INFO] Transformer blocks complete.
+[INFO] final RMSNorm: min=-26.976061, max=16.180563, mean=-0.066638, all_finite=yes
+[INFO] logits: min=-11.809195, max=8.516650, mean=-2.020373, all_finite=yes
+[INFO] Forward pass complete.
+[INFO] Embedding lookup complete (converted to float32).
+[INFO] embedding (float32): min=-0.043457, max=0.069336, mean=-0.000270, all_finite=yes
+[INFO] Transformer blocks complete.
+[INFO] final RMSNorm: min=-26.976061, max=16.180563, mean=-0.066638, all_finite=yes
+[INFO] logits: min=-11.809195, max=8.516650, mean=-2.020373, all_finite=yes
+[INFO] Forward pass complete.
+[INFO] Embedding lookup complete (converted to float32).
+[INFO] embedding (float32): min=-0.049805, max=0.068359, mean=0.000005, all_finite=yes
+[INFO] Transformer blocks complete.
+[INFO] final RMSNorm: min=-18.837311, max=21.167831, mean=0.011314, all_finite=yes
+[INFO] logits: min=-12.418781, max=9.678916, mean=-2.686197, all_finite=yes
+[INFO] Forward pass complete.
+[INFO] Embedding lookup complete (converted to float32).
+[INFO] embedding (float32): min=-0.066406, max=0.073242, mean=0.000010, all_finite=yes
+[INFO] Transformer blocks complete.
+[INFO] final RMSNorm: min=-30.180891, max=19.028980, mean=-0.000575, all_finite=yes
+[INFO] logits: min=-14.488927, max=7.726672, mean=-2.413382, all_finite=yes
+[INFO] Forward pass complete.
+[INFO] Embedding lookup complete (converted to float32).
+[INFO] embedding (float32): min=-0.041504, max=0.064941, mean=0.000110, all_finite=yes
+[INFO] Transformer blocks complete.
+[INFO] final RMSNorm: min=-24.095043, max=28.106806, mean=0.036470, all_finite=yes
+[INFO] logits: min=-14.406349, max=7.360050, mean=-2.864198, all_finite=yes
+[INFO] Forward pass complete.
+[INFO] Embedding lookup complete (converted to float32).
+[INFO] embedding (float32): min=-0.049316, max=0.047119, mean=-0.000161, all_finite=yes
+[INFO] Transformer blocks complete.
+[INFO] final RMSNorm: min=-20.880863, max=13.556460, mean=-0.048881, all_finite=yes
+[INFO] logits: min=-10.267921, max=7.952105, mean=-1.784684, all_finite=yes
+[INFO] Forward pass complete.
+[INFO] Embedding lookup complete (converted to float32).
+[INFO] embedding (float32): min=-0.041260, max=0.092285, mean=0.000121, all_finite=yes
+[INFO] Transformer blocks complete.
+[INFO] final RMSNorm: min=-22.725048, max=16.288898, mean=-0.033260, all_finite=yes
+[INFO] logits: min=-14.190132, max=8.725683, mean=-2.939806, all_finite=yes
+[INFO] Forward pass complete.
+[INFO] Embedding lookup complete (converted to float32).
+[INFO] embedding (float32): min=-0.063965, max=0.075195, mean=0.000024, all_finite=yes
+[INFO] Transformer blocks complete.
+[INFO] final RMSNorm: min=-16.484877, max=13.738866, mean=0.023746, all_finite=yes
+[INFO] logits: min=-11.251940, max=7.330640, mean=-2.244394, all_finite=yes
+[INFO] Forward pass complete.
+[INFO] Embedding lookup complete (converted to float32).
+[INFO] embedding (float32): min=-0.046631, max=0.041748, mean=0.000214, all_finite=yes
+[INFO] Transformer blocks complete.
+[INFO] final RMSNorm: min=-22.979549, max=13.153867, mean=-0.025924, all_finite=yes
+[INFO] logits: min=-12.772730, max=7.024331, mean=-2.359135, all_finite=yes
+[INFO] Forward pass complete.
+[INFO] Embedding lookup complete (converted to float32).
+[INFO] embedding (float32): min=-0.037109, max=0.094238, mean=0.000092, all_finite=yes
+[INFO] Transformer blocks complete.
+[INFO] final RMSNorm: min=-20.807467, max=21.305454, mean=-0.029532, all_finite=yes
+[INFO] logits: min=-9.928858, max=7.671634, mean=-1.733555, all_finite=yes
+[INFO] Forward pass complete.
+[INFO] Embedding lookup complete (converted to float32).
+[INFO] embedding (float32): min=-0.066406, max=0.073242, mean=0.000010, all_finite=yes
+[INFO] Transformer blocks complete.
+[INFO] final RMSNorm: min=-30.180891, max=19.028980, mean=-0.000575, all_finite=yes
+[INFO] logits: min=-14.488927, max=7.726672, mean=-2.413382, all_finite=yes
+[INFO] Forward pass complete.
+[INFO] Embedding lookup complete (converted to float32).
+[INFO] embedding (float32): min=-0.053711, max=0.055176, mean=-0.000011, all_finite=yes
+[INFO] Transformer blocks complete.
+[INFO] final RMSNorm: min=-14.733565, max=8.834928, mean=0.015447, all_finite=yes
+[INFO] logits: min=-10.432450, max=11.637203, mean=-1.554834, all_finite=yes
+[INFO] Forward pass complete.
+[INFO] Embedding lookup complete (converted to float32).
+[INFO] embedding (float32): min=-0.034424, max=0.040283, mean=0.000211, all_finite=yes
+[INFO] Transformer blocks complete.
+[INFO] final RMSNorm: min=-25.120325, max=12.729542, mean=-0.060070, all_finite=yes
+[INFO] logits: min=-10.407182, max=8.394503, mean=-1.863512, all_finite=yes
+[INFO] Forward pass complete.
+[INFO] Embedding lookup complete (converted to float32).
+[INFO] embedding (float32): min=-0.036865, max=0.109863, mean=0.000065, all_finite=yes
+[INFO] Transformer blocks complete.
+[INFO] final RMSNorm: min=-33.804386, max=17.463371, mean=-0.014377, all_finite=yes
+[INFO] logits: min=-15.003785, max=10.813818, mean=-2.864660, all_finite=yes
+[INFO] Forward pass complete.
+[INFO] Generated answer: " and other questions of theguard, anderased.
+[INFO] Pipeline finalised.
 

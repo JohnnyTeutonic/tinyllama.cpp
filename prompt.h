@@ -4,17 +4,9 @@
 #include <string>
 #include <vector>
 
-// Format a prompt for TinyLlama inference.
-// - system: the system message (may be empty)
-// - user_messages: vector of user messages (one per turn)
-// - assistant_messages: vector of assistant messages (one per turn, may be empty for incomplete turn)
-// - chat_template: if non-empty, use this template; otherwise use TinyLlama default
-// Returns the formatted prompt string.
-std::string format_prompt(
-    const std::string& system,
-    const std::vector<std::string>& user_messages,
-    const std::vector<std::string>& assistant_messages,
-    const std::string& chat_template = ""
-);
+// Format a prompt for TinyLlama inference using Q: A: style only.
+// - question: a single user question
+// Returns the formatted prompt string in Q: A: format.
+std::string format_prompt(const std::string& question);
 
 #endif // PROMPT_H 

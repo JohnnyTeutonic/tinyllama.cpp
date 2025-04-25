@@ -2,3 +2,6 @@
 *.md
 data/
 build/
+*.bin
+.vscode
+myenv/

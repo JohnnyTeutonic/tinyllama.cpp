@@ -26,6 +26,10 @@ endif()
 target_include_directories(tinyllama PRIVATE ${SentencePiece_INCLUDE_DIR})
 target_link_libraries(tinyllama PRIVATE ${SentencePiece_LIBRARY})
 
+# Find and link BLAS (e.g., OpenBLAS)
+find_package(BLAS REQUIRED)
+target_link_libraries(tinyllama PRIVATE ${BLAS_LIBRARIES})
+
 # If nlohmann_json is not found, provide a hint
 if(NOT nlohmann_json_FOUND)
     message(FATAL_ERROR "nlohmann_json not found. You can install it via your package manager or add the single header to your project.")
