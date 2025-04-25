@@ -38,6 +38,21 @@ struct KVCache {
 // Forward diagnostic callback type
 using ForwardDiagCallback = std::function<void(int layer, const std::string& name, const std::vector<float>& v)>;
 
+// LayerWeights struct for transformer layers
+struct LayerWeights {
+    std::vector<uint16_t> input_layernorm;         // [hidden_size]
+    std::vector<uint16_t> post_attention_layernorm;// [hidden_size]
+    // Attention
+    std::vector<uint16_t> q_proj; // [hidden_size, hidden_size]
+    std::vector<uint16_t> k_proj; // [hidden_size, kv_dim]
+    std::vector<uint16_t> v_proj; // [hidden_size, kv_dim]
+    std::vector<uint16_t> o_proj; // [hidden_size, hidden_size]
+    // MLP
+    std::vector<uint16_t> gate_proj; // [intermediate_size, hidden_size]
+    std::vector<uint16_t> up_proj;   // [intermediate_size, hidden_size]
+    std::vector<uint16_t> down_proj; // [hidden_size, intermediate_size]
+};
+
 class TinyLlamaModel {
 public:
     // Construct from config and safetensors loader
@@ -50,6 +65,15 @@ public:
     // Get model config
     const ModelConfig& get_config() const { return config_; }
 
+    // Getter for lm_head weights
+    const std::vector<uint16_t>& get_lm_head() const { return lm_head; }
+
+    // Getter for embed_tokens weights
+    const std::vector<uint16_t>& get_embed_tokens() const { return embed_tokens; }
+
+    // Getter for layers (for debugging)
+    const std::vector<LayerWeights>& get_layers() const { return layers; }
+
 private:
     ModelConfig config_;
 
@@ -58,26 +82,28 @@ private:
     std::vector<uint16_t> lm_head;      // [vocab_size, hidden_size]
     std::vector<uint16_t> final_norm;   // [hidden_size]
 
-    struct LayerWeights {
-        std::vector<uint16_t> input_layernorm;         // [hidden_size]
-        std::vector<uint16_t> post_attention_layernorm;// [hidden_size]
-        // Attention
-        std::vector<uint16_t> q_proj; // [hidden_size, hidden_size]
-        std::vector<uint16_t> k_proj; // [hidden_size, kv_dim]
-        std::vector<uint16_t> v_proj; // [hidden_size, kv_dim]
-        std::vector<uint16_t> o_proj; // [hidden_size, hidden_size]
-        // MLP
-        std::vector<uint16_t> gate_proj; // [intermediate_size, hidden_size]
-        std::vector<uint16_t> up_proj;   // [intermediate_size, hidden_size]
-        std::vector<uint16_t> down_proj; // [hidden_size, intermediate_size]
-    };
     std::vector<LayerWeights> layers; // num_hidden_layers
-
-    // REMOVED old helper, new helpers will be static in .cpp
-    // static std::vector<float> bfloat16_to_float32(const std::vector<uint8_t>& b16, size_t numel);
 };
 
 // Utility: parse ModelConfig from nlohmann::json
 ModelConfig parse_model_config(const nlohmann::json& json);
+
+// Helper function declaration
+int argmax(const std::vector<float>& v);
+
+// Convert a single bfloat16 (uint16_t) to float32
+float bfloat16_to_float32(uint16_t b16);
+
+// rmsnorm declaration
+void rmsnorm(const std::vector<float>& x, const std::vector<uint16_t>& weight, float eps, std::vector<float>& out);
+
+// matvec_bf16_f32 declaration
+void matvec_bf16_f32(const std::vector<uint16_t>& mat, const std::vector<float>& vec, std::vector<float>& out, int M, int N);
+
+// apply_rope declaration
+void apply_rope(std::vector<float>& x, int num_heads, int head_dim, int pos, float rope_theta);
+
+// softmax declaration
+void softmax(std::vector<float>& x);
 
 #endif // MODEL_H 
