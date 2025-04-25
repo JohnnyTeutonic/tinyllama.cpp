@@ -31,14 +31,57 @@ def precompute_freqs_cis(dim, end, theta=10000.0, device=None):
     freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
     return freqs_cis  # (seq_len, dim/2)
 
+# Helper function for direct RoPE manipulation
+def rotate_half(x):
+    """Rotates half the hidden dims of the input."""
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
+
 def apply_rotary_emb(x, freqs_cis):
-    # x: (batch, seq, n_heads, head_dim)
-    x_ = x.float().reshape(*x.shape[:-1], -1, 2)
-    x_ = torch.view_as_complex(x_)
-    freqs_cis = freqs_cis.unsqueeze(0).unsqueeze(2)  # (1, seq, 1, head_dim/2)
-    x_out = x_ * freqs_cis
-    x_out = torch.view_as_real(x_out).reshape_as(x)
-    return x_out.type_as(x)
+    """Applies RoPE using direct real-valued manipulation."""
+    # x: [bs, seq_len, n_heads, head_dim]
+    # freqs_cis: [seq_len, head_dim / 2] (complex)
+
+    # Get seq_len from freqs_cis to handle partial sequences
+    seq_len_freq = freqs_cis.shape[0]
+    
+    # Ensure freqs_cis matches the sequence length of x
+    # This handles cases where seq_len_x might be different (e.g., during kv caching, though not used here)
+    # We take the portion of freqs_cis relevant to the input sequence length
+    freqs_cis = freqs_cis[:seq_len_freq]
+
+    # Extract real (cos) and imaginary (sin) parts
+    # freqs_cos/sin shape: [seq_len, head_dim / 2]
+    freqs_cos = freqs_cis.real
+    freqs_sin = freqs_cis.imag
+
+    # Add batch and head dimensions for broadcasting
+    # Shape: [1, seq_len, 1, head_dim / 2]
+    freqs_cos = freqs_cos.unsqueeze(0).unsqueeze(2)
+    freqs_sin = freqs_sin.unsqueeze(0).unsqueeze(2)
+
+    # Duplicate cos and sin to match the full head_dim for element-wise multiplication
+    # Shape becomes: [1, seq_len, 1, head_dim]
+    freqs_cos = torch.cat((freqs_cos, freqs_cos), dim=-1)
+    freqs_sin = torch.cat((freqs_sin, freqs_sin), dim=-1)
+
+    # Apply the rotation using the formula: x_rotated = x * cos + rotate_half(x) * sin
+    # rotate_half operates on the last dimension (head_dim)
+    x_rotated = (x * freqs_cos) + (rotate_half(x) * freqs_sin)
+
+    # No need to cast back if input dtype was correct (e.g., float32)
+    return x_rotated
+
+# Old implementation using view_as_complex
+# def apply_rotary_emb_complex(x, freqs_cis):
+#     # x: (batch, seq, n_heads, head_dim)
+#     x_ = x.float().reshape(*x.shape[:-1], -1, 2)
+#     x_ = torch.view_as_complex(x_)
+#     freqs_cis = freqs_cis.unsqueeze(0).unsqueeze(2)  # (1, seq, 1, head_dim/2)
+#     x_out = x_ * freqs_cis
+#     x_out = torch.view_as_real(x_out).reshape_as(x)
+#     return x_out.type_as(x)
 
 def repeat_kv(x, n_rep):
     """Repeat K/V heads for GQA compatibility."""
@@ -106,41 +149,53 @@ class Llama2Block(nn.Module):
         copy_weight(self.down_proj.weight, weights[prefix + "mlp.down_proj.weight"], f"{prefix}mlp.down_proj.weight")
 
     def forward(self, x, attn_mask=None):
-        # x is expected to be float32 now
-        bsz, seq_len, _ = x.size()
-        # Attention
+        # Store input for first residual connection
+        residual = x 
+        # Get batch size and sequence length from input
+        bsz, seq_len, _ = x.shape
+        
+        # --- Attention Block --- 
         h = self.rmsnorm1(x)
         q = self.q_proj(h).view(bsz, seq_len, self.num_q_heads, self.head_dim)
         k = self.k_proj(h).view(bsz, seq_len, self.num_kv_heads, self.head_dim)
         v = self.v_proj(h).view(bsz, seq_len, self.num_kv_heads, self.head_dim)
-        # RoPE
+        
         freqs_cis = self.freqs_cis[:seq_len]
         q = apply_rotary_emb(q, freqs_cis)
         k = apply_rotary_emb(k, freqs_cis)
-        # Repeat K/V heads for GQA
+        
         k = repeat_kv(k, self.num_key_value_groups)
         v = repeat_kv(v, self.num_key_value_groups)
-        # Attention scores
-        q = q.permute(0, 2, 1, 3)  # (bsz, n_q_heads, seq, head_dim)
-        k = k.permute(0, 2, 1, 3)  # (bsz, n_q_heads, seq, head_dim)
-        v = v.permute(0, 2, 1, 3)  # (bsz, n_q_heads, seq, head_dim)
+        
+        q = q.permute(0, 2, 1, 3) 
+        k = k.permute(0, 2, 1, 3)
+        v = v.permute(0, 2, 1, 3)
+        
         attn_scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
         if attn_mask is not None:
-            # Reshape mask for broadcasting: [1, 1, seq_len, seq_len]
             attn_mask = attn_mask.unsqueeze(0).unsqueeze(0)
             attn_scores = attn_scores.masked_fill(~attn_mask, float('-inf'))
         attn_probs = F.softmax(attn_scores, dim=-1, dtype=q.dtype)
-        attn_out = torch.matmul(attn_probs, v)  # (bsz, n_q_heads, seq, head_dim)
+        attn_out = torch.matmul(attn_probs, v)
         attn_out = attn_out.permute(0, 2, 1, 3).contiguous().view(bsz, seq_len, self.hidden_size)
         attn_out = self.o_proj(attn_out)
-        x = x + attn_out
-        # MLP
-        h = self.rmsnorm2(x)
+        
+        # --- First Residual Connection --- 
+        h = residual + attn_out
+
+        # --- MLP Block --- 
+        # Store output of attention block for second residual connection
+        residual = h 
+        h = self.rmsnorm2(h) # Apply norm *after* first residual
+        
         gate = F.silu(self.gate_proj(h))
         up = self.up_proj(h)
         mlp_out = self.down_proj(gate * up)
-        x = x + mlp_out
-        return x
+        
+        # --- Second Residual Connection --- 
+        out = residual + mlp_out
+        
+        return out
 
 class TinyLlama(nn.Module):
     """TinyLlama model: embedding, transformer stack, output head. Uses config for hyperparameters."""
