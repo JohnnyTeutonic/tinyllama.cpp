@@ -105,6 +105,15 @@ def main():
         mean_rms = float(rmsnorm_out.mean())
         print(f"First RMSNorm output stats: min={minv_rms}, max={maxv_rms}, mean={mean_rms}")
         logging.info(f"First RMSNorm output stats: min={minv_rms}, max={maxv_rms}, mean={mean_rms}")
+        # --- START: Save RMSNorm output for C++ comparison ---
+        ref_filename = "rmsnorm_out_ref.bin"
+        try:
+            with open(ref_filename, 'wb') as f:
+                f.write(rmsnorm_out.astype(np.float32).tobytes())
+            logging.info(f"Saved reference RMSNorm output (Layer 0, Token 0) to {ref_filename}")
+        except Exception as e:
+            logging.error(f"Failed to save reference RMSNorm output to {ref_filename}: {e}")
+        # --- END: Save RMSNorm output ---
 
         # Print stats for first Q projection (q_proj) output for the first token
         q_proj_weight = model.blocks[0].q_proj.weight.detach().cpu().numpy()

@@ -55,25 +55,33 @@ int argmax(const std::vector<float>& v) {
 }
 // --- END: Argmax Helper ---
 
-// RMSNorm: y = x / sqrt(mean(x^2) + eps) * weight
-// Accepts float input/output, uint16_t (bfloat16) weights
+// RMSNorm: Match PyTorch's likely calculation order
 void rmsnorm(const std::vector<float>& x, const std::vector<uint16_t>& weight, float eps, std::vector<float>& out) {
     size_t N_full = x.size();
-    if (N_full == 0) {
+    if (N_full == 0) { 
         Logger::error("RMSNorm Error: Input vector x is empty.");
-        return;
+        return; 
     }
-    // Accumulate in double for maximum stability (matches PyTorch)
+
+    // 1. Calculate sum of squares (use double for stability)
     double ss = 0.0;
     #pragma omp parallel for reduction(+:ss)
     for (size_t i = 0; i < N_full; ++i) {
         ss += double(x[i]) * double(x[i]);
     }
+
+    // 2. Calculate RMS = sqrt(mean_sq)
     double mean_sq = ss / double(N_full);
-    double denom = 1.0 / std::sqrt(mean_sq + double(eps));
+    double rms_val = std::sqrt(mean_sq); // Calculate sqrt directly
+
+    // 3. Apply the formula: output = x * (weight / (rms + eps))
     #pragma omp parallel for
     for (size_t i = 0; i < N_full; ++i) {
-        out[i] = float(double(x[i]) * denom) * bfloat16_to_float32(weight[i]);
+        double weight_f = bfloat16_to_float32(weight[i]);
+        // Calculate scaling factor using double for intermediate precision
+        double scale = weight_f / (rms_val + double(eps)); 
+        double scaled_x = double(x[i]) * scale;
+        out[i] = float(scaled_x); // Cast final result back to float
     }
 }
 
@@ -262,6 +270,27 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& config, const SafeTensorsLoade
             lw.up_proj = uint8_vector_to_uint16_vector(loader.get_tensor_bytes(prefix + "mlp.up_proj.weight"), is * hs);
             lw.down_proj = uint8_vector_to_uint16_vector(loader.get_tensor_bytes(prefix + "mlp.down_proj.weight"), hs * is);
 
+            // Log expected dimensions and loaded size for Layer 0 Q/K proj
+            if (i == 0) {
+                int expected_q_M = hs;
+                int expected_q_N = hs;
+                size_t expected_q_size = (size_t)expected_q_M * expected_q_N;
+                Logger::info("C++ Layer 0 q_proj expected M, N: " + std::to_string(expected_q_M) + ", " + std::to_string(expected_q_N));
+                Logger::info("C++ Layer 0 q_proj loaded size: " + std::to_string(lw.q_proj.size()) + " (Expected: " + std::to_string(expected_q_size) + ")");
+                if (lw.q_proj.size() != expected_q_size) {
+                    Logger::error("C++ Layer 0 q_proj SIZE MISMATCH!");
+                }
+
+                int expected_k_M = kv_dim;
+                int expected_k_N = hs;
+                size_t expected_k_size = (size_t)expected_k_M * expected_k_N;
+                 Logger::info("C++ Layer 0 k_proj expected M, N: " + std::to_string(expected_k_M) + ", " + std::to_string(expected_k_N));
+                 Logger::info("C++ Layer 0 k_proj loaded size: " + std::to_string(lw.k_proj.size()) + " (Expected: " + std::to_string(expected_k_size) + ")");
+                 if (lw.k_proj.size() != expected_k_size) {
+                     Logger::error("C++ Layer 0 k_proj SIZE MISMATCH!");
+                 }
+            }
+
             // Print first 5 raw uint16_t values of q_proj for this layer (for basic check)
             std::ostringstream oss;
             oss << "C++ layer " << i << " q_proj first 5 (uint16_t): ";
@@ -350,6 +379,13 @@ std::vector<float> TinyLlamaModel::forward(int input_id, int token_idx, KVCache*
         // a) Input RMSNorm (remains same)
         std::vector<float> x_norm(hs);
         rmsnorm(x, lw.input_layernorm, eps, x_norm);
+        if (l == 0) {
+            std::stringstream ss_x_norm_raw;
+            ss_x_norm_raw << "Layer 0 RMSNorm1 Output (Input to Proj) first 5: ["; // Changed label back
+            for(int i=0; i < 5 && i < x_norm.size(); ++i) ss_x_norm_raw << (i > 0 ? " " : "") << x_norm[i];
+            ss_x_norm_raw << "]";
+            Logger::info(ss_x_norm_raw.str());
+        }
         if (!std::all_of(x_norm.begin(), x_norm.end(), [](float v){ return std::isfinite(v); })) {
             Logger::error("NaN/Inf detected in x_norm after input RMSNorm, layer " + std::to_string(l));
         }
@@ -360,30 +396,37 @@ std::vector<float> TinyLlamaModel::forward(int input_id, int token_idx, KVCache*
         matvec_bf16_f32(lw.q_proj, x_norm, q, hs, hs);
         matvec_bf16_f32(lw.k_proj, x_norm, k_current, head_dim * n_kv_heads, hs);
         matvec_bf16_f32(lw.v_proj, x_norm, v_current, head_dim * n_kv_heads, hs);
-        if (!std::all_of(q.begin(), q.end(), [](float v){ return std::isfinite(v); })) {
-            Logger::error("NaN/Inf detected in Q projection, layer " + std::to_string(l));
-        }
-        if (!std::all_of(k_current.begin(), k_current.end(), [](float v){ return std::isfinite(v); })) {
-            Logger::error("NaN/Inf detected in K projection, layer " + std::to_string(l));
-        }
-        if (!std::all_of(v_current.begin(), v_current.end(), [](float v){ return std::isfinite(v); })) {
-            Logger::error("NaN/Inf detected in V projection, layer " + std::to_string(l));
-        }
-        // if (l == 0) { log_to_file("Q", q); log_to_file("K_current", k_current); log_to_file("V_current", v_current); }
+        // Log Q/K raw projection outputs before RoPE for Layer 0
+        if (l == 0) {
+            std::stringstream ss_q_proj_raw;
+            ss_q_proj_raw << "Layer 0 Q Projection Output (Pre-RoPE) first 5: [";
+            for(int i=0; i < 5 && i < q.size(); ++i) ss_q_proj_raw << (i > 0 ? " " : "") << q[i];
+            ss_q_proj_raw << "]";
+            Logger::info(ss_q_proj_raw.str());
 
+            std::stringstream ss_k_proj_raw;
+            ss_k_proj_raw << "Layer 0 K Projection Output (Pre-RoPE) first 5: [";
+            for(int i=0; i < 5 && i < k_current.size(); ++i) ss_k_proj_raw << (i > 0 ? " " : "") << k_current[i];
+            ss_k_proj_raw << "]";
+            Logger::info(ss_k_proj_raw.str());
+        }
+        // Log Q/K/V projection stats
+        if (l == 0) {
+            log_vec_stats("Layer " + std::to_string(l) + " Q projection", q);
+            log_vec_stats("Layer " + std::to_string(l) + " K projection", k_current);
+            log_vec_stats("Layer " + std::to_string(l) + " V projection", v_current);
+            // Q before RoPE (logging raw values above now)
+            // Logger::info("Layer " + std::to_string(l) + " Q before RoPE shape: [" + std::to_string(q.size()) + "] first 5: " + std::to_string(q[0]) + " " + std::to_string(q[1]) + " " + std::to_string(q[2]) + " " + std::to_string(q[3]) + " " + std::to_string(q[4]));
+        }
         // RoPE (operates on float Q/K copies)
         std::vector<float> q_heads(q); // Full Q projection
         apply_rope(q_heads, n_heads, head_dim, pos, rope_theta);
         std::vector<float> k_rope_current = k_current;
         apply_rope(k_rope_current, n_kv_heads, head_dim, pos, rope_theta);
-        if (!std::all_of(q_heads.begin(), q_heads.end(), [](float v){ return std::isfinite(v); })) {
-            Logger::error("NaN/Inf detected in Q_rope, layer " + std::to_string(l));
-        }
-        if (!std::all_of(k_rope_current.begin(), k_rope_current.end(), [](float v){ return std::isfinite(v); })) {
-            Logger::error("NaN/Inf detected in K_rope_current, layer " + std::to_string(l));
-        }
-        // if (l == 0) { log_to_file("Q_rope", q_heads); log_to_file("K_rope_current", k_rope_current); }
-
+        // Q after RoPE
+        Logger::info("Layer " + std::to_string(l) + " Q after RoPE shape: [" + std::to_string(q_heads.size()) + "] first 5: " + std::to_string(q_heads[0]) + " " + std::to_string(q_heads[1]) + " " + std::to_string(q_heads[2]) + " " + std::to_string(q_heads[3]) + " " + std::to_string(q_heads[4]));
+        // K after RoPE
+        Logger::info("Layer " + std::to_string(l) + " K after RoPE shape: [" + std::to_string(k_rope_current.size()) + "] first 5: " + std::to_string(k_rope_current[0]) + " " + std::to_string(k_rope_current[1]) + " " + std::to_string(k_rope_current[2]) + " " + std::to_string(k_rope_current[3]) + " " + std::to_string(k_rope_current[4]));
         // Store current K, V to cache
         if (cache) {
             size_t cache_offset_base = (size_t)pos * head_dim;
@@ -416,12 +459,33 @@ std::vector<float> TinyLlamaModel::forward(int input_id, int token_idx, KVCache*
             }
             int kvh = h;
             float* current_q_head = q_heads.data() + h * head_dim;
+            // Log Q head for Layer 0, Head 0
+            if (l == 0 && h == 0) {
+                 std::stringstream ss_q_head;
+                 ss_q_head << "Layer 0 Q Head 0, Pos 0 (Input to Score) first 5: [";
+                 for(int i = 0; i < 5 && i < head_dim; ++i) ss_q_head << (i > 0 ? " " : "") << current_q_head[i];
+                 ss_q_head << "]";
+                 Logger::info(ss_q_head.str());
+            }
             std::vector<float> scores(pos + 1);
             size_t cache_layer_stride = (size_t)max_seq_len * head_dim;
             size_t cache_head_offset = (size_t)kvh * cache_layer_stride;
             for (int t = 0; t <= pos; ++t) {
                 float score = 0.0f;
                 float* cached_k_timestep = cache ? cache->layers[l].k.data() + cache_head_offset + t * head_dim : nullptr;
+                 // Log K head for Layer 0, Head 0, Timestep 0
+                if (l == 0 && h == 0 && t == 0) {
+                     float* k_head_ptr = cache ? cached_k_timestep : k_rope_current.data() + kvh * head_dim;
+                     std::stringstream ss_k_head;
+                     ss_k_head << "Layer 0 K Head 0, Pos 0 (Input to Score) first 5: [";
+                     if (k_head_ptr) {
+                         for(int i = 0; i < 5 && i < head_dim; ++i) ss_k_head << (i > 0 ? " " : "") << k_head_ptr[i];
+                     } else {
+                         ss_k_head << "ERROR_K_HEAD_NULL"; // Should not happen for t=0 unless no cache and k_rope_current is bad
+                     }
+                     ss_k_head << "]";
+                     Logger::info(ss_k_head.str());
+                }
                 if (!cached_k_timestep && cache) {
                     Logger::error("Cache read K out of bounds! Layer=" + std::to_string(l) + " Pos=" + std::to_string(t));
                     score = -std::numeric_limits<float>::infinity();
@@ -433,7 +497,23 @@ std::vector<float> TinyLlamaModel::forward(int input_id, int token_idx, KVCache*
                 }
                 scores[t] = score / std::sqrt(float(head_dim));
             }
+            // Log scores before softmax for Layer 0, Head 0
+            if (l == 0 && h == 0) {
+                std::stringstream ss_scores_before;
+                ss_scores_before << "Layer 0 Attention Scores (Head 0, Pos 0, Before Softmax): [";
+                for(size_t i = 0; i < scores.size(); ++i) ss_scores_before << (i > 0 ? " " : "") << scores[i];
+                ss_scores_before << "]";
+                Logger::info(ss_scores_before.str());
+            }
             softmax(scores);
+            // Log probabilities after softmax for Layer 0, Head 0
+            if (l == 0 && h == 0) {
+                std::stringstream ss_scores_after;
+                ss_scores_after << "Layer 0 Attention Probs (Head 0, Pos 0): [";
+                for(size_t i = 0; i < scores.size(); ++i) ss_scores_after << (i > 0 ? " " : "") << scores[i];
+                ss_scores_after << "]";
+                Logger::info(ss_scores_after.str());
+            }
             float* attn_out_head = attn_out.data() + h * head_dim;
             std::fill(attn_out_head, attn_out_head + head_dim, 0.0f);
             for (int t = 0; t <= pos; ++t) {
@@ -448,53 +528,43 @@ std::vector<float> TinyLlamaModel::forward(int input_id, int token_idx, KVCache*
                     attn_out_head[i] += score_t * v_val;
                 }
             }
+            // Log first 5 elements of attn_out_head for Layer 0, Head 0
+            if (l == 0 && h == 0) {
+                std::stringstream ss_attn_out_head;
+                ss_attn_out_head << "Layer 0 Attention Out (Head 0, Pos 0, Before o_proj) first 5: [";
+                for(int i = 0; i < 5 && i < head_dim; ++i) ss_attn_out_head << (i > 0 ? " " : "") << attn_out_head[i];
+                ss_attn_out_head << "]";
+                Logger::info(ss_attn_out_head.str());
+            }
         }
-        if (!std::all_of(attn_out.begin(), attn_out.end(), [](float v){ return std::isfinite(v); })) {
-            Logger::error("NaN/Inf detected in attn_out, layer " + std::to_string(l));
-        }
-        // Log attn_out stats for the first layer
+        // Log attention output stats
         if (l == 0) {
-            log_vec_stats("attn_out (layer 0)", attn_out);
+            log_vec_stats("Layer " + std::to_string(l) + " attn_out (Before o_proj)", attn_out);
         }
-
         // Output projection
         std::vector<float> attn_proj(hs);
         matvec_bf16_f32(lw.o_proj, attn_out, attn_proj, hs, hs);
-        if (!std::all_of(attn_proj.begin(), attn_proj.end(), [](float v){ return std::isfinite(v); })) {
-            Logger::error("NaN/Inf detected in attn_proj, layer " + std::to_string(l));
+        // Log projected attention output stats
+        if (l == 0) {
+             log_vec_stats("Layer " + std::to_string(l) + " attn_out (Projected)", attn_proj);
         }
+        // Residual addition
         for (int i = 0; i < hs; ++i) x[i] += attn_proj[i];
-
+        log_vec_stats("Layer " + std::to_string(l) + " post-attn residual", x);
         // d) Post-attention RMSNorm
         std::vector<float> ffn_norm(hs);
         rmsnorm(x, lw.post_attention_layernorm, eps, ffn_norm);
-        if (!std::all_of(ffn_norm.begin(), ffn_norm.end(), [](float v){ return std::isfinite(v); })) {
-            Logger::error("NaN/Inf detected in ffn_norm after post-attention RMSNorm, layer " + std::to_string(l));
-        }
-
         // e) MLP
         std::vector<float> gate(is), up(is), silu_gate(is), ffn_out(hs);
         matvec_bf16_f32(lw.gate_proj, ffn_norm, gate, is, hs);
         matvec_bf16_f32(lw.up_proj, ffn_norm, up, is, hs);
-        if (!std::all_of(gate.begin(), gate.end(), [](float v){ return std::isfinite(v); })) {
-            Logger::error("NaN/Inf detected in gate_proj, layer " + std::to_string(l));
-        }
-        if (!std::all_of(up.begin(), up.end(), [](float v){ return std::isfinite(v); })) {
-            Logger::error("NaN/Inf detected in up_proj, layer " + std::to_string(l));
-        }
         silu(gate, silu_gate);
-        if (!std::all_of(silu_gate.begin(), silu_gate.end(), [](float v){ return std::isfinite(v); })) {
-            Logger::error("NaN/Inf detected in silu_gate, layer " + std::to_string(l));
-        }
         for (int i = 0; i < is; ++i) up[i] *= silu_gate[i];
-        if (!std::all_of(up.begin(), up.end(), [](float v){ return std::isfinite(v); })) {
-            Logger::error("NaN/Inf detected in up * silu_gate, layer " + std::to_string(l));
-        }
         matvec_bf16_f32(lw.down_proj, up, ffn_out, hs, is);
-        if (!std::all_of(ffn_out.begin(), ffn_out.end(), [](float v){ return std::isfinite(v); })) {
-            Logger::error("NaN/Inf detected in ffn_out, layer " + std::to_string(l));
-        }
+        log_vec_stats("Layer " + std::to_string(l) + " MLP output", ffn_out);
+        // Residual addition after MLP
         for (int i = 0; i < hs; ++i) x[i] += ffn_out[i];
+        log_vec_stats("Layer " + std::to_string(l) + " post-MLP residual", x);
     }
 
     // Final RMSNorm
