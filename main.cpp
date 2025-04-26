@@ -77,6 +77,19 @@ int sample_top_k_top_p_temperature(const std::vector<float>& logits, float tempe
 // Forward diagnostic callback type
 using ForwardDiagCallback = std::function<void(int layer, const std::string& name, const std::vector<float>& v)>;
 
+// Helper: log vector stats (min, max, mean, all finite)
+void log_vec_stats(const std::string& name, const std::vector<float>& v) {
+    if (v.empty()) {
+        Logger::info(name + ": EMPTY VECTOR");
+        return;
+    }
+    float minv = *std::min_element(v.begin(), v.end());
+    float maxv = *std::max_element(v.begin(), v.end());
+    float mean = std::accumulate(v.begin(), v.end(), 0.0f) / v.size();
+    bool all_finite = std::all_of(v.begin(), v.end(), [](float x) { return std::isfinite(x); });
+    Logger::info(name + ": min=" + std::to_string(minv) + ", max=" + std::to_string(maxv) + ", mean=" + std::to_string(mean) + ", all_finite=" + (all_finite ? "yes" : "no"));
+}
+
 int main(int argc, char** argv) {
     // Accept data directory as argument (default: "data")
     std::string data_dir = "data";
@@ -192,146 +205,110 @@ int main(int argc, char** argv) {
             ss_token_ids << "]";
             Logger::info(ss_token_ids.str());
 
-            // Feed prompt tokens to model to fill KVCache
-            cache.seq_len = 0; // Reset sequence length for each new prompt
-            for (size_t i = 0; i < prompt_ids.size(); ++i) {
-                // For the first token, print embedding stats
-                if (i == 0) {
-                    const auto& embed_tokens = model.get_embed_tokens();
-                    std::vector<float> embedding_vec(model.get_config().hidden_size);
-                    for (int j = 0; j < model.get_config().hidden_size; ++j) {
-                        embedding_vec[j] = bfloat16_to_float32(embed_tokens[prompt_ids[0] * model.get_config().hidden_size + j]);
-                    }
-                    float minv = *std::min_element(embedding_vec.begin(), embedding_vec.end());
-                    float maxv = *std::max_element(embedding_vec.begin(), embedding_vec.end());
-                    float mean = std::accumulate(embedding_vec.begin(), embedding_vec.end(), 0.0f) / embedding_vec.size();
-                    std::stringstream ss_emb;
-                    ss_emb << "Embedding stats for first token: min=" << minv << ", max=" << maxv << ", mean=" << mean;
-                    Logger::info(ss_emb.str());
+            // --- Declare persistent state vector ---
+            std::vector<float> current_x(mcfg.hidden_size);
+            // --------------------------------------
 
-                    // Print stats for first RMSNorm (input_layernorm) output for the first token
-                    std::vector<float> rmsnorm_out(model.get_config().hidden_size);
-                    rmsnorm(embedding_vec, model.get_embed_tokens().size() >= model.get_config().hidden_size ? model.get_embed_tokens() : model.get_lm_head(), model.get_config().rms_norm_eps, rmsnorm_out); // Use the correct weights below
-                    // Actually, use the first layer's input_layernorm weights
-                    const auto& layers = model.get_layers();
-                    if (!layers.empty()) {
-                        rmsnorm(embedding_vec, layers[0].input_layernorm, model.get_config().rms_norm_eps, rmsnorm_out);
-                        float minv_rms = *std::min_element(rmsnorm_out.begin(), rmsnorm_out.end());
-                        float maxv_rms = *std::max_element(rmsnorm_out.begin(), rmsnorm_out.end());
-                        float mean_rms = std::accumulate(rmsnorm_out.begin(), rmsnorm_out.end(), 0.0f) / rmsnorm_out.size();
-                        std::stringstream ss_rms;
-                        ss_rms << "First RMSNorm output stats: min=" << minv_rms << ", max=" << maxv_rms << ", mean=" << mean_rms;
-                        Logger::info(ss_rms.str());
+            // --- Feed prompt tokens & Generate ---
+            cache.seq_len = 0; // Reset sequence length 
+            int next_token_id = -1; // Initialize next token
+            int max_new_tokens = 50; // Example limit
+            int num_prompt_tokens = prompt_ids.size();
+            std::vector<int> generated_ids = prompt_ids;
+            std::vector<int> generated_only_ids; 
+            
+            Logger::info("Starting combined prompt processing and generation loop...");
+            for (int pos = 0; pos < num_prompt_tokens + max_new_tokens; ++pos) {
+                if (pos >= mcfg.max_position_embeddings) {
+                    Logger::info("Reached max sequence length.");
+                    break;
+                }
 
-                        // Print stats for first Q projection (q_proj) output for the first token
-                        const auto& q_proj = layers[0].q_proj;
-                        int hs = model.get_config().hidden_size;
-                        std::vector<float> q_proj_out(hs, 0.0f);
-                        // matvec_bf16_f32: out = mat [M,N] * vec [N] -> [M]
-                        matvec_bf16_f32(q_proj, rmsnorm_out, q_proj_out, hs, hs);
-                        float minv_q = *std::min_element(q_proj_out.begin(), q_proj_out.end());
-                        float maxv_q = *std::max_element(q_proj_out.begin(), q_proj_out.end());
-                        float mean_q = std::accumulate(q_proj_out.begin(), q_proj_out.end(), 0.0f) / q_proj_out.size();
-                        std::stringstream ss_q;
-                        ss_q << "First Q projection output stats: min=" << minv_q << ", max=" << maxv_q << ", mean=" << mean_q;
-                        Logger::info(ss_q.str());
+                // 1. Determine Input Token ID
+                int input_token_id = (pos < num_prompt_tokens) ? prompt_ids[pos] : next_token_id;
 
-                        // Q before RoPE
-                        std::stringstream ss_qpre;
-                        ss_qpre << "Q before RoPE shape: [" << q_proj_out.size() << "] num_heads=" << model.get_config().num_attention_heads << " head_dim=" << hs / model.get_config().num_attention_heads << " pos=0 ";
-                        ss_qpre << " first 5: ";
-                        for (int j = 0; j < 5 && j < q_proj_out.size(); ++j) ss_qpre << q_proj_out[j] << " ";
-                        Logger::info(ss_qpre.str());
-                        // Q after RoPE
-                        std::vector<float> q_rope = q_proj_out;
-                        apply_rope(q_rope, model.get_config().num_attention_heads, hs / model.get_config().num_attention_heads, 0, model.get_config().rope_theta);
-                        std::stringstream ss_qpost;
-                        ss_qpost << "Q after RoPE shape: [" << q_rope.size() << "] first 5: ";
-                        for (int j = 0; j < 5 && j < q_rope.size(); ++j) ss_qpost << q_rope[j] << " ";
-                        Logger::info(ss_qpost.str());
-
-                        // K projection
-                        const auto& k_proj = layers[0].k_proj;
-                        int kv_dim = (hs / model.get_config().num_attention_heads) * model.get_config().num_key_value_heads;
-                        std::vector<float> k_proj_out(kv_dim, 0.0f);
-                        matvec_bf16_f32(k_proj, rmsnorm_out, k_proj_out, kv_dim, hs);
-                        float minv_k = *std::min_element(k_proj_out.begin(), k_proj_out.end());
-                        float maxv_k = *std::max_element(k_proj_out.begin(), k_proj_out.end());
-                        float mean_k = std::accumulate(k_proj_out.begin(), k_proj_out.end(), 0.0f) / k_proj_out.size();
-                        std::stringstream ss_k;
-                        ss_k << "First K projection output stats: min=" << minv_k << ", max=" << maxv_k << ", mean=" << mean_k;
-                        Logger::info(ss_k.str());
-
-                        // V projection
-                        const auto& v_proj = layers[0].v_proj;
-                        std::vector<float> v_proj_out(kv_dim, 0.0f);
-                        matvec_bf16_f32(v_proj, rmsnorm_out, v_proj_out, kv_dim, hs);
-                        float minv_v = *std::min_element(v_proj_out.begin(), v_proj_out.end());
-                        float maxv_v = *std::max_element(v_proj_out.begin(), v_proj_out.end());
-                        float mean_v = std::accumulate(v_proj_out.begin(), v_proj_out.end(), 0.0f) / v_proj_out.size();
-                        std::stringstream ss_v;
-                        ss_v << "First V projection output stats: min=" << minv_v << ", max=" << maxv_v << ", mean=" << mean_v;
-                        Logger::info(ss_v.str());
-
-                        // Q after RoPE (already logged above)
-                        // K after RoPE (no-op for t=0, but keep for symmetry)
-                        std::vector<float> k_rope = k_proj_out;
-                        // Attention score (dot Q_rope, K_rope) using only first kv_dim of Q
-                        float attn_score = 0.0f;
-                        for (int i = 0; i < kv_dim; ++i) attn_score += q_rope[i] * k_rope[i];
-                        Logger::info("First attention score (dot Q_rope, K_rope): " + std::to_string(attn_score));
-
-                        // Attention probability (softmax)
-                        std::vector<float> attn_scores = {attn_score};
-                        softmax(attn_scores);
-                        Logger::info("First attention probability (after softmax): " + std::to_string(attn_scores[0]));
-
-                        // Attention output (context vector, weighted sum of V) using only first kv_dim
-                        std::vector<float> attn_out(kv_dim, 0.0f);
-                        for (int i = 0; i < kv_dim; ++i) attn_out[i] = attn_scores[0] * v_proj_out[i];
-                        float minv_attn = *std::min_element(attn_out.begin(), attn_out.end());
-                        float maxv_attn = *std::max_element(attn_out.begin(), attn_out.end());
-                        float mean_attn = std::accumulate(attn_out.begin(), attn_out.end(), 0.0f) / attn_out.size();
-                        std::stringstream ss_attn;
-                        ss_attn << "First attention output stats: min=" << minv_attn << ", max=" << maxv_attn << ", mean=" << mean_attn;
-                        Logger::info(ss_attn.str());
+                // 2. Lookup Embedding for the CURRENT token
+                std::vector<float> embedding = model.lookup_embedding(input_token_id); 
+                
+                // 3. Initialize or Use Previous State
+                if (pos == 0) {
+                    // Initialize the state with the first token's embedding
+                    current_x = embedding; 
+                    Logger::info("Initialized current_x with embedding for pos 0.");
+                } else {
+                    // For subsequent steps, 'current_x' already holds the output state 
+                    // from the previous iteration's forward pass. 
+                    // Pass it directly to the forward call.
+                    if (pos == 1) { // Logging for the step we are debugging
+                        log_vec_stats("main.cpp: current_x BEFORE forward call (pos=1)", current_x);
+                        std::stringstream ss_x_main_before;
+                        ss_x_main_before << "main.cpp: current_x BEFORE forward call (pos=1) first 5: [";
+                        for(int i=0; i < 5 && i < current_x.size(); ++i) ss_x_main_before << (i > 0 ? " " : "") << current_x[i];
+                        ss_x_main_before << "]";
+                        Logger::info(ss_x_main_before.str());
                     }
                 }
-                model.forward(prompt_ids[i], i, &cache);
-            }
 
-            // Generation loop
-            std::vector<int> generated_ids;
-            int max_new_tokens = 10; // Restrict to 10 tokens for efficiency
-            int last_token = prompt_ids.empty() ? tokenizer.get_special_token_id("bos") : prompt_ids.back();
+                // 4. Call the Modified Forward Pass
+                // Pass 'current_x' by reference. It will be updated in place.
+                // 'pos' represents the current position being processed.
+                Logger::info("Calling forward for pos: " + std::to_string(pos));
+                std::vector<float> logits = model.forward(current_x, pos, &cache); 
+                
+                // --- INCREMENT CACHE LENGTH *AFTER* FORWARD CALL --- 
+                cache.seq_len = pos + 1; // Update cache sequence length after processing 'pos'
+                // ----------------------------------------------------
 
-            for (int t = 0; t < max_new_tokens; ++t) {
-                int current_pos = cache.seq_len;
-                std::vector<float> logits = model.forward(last_token, current_pos, &cache);
-                if (t == 0) {
-                    std::stringstream ss_logits;
-                    ss_logits << "First generated token logits (first 10): ";
-                    for (int i = 0; i < 10 && i < logits.size(); ++i) ss_logits << logits[i] << " ";
-                    Logger::info(ss_logits.str());
+                // 5. Log State After Forward (Optional but helpful)
+                if (pos == 1) { // Log specifically after pos=1 processing
+                    log_vec_stats("main.cpp: current_x AFTER forward call (pos=1)", current_x);
+                    std::stringstream ss_x_main_after;
+                    ss_x_main_after << "main.cpp: current_x AFTER forward call (pos=1) first 5: [";
+                    for(int i=0; i < 5 && i < current_x.size(); ++i) ss_x_main_after << (i > 0 ? " " : "") << current_x[i];
+                    ss_x_main_after << "]";
+                    Logger::info(ss_x_main_after.str());
                 }
-                int next_token = argmax(logits);
-                if (next_token == eos_id) break;
-                generated_ids.push_back(next_token);
-                last_token = next_token;
-            }
+                
+                // 6. Sample Next Token (Only during Generation Phase)
+                if (pos >= num_prompt_tokens - 1) {
+                    if (logits.empty()) {
+                        Logger::error("model.forward returned empty logits at pos " + std::to_string(pos));
+                        break;
+                    }
+                    
+                    // Simple argmax sampling for now
+                    next_token_id = argmax(logits); 
+                    Logger::info("Predicted next token ID: " + std::to_string(next_token_id) + " for pos " + std::to_string(pos));
 
-            // Log the raw generated IDs before detokenization
-            std::stringstream ss_ids;
-            ss_ids << "Generated Token IDs: [ ";
-            for (int id : generated_ids) {
-                ss_ids << id << " ";
-            }
-            ss_ids << "]";
-            Logger::info(ss_ids.str());
+                    // Store generated token if generating
+                    if (pos >= num_prompt_tokens) { // Make sure we only store *newly* generated tokens
+                        generated_only_ids.push_back(next_token_id);
+                    }
+                    generated_ids.push_back(next_token_id); // Keep track of the full sequence
 
-            // Detokenize and print answer
-            std::string answer = tokenizer.detokenize(generated_ids);
-            Logger::info("Generated answer: " + answer);
+                    // Check for EOS
+                    if (next_token_id == eos_id) {
+                        Logger::info("EOS token generated at pos " + std::to_string(pos) + ". Stopping generation.");
+                        break; 
+                    }
+                } else {
+                    // During prompt processing, we don't sample, just continue
+                    // next_token_id is only needed *after* the last prompt token
+                     Logger::info("Processed prompt token at pos " + std::to_string(pos) + ". Continuing.");
+                }
+            } // End generation loop
+
+            // Decode and print the generated part
+            std::string generated_text = tokenizer.detokenize(generated_only_ids);
+            Logger::info("Generated Token IDs: " + [&](){
+                std::stringstream ss;
+                ss << "[ ";
+                for(int id : generated_only_ids) ss << id << " ";
+                ss << "]";
+                return ss.str();
+            }());
+            Logger::info("Generated answer: " + generated_text);
+            std::cout << "\nGenerated Answer:\n" << generated_text << std::endl;
         } catch (const std::exception& e) {
             Logger::error(std::string("Model weight loading error: ") + e.what());
             return 1;

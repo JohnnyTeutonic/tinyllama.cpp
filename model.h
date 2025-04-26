@@ -58,9 +58,11 @@ public:
     // Construct from config and safetensors loader
     TinyLlamaModel(const ModelConfig& config, const SafeTensorsLoader& loader);
 
-    // Forward pass: input_id, token_idx, kv_cache, returns logits
+    // Forward pass: input_id, pos, kv_cache, returns logits
     // Optionally accepts a diagnostic callback for per-layer logging
-    std::vector<float> forward(int input_id, int token_idx, KVCache* cache, ForwardDiagCallback diag_cb = nullptr);
+    // std::vector<float> forward(int input_id, int pos, KVCache* cache = nullptr, ForwardDiagCallback diag_cb = nullptr);
+    // --- CHANGED: Forward pass takes state vector by reference ---
+    std::vector<float> forward(std::vector<float>& x, int pos, KVCache* cache = nullptr, ForwardDiagCallback diag_cb = nullptr);
 
     // Get model config
     const ModelConfig& get_config() const { return config_; }
@@ -74,6 +76,9 @@ public:
     // Getter for layers (for debugging)
     const std::vector<LayerWeights>& get_layers() const { return layers; }
 
+    // Lookup embedding for a token
+    std::vector<float> lookup_embedding(int token_id);
+
 private:
     ModelConfig config_;
 
@@ -83,6 +88,9 @@ private:
     std::vector<uint16_t> final_norm;   // [hidden_size]
 
     std::vector<LayerWeights> layers; // num_hidden_layers
+
+    // Precomputed RoPE frequencies
+    std::vector<float> precomputed_freqs_;
 };
 
 // Utility: parse ModelConfig from nlohmann::json
@@ -105,5 +113,12 @@ void apply_rope(std::vector<float>& x, int num_heads, int head_dim, int pos, flo
 
 // softmax declaration
 void softmax(std::vector<float>& x);
+
+// Forward declaration for KVCache structure
+struct KVCache;
+
+// Helper function declarations (make them non-static)
+float bfloat16_to_float32(uint16_t b16);
+std::vector<uint16_t> uint8_vector_to_uint16_vector(const std::vector<uint8_t>& bytes, size_t numel);
 
 #endif // MODEL_H 

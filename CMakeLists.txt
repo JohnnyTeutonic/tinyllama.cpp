@@ -19,6 +19,9 @@ endif()
 add_executable(tinyllama main.cpp safetensors_loader.cpp tokenizer.cpp logger.cpp prompt.cpp model.cpp)
 # In the future, add more modules as needed.
 
+# Add CMAKE_CURRENT_SOURCE_DIR for local headers
+target_include_directories(tinyllama PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
 # nlohmann_json (header-only)
 find_package(nlohmann_json 3.2.0 REQUIRED)
 # Explicitly add include directory for nlohmann_json
@@ -62,3 +65,25 @@ endif()
 
 # Optionally, add include directories if you have local copies
 # target_include_directories(tinyllama PRIVATE /path/to/json/include) 
+
+# --- START: Test executable for matvec_bf16_f32 ---
+add_executable(test_matvec test_matvec.cpp safetensors_loader.cpp logger.cpp model.cpp)
+
+# Add CMAKE_CURRENT_SOURCE_DIR for local headers
+target_include_directories(test_matvec PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+# Link test_matvec with necessary libraries
+target_include_directories(test_matvec PRIVATE ${nlohmann_json_INCLUDE_DIRS}) # For safetensors_loader potentially
+target_link_libraries(test_matvec PRIVATE nlohmann_json::nlohmann_json)      # For safetensors_loader potentially
+
+# Link BLAS (not strictly needed for matvec_bf16_f32, but model.cpp might depend on it)
+if(BLAS_INCLUDE_DIRS)
+    target_include_directories(test_matvec PRIVATE ${BLAS_INCLUDE_DIRS})
+endif()
+target_link_libraries(test_matvec PRIVATE ${BLAS_LIBRARIES})
+
+# Link OpenMP (matvec_bf16_f32 uses OpenMP pragmas)
+if(TARGET OpenMP::OpenMP_CXX)
+    target_link_libraries(test_matvec PRIVATE OpenMP::OpenMP_CXX)
+endif()
+# --- END: Test executable --- 
