@@ -7,8 +7,6 @@
 #include <iomanip>
 #include <sstream>
 #include <fstream>
-#include <cblas.h> // Include CBLAS header for BLAS calls
-#include <omp.h> // Include OpenMP header
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -22,6 +20,7 @@
 #include <numeric> // For std::accumulate
 #include <cassert> // For assert()
 #include <iostream> // Include for std::cout in logging
+#include <torch/torch.h>
 
 // --- PASTE: Definition of logging helper moved here ---
 // (Declaration is in model.h)
@@ -111,92 +110,21 @@ int argmax(const std::vector<float>& v) {
 }
 // --- END: Argmax Helper ---
 
-// Improved RMSNorm implementation for better numerical stability
-void rmsnorm(const std::vector<float>& x, const std::vector<uint16_t>& weight, float eps, std::vector<float>& out) {
-    if (x.empty()) {
-        Logger::error("rmsnorm called with empty input vector");
-        return;
-    }
-    
-    const size_t size = x.size();
-    
-    // Calculate sum of squares using Kahan summation for better precision
-    double sum = 0.0;
-    double c = 0.0; // compensation term for Kahan summation
-    for (size_t i = 0; i < size; ++i) {
-        double xi = x[i];
-        double y = xi * xi - c;
-        double t = sum + y;
-        c = (t - sum) - y; // compensation term update
-        sum = t;
-    }
-    
-    // Calculate root mean square with normalization factor
-    double rms = sum / size;
-    double norm_factor = 1.0 / std::sqrt(rms + eps);
-    
-    // Apply normalization and scale by weights
-    for (size_t i = 0; i < size; ++i) {
-        float w = bfloat16_to_float32(weight[i]);
-        out[i] = static_cast<float>(x[i] * norm_factor * w);
-        
-        // Check for NaN/Inf and replace with zero if needed
-        if (!std::isfinite(out[i])) {
-            Logger::error("rmsnorm produced non-finite value at index " + std::to_string(i));
-            out[i] = 0.0f;
-        }
-    }
+// Replace matvec_bf16_f32 with libtorch matmul
+// mat: [M, N], vec: [N] -> out: [M]
+torch::Tensor matvec(const torch::Tensor& mat, const torch::Tensor& vec) {
+    return torch::matmul(mat, vec);
 }
 
-// Improved softmax implementation with better numerical stability
-void softmax(std::vector<float>& x) {
-    if (x.empty()) {
-        Logger::error("softmax: Called with empty vector");
-        return;
-    }
-    
-    // Find maximum value for numerical stability
-    float max_val = -std::numeric_limits<float>::infinity();
-    for (const float val : x) {
-        if (std::isfinite(val) && val > max_val) {
-            max_val = val;
-        }
-    }
-    
-    // Handle case where all values are -inf
-    if (max_val == -std::numeric_limits<float>::infinity()) {
-        Logger::info("softmax: All values were -infinity, returning uniform distribution");
-        const float uniform_val = 1.0f / x.size();
-        std::fill(x.begin(), x.end(), uniform_val);
-        return;
-    }
-    
-    // Compute exp(x - max_val) and sum
-    double sum = 0.0; // Use double for better precision in accumulation
-    for (float& val : x) {
-        if (std::isfinite(val)) {
-            val = std::exp(val - max_val);
-            sum += val;
-        } else {
-            // For -inf, exp(-inf - max_val) = 0
-            // For +inf or NaN, we'll set them to 0 to prevent propagation
-            val = 0.0f;
-        }
-    }
-    
-    // Handle edge case where sum is zero or very small
-    if (sum < 1e-20) {
-        Logger::info("softmax: Sum after exp is too small (" + 
-                    std::to_string(sum) + "), returning uniform distribution");
-        const float uniform_val = 1.0f / x.size();
-        std::fill(x.begin(), x.end(), uniform_val);
-        return;
-    }
-    
-    // Normalize by dividing by sum
-    for (float& val : x) {
-        val = static_cast<float>(val / sum);
-    }
+// Replace RMSNorm with libtorch version
+torch::Tensor rmsnorm(const torch::Tensor& x, const torch::Tensor& weight, float eps) {
+    auto norm = x.norm(2, -1, true);
+    return x * (weight / (norm / std::sqrt(x.size(-1)) + eps));
+}
+
+// Replace softmax with libtorch version
+torch::Tensor softmax(const torch::Tensor& x) {
+    return torch::softmax(x, -1);
 }
 
 // SiLU activation: y = x * sigmoid(x) - Match PyTorch structure
@@ -332,53 +260,6 @@ ModelConfig parse_model_config(const nlohmann::json& json) {
     return cfg;
 }
 
-// Improved matrix-vector multiplication with better precision and stability
-void matvec_bf16_f32(const std::vector<uint16_t>& mat, const std::vector<float>& vec, 
-                    std::vector<float>& out, int M, int N) {
-    // Validate input dimensions
-    if (vec.size() != static_cast<size_t>(N)) {
-        Logger::error("matvec_bf16_f32: Input vector size mismatch. Expected " + 
-                     std::to_string(N) + ", got " + std::to_string(vec.size()));
-        return;
-    }
-    if (out.size() != static_cast<size_t>(M)) {
-        Logger::error("matvec_bf16_f32: Output vector size mismatch. Expected " + 
-                     std::to_string(M) + ", got " + std::to_string(out.size()));
-        return;
-    }
-    if (mat.size() != static_cast<size_t>(M * N)) {
-        Logger::error("matvec_bf16_f32: Matrix size mismatch. Expected " + 
-                     std::to_string(M * N) + ", got " + std::to_string(mat.size()));
-        return;
-    }
-
-    // Convert entire matrix row by row for efficiency
-    std::vector<float> row_f32(N);
-
-    #pragma omp parallel for
-    for (int i = 0; i < M; ++i) {
-        // Convert the entire row to float32 once
-        for (int j = 0; j < N; ++j) {
-            row_f32[j] = bfloat16_to_float32(mat[i * N + j]);
-        }
-        
-        // Use double accumulation for better precision
-        double sum = 0.0;
-        for (int j = 0; j < N; ++j) {
-            sum += static_cast<double>(row_f32[j]) * static_cast<double>(vec[j]);
-        }
-        
-        // Store the result
-        out[i] = static_cast<float>(sum);
-        
-        // Check for NaN/Inf in output
-        if (!std::isfinite(out[i])) {
-            Logger::error("matvec_bf16_f32: Non-finite output at index " + std::to_string(i));
-            out[i] = 0.0f;  // Replace with zero to prevent propagation
-        }
-    }
-}
-
 // Helper to log the first few elements of a raw float pointer
 static void log_raw_float_pointer(const std::string& name, const float* ptr, size_t count = 5) {
     if (!ptr) {
@@ -424,6 +305,20 @@ void KVCache::initialize(int num_layers, int max_seq_len, int num_kv_heads, int 
                std::to_string(head_dim) + " head dimension");
     
     seq_len = 0;
+}
+
+// Helper to convert std::vector<float> to torch::Tensor
+inline torch::Tensor vec_to_tensor(const std::vector<float>& v, std::vector<int64_t> shape = {}) {
+    if (shape.empty()) shape = {static_cast<int64_t>(v.size())};
+    return torch::from_blob((void*)v.data(), shape, torch::TensorOptions().dtype(torch::kFloat32)).clone();
+}
+
+// Helper to convert std::vector<uint16_t> (BF16) to torch::Tensor (float32)
+inline torch::Tensor bf16vec_to_tensor(const std::vector<uint16_t>& v, std::vector<int64_t> shape = {}) {
+    std::vector<float> f32(v.size());
+    for (size_t i = 0; i < v.size(); ++i) f32[i] = bfloat16_to_float32(v[i]);
+    if (shape.empty()) shape = {static_cast<int64_t>(f32.size())};
+    return torch::from_blob(f32.data(), shape, torch::TensorOptions().dtype(torch::kFloat32)).clone();
 }
 
 // TinyLlamaModel constructor: load all weights from safetensors into uint16_t vectors
@@ -603,16 +498,20 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x, int pos, KVCac
         if (log_target_layer) log_vector_summary("TROUBLESHOOTING L0 P1 Input", x_resid1);
 
         // a) Input RMSNorm
-        std::vector<float> x_norm(hs);
-        rmsnorm(x, lw.input_layernorm, eps, x_norm);
+        torch::Tensor x_tensor = vec_to_tensor(x, {hs});
+        torch::Tensor w_tensor = bf16vec_to_tensor(lw.input_layernorm, {hs});
+        torch::Tensor x_norm_tensor = rmsnorm(x_tensor, w_tensor, eps);
+        std::vector<float> x_norm(x_norm_tensor.template data_ptr<float>(), x_norm_tensor.template data_ptr<float>() + hs);
         // --- Use L0 P1 flag --- 
         if (log_target_layer) log_vector_summary("TROUBLESHOOTING L0 P1 Output RMSNorm1", x_norm);
 
         // b) Q, K, V projections
-        std::vector<float> q(hs), k_current(n_kv_heads * head_dim), v_current(n_kv_heads * head_dim);
-        matvec_bf16_f32(lw.q_proj, x_norm, q, hs, hs);
-        matvec_bf16_f32(lw.k_proj, x_norm, k_current, n_kv_heads * head_dim, hs);
-        matvec_bf16_f32(lw.v_proj, x_norm, v_current, n_kv_heads * head_dim, hs);
+        torch::Tensor q_tensor = matvec(bf16vec_to_tensor(lw.q_proj, {hs, hs}), x_norm_tensor);
+        torch::Tensor k_current_tensor = matvec(bf16vec_to_tensor(lw.k_proj, {n_kv_heads * head_dim, hs}), x_norm_tensor);
+        torch::Tensor v_current_tensor = matvec(bf16vec_to_tensor(lw.v_proj, {n_kv_heads * head_dim, hs}), x_norm_tensor);
+        std::vector<float> q(q_tensor.template data_ptr<float>(), q_tensor.template data_ptr<float>() + hs);
+        std::vector<float> k_current(k_current_tensor.template data_ptr<float>(), k_current_tensor.template data_ptr<float>() + n_kv_heads * head_dim);
+        std::vector<float> v_current(v_current_tensor.template data_ptr<float>(), v_current_tensor.template data_ptr<float>() + n_kv_heads * head_dim);
         // --- Use L0 P1 flag --- 
         if (log_target_layer) {
             log_vector_summary("TROUBLESHOOTING L0 P1 Q Proj Output", q);
@@ -634,10 +533,10 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x, int pos, KVCac
         }
 
         // Write to KV Cache
-        for (int kvh = 0; kvh < n_kv_heads; ++kvh) {
+            for (int kvh = 0; kvh < n_kv_heads; ++kvh) {
             // Calculate offsets into current K and V vectors
-            size_t current_k_offset = (size_t)kvh * head_dim;
-            size_t current_v_offset = (size_t)kvh * head_dim;
+                size_t current_k_offset = (size_t)kvh * head_dim;
+                size_t current_v_offset = (size_t)kvh * head_dim;
             
             // Calculate write position in cache (matching the read pattern used in attention)
             // Structure: pos → kv_head → head_dim
@@ -648,11 +547,11 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x, int pos, KVCac
                 // Write K and V vectors to cache
                 std::memcpy(&cache->layers[l].k[write_offset], &k_current[current_k_offset], head_dim * sizeof(float));
                 std::memcpy(&cache->layers[l].v[write_offset], &v_current[current_v_offset], head_dim * sizeof(float));
-            } else {
+             } else {
                 Logger::error("KVCache write out of bounds: write_offset=" + 
                              std::to_string(write_offset) + ", cache size=" + 
                              std::to_string(cache->layers[l].k.size()));
-            }
+             }
         }
 
         // d) Attention
@@ -661,7 +560,7 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x, int pos, KVCac
             int current_seq_len = pos + 1; // Include current position
             if (current_seq_len > 0) { 
                 #pragma omp parallel for
-                for (int h = 0; h < n_heads; ++h) {
+            for (int h = 0; h < n_heads; ++h) {
                     const float* q_ptr = q.data() + h * head_dim;
                     std::vector<float> scores(current_seq_len);
                     
@@ -684,7 +583,7 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x, int pos, KVCac
                             }
                             score /= std::sqrt(head_dim); // Scale by sqrt(head_dim)
                             scores[j] = score;
-                        } else {
+                } else {
                             Logger::error("Attention K access out of bounds: cache_pos_offset=" + 
                                          std::to_string(cache_pos_offset) + ", cache size=" + 
                                          std::to_string(cache->layers[l].k.size()));
@@ -692,28 +591,30 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x, int pos, KVCac
                         }
                     }
                     
-                    // Apply softmax to get probabilities
-                    softmax(scores);
-                    
-                    // Compute weighted sum of V vectors
+                    // Convert scores vector to tensor and apply softmax
+                    torch::Tensor scores_tensor = vec_to_tensor(scores);
+                    torch::Tensor probs_tensor = softmax(scores_tensor);
+                    // Convert probs back to vector if needed, or use tensor directly
+                    std::vector<float> probs(probs_tensor.template data_ptr<float>(), probs_tensor.template data_ptr<float>() + current_seq_len);
+                    log_vector_stats("Attention Scores Post-Softmax (L" + std::to_string(l) + " H" + std::to_string(h) + " P" + std::to_string(pos) + ")", probs);
+
+                    // Compute weighted sum of V vectors using the probabilities
                     std::vector<float> head_attn_out(head_dim, 0.0f);
                     for (int d = 0; d < head_dim; ++d) {
-                        float val = 0.0f;
+                        double val = 0.0; // Use double for accumulation
                         for (int j = 0; j < current_seq_len; ++j) {
                             // Use the same cache position calculation for V
                             size_t cache_pos_offset = j * n_kv_heads * head_dim + kv_head_idx * head_dim;
                             
                             if (cache_pos_offset + head_dim <= cache->layers[l].v.size()) {
                                 const float* v_ptr = &cache->layers[l].v[cache_pos_offset];
-                                val += scores[j] * v_ptr[d];
-                            } else {
-                                Logger::error("Attention V access out of bounds: cache_pos_offset=" + 
-                                             std::to_string(cache_pos_offset) + ", cache size=" + 
-                                             std::to_string(cache->layers[l].v.size()));
-                                // Don't add anything to val for out-of-bounds indices
+                                // Use the probability from the softmax result
+                                val += static_cast<double>(probs[j]) * static_cast<double>(v_ptr[d]); 
+                } else {
+                                // Error already logged during K access, skip V access
                             }
                         }
-                        head_attn_out[d] = val;
+                        head_attn_out[d] = static_cast<float>(val);
                     }
                     
                     // Copy this head's output to the correct position in attn_out
@@ -727,13 +628,9 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x, int pos, KVCac
 
         // e) Output projection
         std::vector<float> attn_out_copy = attn_out; 
-        std::vector<float> attn_proj(hs);
-        matvec_bf16_f32(lw.o_proj, attn_out, attn_proj, hs, hs);
-        // --- Use L0 P1 flag --- 
-        if (log_target_layer) {
-             log_vector_summary("TROUBLESHOOTING L0 P1 Input to O-Proj", attn_out_copy);
-             log_vector_summary("TROUBLESHOOTING L0 P1 O-Proj Output", attn_proj);
-        }
+        torch::Tensor attn_proj_tensor = matvec(bf16vec_to_tensor(lw.o_proj, {hs, hs}), vec_to_tensor(attn_out, {hs}));
+        std::vector<float> attn_proj(attn_proj_tensor.template data_ptr<float>(), attn_proj_tensor.template data_ptr<float>() + hs);
+        log_vector_stats("Attention Projection Output (L" + std::to_string(l) + " P" + std::to_string(pos) + ")", attn_proj);
 
         // f) First residual connection
         std::vector<float> x_resid1_copy = x_resid1;
@@ -748,31 +645,24 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x, int pos, KVCac
         std::vector<float> x_resid2 = x; 
         // --- Use L0 P1 flag --- 
         if (log_target_layer) log_vector_summary("TROUBLESHOOTING L0 P1 Input to MLP", x_resid2);
-        std::vector<float> x_norm2(hs);
-        rmsnorm(x, lw.post_attention_layernorm, eps, x_norm2);
-        // --- Use L0 P1 flag --- 
-        if (log_target_layer) {
-            log_vector_summary("TROUBLESHOOTING L0 P1 Output RMSNorm2", x_norm2);
-        }
+        torch::Tensor x_norm2_tensor = rmsnorm(vec_to_tensor(x, {hs}), bf16vec_to_tensor(lw.post_attention_layernorm, {hs}), eps);
+        std::vector<float> x_norm2(x_norm2_tensor.template data_ptr<float>(), x_norm2_tensor.template data_ptr<float>() + hs);
+        log_vector_stats("Input to MLP RMSNorm (L" + std::to_string(l) + " P" + std::to_string(pos) + ")", x_norm2);
 
         std::vector<float> gate(is), up(is);
-        matvec_bf16_f32(lw.gate_proj, x_norm2, gate, is, hs);
-        matvec_bf16_f32(lw.up_proj, x_norm2, up, is, hs);
-        if (log_target_layer) {
-            log_vector_summary("TROUBLESHOOTING L0 P1 Gate Proj Output", gate);
-            log_vector_summary("TROUBLESHOOTING L0 P1 Up Proj Output", up);
-        }
+        torch::Tensor gate_proj_tensor = matvec(bf16vec_to_tensor(lw.gate_proj, {is, hs}), vec_to_tensor(x_norm2, {is}));
+        torch::Tensor up_proj_tensor = matvec(bf16vec_to_tensor(lw.up_proj, {is, hs}), vec_to_tensor(x_norm2, {is}));
         std::vector<float> gate_orig = gate; 
-        for (int d = 0; d < is; ++d) gate[d] = (gate[d] / (1.0f + std::exp(-gate[d]))) * up[d]; // SiLU * Up
+        for (int d = 0; d < is; ++d) {
+            gate[d] = (gate[d] / (1.0f + std::exp(-gate[d]))) * up[d]; // SiLU * Up
+        }
         if (log_target_layer) {
             log_vector_summary("TROUBLESHOOTING L0 P1 Gate BEFORE SiLU*Up", gate_orig);
             log_vector_summary("TROUBLESHOOTING L0 P1 Gate * Up", gate);
         }
-        std::vector<float> mlp_out(hs);
-        matvec_bf16_f32(lw.down_proj, gate, mlp_out, hs, is);
-        if (log_target_layer) {
-            log_vector_summary("TROUBLESHOOTING L0 P1 Down Proj Output (MLP Out)", mlp_out);
-        }
+        torch::Tensor mlp_out_tensor = matvec(bf16vec_to_tensor(lw.down_proj, {hs, is}), vec_to_tensor(gate, {hs}));
+        std::vector<float> mlp_out(mlp_out_tensor.template data_ptr<float>(), mlp_out_tensor.template data_ptr<float>() + hs);
+        log_vector_stats("MLP Output (L" + std::to_string(l) + " P" + std::to_string(pos) + ")", mlp_out);
         
         // h) Second residual connection
         std::vector<float> x_resid2_copy = x_resid2; 
@@ -786,16 +676,16 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x, int pos, KVCac
 
     // 3. Final RMSNorm
     std::vector<float> x_final_norm_input = x; // Copy for logging
-    std::vector<float> x_norm_final(hs);
-    rmsnorm(x, final_norm, eps, x_norm_final);
+    torch::Tensor x_final_norm_tensor = rmsnorm(vec_to_tensor(x, {hs}), bf16vec_to_tensor(final_norm, {hs}), eps);
+    std::vector<float> x_norm_final(x_final_norm_tensor.template data_ptr<float>(), x_final_norm_tensor.template data_ptr<float>() + hs);
     if (log_initial) { 
         log_vector_summary("TROUBLESHOOTING L0 P1 Input to Final RMSNorm (P1)", x_final_norm_input);
         log_vector_summary("TROUBLESHOOTING L0 P1 Output of Final RMSNorm (P1)", x_norm_final);
     }
 
     // 4. Output projection to logits
-    std::vector<float> logits(vs);
-    matvec_bf16_f32(lm_head, x_norm_final, logits, vs, hs);
+    torch::Tensor logits_tensor = matvec(bf16vec_to_tensor(lm_head, {vs, hs}), x_final_norm_tensor);
+    std::vector<float> logits(logits_tensor.template data_ptr<float>(), logits_tensor.template data_ptr<float>() + vs);
     if (log_initial) {
         log_vector_summary("TROUBLESHOOTING L0 P1 Final Logits (P1)", logits, 10);
     }
