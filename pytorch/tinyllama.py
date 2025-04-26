@@ -222,43 +222,43 @@ class Llama2Block(nn.Module):
             q_rope = apply_rotary_emb(q, freqs_cis)
             k_rope = apply_rotary_emb(k, freqs_cis)
 
-            # --- Update KVCache (No logging needed here for P1 debugging) --- 
-            k_to_cache = k_rope.permute(0, 2, 1, 3)
-            v_to_cache = v.permute(0, 2, 1, 3)
-            # --- ADD CACHE WRITE LOGGING ---
-            if layer_idx == 0 and pos < 2: # Log for L0, pos 0 and 1
-                logging.info(f"[PyT Cache Write] L0 P{pos} KV_Head=0 TargetSlice=[0, 0, {pos}:{pos+1}, :]")
-                k_val_log = k_to_cache[0, 0, 0, :5].detach().cpu().numpy()
-                v_val_log = v_to_cache[0, 0, 0, :5].detach().cpu().numpy()
-                logging.info(f"[PyT Cache Write] L0 P{pos} K Vals (H0): {' '.join(f'{x:.6f}' for x in k_val_log)}")
-                logging.info(f"[PyT Cache Write] L0 P{pos} V Vals (H0): {' '.join(f'{x:.6f}' for x in v_val_log)}")
-            # --- END LOGGING ---
-            k_cache[:, :, pos:pos+1, :] = k_to_cache
-            v_cache[:, :, pos:pos+1, :] = v_to_cache
+            # --- Update KVCache --- 
+            # Shapes: k_rope [bs, 1, n_kv_heads, head_dim], v [bs, 1, n_kv_heads, head_dim]
+            # Cache shapes passed in: [bs, n_kv_heads, max_seq_len, head_dim]
+            # We need to insert at the 'pos' index in the sequence dimension (dim=2)
+            k_cache[:, :, pos:pos+1, :] = k_rope.permute(0, 2, 1, 3) # [bs, n_kv_heads, 1, head_dim]
+            v_cache[:, :, pos:pos+1, :] = v.permute(0, 2, 1, 3)      # [bs, n_kv_heads, 1, head_dim]
                  
-            # --- Attention Calculation (pos=1 specific path) ---
-            if pos == 0:
-                 # ... existing code ...
-            else: # pos > 0 logic (already has detailed TROUBLESHOOTING logs)
-                # --- Retrieve K/V history --- 
-                current_seq_len_cache = pos + 1
-                keys = k_cache[:, :, :current_seq_len_cache, :] 
-                values = v_cache[:, :, :current_seq_len_cache, :] 
-                # --- ADD CACHE READ LOGGING ---
-                if layer_idx == 0 and pos == 1: # Log only for L0 P1 read
-                    logging.info(f"[PyT Cache Read] L0 P{pos} Reading K/V up to seq_len={current_seq_len_cache}")
-                    k_read_log_h0_p0 = keys[0, 0, 0, :5].detach().cpu().numpy() # Head 0, Pos 0
-                    v_read_log_h0_p0 = values[0, 0, 0, :5].detach().cpu().numpy()
-                    k_read_log_h0_p1 = keys[0, 0, 1, :5].detach().cpu().numpy() # Head 0, Pos 1
-                    v_read_log_h0_p1 = values[0, 0, 1, :5].detach().cpu().numpy()
-                    logging.info(f"[PyT Cache Read] L0 P{pos} K Vals (H0, Read Pos 0): {' '.join(f'{x:.6f}' for x in k_read_log_h0_p0)}")
-                    logging.info(f"[PyT Cache Read] L0 P{pos} V Vals (H0, Read Pos 0): {' '.join(f'{x:.6f}' for x in v_read_log_h0_p0)}")
-                    logging.info(f"[PyT Cache Read] L0 P{pos} K Vals (H0, Read Pos 1): {' '.join(f'{x:.6f}' for x in k_read_log_h0_p1)}")
-                    logging.info(f"[PyT Cache Read] L0 P{pos} V Vals (H0, Read Pos 1): {' '.join(f'{x:.6f}' for x in v_read_log_h0_p1)}")
-                # --- END LOGGING ---
-                # --- Existing READ logging for pos=1 --- 
-                # if pos == 1 and layer_idx == 0: 
-                #      log_tensor_stats("PyT Keys (READ, L0, P1, len={})"...
+            # --- Retrieve K/V history --- 
+            # Get keys/values up to the current position (inclusive)
+            current_seq_len_cache = pos + 1
+            keys = k_cache[:, :, :current_seq_len_cache, :] # [bs, n_kv_heads, current_seq_len_cache, head_dim]
+            values = v_cache[:, :, :current_seq_len_cache, :] # [bs, n_kv_heads, current_seq_len_cache, head_dim]
+            
+            # Repeat K/V for Grouped Query Attention (GQA)
+            # Input shape to repeat_kv: [bs, current_seq_len_cache, n_kv_heads, head_dim]
+            keys_repeated = repeat_kv(keys.permute(0, 2, 1, 3), self.num_key_value_groups) # [bs, current_seq_len_cache, n_q_heads, head_dim]
+            values_repeated = repeat_kv(values.permute(0, 2, 1, 3), self.num_key_value_groups) # [bs, current_seq_len_cache, n_q_heads, head_dim]
+
+            # Reshape Q, K, V for attention calculation
+            q_attn = q_rope.permute(0, 2, 1, 3)  # [bs, n_q_heads, 1, head_dim]
+            # Permute K/V back to [bs, n_q_heads, current_seq_len_cache, head_dim]
+            k_attn = keys_repeated.permute(0, 2, 1, 3)
+            v_attn = values_repeated.permute(0, 2, 1, 3)
+
+            # --- Calculate attention scores --- 
+            # Q @ K^T -> [bs, n_q_heads, 1, head_dim] @ [bs, n_q_heads, head_dim, current_seq_len_cache] = [bs, n_q_heads, 1, current_seq_len_cache]
+            attn_scores = torch.matmul(q_attn, k_attn.transpose(-2, -1)) / math.sqrt(self.head_dim)
+            
+            # --- Softmax --- 
+            attn_probs = F.softmax(attn_scores, dim=-1, dtype=torch.float32) # Softmax over key sequence length `current_seq_len_cache`
+
+            # --- Calculate attention output --- 
+            # Prob @ V -> [bs, n_q_heads, 1, current_seq_len_cache] @ [bs, n_q_heads, current_seq_len_cache, head_dim] = [bs, n_q_heads, 1, head_dim]
+            attn_out = torch.matmul(attn_probs, v_attn.type_as(attn_probs)) 
+            
+            # Reshape attn_out back to [bs, 1, hidden_size]
+            attn_out = attn_out.permute(0, 2, 1, 3).contiguous().view(bsz, 1, hidden_size)
 
         # --- Common processing after attention --- 
         # (O Projection)
