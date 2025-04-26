@@ -18,6 +18,7 @@
 #include <cstdio> // For std::remove
 #include <sstream>
 #include <numeric>
+#include <iomanip> // Include for std::setw, std::fixed, std::setprecision
 
 // TODO: Implement safetensors loader
 // TODO: Implement TinyLlama model and inference
@@ -173,16 +174,11 @@ int main(int argc, char** argv) {
                 int n_kv_heads = mcfg.num_key_value_heads;
                 int max_seq_len = mcfg.max_position_embeddings;
                 int head_dim = mcfg.hidden_size / mcfg.num_attention_heads;
-                size_t cache_size_per_layer = (size_t)n_kv_heads * max_seq_len * head_dim;
-                if (cache_size_per_layer == 0) {
-                    throw std::runtime_error("Calculated cache size is zero. Check model config.");
-                }
-                cache.layers.resize(nhl);
-                for (int l = 0; l < nhl; ++l) {
-                    cache.layers[l].k.resize(cache_size_per_layer, 0.0f);
-                    cache.layers[l].v.resize(cache_size_per_layer, 0.0f);
-                }
-                Logger::info("KVCache initialized. Layers: " + std::to_string(nhl) + ", Size per layer: " + std::to_string(cache_size_per_layer));
+                
+                // Use the new initialization method
+                cache.initialize(nhl, max_seq_len, n_kv_heads, head_dim);
+                
+                Logger::info("KVCache successfully initialized.");
             } catch (const std::exception& e) {
                 Logger::error(std::string("Failed to initialize KVCache: ") + e.what());
                 return 1;
@@ -205,98 +201,114 @@ int main(int argc, char** argv) {
             ss_token_ids << "]";
             Logger::info(ss_token_ids.str());
 
-            // --- Declare persistent state vector ---
-            std::vector<float> current_x(mcfg.hidden_size);
-            // --------------------------------------
-
             // --- Feed prompt tokens & Generate ---
-            cache.seq_len = 0; // Reset sequence length 
             int next_token_id = -1; // Initialize next token
-            int max_new_tokens = 50; // Example limit
+            int max_new_tokens = 30; // Set max generated tokens to 30
             int num_prompt_tokens = prompt_ids.size();
             std::vector<int> generated_ids = prompt_ids;
-            std::vector<int> generated_only_ids; 
+            std::vector<int> generated_only_ids;
+            std::vector<float> current_x(mcfg.hidden_size); // State vector
+            cache.seq_len = 0; // Reset cache length
+
+            Logger::info("Starting token-by-token processing loop with KVCache...");
+            std::cout << "Generating tokens..." << std::endl; // Initial message
             
-            Logger::info("Starting combined prompt processing and generation loop...");
-            for (int pos = 0; pos < num_prompt_tokens + max_new_tokens; ++pos) {
+            int total_steps = num_prompt_tokens + max_new_tokens -1; // Prompt processing + generation
+            int generated_count = 0;
+
+            for (int pos = 0; pos < total_steps; ++pos) {
+                Logger::info("--- main loop: START pos=" + std::to_string(pos) + " ---");
                 if (pos >= mcfg.max_position_embeddings) {
                     Logger::info("Reached max sequence length.");
                     break;
                 }
 
-                // 1. Determine Input Token ID
-                int input_token_id = (pos < num_prompt_tokens) ? prompt_ids[pos] : next_token_id;
-
-                // 2. Lookup Embedding for the CURRENT token
-                std::vector<float> embedding = model.lookup_embedding(input_token_id); 
-                
-                // 3. Initialize or Use Previous State
-                if (pos == 0) {
-                    // Initialize the state with the first token's embedding
-                    current_x = embedding; 
-                    Logger::info("Initialized current_x with embedding for pos 0.");
-                } else {
-                    // For subsequent steps, 'current_x' already holds the output state 
-                    // from the previous iteration's forward pass. 
-                    // Pass it directly to the forward call.
-                    if (pos == 1) { // Logging for the step we are debugging
-                        log_vec_stats("main.cpp: current_x BEFORE forward call (pos=1)", current_x);
-                        std::stringstream ss_x_main_before;
-                        ss_x_main_before << "main.cpp: current_x BEFORE forward call (pos=1) first 5: [";
-                        for(int i=0; i < 5 && i < current_x.size(); ++i) ss_x_main_before << (i > 0 ? " " : "") << current_x[i];
-                        ss_x_main_before << "]";
-                        Logger::info(ss_x_main_before.str());
+                // --- START: Progress Bar --- 
+                if (pos >= num_prompt_tokens - 1) { // Show progress only during generation
+                    float progress = (float)(generated_count + 1) / max_new_tokens;
+                    int barWidth = 40;
+                    std::cout << "[";
+                    int bar_pos = barWidth * progress;
+                    for (int k = 0; k < barWidth; ++k) {
+                        if (k < bar_pos) std::cout << "=";
+                        else if (k == bar_pos) std::cout << ">";
+                        else std::cout << " ";
                     }
+                    std::cout << "] " << std::fixed << std::setprecision(1) << progress * 100.0 << "% (" << (generated_count + 1) << "/" << max_new_tokens << ")\r";
+                    std::cout.flush();
+                }
+                // --- END: Progress Bar ---
+
+                // 1. Determine Input Token ID & Prepare State x
+                int input_token_id = (pos < num_prompt_tokens) ? prompt_ids[pos] : next_token_id;
+                Logger::info("main loop: input_token_id=" + std::to_string(input_token_id));
+                if (pos == 0) {
+                    current_x = model.lookup_embedding(input_token_id); // Initialize state for first token
+                    log_vec_stats("main loop: current_x after lookup (pos=0)", current_x);
+                } // For pos > 0, current_x holds the output state from the previous iteration
+                else {
+                    log_vec_stats("main loop: current_x before forward (pos>0)", current_x);
                 }
 
-                // 4. Call the Modified Forward Pass
+                // 2. Call the Forward Pass (token-by-token)
                 // Pass 'current_x' by reference. It will be updated in place.
-                // 'pos' represents the current position being processed.
-                Logger::info("Calling forward for pos: " + std::to_string(pos));
-                std::vector<float> logits = model.forward(current_x, pos, &cache); 
+                Logger::info("main loop: Calling model.forward for pos=" + std::to_string(pos));
+                std::vector<float> logits = model.forward(current_x, pos, &cache, nullptr); // Pass cache
+                Logger::info("main loop: Returned from model.forward for pos=" + std::to_string(pos));
                 
-                // --- INCREMENT CACHE LENGTH *AFTER* FORWARD CALL --- 
-                cache.seq_len = pos + 1; // Update cache sequence length after processing 'pos'
-                // ----------------------------------------------------
-
-                // 5. Log State After Forward (Optional but helpful)
-                if (pos == 1) { // Log specifically after pos=1 processing
-                    log_vec_stats("main.cpp: current_x AFTER forward call (pos=1)", current_x);
-                    std::stringstream ss_x_main_after;
-                    ss_x_main_after << "main.cpp: current_x AFTER forward call (pos=1) first 5: [";
-                    for(int i=0; i < 5 && i < current_x.size(); ++i) ss_x_main_after << (i > 0 ? " " : "") << current_x[i];
-                    ss_x_main_after << "]";
-                    Logger::info(ss_x_main_after.str());
+                // --- Crucial: Increment cache sequence length *AFTER* forward call for position `pos`
+                cache.seq_len = pos + 1; 
+                Logger::info("main loop: Updated cache.seq_len=" + std::to_string(cache.seq_len));
+                
+                // --- RUNTIME CHECKS ---
+                if (logits.empty()) {
+                    Logger::error("model.forward returned empty logits at pos " + std::to_string(pos));
+                    break;
+                }
+                if (current_x.size() != mcfg.hidden_size) {
+                    Logger::error("current_x size mismatch after forward at pos " + std::to_string(pos) + ". Expected " + std::to_string(mcfg.hidden_size) + ", got " + std::to_string(current_x.size()));
+                    break;
                 }
                 
-                // 6. Sample Next Token (Only during Generation Phase)
+                log_vec_stats("main loop: logits after forward", logits);
+                log_vec_stats("main loop: current_x after forward (state)", current_x);
+                
+                // 3. Sample Next Token (Only during Generation Phase)
                 if (pos >= num_prompt_tokens - 1) {
                     if (logits.empty()) {
                         Logger::error("model.forward returned empty logits at pos " + std::to_string(pos));
                         break;
                     }
                     
-                    // Simple argmax sampling for now
-                    next_token_id = argmax(logits); 
-                    Logger::info("Predicted next token ID: " + std::to_string(next_token_id) + " for pos " + std::to_string(pos));
+                    // Sample from the returned logits (which are only for the current position)
+                    next_token_id = argmax(logits);
+                    
+                    // --- ADD LOGGING HERE ---
+                    Logger::info("C++ Generation: pos=" + std::to_string(pos) + ", sampled_token_id=" + std::to_string(next_token_id));
+                    // --- END LOGGING ---
 
-                    // Store generated token if generating
-                    if (pos >= num_prompt_tokens) { // Make sure we only store *newly* generated tokens
-                        generated_only_ids.push_back(next_token_id);
-                    }
-                    generated_ids.push_back(next_token_id); // Keep track of the full sequence
+                    std::string next_token_str = tokenizer.detokenize({next_token_id});
+                    Logger::info("Step " + std::to_string(generated_count+1) + ": Predicted token ID: " + std::to_string(next_token_id) + " ('" + next_token_str + "')");
 
-                    // Check for EOS
-                    if (next_token_id == eos_id) {
-                        Logger::info("EOS token generated at pos " + std::to_string(pos) + ". Stopping generation.");
+                    // Store generated token
+                    generated_only_ids.push_back(next_token_id);
+                    generated_ids.push_back(next_token_id); // Keep track of the full sequence for context
+                    generated_count++;
+
+                    // Check for EOS or max tokens
+                    if (next_token_id == eos_id || generated_count >= max_new_tokens) {
+                        if (next_token_id == eos_id) Logger::info("EOS token (" + std::to_string(eos_id) + ") generated. Stopping generation.");
+                        else Logger::info("Max new tokens reached. Stopping generation.");
                         break; 
                     }
                 } else {
-                    // During prompt processing, we don't sample, just continue
-                    // next_token_id is only needed *after* the last prompt token
-                     Logger::info("Processed prompt token at pos " + std::to_string(pos) + ". Continuing.");
+                     // During prompt processing, we don't sample, just process the next prompt token.
+                     // The state `current_x` is updated in-place by model.forward().
+                     Logger::info("Processed prompt token at pos " + std::to_string(pos) + ".");
                 }
+                Logger::info("--- main loop: END pos=" + std::to_string(pos) + " ---");
             } // End generation loop
+            std::cout << std::endl; // Move to the next line after progress bar finishes
 
             // Decode and print the generated part
             std::string generated_text = tokenizer.detokenize(generated_only_ids);

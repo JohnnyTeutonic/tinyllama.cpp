@@ -33,6 +33,9 @@ struct KVCache {
     };
     std::vector<LayerKV> layers; // num_hidden_layers
     int seq_len = 0;
+    
+    // Initialize KVCache with proper dimensions
+    void initialize(int num_layers, int max_seq_len, int num_kv_heads, int head_dim);
 };
 
 // Forward diagnostic callback type
@@ -58,11 +61,8 @@ public:
     // Construct from config and safetensors loader
     TinyLlamaModel(const ModelConfig& config, const SafeTensorsLoader& loader);
 
-    // Forward pass: input_id, pos, kv_cache, returns logits
-    // Optionally accepts a diagnostic callback for per-layer logging
-    // std::vector<float> forward(int input_id, int pos, KVCache* cache = nullptr, ForwardDiagCallback diag_cb = nullptr);
-    // --- CHANGED: Forward pass takes state vector by reference ---
-    std::vector<float> forward(std::vector<float>& x, int pos, KVCache* cache = nullptr, ForwardDiagCallback diag_cb = nullptr);
+    // --- RESTORED: Token-by-Token + KVCache Forward --- 
+    std::vector<float> forward(std::vector<float>& x, int pos, KVCache* cache = nullptr, const std::vector<int>* attention_mask = nullptr); // Keep optional mask for now, though not used by token-by-token
 
     // Get model config
     const ModelConfig& get_config() const { return config_; }
@@ -79,6 +79,8 @@ public:
     // Lookup embedding for a token
     std::vector<float> lookup_embedding(int token_id);
 
+    int get_vocab_size() const;
+
 private:
     ModelConfig config_;
 
@@ -89,8 +91,8 @@ private:
 
     std::vector<LayerWeights> layers; // num_hidden_layers
 
-    // Precomputed RoPE frequencies
-    std::vector<float> precomputed_freqs_;
+    // Precomputed RoPE cos/sin values
+    std::vector<std::pair<float, float>> precomputed_freqs_cis_;
 };
 
 // Utility: parse ModelConfig from nlohmann::json
@@ -120,5 +122,8 @@ struct KVCache;
 // Helper function declarations (make them non-static)
 float bfloat16_to_float32(uint16_t b16);
 std::vector<uint16_t> uint8_vector_to_uint16_vector(const std::vector<uint8_t>& bytes, size_t numel);
+
+// --- FIX: Add declaration for logging helper ---
+void log_vector_summary(const std::string& name, const std::vector<float>& v, int head_count = 5);
 
 #endif // MODEL_H 

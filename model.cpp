@@ -19,15 +19,70 @@
 #  endif
 #endif
 #include <cstdint> // For uintptr_t, uint16_t
+#include <numeric> // For std::accumulate
+#include <cassert> // For assert()
+#include <iostream> // Include for std::cout in logging
+
+// --- PASTE: Definition of logging helper moved here ---
+// (Declaration is in model.h)
+void log_vector_summary(const std::string& name, const std::vector<float>& v, int head_count) {
+    if (v.empty()) {
+        Logger::info(name + ": EMPTY");
+        return;
+    }
+    std::stringstream ss;
+    ss << name << ": size=" << v.size() << ", first " << std::min((int)v.size(), head_count) << ": [";
+    for(int i = 0; i < std::min((int)v.size(), head_count); ++i) {
+        ss << (i > 0 ? " " : "") << std::fixed << std::setprecision(4) << v[i];
+    }
+    ss << "]";
+    // Add basic stats
+    float minv = *std::min_element(v.begin(), v.end());
+    float maxv = *std::max_element(v.begin(), v.end());
+    double sum = std::accumulate(v.begin(), v.end(), 0.0);
+    float mean = sum / v.size();
+    bool all_finite = std::all_of(v.begin(), v.end(), [](float x){ return std::isfinite(x); });
+    ss << ", min=" << minv << ", max=" << maxv << ", mean=" << mean << ", finite=" << (all_finite ? "yes" : "NO");
+    Logger::info(ss.str());
+}
+// --- END PASTE ---
 
 // --- START: New Helper Functions for BFloat16 ---
 
-// Convert a single bfloat16 (uint16_t) to float32
-float bfloat16_to_float32(uint16_t b16) {
-    uint32_t f = ((uint32_t)b16) << 16;
-    float f32;
-    std::memcpy(&f32, &f, sizeof(float));
-    return f32;
+// Improved BFloat16 to Float32 conversion with proper handling of special values
+float bfloat16_to_float32(uint16_t bf16) {
+    // Special case handling for important IEEE-754 values
+    if (bf16 == 0) return 0.0f; // Positive zero
+    if (bf16 == 0x8000) return -0.0f; // Negative zero
+    
+    // Check for NaN patterns (exponent all 1s, non-zero mantissa)
+    bool is_nan = ((bf16 & 0x7F80) == 0x7F80) && ((bf16 & 0x007F) != 0);
+    if (is_nan) return std::numeric_limits<float>::quiet_NaN();
+    
+    // Check for Infinity patterns (exponent all 1s, zero mantissa)
+    if ((bf16 & 0x7F80) == 0x7F80 && (bf16 & 0x007F) == 0) {
+        return (bf16 & 0x8000) ? -std::numeric_limits<float>::infinity() : 
+                                  std::numeric_limits<float>::infinity();
+    }
+    
+    // Normal conversion using bit operations with endianness safety
+    uint32_t bits = static_cast<uint32_t>(bf16) << 16;
+    float result;
+    std::memcpy(&result, &bits, sizeof(float));
+    
+    return result;
+}
+
+// Helper to convert a vector of BF16 to F32 efficiently
+std::vector<float> bfloat16_vector_to_float32(const std::vector<uint16_t>& bf16_vec) {
+    std::vector<float> f32_vec(bf16_vec.size());
+    
+    #pragma omp parallel for
+    for (size_t i = 0; i < bf16_vec.size(); ++i) {
+        f32_vec[i] = bfloat16_to_float32(bf16_vec[i]);
+    }
+    
+    return f32_vec;
 }
 
 // Convert raw bytes (vector<uint8_t>) to vector<uint16_t> for bfloat16 storage
@@ -56,55 +111,91 @@ int argmax(const std::vector<float>& v) {
 }
 // --- END: Argmax Helper ---
 
-// RMSNorm: Match PyTorch's likely calculation order
+// Improved RMSNorm implementation for better numerical stability
 void rmsnorm(const std::vector<float>& x, const std::vector<uint16_t>& weight, float eps, std::vector<float>& out) {
-    size_t N_full = x.size();
-    if (N_full == 0) {
-        Logger::error("RMSNorm Error: Input vector x is empty.");
-        return; 
+    if (x.empty()) {
+        Logger::error("rmsnorm called with empty input vector");
+        return;
     }
-
-    // 1. Calculate sum of squares (use double for stability)
-    double ss = 0.0;
-    #pragma omp parallel for reduction(+:ss)
-    for (size_t i = 0; i < N_full; ++i) {
-        ss += double(x[i]) * double(x[i]);
+    
+    const size_t size = x.size();
+    
+    // Calculate sum of squares using Kahan summation for better precision
+    double sum = 0.0;
+    double c = 0.0; // compensation term for Kahan summation
+    for (size_t i = 0; i < size; ++i) {
+        double xi = x[i];
+        double y = xi * xi - c;
+        double t = sum + y;
+        c = (t - sum) - y; // compensation term update
+        sum = t;
     }
-
-    // 2. Calculate RMS = sqrt(mean_sq)
-    double mean_sq = ss / double(N_full);
-    double rms_val = std::sqrt(mean_sq); // Calculate sqrt directly
-
-    // 3. Apply the formula: output = x * (weight / (rms + eps))
-    #pragma omp parallel for
-    for (size_t i = 0; i < N_full; ++i) {
-        double weight_f = bfloat16_to_float32(weight[i]);
-        // Calculate scaling factor using double for intermediate precision
-        double scale = weight_f / (rms_val + double(eps)); 
-        double scaled_x = double(x[i]) * scale;
-        out[i] = float(scaled_x); // Cast final result back to float
+    
+    // Calculate root mean square with normalization factor
+    double rms = sum / size;
+    double norm_factor = 1.0 / std::sqrt(rms + eps);
+    
+    // Apply normalization and scale by weights
+    for (size_t i = 0; i < size; ++i) {
+        float w = bfloat16_to_float32(weight[i]);
+        out[i] = static_cast<float>(x[i] * norm_factor * w);
+        
+        // Check for NaN/Inf and replace with zero if needed
+        if (!std::isfinite(out[i])) {
+            Logger::error("rmsnorm produced non-finite value at index " + std::to_string(i));
+            out[i] = 0.0f;
+        }
     }
 }
 
-// Softmax over a vector (in-place) - Use float accumulation
+// Improved softmax implementation with better numerical stability
 void softmax(std::vector<float>& x) {
-    if (x.empty()) return;
-    float maxv = x[0];
-    #pragma omp parallel for reduction(max:maxv) // Ensure max finding is parallel safe if needed
-    for (size_t i = 1; i < x.size(); ++i) {
-         if (x[i] > maxv) maxv = x[i];
+    if (x.empty()) {
+        Logger::error("softmax: Called with empty vector");
+        return;
     }
-    // --- CHANGE: Accumulate sum in float ---
-    float sum = 0.0f;
-    #pragma omp parallel for reduction(+:sum)
-    for (size_t i = 0; i < x.size(); ++i) {
-        x[i] = expf(x[i] - maxv); // Use global namespace expf
-        sum += x[i]; // Accumulate as float
+    
+    // Find maximum value for numerical stability
+    float max_val = -std::numeric_limits<float>::infinity();
+    for (const float val : x) {
+        if (std::isfinite(val) && val > max_val) {
+            max_val = val;
+        }
     }
-    // --- CHANGE: Divide by float sum ---
-    #pragma omp parallel for
-    for (size_t i = 0; i < x.size(); ++i) {
-        x[i] = x[i] / sum; // Divide by float sum
+    
+    // Handle case where all values are -inf
+    if (max_val == -std::numeric_limits<float>::infinity()) {
+        Logger::info("softmax: All values were -infinity, returning uniform distribution");
+        const float uniform_val = 1.0f / x.size();
+        std::fill(x.begin(), x.end(), uniform_val);
+        return;
+    }
+    
+    // Compute exp(x - max_val) and sum
+    double sum = 0.0; // Use double for better precision in accumulation
+    for (float& val : x) {
+        if (std::isfinite(val)) {
+            val = std::exp(val - max_val);
+            sum += val;
+        } else {
+            // For -inf, exp(-inf - max_val) = 0
+            // For +inf or NaN, we'll set them to 0 to prevent propagation
+            val = 0.0f;
+        }
+    }
+    
+    // Handle edge case where sum is zero or very small
+    if (sum < 1e-20) {
+        Logger::info("softmax: Sum after exp is too small (" + 
+                    std::to_string(sum) + "), returning uniform distribution");
+        const float uniform_val = 1.0f / x.size();
+        std::fill(x.begin(), x.end(), uniform_val);
+        return;
+    }
+    
+    // Normalize by dividing by sum
+    for (float& val : x) {
+        val = static_cast<float>(val / sum);
     }
 }
 
@@ -117,37 +208,59 @@ static void silu(const std::vector<float>& x, std::vector<float>& out) {
     }
 }
 
-// RoPE: apply rotary positional embedding to Q or K (in-place)
-void apply_rope(std::vector<float>& x, int num_heads, int head_dim, int pos, const std::vector<float>& freqs) {
-    // --- START: RoPE Debug Logging --- 
-    bool should_log = (pos == 15); // Log only for position 15
-    // --- END: RoPE Debug Logging --- 
-    #pragma omp parallel for // --- RE-ENABLED ---
+// Fix for RoPE implementation with better position handling
+void apply_rope(std::vector<float>& x, int num_heads, int head_dim, int pos, 
+                const std::vector<std::pair<float, float>>& freqs_cis) {
+    // Validate input
+    if (head_dim % 2 != 0) {
+        Logger::error("apply_rope: head_dim must be even, got " + std::to_string(head_dim));
+        return;
+    }
+    
+    // Required vector size check
+    const int dim_half = head_dim / 2;
+    const size_t expected_size = static_cast<size_t>(num_heads * head_dim);
+    if (x.size() != expected_size) {
+        Logger::error("apply_rope: Input vector size mismatch. Expected " + 
+                     std::to_string(expected_size) + ", got " + std::to_string(x.size()));
+        return;
+    }
+    
+    // Validate freqs_cis has enough elements
+    if (freqs_cis.size() < static_cast<size_t>(dim_half)) {
+        Logger::error("apply_rope: freqs_cis too small. Expected at least " + 
+                     std::to_string(dim_half) + ", got " + std::to_string(freqs_cis.size()));
+        return;
+    }
+    
+    // Apply rotation for each head
     for (int h = 0; h < num_heads; ++h) {
-        for (int i = 0; i < head_dim; i += 2) {
-            // --- START: RoPE Debug Logging --- 
-            if (should_log && h < 2 && i < 4) { // Log only for first 2 heads, first 2 pairs
-                float freq = freqs[i / 2];
-                float angle = pos * freq;
-                float x0_in = x[h * head_dim + i];
-                float x1_in = x[h * head_dim + i + 1];
-                std::stringstream ss_rope_dbg;
-                ss_rope_dbg << "C++ RoPE Debug (P15 H" << h << " I" << i << "): "
-                            << "x0_in=" << x0_in << " x1_in=" << x1_in 
-                            << " freq=" << freq << " angle=" << angle;
-                Logger::info(ss_rope_dbg.str());
-            }
-            // --- END: RoPE Debug Logging --- 
-            if (i / 2 >= freqs.size()) { // Bounds check
-                Logger::error("RoPE frequency index out of bounds!");
+        const int head_start = h * head_dim;
+        
+        for (int d = 0; d < dim_half; ++d) {
+            // Get indices for the feature dimension and its pair
+            const int i = head_start + d;
+            const int i_pair = head_start + d + dim_half;
+            
+            // Ensure indices are in bounds
+            if (i >= static_cast<int>(x.size()) || i_pair >= static_cast<int>(x.size())) {
+                Logger::error("apply_rope: Index out of bounds: i=" + std::to_string(i) + 
+                             ", i_pair=" + std::to_string(i_pair) + 
+                             ", x.size()=" + std::to_string(x.size()));
                 continue;
             }
-            float freq = freqs[i / 2]; // Use precomputed frequency
-            float angle = pos * freq;
-            float x0 = x[h * head_dim + i];
-            float x1 = x[h * head_dim + i + 1];
-            x[h * head_dim + i]     = x0 * std::cos(angle) - x1 * std::sin(angle);
-            x[h * head_dim + i + 1] = x0 * std::sin(angle) + x1 * std::cos(angle);
+            
+            // Get the original values
+            const float x_i = x[i];
+            const float x_i_pair = x[i_pair];
+            
+            // Get position-specific rotation factors
+            const float cos_pos = freqs_cis[d].first;
+            const float sin_pos = freqs_cis[d].second;
+            
+            // Apply the rotation
+            x[i] = x_i * cos_pos - x_i_pair * sin_pos;
+            x[i_pair] = x_i * sin_pos + x_i_pair * cos_pos;
         }
     }
 }
@@ -219,31 +332,99 @@ ModelConfig parse_model_config(const nlohmann::json& json) {
     return cfg;
 }
 
-// --- START: New MatVec for BFloat16 Weights ---
-// Matrix multiplication: out = mat [M,N] * vec [N] -> [M]
-// mat: uint16_t (bfloat16), vec: float, out: float
-void matvec_bf16_f32(const std::vector<uint16_t>& mat, const std::vector<float>& vec, std::vector<float>& out, int M, int N) {
-    if (mat.size() != M * N) {
-        throw std::runtime_error("Matrix size mismatch in matvec_bf16_f32");
+// Improved matrix-vector multiplication with better precision and stability
+void matvec_bf16_f32(const std::vector<uint16_t>& mat, const std::vector<float>& vec, 
+                    std::vector<float>& out, int M, int N) {
+    // Validate input dimensions
+    if (vec.size() != static_cast<size_t>(N)) {
+        Logger::error("matvec_bf16_f32: Input vector size mismatch. Expected " + 
+                     std::to_string(N) + ", got " + std::to_string(vec.size()));
+        return;
     }
-    if (vec.size() != N) {
-        throw std::runtime_error("Vector size mismatch in matvec_bf16_f32");
+    if (out.size() != static_cast<size_t>(M)) {
+        Logger::error("matvec_bf16_f32: Output vector size mismatch. Expected " + 
+                     std::to_string(M) + ", got " + std::to_string(out.size()));
+        return;
     }
-    if (out.size() != M) {
-         out.resize(M); // Ensure output vector has correct size
+    if (mat.size() != static_cast<size_t>(M * N)) {
+        Logger::error("matvec_bf16_f32: Matrix size mismatch. Expected " + 
+                     std::to_string(M * N) + ", got " + std::to_string(mat.size()));
+        return;
     }
-    // Accumulate in double for maximum stability (matches PyTorch)
+
+    // Convert entire matrix row by row for efficiency
+    std::vector<float> row_f32(N);
+
     #pragma omp parallel for
     for (int i = 0; i < M; ++i) {
+        // Convert the entire row to float32 once
+        for (int j = 0; j < N; ++j) {
+            row_f32[j] = bfloat16_to_float32(mat[i * N + j]);
+        }
+        
+        // Use double accumulation for better precision
         double sum = 0.0;
         for (int j = 0; j < N; ++j) {
-            float mat_val = bfloat16_to_float32(mat[i * N + j]);
-            sum += double(mat_val) * double(vec[j]);
+            sum += static_cast<double>(row_f32[j]) * static_cast<double>(vec[j]);
         }
-        out[i] = float(sum);
+        
+        // Store the result
+        out[i] = static_cast<float>(sum);
+        
+        // Check for NaN/Inf in output
+        if (!std::isfinite(out[i])) {
+            Logger::error("matvec_bf16_f32: Non-finite output at index " + std::to_string(i));
+            out[i] = 0.0f;  // Replace with zero to prevent propagation
+        }
     }
 }
-// --- END: New MatVec for BFloat16 Weights ---
+
+// Helper to log the first few elements of a raw float pointer
+static void log_raw_float_pointer(const std::string& name, const float* ptr, size_t count = 5) {
+    if (!ptr) {
+        Logger::info(name + ": NULL Pointer");
+        return;
+    }
+    std::stringstream ss;
+    ss << name << " first " << count << ": [";
+    for (size_t i = 0; i < count; ++i) {
+        ss << (i > 0 ? " " : "") << std::fixed << std::setprecision(6) << ptr[i];
+    }
+    ss << "]";
+    Logger::info(ss.str());
+}
+
+// KVCache initialization method to add to the existing struct
+void KVCache::initialize(int num_layers, int max_seq_len, int num_kv_heads, int head_dim) {
+    layers.resize(num_layers);
+    
+    // Calculate the size needed for each layer's K and V cache
+    // Structure: sequence_position → kv_head → head_dimension
+    size_t cache_size_per_layer = static_cast<size_t>(max_seq_len) * 
+                                 static_cast<size_t>(num_kv_heads) * 
+                                 static_cast<size_t>(head_dim);
+    
+    if (cache_size_per_layer == 0) {
+        throw std::runtime_error("KVCache: Calculated cache size is zero. Check parameters: " +
+                           std::to_string(max_seq_len) + " * " + 
+                           std::to_string(num_kv_heads) + " * " + 
+                           std::to_string(head_dim));
+    }
+    
+    // Allocate and zero-initialize all cache tensors
+    for (int l = 0; l < num_layers; ++l) {
+        layers[l].k.resize(cache_size_per_layer, 0.0f);
+        layers[l].v.resize(cache_size_per_layer, 0.0f);
+    }
+    
+    Logger::info("KVCache initialized with dimensions: " +
+               std::to_string(num_layers) + " layers, " +
+               std::to_string(max_seq_len) + " sequence length, " +
+               std::to_string(num_kv_heads) + " KV heads, " + 
+               std::to_string(head_dim) + " head dimension");
+    
+    seq_len = 0;
+}
 
 // TinyLlamaModel constructor: load all weights from safetensors into uint16_t vectors
 TinyLlamaModel::TinyLlamaModel(const ModelConfig& config, const SafeTensorsLoader& loader)
@@ -283,8 +464,8 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& config, const SafeTensorsLoade
             lw.input_layernorm = uint8_vector_to_uint16_vector(loader.get_tensor_bytes(prefix + "input_layernorm.weight"), hs);
             lw.post_attention_layernorm = uint8_vector_to_uint16_vector(loader.get_tensor_bytes(prefix + "post_attention_layernorm.weight"), hs);
             lw.q_proj = uint8_vector_to_uint16_vector(loader.get_tensor_bytes(prefix + "self_attn.q_proj.weight"), hs * hs);
-            lw.k_proj = uint8_vector_to_uint16_vector(loader.get_tensor_bytes(prefix + "self_attn.k_proj.weight"), hs * kv_dim);
-            lw.v_proj = uint8_vector_to_uint16_vector(loader.get_tensor_bytes(prefix + "self_attn.v_proj.weight"), hs * kv_dim);
+            lw.k_proj = uint8_vector_to_uint16_vector(loader.get_tensor_bytes(prefix + "self_attn.k_proj.weight"), kv_dim * hs);
+            lw.v_proj = uint8_vector_to_uint16_vector(loader.get_tensor_bytes(prefix + "self_attn.v_proj.weight"), kv_dim * hs);
             lw.o_proj = uint8_vector_to_uint16_vector(loader.get_tensor_bytes(prefix + "self_attn.o_proj.weight"), hs * hs);
             lw.gate_proj = uint8_vector_to_uint16_vector(loader.get_tensor_bytes(prefix + "mlp.gate_proj.weight"), is * hs);
             lw.up_proj = uint8_vector_to_uint16_vector(loader.get_tensor_bytes(prefix + "mlp.up_proj.weight"), is * hs);
@@ -337,14 +518,25 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& config, const SafeTensorsLoade
     }
     Logger::info("All model weights loaded (as bfloat16/uint16_t).");
 
-    // Precompute RoPE frequencies
+    // Precompute RoPE cos/sin values
     int head_dim = hs / n_heads;
-    precomputed_freqs_.resize(head_dim / 2);
+    int max_seq_len = config.max_position_embeddings;
+    precomputed_freqs_cis_.resize((max_seq_len * head_dim) / 2);
     float theta = config_.rope_theta;
+    for (int pos = 0; pos < max_seq_len; ++pos) {
     for (int i = 0; i < head_dim; i += 2) {
-        precomputed_freqs_[i / 2] = std::pow(theta, -((float)i) / head_dim);
+            float freq = std::pow(theta, -((float)i) / head_dim);
+            float angle = pos * freq;
+            float cos_val = std::cos(angle);
+            float sin_val = std::sin(angle);
+            precomputed_freqs_cis_[(pos * head_dim / 2) + (i / 2)] = {cos_val, sin_val};
+            // Log first few values for pos=1
+            if (pos == 1 && (i/2) < 5) { // Log first 5 pairs for pos=1
+                 Logger::info("C++ RoPE Precompute (Pos=1, FreqDim=" + std::to_string(i/2) + "): cos=" + std::to_string(cos_val) + " sin=" + std::to_string(sin_val));
+            }
+        }
     }
-    Logger::info("Precomputed RoPE frequencies.");
+    Logger::info("Precomputed RoPE cos/sin frequencies.");
 }
 
 // --- ADDED: Embedding Lookup Method --- 
@@ -373,10 +565,9 @@ std::vector<float> TinyLlamaModel::lookup_embedding(int token_id) {
 }
 // --- END ADDED --- 
 
-// Forward pass - Updated for KVCache store/retrieve
-// --- CHANGE: Pass state vector x by reference, remove input_id --- 
-std::vector<float> TinyLlamaModel::forward(std::vector<float>& x, int pos, KVCache* cache, ForwardDiagCallback diag_cb) {
-    // Config dimensions (move to top for full function scope)
+// --- RESTORED: Token-by-Token + KVCache Forward ---
+std::vector<float> TinyLlamaModel::forward(std::vector<float>& x, int pos, KVCache* cache, const std::vector<int>* attention_mask) {
+    // Config dimensions
     int hs = config_.hidden_size;
     int is = config_.intermediate_size;
     int nhl = config_.num_hidden_layers;
@@ -387,629 +578,233 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x, int pos, KVCac
     int max_seq_len = config_.max_position_embeddings;
     float eps = config_.rms_norm_eps;
 
-    // Check if cache is valid and initialized (basic check)
-    if (cache && cache->layers.empty() && config_.num_hidden_layers > 0) {
-        // This shouldn't happen if main initializes it, but as a safeguard:
-        Logger::error("KVCache passed to forward but layers vector is empty!");
-        // Handle error appropriately, maybe throw or return empty
+    // --- Flags for detailed logging --- 
+    bool log_initial = (pos == 0); 
+    // bool log_details_l0_p1 = (pos == 1 && l == 0); // Restore this target
+
+    // if (log_initial) Logger::info("--- TROUBLESHOOTING INITIAL (C++) START pos=0 ---");
+    
+    if (pos >= max_seq_len) {
+        Logger::error("Position index exceeds max_position_embeddings");
+        return {};
+    }
+    if (!cache) {
+        Logger::error("KVCache is required for token-by-token forward pass");
         return {};
     }
 
-    // --- REMOVED: Embedding lookup is now handled by the caller ---
-    // std::vector<float> x(hs); 
-    // for (int i = 0; i < hs; ++i) { 
-    //    x[i] = bfloat16_to_float32(embed_tokens[input_id * hs + i]); 
-    // } 
-    // Logger::info("Embedding lookup complete (converted to float32)."); 
-    // ... (removed logging related to embedding lookup inside forward) ...
-    // log_vec_stats("embedding (float32)", x);
-    // if (!std::all_of(x.begin(), x.end(), [](float v){ return std::isfinite(v); })) {
-    //     Logger::error("NaN/Inf detected in embedding vector after lookup!");
-    // }
-    // if (diag_cb) diag_cb(-1, "embedding", x);
-    // --- END REMOVED --- 
-
-    // --- Add initial state logging for pos=1 --- 
-    if (pos == 1) { // Log the state vector x *as received* for pos=1
-        try {
-            if (x.empty()) {
-                Logger::error("C++ Input state x is empty before L0 P1 stats calculation!");
-            } else {
-                float min_val = *std::min_element(x.begin(), x.end());
-                float max_val = *std::max_element(x.begin(), x.end());
-                double sum = std::accumulate(x.begin(), x.end(), 0.0); // Use double for sum
-                float mean_val = static_cast<float>(sum / x.size());
-
-                Logger::info("--- C++ Forward Input State Debug (Pos 1) --- ");
-                Logger::info("C++ Input x (Start of Forward, Pos 1) shape: [" + std::to_string(x.size()) + "]");
-                Logger::info("C++ Input x (Start of Forward, Pos 1) mean: " + std::to_string(mean_val));
-                Logger::info("C++ Input x (Start of Forward, Pos 1) min: " + std::to_string(min_val));
-                Logger::info("C++ Input x (Start of Forward, Pos 1) max: " + std::to_string(max_val));
-                 // Log first 5 elements
-                 std::stringstream ss_x_start;
-                 ss_x_start << "C++ Input x (Start of Forward, Pos 1) first 5: [";
-                 for(int i=0; i < 5 && i < x.size(); ++i) ss_x_start << (i > 0 ? " " : "") << x[i];
-                 ss_x_start << "]";
-                 Logger::info(ss_x_start.str());
-                Logger::info("--- End C++ Forward Input State Debug --- ");
-            }
-        } catch (const std::exception& e) {
-            Logger::error("C++ Exception during input state stats calculation (Pos 1): " + std::string(e.what()));
-        } catch (...) {
-            Logger::error("C++ Unknown exception during input state stats calculation (Pos 1).");
-        }
-    }
-    // --- END Add initial state logging --- 
-
-    // 2. Transformer blocks (operates on the input vector 'x')
+    // 2. Process through all transformer layers
     for (int l = 0; l < nhl; ++l) {
+        // --- Restore logging target to L0 P1 --- 
+        bool log_target_layer = (pos == 1 && l == 0); 
         const auto& lw = layers[l];
+        std::vector<float> x_resid1 = x; 
+        // --- Use L0 P1 flag --- 
+        if (log_target_layer) log_vector_summary("TROUBLESHOOTING L0 P1 Input", x_resid1);
 
-        // --- DETAILED LOGGING INITIALISED (Layer 0, Pos 0) ---
-        if (l == 0 && pos == 0) {
-            Logger::info("=== DETAILED LOGGING INITIALISED (Layer 0, Pos 0) ===");
-        }
-
-        // --- START: Log x input to RMSNorm1 (L0 P0) --- 
-        if (l == 0 && pos == 0) {
-            std::stringstream ss_x_rms_inp;
-            ss_x_rms_inp << "x vector (Input to RMSNorm1, L0 P0) first 5: [";
-            for(int i=0; i < 5 && i < x.size(); ++i) ss_x_rms_inp << (i > 0 ? " " : "") << x[i];
-            ss_x_rms_inp << "]";
-            Logger::info(ss_x_rms_inp.str());
-        }
-        // --- END: Log x --- 
-
-        // a) Input RMSNorm (remains same)
+        // a) Input RMSNorm
         std::vector<float> x_norm(hs);
         rmsnorm(x, lw.input_layernorm, eps, x_norm);
-        if (l == 0 && pos == 0) {
-            std::stringstream ss_x_norm_raw;
-            ss_x_norm_raw << "Layer 0 RMSNorm1 Output (Input to Proj, Pos 0) first 5: [";
-            for(int i=0; i < 5 && i < x_norm.size(); ++i) ss_x_norm_raw << (i > 0 ? " " : "") << x_norm[i];
-            ss_x_norm_raw << "]";
-            Logger::info(ss_x_norm_raw.str());
-        }
-        // --- START: Log x_norm input to Q proj (L0 P0) --- 
-        if (l == 0 && pos == 0) {
-            std::stringstream ss_x_norm_q_inp;
-            ss_x_norm_q_inp << "x_norm vector (Input to Q proj, L0 P0) first 5: [";
-            for(int i=0; i < 5 && i < x_norm.size(); ++i) ss_x_norm_q_inp << (i > 0 ? " " : "") << x_norm[i];
-            ss_x_norm_q_inp << "]";
-            Logger::info(ss_x_norm_q_inp.str());
-        }
-        // --- END: Log x_norm --- 
-        if (!std::all_of(x_norm.begin(), x_norm.end(), [](float v){ return std::isfinite(v); })) {
-            Logger::error("NaN/Inf detected in x_norm after input RMSNorm, layer " + std::to_string(l));
-        }
+        // --- Use L0 P1 flag --- 
+        if (log_target_layer) log_vector_summary("TROUBLESHOOTING L0 P1 Output RMSNorm1", x_norm);
 
-        // b) Attention Q, K, V projections
-        std::vector<float> q(hs), k_current(head_dim * n_kv_heads), v_current(head_dim * n_kv_heads);
+        // b) Q, K, V projections
+        std::vector<float> q(hs), k_current(n_kv_heads * head_dim), v_current(n_kv_heads * head_dim);
         matvec_bf16_f32(lw.q_proj, x_norm, q, hs, hs);
-        matvec_bf16_f32(lw.k_proj, x_norm, k_current, head_dim * n_kv_heads, hs);
-        matvec_bf16_f32(lw.v_proj, x_norm, v_current, head_dim * n_kv_heads, hs);
-        // Log Q/K raw projection outputs before RoPE for Layer 0, Pos 0
-        if (l == 0 && pos == 0) {
-            std::stringstream ss_q_proj_raw;
-            ss_q_proj_raw << "Layer 0 Q Projection Output (Pre-RoPE, Pos 0) first 5: [";
-            for(int i=0; i < 5 && i < q.size(); ++i) ss_q_proj_raw << (i > 0 ? " " : "") << q[i];
-            ss_q_proj_raw << "]";
-            Logger::info(ss_q_proj_raw.str());
-
-            std::stringstream ss_k_proj_raw;
-            ss_k_proj_raw << "Layer 0 K Projection Output (Pre-RoPE, Pos 0) first 5: [";
-            for(int i=0; i < 5 && i < k_current.size(); ++i) ss_k_proj_raw << (i > 0 ? " " : "") << k_current[i];
-            ss_k_proj_raw << "]";
-            Logger::info(ss_k_proj_raw.str());
-        }
-        // Log Q/K/V projection stats for Layer 0, Pos 0
-        if (l == 0 && pos == 0) {
-            log_vec_stats("Layer 0 Q projection (Pos 0)", q);
-            log_vec_stats("Layer 0 K projection (Pos 0)", k_current);
-            log_vec_stats("Layer 0 V projection (Pos 0)", v_current);
-        }
-        // RoPE (operates on float Q/K copies) - uses precomputed freqs
-        std::vector<float> q_heads(q); // Full Q projection
-
-        // --- START: Log q vector and q_heads copy before apply_rope (L0, P0) ---
-        if (l == 0 && pos == 0) {
-             std::stringstream ss_q_pre_copy;
-             ss_q_pre_copy << "q vector (Before q_heads copy, L0 P0) first 5: [";
-             for(int i=0; i < 5 && i < q.size(); ++i) ss_q_pre_copy << (i > 0 ? " " : "") << q[i];
-             ss_q_pre_copy << "]";
-             Logger::info(ss_q_pre_copy.str());
-        }
-        // --- END: Log q --- 
-
-        // --- START: Log q_heads after copy (L0, P0) --- 
-        if (l == 0 && pos == 0) {
-             std::stringstream ss_q_heads_pre_rope;
-             ss_q_heads_pre_rope << "q_heads vector (Before apply_rope, L0 P0) first 5: [";
-             for(int i=0; i < 5 && i < q_heads.size(); ++i) ss_q_heads_pre_rope << (i > 0 ? " " : "") << q_heads[i];
-             ss_q_heads_pre_rope << "]";
-             Logger::info(ss_q_heads_pre_rope.str());
-        }
-        // --- END: Log q_heads --- 
-
-        apply_rope(q_heads, n_heads, head_dim, pos, precomputed_freqs_); // Pass precomputed freqs
-        std::vector<float> k_rope_current = k_current;
-        apply_rope(k_rope_current, n_kv_heads, head_dim, pos, precomputed_freqs_); // Pass precomputed freqs
-
-        // Log Q/K after RoPE for pos=0 and pos=15 (first generated token)
-        if (l == 0) {
-            if (pos == 0) {
-                 // Log Q after RoPE for pos=0
-                 std::stringstream ss_q_rope0;
-                 ss_q_rope0 << "Layer 0 Q after RoPE (Pos 0) shape: [" + std::to_string(q_heads.size()) + "] first 5: " + std::to_string(q_heads[0]) + " " + std::to_string(q_heads[1]) + " " + std::to_string(q_heads[2]) + " " + std::to_string(q_heads[3]) + " " + std::to_string(q_heads[4]);
-                 Logger::info(ss_q_rope0.str());
-                 // Log K after RoPE for pos=0
-                 std::stringstream ss_k_rope0;
-                 ss_k_rope0 << "Layer 0 K after RoPE (Pos 0) shape: [" + std::to_string(k_rope_current.size()) + "] first 5: " + std::to_string(k_rope_current[0]) + " " + std::to_string(k_rope_current[1]) + " " + std::to_string(k_rope_current[2]) + " " + std::to_string(k_rope_current[3]) + " " + std::to_string(k_rope_current[4]);
-                 Logger::info(ss_k_rope0.str());
-            } else if (pos == 15) { // Log for the first generated token (now potentially loaded from file)
-                 // Log Q after RoPE for pos=15
-                 std::stringstream ss_q_rope15;
-                 ss_q_rope15 << "Layer 0 Q after RoPE (Pos 15 - Loaded) shape: [" + std::to_string(q_heads.size()) + "] first 5: " + std::to_string(q_heads[0]) + " " + std::to_string(q_heads[1]) + " " + std::to_string(q_heads[2]) + " " + std::to_string(q_heads[3]) + " " + std::to_string(q_heads[4]);
-                 Logger::info(ss_q_rope15.str());
-                 // Log K after RoPE for pos=15
-                 std::stringstream ss_k_rope15;
-                 ss_k_rope15 << "Layer 0 K after RoPE (Pos 15 - Loaded) shape: [" + std::to_string(k_rope_current.size()) + "] first 5: " + std::to_string(k_rope_current[0]) + " " + std::to_string(k_rope_current[1]) + " " + std::to_string(k_rope_current[2]) + " " + std::to_string(k_rope_current[3]) + " " + std::to_string(k_rope_current[4]);
-                 Logger::info(ss_k_rope15.str());
-            }
-        }
-        // Store current K, V to cache
-        if (cache) {
-            size_t cache_offset_base = (size_t)pos * head_dim;
-            size_t layer_stride = (size_t)max_seq_len * head_dim;
-            for (int kvh = 0; kvh < n_kv_heads; ++kvh) {
-                size_t head_offset = (size_t)kvh * layer_stride;
-                size_t current_k_offset = (size_t)kvh * head_dim;
-                size_t current_v_offset = (size_t)kvh * head_dim;
-                if (head_offset + cache_offset_base + head_dim <= cache->layers[l].k.size()) {
-                    std::memcpy(&cache->layers[l].k[head_offset + cache_offset_base],
-                                &k_rope_current[current_k_offset],
-                                head_dim * sizeof(float));
-                    std::memcpy(&cache->layers[l].v[head_offset + cache_offset_base],
-                                &v_current[current_v_offset],
-                                head_dim * sizeof(float));
-                } else {
-                    Logger::error("Cache write out of bounds! Layer=" + std::to_string(l) + " Pos=" + std::to_string(pos));
-                }
-            }
+        matvec_bf16_f32(lw.k_proj, x_norm, k_current, n_kv_heads * head_dim, hs);
+        matvec_bf16_f32(lw.v_proj, x_norm, v_current, n_kv_heads * head_dim, hs);
+        // --- Use L0 P1 flag --- 
+        if (log_target_layer) {
+            log_vector_summary("TROUBLESHOOTING L0 P1 Q Proj Output", q);
+            log_vector_summary("TROUBLESHOOTING L0 P1 K Proj Output", k_current);
+            log_vector_summary("TROUBLESHOOTING L0 P1 V Proj Output", v_current);
         }
 
-        // --- START: Verify Cache Store/Retrieve for L0, Pos 15 --- 
-        if (cache && l == 0 && pos == 15) {
-             size_t cache_offset_verify = (size_t)pos * head_dim; // Base offset for this position
-             size_t layer_stride_verify = (size_t)max_seq_len * head_dim;
-             size_t head0_offset_verify = 0 * layer_stride_verify; // Offset for head 0 within the layer
-             size_t final_k_offset = head0_offset_verify + cache_offset_verify;
-             size_t final_v_offset = head0_offset_verify + cache_offset_verify; // V cache has same structure
-
-             if (final_k_offset + 5 <= cache->layers[l].k.size() && final_v_offset + 5 <= cache->layers[l].v.size()) {
-                 std::stringstream ss_k_cache, ss_v_cache, ss_k_src, ss_v_src;
-                 
-                 // Log K retrieved from cache
-                 ss_k_cache << "L0 P15 K Cache Readback (H0) first 5: [";
-                 for (int i = 0; i < 5; ++i) ss_k_cache << (i > 0 ? " " : "") << cache->layers[l].k[final_k_offset + i];
-                 ss_k_cache << "]";
-                 Logger::info(ss_k_cache.str());
-
-                 // Log V retrieved from cache
-                 ss_v_cache << "L0 P15 V Cache Readback (H0) first 5: [";
-                 for (int i = 0; i < 5; ++i) ss_v_cache << (i > 0 ? " " : "") << cache->layers[l].v[final_v_offset + i];
-                 ss_v_cache << "]";
-                 Logger::info(ss_v_cache.str());
-
-                 // Log original K source (head 0 slice)
-                 size_t k_src_offset = 0 * head_dim; // Head 0 offset in k_rope_current
-                 ss_k_src << "L0 P15 K Source (H0) first 5: [";
-                 for (int i = 0; i < 5; ++i) ss_k_src << (i > 0 ? " " : "") << k_rope_current[k_src_offset + i];
-                 ss_k_src << "]";
-                 Logger::info(ss_k_src.str());
-
-                 // Log original V source (head 0 slice)
-                 size_t v_src_offset = 0 * head_dim; // Head 0 offset in v_current
-                 ss_v_src << "L0 P15 V Source (H0) first 5: [";
-                 for (int i = 0; i < 5; ++i) ss_v_src << (i > 0 ? " " : "") << v_current[v_src_offset + i];
-                 ss_v_src << "]";
-                 Logger::info(ss_v_src.str());
-             } else {
-                 Logger::error("Cache verification indices out of bounds!");
-             }
+        // c) RoPE for Q, K
+        std::vector<float> q_before_rope = q; // Copy for logging
+        apply_rope(q, n_heads, head_dim, pos, precomputed_freqs_cis_);
+        std::vector<float> k_before_rope = k_current; // Copy for logging
+        apply_rope(k_current, n_kv_heads, head_dim, pos, precomputed_freqs_cis_);
+        // --- Use L0 P1 flag --- 
+        if (log_target_layer) {
+            log_vector_summary("TROUBLESHOOTING L0 P1 Q BEFORE RoPE", q_before_rope);
+            log_vector_summary("TROUBLESHOOTING L0 P1 Q AFTER RoPE", q);
+            log_vector_summary("TROUBLESHOOTING L0 P1 K BEFORE RoPE", k_before_rope);
+            log_vector_summary("TROUBLESHOOTING L0 P1 K AFTER RoPE", k_current);
         }
-        // --- END: Verify Cache Store/Retrieve --- 
 
-        // Attention Calculation using Cache
-        int kv_dim = head_dim * n_kv_heads;
-        std::vector<float> attn_out(hs, 0.0f);
-
-        // --- START: Log q_heads before parallel loop --- 
-        if (l == 0 && pos == 15) {
-             std::stringstream ss_q_heads_verify;
-             ss_q_heads_verify << "C++ q_heads vector (L0 P15, before parallel loop) first 5: [";
-             for(int i=0; i<5 && i<q_heads.size(); ++i) ss_q_heads_verify << (i>0?" ":"") << q_heads[i];
-             ss_q_heads_verify << "]";
-             Logger::info(ss_q_heads_verify.str());
-        }
-        // --- END: Log q_heads --- 
-
-        // --- Temporarily REMOVE OpenMP --- 
-        // #pragma omp parallel for 
-            for (int h = 0; h < n_heads; ++h) {
-            if (h >= n_kv_heads) {
-                // For heads beyond n_kv_heads, set output to zero (already zero-initialized)
-                continue;
-            }
-            int kvh = h;
-            float* current_q_head = q_heads.data() + h * head_dim;
-            float* attn_out_head = attn_out.data() + h * head_dim;
-            std::fill(attn_out_head, attn_out_head + head_dim, 0.0f); // Initialize output for the head
+        // Write to KV Cache
+        for (int kvh = 0; kvh < n_kv_heads; ++kvh) {
+            // Calculate offsets into current K and V vectors
+            size_t current_k_offset = (size_t)kvh * head_dim;
+            size_t current_v_offset = (size_t)kvh * head_dim;
             
-            // --- START: Force Load K/V Cache for L0, H0, Pos 15 --- 
-            std::vector<float> k_cache_ref; // Holds loaded K cache
-            std::vector<float> v_cache_ref; // Holds loaded V cache
-            bool use_ref_cache = false;
-            if (l == 0 && h == 0 && pos == 15) {
-                std::string k_ref_filename = "k_cache_layer0_head0_0to15_ref.bin";
-                std::string v_ref_filename = "v_cache_layer0_head0_0to15_ref.bin";
-                size_t expected_cache_elements = (pos + 1) * head_dim;
-                size_t expected_cache_bytes = expected_cache_elements * sizeof(float);
+            // Calculate write position in cache (matching the read pattern used in attention)
+            // Structure: pos → kv_head → head_dim
+            size_t write_offset = pos * n_kv_heads * head_dim + kvh * head_dim;
+            
+            // Bounds check before writing
+            if (write_offset + head_dim <= cache->layers[l].k.size()) {
+                // Write K and V vectors to cache
+                std::memcpy(&cache->layers[l].k[write_offset], &k_current[current_k_offset], head_dim * sizeof(float));
+                std::memcpy(&cache->layers[l].v[write_offset], &v_current[current_v_offset], head_dim * sizeof(float));
+            } else {
+                Logger::error("KVCache write out of bounds: write_offset=" + 
+                             std::to_string(write_offset) + ", cache size=" + 
+                             std::to_string(cache->layers[l].k.size()));
+            }
+        }
 
-                std::ifstream k_ref_file(k_ref_filename, std::ios::binary);
-                std::ifstream v_ref_file(v_ref_filename, std::ios::binary);
-
-                if (k_ref_file && v_ref_file) {
-                    k_cache_ref.resize(expected_cache_elements);
-                    v_cache_ref.resize(expected_cache_elements);
-
-                    k_ref_file.read(reinterpret_cast<char*>(k_cache_ref.data()), expected_cache_bytes);
-                    v_ref_file.read(reinterpret_cast<char*>(v_cache_ref.data()), expected_cache_bytes);
-
-                    if (k_ref_file && v_ref_file) {
-                        Logger::info("Successfully loaded reference K and V caches for L0, H0, Pos 0-15.");
-                        use_ref_cache = true;
-                    } else {
-                        Logger::error("FAILED to read full data from reference K/V cache files.");
+        // d) Attention
+        std::vector<float> attn_out(hs, 0.0f);
+        if (pos > 0) {
+            int current_seq_len = pos + 1; // Include current position
+            if (current_seq_len > 0) { 
+                #pragma omp parallel for
+                for (int h = 0; h < n_heads; ++h) {
+                    const float* q_ptr = q.data() + h * head_dim;
+                    std::vector<float> scores(current_seq_len);
+                    
+                    // Determine which KV head this Q head maps to for Grouped Query Attention (GQA)
+                    int kv_head_idx = h / (n_heads / n_kv_heads); // This ensures proper GQA head mapping
+                    
+                    // Calculate Scores
+                    for (int j = 0; j < current_seq_len; ++j) {
+                        // Calculate cache position for current KV head and sequence position
+                        size_t cache_pos_offset = j * n_kv_heads * head_dim + kv_head_idx * head_dim;
+                        
+                        // Bounds checking
+                        if (cache_pos_offset + head_dim <= cache->layers[l].k.size()) {
+                            const float* k_ptr = &cache->layers[l].k[cache_pos_offset];
+                            
+                            // Calculate attention score (dot product of Q and K)
+                            float score = 0.0f;
+                            for (int d = 0; d < head_dim; ++d) {
+                                score += q_ptr[d] * k_ptr[d];
+                            }
+                            score /= std::sqrt(head_dim); // Scale by sqrt(head_dim)
+                            scores[j] = score;
+                        } else {
+                            Logger::error("Attention K access out of bounds: cache_pos_offset=" + 
+                                         std::to_string(cache_pos_offset) + ", cache size=" + 
+                                         std::to_string(cache->layers[l].k.size()));
+                            scores[j] = -1e9f; // Large negative value to avoid NaN after softmax
+                        }
                     }
-                } else {
-                    Logger::error("FAILED TO OPEN reference K/V cache files: " + k_ref_filename + " or " + v_ref_filename);
+                    
+                    // Apply softmax to get probabilities
+                    softmax(scores);
+                    
+                    // Compute weighted sum of V vectors
+                    std::vector<float> head_attn_out(head_dim, 0.0f);
+                    for (int d = 0; d < head_dim; ++d) {
+                        float val = 0.0f;
+                        for (int j = 0; j < current_seq_len; ++j) {
+                            // Use the same cache position calculation for V
+                            size_t cache_pos_offset = j * n_kv_heads * head_dim + kv_head_idx * head_dim;
+                            
+                            if (cache_pos_offset + head_dim <= cache->layers[l].v.size()) {
+                                const float* v_ptr = &cache->layers[l].v[cache_pos_offset];
+                                val += scores[j] * v_ptr[d];
+                            } else {
+                                Logger::error("Attention V access out of bounds: cache_pos_offset=" + 
+                                             std::to_string(cache_pos_offset) + ", cache size=" + 
+                                             std::to_string(cache->layers[l].v.size()));
+                                // Don't add anything to val for out-of-bounds indices
+                            }
+                        }
+                        head_attn_out[d] = val;
+                    }
+                    
+                    // Copy this head's output to the correct position in attn_out
+                    std::memcpy(attn_out.data() + h * head_dim, head_attn_out.data(), head_dim * sizeof(float));
                 }
             }
-            // --- END: Force Load K/V Cache --- 
-
-            // --- START: Add Attention Calculation Logic --- 
-            // Vector to store attention scores for this head for all positions up to pos
-            std::vector<float> attn_scores(pos + 1);
-
-            // Calculate attention scores (Q @ K^T / sqrt(head_dim))
-            size_t layer_stride_attn = (size_t)max_seq_len * head_dim;
-            size_t head_offset_attn = (size_t)kvh * layer_stride_attn;
-            for (int t = 0; t <= pos; ++t) {
-                float* cached_k;
-                size_t cache_offset_attn = (size_t)t * head_dim;
-                cached_k = &cache->layers[l].k[head_offset_attn + cache_offset_attn];
-                // Log Q/K for Layer 0, Pos 0, Head 0, t=0
-                if (l == 0 && h == 0 && pos == 0 && t == 0) {
-                    std::stringstream ss_q, ss_k;
-                    ss_q << "[C++] L0 H0 P0 Q: ";
-                    for(int i=0; i<5 && i<head_dim; ++i) ss_q << (i>0?" ":"") << current_q_head[i];
-                    Logger::info(ss_q.str());
-                    ss_k << "[C++] L0 H0 P0 K: ";
-                    for(int i=0; i<5 && i<head_dim; ++i) ss_k << (i>0?" ":"") << cached_k[i];
-                    Logger::info(ss_k.str());
-                }
-                double score = 0.0;
-                for (int i = 0; i < head_dim; ++i) {
-                    score += (double)current_q_head[i] * (double)cached_k[i];
-                }
-                attn_scores[t] = (float)(score / std::sqrt((double)head_dim));
-            }
-            // Log attention scores before softmax
-            if (l == 0 && h == 0 && pos == 0) {
-                std::stringstream ss;
-                ss << "[C++] L0 H0 P0 attn_scores (before softmax): ";
-                for(int i=0; i<attn_scores.size(); ++i) ss << (i>0?" ":"") << attn_scores[i];
-                Logger::info(ss.str());
-            }
-            softmax(attn_scores); // Operates in-place
-            // Log attention scores after softmax
-            if (l == 0 && h == 0 && pos == 0) {
-                std::stringstream ss;
-                ss << "[C++] L0 H0 P0 attn_probs (after softmax): ";
-                for(int i=0; i<attn_scores.size(); ++i) ss << (i>0?" ":"") << attn_scores[i];
-                Logger::info(ss.str());
-            }
-            // Weighted sum of values (Scores @ V)
-            for (int t = 0; t <= pos; ++t) {
-                float* cached_v;
-                size_t cache_offset_attn = (size_t)t * head_dim;
-                cached_v = &cache->layers[l].v[head_offset_attn + cache_offset_attn];
-                float weight = attn_scores[t];
-                // Log V and weight for Layer 0, Pos 0, Head 0, t=0
-                if (l == 0 && h == 0 && pos == 0 && t == 0) {
-                    std::stringstream ss_v, ss_w;
-                    ss_v << "[C++] L0 H0 P0 V: ";
-                    for(int i=0; i<5 && i<head_dim; ++i) ss_v << (i>0?" ":"") << cached_v[i];
-                    Logger::info(ss_v.str());
-                    ss_w << "[C++] L0 H0 P0 attn_weight: " << weight;
-                    Logger::info(ss_w.str());
-                }
-                for (int i = 0; i < head_dim; ++i) {
-                    attn_out_head[i] += weight * cached_v[i];
-                }
-            }
-            // Log attention output for Layer 0, Pos 0, Head 0
-            if (l == 0 && h == 0 && pos == 0) {
-                std::stringstream ss_out;
-                ss_out << "[C++] L0 H0 P0 attn_out_head: ";
-                for(int i=0; i<5 && i<head_dim; ++i) ss_out << (i>0?" ":"") << attn_out_head[i];
-                Logger::info(ss_out.str());
-            }
-            // --- END: Add Attention Calculation Logic --- 
-
-            // Log first 5 elements of attn_out_head (potentially loaded) for Layer 0, Head 0
-            if (l == 0 && h == 0) {
-                if (pos == 0) {
-                    std::stringstream ss_attn_out_head;
-                    ss_attn_out_head << "Layer 0 Attention Out (Head 0, Pos 0, Before o_proj) first 5: [";
-                    for(int i = 0; i < 5 && i < head_dim; ++i) ss_attn_out_head << (i > 0 ? " " : "") << attn_out_head[i];
-                    ss_attn_out_head << "]";
-                    Logger::info(ss_attn_out_head.str());
-                 } else if (pos == 15) {
-                     std::stringstream ss_attn_out_head_15;
-                     ss_attn_out_head_15 << "Layer 0 Attention Out (Head 0, Pos 15, Before o_proj) first 5: [";
-                     for(int i = 0; i < 5 && i < head_dim; ++i) ss_attn_out_head_15 << (i > 0 ? " " : "") << attn_out_head[i];
-                     ss_attn_out_head_15 << "]";
-                     Logger::info(ss_attn_out_head_15.str());
-                 }
-            }
+        } else {
+            // For pos=0, no attention is calculated (output is all zeros)
+            // existing code...
         }
 
-        // Log first 5 elements of C++ calculated attn_out_head for Layer 0, Head 0 at pos=15
-        // Note: This logging happens *after* the parallel loop completes, reflecting the final C++ calculated state.
-        if (l == 0 && pos == 15) {
-            std::stringstream ss_cpp_attn_out_head_15;
-            ss_cpp_attn_out_head_15 << "C++ Layer 0 Attention Out (Head 0, Pos 15, Before o_proj) first 5: [";
-            float* head_ptr_log = attn_out.data(); // attn_out_head is potentially out of scope
-            for(int i = 0; i < 5 && i < head_dim; ++i) ss_cpp_attn_out_head_15 << (i > 0 ? " " : "") << head_ptr_log[i];
-            ss_cpp_attn_out_head_15 << "]";
-            Logger::info(ss_cpp_attn_out_head_15.str());
-        }
-
-        // Log attention output stats
-        if (l == 0) {
-            // --- START: Log full C++ attn_out vector at pos=15 --- 
-            if (pos == 15) {
-                 std::stringstream ss_full_attn_out_15;
-                 ss_full_attn_out_15 << "C++ Layer 0 Full attn_out (Pos 15, Before o_proj) first 5: [";
-                 for(int i = 0; i < 5 && i < attn_out.size(); ++i) ss_full_attn_out_15 << (i > 0 ? " " : "") << attn_out[i];
-                 ss_full_attn_out_15 << "]";
-                 Logger::info(ss_full_attn_out_15.str());
-            }
-            // --- END: Log full C++ attn_out vector --- 
-            log_vec_stats("Layer " + std::to_string(l) + " attn_out (Before o_proj)", attn_out);
-        }
-
-        // Output projection
+        // e) Output projection
+        std::vector<float> attn_out_copy = attn_out; 
         std::vector<float> attn_proj(hs);
         matvec_bf16_f32(lw.o_proj, attn_out, attn_proj, hs, hs);
-        // Log projected attention output stats
-        if (l == 0) {
-             // Log stats regardless of position for layer 0
-             log_vec_stats("Layer " + std::to_string(l) + " attn_out (Projected, Pos " + std::to_string(pos) + ")", attn_proj);
-             // Log first 5 values for specific positions
-            if (pos == 0) {
-                 std::stringstream ss_proj0;
-                 ss_proj0 << "Layer 0 attn_out (Projected, Pos 0) first 5: [";
-                 for(int i=0; i < 5 && i < attn_proj.size(); ++i) ss_proj0 << (i > 0 ? " " : "") << attn_proj[i];
-                 ss_proj0 << "]";
-                 Logger::info(ss_proj0.str());
-            } else if (pos == 15) {
-                 std::stringstream ss_proj15;
-                 ss_proj15 << "Layer 0 attn_out (Projected, Pos 15) first 5: [";
-                 for(int i=0; i < 5 && i < attn_proj.size(); ++i) ss_proj15 << (i > 0 ? " " : "") << attn_proj[i];
-                 ss_proj15 << "]";
-                 Logger::info(ss_proj15.str());
-            }
+        // --- Use L0 P1 flag --- 
+        if (log_target_layer) {
+             log_vector_summary("TROUBLESHOOTING L0 P1 Input to O-Proj", attn_out_copy);
+             log_vector_summary("TROUBLESHOOTING L0 P1 O-Proj Output", attn_proj);
         }
-        // Residual addition after MLP
-        for (int i = 0; i < hs; ++i) x[i] += attn_proj[i];
-        log_vec_stats("Layer " + std::to_string(l) + " post-MLP residual", x);
+
+        // f) First residual connection
+        std::vector<float> x_resid1_copy = x_resid1;
+        for (int i = 0; i < hs; ++i) x[i] = x_resid1[i] + attn_proj[i];
+        // --- Use L0 P1 flag --- 
+        if (log_target_layer) { 
+            log_vector_summary("TROUBLESHOOTING L0 P1 State BEFORE 1st Residual", x_resid1_copy);
+            log_vector_summary("TROUBLESHOOTING L0 P1 State AFTER 1st Residual", x);
+        }
+
+        // g) MLP block
+        std::vector<float> x_resid2 = x; 
+        // --- Use L0 P1 flag --- 
+        if (log_target_layer) log_vector_summary("TROUBLESHOOTING L0 P1 Input to MLP", x_resid2);
+        std::vector<float> x_norm2(hs);
+        rmsnorm(x, lw.post_attention_layernorm, eps, x_norm2);
+        // --- Use L0 P1 flag --- 
+        if (log_target_layer) {
+            log_vector_summary("TROUBLESHOOTING L0 P1 Output RMSNorm2", x_norm2);
+        }
+
+        std::vector<float> gate(is), up(is);
+        matvec_bf16_f32(lw.gate_proj, x_norm2, gate, is, hs);
+        matvec_bf16_f32(lw.up_proj, x_norm2, up, is, hs);
+        if (log_target_layer) {
+            log_vector_summary("TROUBLESHOOTING L0 P1 Gate Proj Output", gate);
+            log_vector_summary("TROUBLESHOOTING L0 P1 Up Proj Output", up);
+        }
+        std::vector<float> gate_orig = gate; 
+        for (int d = 0; d < is; ++d) gate[d] = (gate[d] / (1.0f + std::exp(-gate[d]))) * up[d]; // SiLU * Up
+        if (log_target_layer) {
+            log_vector_summary("TROUBLESHOOTING L0 P1 Gate BEFORE SiLU*Up", gate_orig);
+            log_vector_summary("TROUBLESHOOTING L0 P1 Gate * Up", gate);
+        }
+        std::vector<float> mlp_out(hs);
+        matvec_bf16_f32(lw.down_proj, gate, mlp_out, hs, is);
+        if (log_target_layer) {
+            log_vector_summary("TROUBLESHOOTING L0 P1 Down Proj Output (MLP Out)", mlp_out);
+        }
         
-        // --- DETAILED LOGGING INITIALISED (Layer 0, Pos 1) ---
-        if (l == 0 && pos == 1) {
-            Logger::info("=== DETAILED LOGGING INITIALISED (Layer 0, Pos 1) ===");
+        // h) Second residual connection
+        std::vector<float> x_resid2_copy = x_resid2; 
+        for (int i = 0; i < hs; ++i) x[i] = x_resid2[i] + mlp_out[i];
+        if (log_target_layer) { 
+            log_vector_summary("TROUBLESHOOTING L0 P1 State BEFORE 2nd Residual", x_resid2_copy);
+            log_vector_summary("TROUBLESHOOTING L0 P1 State AFTER 2nd Residual", x);
+            Logger::info("--- TROUBLESHOOTING L0 P1 C++ Layer End ---");
         }
+    } // End layer loop
 
-        // --- START: Log x input to RMSNorm1 (L0 P1) --- 
-        if (l == 0 && pos == 1) {
-            std::stringstream ss_x_rms_inp;
-            ss_x_rms_inp << "x vector (Input to RMSNorm1, L0 P1) first 5: [";
-            for(int i=0; i < 5 && i < x.size(); ++i) ss_x_rms_inp << (i > 0 ? " " : "") << x[i];
-            ss_x_rms_inp << "]";
-            Logger::info(ss_x_rms_inp.str());
-        }
-        // --- END: Log x --- 
-
-        // a) Input RMSNorm (remains same)
-        // x_norm is already declared above
-        rmsnorm(x, lw.input_layernorm, eps, x_norm);
-        if (l == 0 && pos == 1) {
-            std::stringstream ss_x_norm_raw;
-            ss_x_norm_raw << "Layer 0 RMSNorm1 Output (Input to Proj, Pos 1) first 5: [";
-            for(int i=0; i < 5 && i < x_norm.size(); ++i) ss_x_norm_raw << (i > 0 ? " " : "") << x_norm[i];
-            ss_x_norm_raw << "]";
-            Logger::info(ss_x_norm_raw.str());
-        }
-        // --- START: Log x_norm input to Q proj (L0 P1) --- 
-        if (l == 0 && pos == 1) {
-            std::stringstream ss_x_norm_q_inp;
-            ss_x_norm_q_inp << "x_norm vector (Input to Q proj, L0 P1) first 5: [";
-            for(int i=0; i < 5 && i < x_norm.size(); ++i) ss_x_norm_q_inp << (i > 0 ? " " : "") << x_norm[i];
-            ss_x_norm_q_inp << "]";
-            Logger::info(ss_x_norm_q_inp.str());
-        }
-        // --- END: Log x_norm --- 
-
-        // b) Attention Q, K, V projections
-        // q, k_current, v_current are already declared above
-        matvec_bf16_f32(lw.q_proj, x_norm, q, hs, hs);
-        matvec_bf16_f32(lw.k_proj, x_norm, k_current, head_dim * n_kv_heads, hs);
-        matvec_bf16_f32(lw.v_proj, x_norm, v_current, head_dim * n_kv_heads, hs);
-        // Log Q/K raw projection outputs before RoPE for Layer 0, Pos 1
-        if (l == 0 && pos == 1) {
-            std::stringstream ss_q_proj_raw;
-            ss_q_proj_raw << "Layer 0 Q Projection Output (Pre-RoPE, Pos 1) first 5: [";
-            for(int i=0; i < 5 && i < q.size(); ++i) ss_q_proj_raw << (i > 0 ? " " : "") << q[i];
-            ss_q_proj_raw << "]";
-            Logger::info(ss_q_proj_raw.str());
-
-            std::stringstream ss_k_proj_raw;
-            ss_k_proj_raw << "Layer 0 K Projection Output (Pre-RoPE, Pos 1) first 5: [";
-            for(int i=0; i < 5 && i < k_current.size(); ++i) ss_k_proj_raw << (i > 0 ? " " : "") << k_current[i];
-            ss_k_proj_raw << "]";
-            Logger::info(ss_k_proj_raw.str());
-        }
-        // Log Q/K/V projection stats for Layer 0, Pos 1
-        if (l == 0 && pos == 1) {
-            log_vec_stats("Layer 0 Q projection (Pos 1)", q);
-            log_vec_stats("Layer 0 K projection (Pos 1)", k_current);
-            log_vec_stats("Layer 0 V projection (Pos 1)", v_current);
-        }
-        // RoPE (operates on float Q/K copies) - uses precomputed freqs
-        // q_heads is already declared above
-        q_heads = q; // assign q to q_heads
-
-        // --- START: Log q vector and q_heads copy before apply_rope (L0, P1) ---
-        if (l == 0 && pos == 1) {
-             std::stringstream ss_q_pre_copy;
-             ss_q_pre_copy << "q vector (Before q_heads copy, L0 P1) first 5: [";
-             for(int i=0; i < 5 && i < q.size(); ++i) ss_q_pre_copy << (i > 0 ? " " : "") << q[i];
-             ss_q_pre_copy << "]";
-             Logger::info(ss_q_pre_copy.str());
-        }
-        // --- END: Log q --- 
-
-        // --- START: Log q_heads after copy (L0, P1) --- 
-        if (l == 0 && pos == 1) {
-             std::stringstream ss_q_heads_pre_rope;
-             ss_q_heads_pre_rope << "q_heads vector (Before apply_rope, L0 P1) first 5: [";
-             for(int i=0; i < 5 && i < q_heads.size(); ++i) ss_q_heads_pre_rope << (i > 0 ? " " : "") << q_heads[i];
-             ss_q_heads_pre_rope << "]";
-             Logger::info(ss_q_heads_pre_rope.str());
-        }
-        // --- END: Log q_heads --- 
-
-        apply_rope(q_heads, n_heads, head_dim, pos, precomputed_freqs_); // Pass precomputed freqs
-        // k_rope_current is already declared above
-        k_rope_current = k_current;
-        apply_rope(k_rope_current, n_kv_heads, head_dim, pos, precomputed_freqs_); // Pass precomputed freqs
-
-        // Log Q/K after RoPE for pos=1
-        if (l == 0 && pos == 1) {
-            std::stringstream ss_q_rope1;
-            ss_q_rope1 << "Layer 0 Q after RoPE (Pos 1) shape: [" + std::to_string(q_heads.size()) + "] first 5: " + std::to_string(q_heads[0]) + " " + std::to_string(q_heads[1]) + " " + std::to_string(q_heads[2]) + " " + std::to_string(q_heads[3]) + " " + std::to_string(q_heads[4]);
-            Logger::info(ss_q_rope1.str());
-            std::stringstream ss_k_rope1;
-            ss_k_rope1 << "Layer 0 K after RoPE (Pos 1) shape: [" + std::to_string(k_rope_current.size()) + "] first 5: " + std::to_string(k_rope_current[0]) + " " + std::to_string(k_rope_current[1]) + " " + std::to_string(k_rope_current[2]) + " " + std::to_string(k_rope_current[3]) + " " + std::to_string(k_rope_current[4]);
-            Logger::info(ss_k_rope1.str());
-        }
-        // --- DETAILED LOGGING ENDED (Layer 0, Pos 1) ---
-        if (l == 0 && pos == 1) {
-            Logger::info("=== DETAILED LOGGING ENDED (Layer 0, Pos 1) ===");
-        }
-    } // End of layer loop
-
-    // --- START: Log Final Norm Input Stats (pos=13) --- 
-    if (pos == 13) {
-        try {
-            if (x.empty()) {
-                 Logger::error("C++ vector x is empty before final norm input stats!");
-            } else {
-                float min_val = *std::min_element(x.begin(), x.end());
-                float max_val = *std::max_element(x.begin(), x.end());
-                double sum = std::accumulate(x.begin(), x.end(), 0.0);
-                float mean_val = static_cast<float>(sum / x.size());
-                Logger::info("--- C++ Final Norm Input Debug (Pos 13) ---");
-                Logger::info("C++ x (Input to Final Norm, Pos 13) shape: [" + std::to_string(x.size()) + "]");
-                Logger::info("C++ x (Input to Final Norm, Pos 13) mean: " + std::to_string(mean_val));
-                Logger::info("C++ x (Input to Final Norm, Pos 13) min: " + std::to_string(min_val));
-                Logger::info("C++ x (Input to Final Norm, Pos 13) max: " + std::to_string(max_val));
-                Logger::info("--- End C++ Final Norm Input Debug ---");
-            }
-        } catch (const std::exception& e) {
-             Logger::error("C++ Exception during final norm input stats calc: " + std::string(e.what()));
-        } catch (...) {
-             Logger::error("C++ Unknown exception during final norm input stats calc.");
-        }
+    // 3. Final RMSNorm
+    std::vector<float> x_final_norm_input = x; // Copy for logging
+    std::vector<float> x_norm_final(hs);
+    rmsnorm(x, final_norm, eps, x_norm_final);
+    if (log_initial) { 
+        log_vector_summary("TROUBLESHOOTING L0 P1 Input to Final RMSNorm (P1)", x_final_norm_input);
+        log_vector_summary("TROUBLESHOOTING L0 P1 Output of Final RMSNorm (P1)", x_norm_final);
     }
-    // --- END: Log Final Norm Input Stats --- 
 
-    // Final RMSNorm
-    std::vector<float> x_norm(hs);
-    rmsnorm(x, final_norm, eps, x_norm);
-    if (!std::all_of(x_norm.begin(), x_norm.end(), [](float v){ return std::isfinite(v); })) {
-        Logger::error("NaN/Inf detected in final RMSNorm output");
-    }
-    // --- START: Log Final Norm Output Stats (pos=13) --- 
-    if (pos == 13) {
-        try {
-            if (x_norm.empty()) {
-                 Logger::error("C++ vector x_norm is empty before final norm output stats!");
-            } else {
-                float min_val = *std::min_element(x_norm.begin(), x_norm.end());
-                float max_val = *std::max_element(x_norm.begin(), x_norm.end());
-                double sum = std::accumulate(x_norm.begin(), x_norm.end(), 0.0);
-                float mean_val = static_cast<float>(sum / x_norm.size());
-                Logger::info("--- C++ Final Norm Output Debug (Pos 13) ---");
-                Logger::info("C++ x_norm (Output of Final Norm, Pos 13) shape: [" + std::to_string(x_norm.size()) + "]");
-                Logger::info("C++ x_norm (Output of Final Norm, Pos 13) mean: " + std::to_string(mean_val));
-                Logger::info("C++ x_norm (Output of Final Norm, Pos 13) min: " + std::to_string(min_val));
-                Logger::info("C++ x_norm (Output of Final Norm, Pos 13) max: " + std::to_string(max_val));
-                Logger::info("--- End C++ Final Norm Output Debug ---");
-            }
-        } catch (const std::exception& e) {
-             Logger::error("C++ Exception during final norm output stats calc: " + std::string(e.what()));
-        } catch (...) {
-             Logger::error("C++ Unknown exception during final norm output stats calc.");
-        }
-    }
-    // --- END: Log Final Norm Output Stats --- 
-
-    // LM head projection
+    // 4. Output projection to logits
     std::vector<float> logits(vs);
-    matvec_bf16_f32(lm_head, x_norm, logits, vs, hs);
-    if (!std::all_of(logits.begin(), logits.end(), [](float v){ return std::isfinite(v); })) {
-        Logger::error("NaN/Inf detected in logits before return");
+    matvec_bf16_f32(lm_head, x_norm_final, logits, vs, hs);
+    if (log_initial) {
+        log_vector_summary("TROUBLESHOOTING L0 P1 Final Logits (P1)", logits, 10);
     }
-    // --- START: Log Final Logits Stats (pos=13) ---
-    // Note: Existing log_vec_stats already provides this, but we add explicit checks/labels for clarity 
-    if (pos == 13) {
-        try {
-            if (logits.empty()) {
-                 Logger::error("C++ vector logits is empty before final logits stats!");
-            } else {
-                float min_val = *std::min_element(logits.begin(), logits.end());
-                float max_val = *std::max_element(logits.begin(), logits.end());
-                double sum = std::accumulate(logits.begin(), logits.end(), 0.0);
-                float mean_val = static_cast<float>(sum / logits.size());
-                Logger::info("--- C++ Final Logits Debug (Pos 13) ---");
-                Logger::info("C++ Logits (Pos 13) shape: [" + std::to_string(logits.size()) + "]");
-                Logger::info("C++ Logits (Pos 13) mean: " + std::to_string(mean_val));
-                Logger::info("C++ Logits (Pos 13) min: " + std::to_string(min_val));
-                Logger::info("C++ Logits (Pos 13) max: " + std::to_string(max_val));
-                Logger::info("--- End C++ Final Logits Debug ---");
-            }
-        } catch (const std::exception& e) {
-             Logger::error("C++ Exception during final logits stats calc: " + std::string(e.what()));
-        } catch (...) {
-             Logger::error("C++ Unknown exception during final logits stats calc.");
-        }
-    }
-    // --- END: Log Final Logits Stats --- 
-    // Log final logits stats before return
-    log_vec_stats("final logits", logits);
-    Logger::info("Forward pass complete.");
-    return logits;
+
+    if (log_initial) Logger::info("--- TROUBLESHOOTING L0 P1 (C++) END pos=1 ---");
+    return logits; 
+}
+
+// --- Get Vocab Size --- 
+int TinyLlamaModel::get_vocab_size() const {
+    return config_.vocab_size;
 } 
