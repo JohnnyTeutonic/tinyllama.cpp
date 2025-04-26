@@ -5,6 +5,7 @@ import math
 import re
 import logging
 import numpy as np
+from typing import Optional, List, Tuple
 
 # Configure logging
 logging.basicConfig(filename='pytorch/debugging.log', level=logging.INFO, 
@@ -120,6 +121,14 @@ class Llama2Block(nn.Module):
         self.down_proj = nn.Linear(mlp_hidden_size, hidden_size, bias=False)
         # Precompute RoPE frequencies
         self.register_buffer("freqs_cis", precompute_freqs_cis(self.head_dim, self.max_seq_len, self.rope_theta), persistent=False)
+        # --- Log precomputed freqs_cis for pos=1 --- 
+        if self.freqs_cis.shape[0] > 1:
+             freqs_cis_pos1 = self.freqs_cis[1]
+             for i in range(min(5, freqs_cis_pos1.shape[0])): # Log first 5 complex numbers
+                 cos_val = freqs_cis_pos1[i].real.item()
+                 sin_val = freqs_cis_pos1[i].imag.item()
+                 logging.info(f"PyTorch RoPE Precompute (Pos=1, FreqDim={i}): cos={cos_val:.6f} sin={sin_val:.6f}")
+        # --- End log ---
 
     def load_weights(self, weights, prefix):
         def copy_weight(param, tensor, name):
@@ -149,121 +158,164 @@ class Llama2Block(nn.Module):
         copy_weight(self.up_proj.weight, weights[prefix + "mlp.up_proj.weight"], f"{prefix}mlp.up_proj.weight")
         copy_weight(self.down_proj.weight, weights[prefix + "mlp.down_proj.weight"], f"{prefix}mlp.down_proj.weight")
 
-    def forward(self, x, attn_mask=None, layer_idx=None):
-        # Store input for first residual connection
+    def forward(self, x, attn_mask=None, layer_idx=None, pos: Optional[int] = None, k_cache=None, v_cache=None):
+        bsz, seq_len, hidden_size = x.shape
+        prefix = f"L{layer_idx}"
         residual = x 
-        # Get batch size and sequence length from input
-        bsz, seq_len, _ = x.shape
-        prefix = f"Layer {layer_idx} " if layer_idx is not None else ""
+
         # --- Attention Block --- 
-        h = self.rmsnorm1(x)
-        if layer_idx == 0:
-            h_flat = h[0,0].detach().cpu().numpy().reshape(-1)
-            logging.info(f"{prefix}RMSNorm1 Output (Input to Proj) first 5: {h_flat[:5]}")
-            # --- START: Save RMSNorm1 output for C++ comparison ---
-            ref_filename = "rmsnorm1_out_layer0_ref.bin"
-            try:
-                h_save = h[0,0].detach().cpu().numpy().astype(np.float32) # Use first token, ensure float32
-                with open(ref_filename, 'wb') as f:
-                    f.write(h_save.tobytes())
-                logging.info(f"Saved reference RMSNorm1 output (Layer 0, Token 0) to {ref_filename}")
-            except Exception as e:
-                logging.error(f"Failed to save reference RMSNorm1 output to {ref_filename}: {e}")
-            # --- END: Save RMSNorm1 output ---
-        q = self.q_proj(h).view(bsz, seq_len, self.num_q_heads, self.head_dim)
-        k = self.k_proj(h).view(bsz, seq_len, self.num_kv_heads, self.head_dim)
-        v = self.v_proj(h).view(bsz, seq_len, self.num_kv_heads, self.head_dim)
+        h_norm1 = self.rmsnorm1(x)
+        if layer_idx == 0 and seq_len > 1:
+            log_tensor_stats(f"L0 P1 Input to RMSNorm1", x[:, 1, :])
+            log_tensor_stats(f"L0 P1 Output of RMSNorm1", h_norm1[:, 1, :])
 
-        # Log Q/K/V projection stats for first token
-        if layer_idx == 0:
-            q_proj_flat = q[0,0].detach().cpu().numpy().reshape(-1)
-            k_proj_flat = k[0,0].detach().cpu().numpy().reshape(-1)
-            v_proj_flat = v[0,0].detach().cpu().numpy().reshape(-1)
-            # Log raw projection output before RoPE
-            logging.info(f"{prefix}Q Projection Output (Pre-RoPE) first 5: {q_proj_flat[:5]}")
-            logging.info(f"{prefix}K Projection Output (Pre-RoPE) first 5: {k_proj_flat[:5]}")
-            logging.info(f"{prefix}Q projection stats: min={q_proj_flat.min()}, max={q_proj_flat.max()}, mean={q_proj_flat.mean()}")
-            logging.info(f"{prefix}K projection stats: min={k_proj_flat.min()}, max={k_proj_flat.max()}, mean={k_proj_flat.mean()}")
-            logging.info(f"{prefix}V projection stats: min={v_proj_flat.min()}, max={v_proj_flat.max()}, mean={v_proj_flat.mean()}")
-            logging.info(f"{prefix}Q before RoPE shape: [{q_proj_flat.shape[0]}] first 5: {q_proj_flat[:5]}") # This is redundant now but keep for format consistency if needed
-
-        freqs_cis = self.freqs_cis[:seq_len]
-        q_rope = apply_rotary_emb(q, freqs_cis)
-        k_rope = apply_rotary_emb(k, freqs_cis)
-
-        # Log Q/K after RoPE for first token
-        if layer_idx == 0:
-            q_rope_flat = q_rope[0,0].detach().cpu().numpy().reshape(-1)
-            k_rope_flat = k_rope[0,0].detach().cpu().numpy().reshape(-1)
-            logging.info(f"{prefix}Q after RoPE shape: [{q_rope_flat.shape[0]}] first 5: {q_rope_flat[:5]}")
-            logging.info(f"{prefix}K after RoPE shape: [{k_rope_flat.shape[0]}] first 5: {k_rope_flat[:5]}")
-
-        k = repeat_kv(k_rope, self.num_key_value_groups)
-        v = repeat_kv(v, self.num_key_value_groups) # Note: Using original V here, not k_rope!
-        q = q_rope
-
-        if layer_idx == 0:
-            # Log the Q and K heads for the first position (pos=0) that go into the first score calculation
-            q_head0_pos0_log = q[0, 0, 0, :].detach().cpu().numpy() # Batch 0, SeqPos 0, Head 0
-            k_head0_pos0_log = k_rope[0, 0, 0, :].detach().cpu().numpy() # Batch 0, SeqPos 0, Head 0 (before repeat_kv)
-            logging.info(f"{prefix}Q Head 0, Pos 0 (Input to Score) first 5: {q_head0_pos0_log[:5]}")
-            logging.info(f"{prefix}K Head 0, Pos 0 (Input to Score) first 5: {k_head0_pos0_log[:5]}")
+        if pos is None: # Original full-sequence logic
+            q = self.q_proj(h_norm1).view(bsz, seq_len, self.num_q_heads, self.head_dim)
+            k = self.k_proj(h_norm1).view(bsz, seq_len, self.num_kv_heads, self.head_dim)
+            v = self.v_proj(h_norm1).view(bsz, seq_len, self.num_kv_heads, self.head_dim)
             
-        q = q.permute(0, 2, 1, 3) 
-        k = k.permute(0, 2, 1, 3)
-        v = v.permute(0, 2, 1, 3)
-
-        attn_scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
-        if attn_mask is not None:
-            attn_mask = attn_mask.unsqueeze(0).unsqueeze(0)
-            attn_scores = attn_scores.masked_fill(~attn_mask, float('-inf'))
-        if layer_idx == 0:
-            # Log scores for first batch, first head, first query pos attending to all key pos
-            scores_log = attn_scores[0, 0, 0, :].detach().cpu().numpy()
-            logging.info(f"{prefix}Attention Scores (Head 0, Pos 0): {scores_log}")
+            freqs_cis = self.freqs_cis[:seq_len]
+            q_rope = apply_rotary_emb(q, freqs_cis)
+            k_rope = apply_rotary_emb(k, freqs_cis)
             
-        attn_probs = F.softmax(attn_scores, dim=-1, dtype=torch.float32) # Explicit float32 for softmax
-        if layer_idx == 0:
-            # Log probabilities for the same
-            probs_log = attn_probs[0, 0, 0, :].detach().cpu().numpy()
-            logging.info(f"{prefix}Attention Probs (Head 0, Pos 0): {probs_log}")
+            # KVCache is not used here in the original logic path
             
-        attn_out = torch.matmul(attn_probs, v.type_as(attn_probs)) # Cast V to match probs dtype
-        attn_out_unprojected = attn_out.permute(0, 2, 1, 3).contiguous().view(bsz, seq_len, self.hidden_size)
-        if layer_idx == 0:
-             # Log first 5 values of the attention output vector *before* projection for the first token
-            attn_out_log = attn_out_unprojected[0, 0, :self.head_dim].detach().cpu().numpy() # Log first head's output vector
-            logging.info(f"{prefix}Attention Out (Head 0, Pos 0, Before o_proj) first {len(attn_out_log)}: {attn_out_log[:5]}") # Print first 5 values
+            k_repeated = repeat_kv(k_rope, self.num_key_value_groups) # Repeat K for GQA after RoPE
+            v_repeated = repeat_kv(v, self.num_key_value_groups) # Repeat V for GQA
+            
+            q_attn = q_rope.permute(0, 2, 1, 3) # [bs, n_heads, seq_len, head_dim]
+            k_attn = k_repeated.permute(0, 2, 1, 3)      # [bs, n_heads, seq_len, head_dim]
+            v_attn = v_repeated.permute(0, 2, 1, 3)      # [bs, n_heads, seq_len, head_dim]
 
-        attn_out_proj = self.o_proj(attn_out_unprojected.type_as(x)) # Cast back to input type before o_proj
+            attn_scores = torch.matmul(q_attn, k_attn.transpose(-2, -1)) / math.sqrt(self.head_dim)
+            
+            if attn_mask is not None:
+                if attn_mask.dim() == 2: attn_mask = attn_mask.unsqueeze(0).unsqueeze(0)
+                if attn_mask.dim() == 3: attn_mask = attn_mask.unsqueeze(1)
+                # Ensure mask dimensions match scores dimensions [bs, n_heads, seq_len, seq_len]
+                attn_scores = attn_scores.masked_fill(~attn_mask[:, :, :seq_len, :seq_len], float('-inf'))
+                # Logging for full sequence (optional)
+                # if layer_idx == 0 and seq_len > 1:
+                #    scores_log = attn_scores[0, 0, 1, :].detach().cpu().numpy()
+                #    logging.info(f"L0 P1 H0 Scores (Full Seq): [ {' '.join(map(str, scores_log))} ]")
+                
+            attn_probs = F.softmax(attn_scores, dim=-1, dtype=torch.float32)
+            # Logging for full sequence (optional)
+            # if layer_idx == 0 and seq_len > 1:
+            #    probs_log = attn_probs[0, 0, 1, :].detach().cpu().numpy()
+            #    logging.info(f"L0 P1 H0 Probs (Full Seq): [ {' '.join(map(str, probs_log))} ]")
 
-        # Log attention output stats for first token
-        if layer_idx == 0:
-            attn_out_flat = attn_out_proj[0,0].detach().cpu().numpy()
-            logging.info(f"{prefix}attn_out (Projected) stats: min={attn_out_flat.min()}, max={attn_out_flat.max()}, mean={attn_out_flat.mean()}")
+            attn_out = torch.matmul(attn_probs, v_attn.type_as(attn_probs))
+            attn_out = attn_out.permute(0, 2, 1, 3).contiguous().view(bsz, seq_len, hidden_size)
+        
+        else: # Token-by-token logic with KVCache
+            assert seq_len == 1, f"Expected seq_len=1 for token-by-token generation, but got {seq_len}"
+            assert k_cache is not None and v_cache is not None, "KVCache must be provided for token-by-token generation"
+            
+            # Calculate Q, K, V for the single input token
+            q = self.q_proj(h_norm1).view(bsz, 1, self.num_q_heads, self.head_dim) # seq_len is 1
+            k = self.k_proj(h_norm1).view(bsz, 1, self.num_kv_heads, self.head_dim) # seq_len is 1
+            v = self.v_proj(h_norm1).view(bsz, 1, self.num_kv_heads, self.head_dim) # seq_len is 1
 
+            # Apply RoPE for the current position
+            freqs_cis = self.freqs_cis[pos:pos+1] # Get freqs for the current position
+            q_rope = apply_rotary_emb(q, freqs_cis)
+            k_rope = apply_rotary_emb(k, freqs_cis)
+
+            # --- Update KVCache --- 
+            # Shapes: k_rope [bs, 1, n_kv_heads, head_dim], v [bs, 1, n_kv_heads, head_dim]
+            # Cache shapes passed in: [bs, n_kv_heads, max_seq_len, head_dim]
+            # We need to insert at the 'pos' index in the sequence dimension (dim=2)
+            k_cache[:, :, pos:pos+1, :] = k_rope.permute(0, 2, 1, 3) # [bs, n_kv_heads, 1, head_dim]
+            v_cache[:, :, pos:pos+1, :] = v.permute(0, 2, 1, 3)      # [bs, n_kv_heads, 1, head_dim]
+                 
+            # --- Retrieve K/V history --- 
+            # Get keys/values up to the current position (inclusive)
+            current_seq_len_cache = pos + 1
+            keys = k_cache[:, :, :current_seq_len_cache, :] # [bs, n_kv_heads, current_seq_len_cache, head_dim]
+            values = v_cache[:, :, :current_seq_len_cache, :] # [bs, n_kv_heads, current_seq_len_cache, head_dim]
+            
+            # Repeat K/V for Grouped Query Attention (GQA)
+            # Input shape to repeat_kv: [bs, current_seq_len_cache, n_kv_heads, head_dim]
+            keys_repeated = repeat_kv(keys.permute(0, 2, 1, 3), self.num_key_value_groups) # [bs, current_seq_len_cache, n_q_heads, head_dim]
+            values_repeated = repeat_kv(values.permute(0, 2, 1, 3), self.num_key_value_groups) # [bs, current_seq_len_cache, n_q_heads, head_dim]
+
+            # Reshape Q, K, V for attention calculation
+            q_attn = q_rope.permute(0, 2, 1, 3)  # [bs, n_q_heads, 1, head_dim]
+            # Permute K/V back to [bs, n_q_heads, current_seq_len_cache, head_dim]
+            k_attn = keys_repeated.permute(0, 2, 1, 3)
+            v_attn = values_repeated.permute(0, 2, 1, 3)
+
+            # --- Calculate attention scores --- 
+            # Q @ K^T -> [bs, n_q_heads, 1, head_dim] @ [bs, n_q_heads, head_dim, current_seq_len_cache] = [bs, n_q_heads, 1, current_seq_len_cache]
+            attn_scores = torch.matmul(q_attn, k_attn.transpose(-2, -1)) / math.sqrt(self.head_dim)
+            
+            # --- Softmax --- 
+            attn_probs = F.softmax(attn_scores, dim=-1, dtype=torch.float32) # Softmax over key sequence length `current_seq_len_cache`
+
+            # --- Calculate attention output --- 
+            # Prob @ V -> [bs, n_q_heads, 1, current_seq_len_cache] @ [bs, n_q_heads, current_seq_len_cache, head_dim] = [bs, n_q_heads, 1, head_dim]
+            attn_out = torch.matmul(attn_probs, v_attn.type_as(attn_probs)) 
+            
+            # Reshape attn_out back to [bs, 1, hidden_size]
+            attn_out = attn_out.permute(0, 2, 1, 3).contiguous().view(bsz, 1, hidden_size)
+
+        # --- Common processing after attention --- 
+        # (O Projection)
+        attn_out_proj = self.o_proj(attn_out) 
+        
         # --- First Residual Connection --- 
-        h = residual + attn_out_proj
-        if layer_idx == 0:
-            h_flat = h[0,0].detach().cpu().numpy()
-            logging.info(f"{prefix}post-attn residual stats: min={h_flat.min()}, max={h_flat.max()}, mean={h_flat.mean()}")
+        h_resid1 = residual + attn_out_proj
+        if layer_idx == 0 and seq_len > 1:
+            log_tensor_stats(f"L0 P1 State after 1st Residual", h_resid1[:, 1, :])
 
         # --- MLP Block --- 
-        # Store output of attention block for second residual connection
-        residual = h 
-        h = self.rmsnorm2(h) # Apply norm *after* first residual
-        gate = F.silu(self.gate_proj(h))
-        up = self.up_proj(h)
-        mlp_out = self.down_proj(gate * up)
-        if layer_idx == 0:
-            mlp_out_flat = mlp_out[0,0].detach().cpu().numpy()
-            logging.info(f"{prefix}MLP output stats: min={mlp_out_flat.min()}, max={mlp_out_flat.max()}, mean={mlp_out_flat.mean()}")
+        residual2 = h_resid1
+        h_norm2 = self.rmsnorm2(h_resid1)
+        if layer_idx == 0 and seq_len > 1:
+            log_tensor_stats(f"L0 P1 Input to RMSNorm2", h_resid1[:, 1, :])
+            log_tensor_stats(f"L0 P1 Output of RMSNorm2", h_norm2[:, 1, :])
+        
+        gate = self.gate_proj(h_norm2)
+        up = self.up_proj(h_norm2)
+        if layer_idx == 0 and seq_len > 1:
+            log_tensor_stats(f"L0 P1 Gate Proj Output", gate[:, 1, :])
+            log_tensor_stats(f"L0 P1 Up Proj Output", up[:, 1, :])
+
+        gate_activated = F.silu(gate)
+        if layer_idx == 0 and seq_len > 1:
+             log_tensor_stats(f"L0 P1 Gate after SiLU", gate_activated[:, 1, :])
+        
+        gate_mul_up = gate_activated * up
+        if layer_idx == 0 and seq_len > 1:
+             log_tensor_stats(f"L0 P1 Gate * Up", gate_mul_up[:, 1, :])
+
+        mlp_out = self.down_proj(gate_mul_up)
+        if layer_idx == 0 and seq_len > 1:
+            log_tensor_stats(f"L0 P1 Down Proj Output (MLP Out)", mlp_out[:, 1, :])
+
         # --- Second Residual Connection --- 
-        out = residual + mlp_out
-        if layer_idx == 0:
-            out_flat = out[0,0].detach().cpu().numpy()
-            logging.info(f"{prefix}post-MLP residual stats: min={out_flat.min()}, max={out_flat.max()}, mean={out_flat.mean()}")
+        out = residual2 + mlp_out
+        if layer_idx == 0 and seq_len > 1:
+            log_tensor_stats(f"L0 P1 State after 2nd Residual (Layer Output)", out[:, 1, :])
+            logging.info(f"--- PyTorch Layer 0 End ---")
+            
         return out
+
+# Add utility function for logging tensor stats
+def log_tensor_stats(name, tensor):
+    if tensor.numel() == 0: 
+        logging.info(f"[PyTorch] {name}: EMPTY TENSOR")
+        return
+    t_np = tensor.detach().cpu().numpy().flatten()
+    minv = t_np.min()
+    maxv = t_np.max()
+    mean = t_np.mean()
+    finite = np.isfinite(t_np).all()
+    logging.info(f"[PyTorch] {name}: shape={list(tensor.shape)}, min={minv:.6f}, max={maxv:.6f}, mean={mean:.6f}, all_finite={finite}")
+    # Log first 5 elements
+    first_5 = t_np[:5]
+    logging.info(f"[PyTorch] {name} first 5: {' '.join(f'{x:.6f}' for x in first_5)}")
 
 class TinyLlama(nn.Module):
     """TinyLlama model: embedding, transformer stack, output head. Uses config for hyperparameters."""
@@ -279,8 +331,12 @@ class TinyLlama(nn.Module):
         max_seq_len = config.get('max_position_embeddings', 2048)
         rope_theta = config.get('rope_theta', 10000.0) # Get rope_theta or default
         rms_norm_eps = config.get('rms_norm_eps', 1e-5) # Get norm eps or default
-        # torch_dtype_str = config.get('torch_dtype', 'float32') # REMOVED
-        # self.dtype = getattr(torch, torch_dtype_str) # REMOVED
+        # --- Added for KVCache ---
+        self.head_dim = hidden_size // num_q_heads
+        self.max_seq_len = max_seq_len 
+        self.n_layers = num_layers
+        self.n_kv_heads = num_kv_heads
+        # --- End KVCache additions ---
 
         # Build model (defaulting to float32)
         self.embedding = nn.Embedding(vocab_size, hidden_size)
@@ -292,6 +348,10 @@ class TinyLlama(nn.Module):
         self.norm = RMSNorm(hidden_size, eps=rms_norm_eps)
         self.output_head = nn.Linear(hidden_size, vocab_size, bias=False)
         
+        # --- Initialize KVCache --- 
+        self.init_kv_cache()
+        # --- End KVCache Init ---
+
         # NO explicit weight tying here based on config
 
         # Load weights if provided (will load into float32 params)
@@ -356,7 +416,28 @@ class TinyLlama(nn.Module):
                 print(f"PyTorch Layer 0 q_proj weight shape: {self.blocks[0].q_proj.weight.shape}")
                 print(f"PyTorch Layer 0 k_proj weight shape: {self.blocks[0].k_proj.weight.shape}")
 
-    def forward(self, input_ids, attention_mask=None):
+    def init_kv_cache(self, batch_size=1):
+        """Initialize the K/V cache tensors."""
+        logging.info(f"Initializing KVCache for batch_size={batch_size}, max_seq_len={self.max_seq_len}, layers={self.n_layers}, kv_heads={self.n_kv_heads}, head_dim={self.head_dim}")
+        # Create empty lists to hold tensors for each layer
+        k_cache = []
+        v_cache = []
+        # Desired shape: [batch_size, num_kv_heads, max_seq_len, head_dim]
+        cache_shape = (batch_size, self.n_kv_heads, self.max_seq_len, self.head_dim)
+        for _ in range(self.n_layers):
+            k_cache.append(torch.zeros(cache_shape, dtype=self.embedding.weight.dtype, device=self.embedding.weight.device))
+            v_cache.append(torch.zeros(cache_shape, dtype=self.embedding.weight.dtype, device=self.embedding.weight.device))
+        
+        # Register caches as buffers (part of state, not parameters)
+        # We use lists of tensors, which register_buffer doesn't handle directly.
+        # Instead, store them as regular attributes. Ensure they are moved to the correct device.
+        self.k_cache = k_cache
+        self.v_cache = v_cache
+        logging.info(f"KVCache initialized. k_cache length: {len(self.k_cache)}, v_cache length: {len(self.v_cache)}")
+        if self.k_cache: logging.info(f"Example k_cache[0] shape: {self.k_cache[0].shape}")
+
+    def forward(self, input_ids, attention_mask=None, pos: Optional[int] = None):
+        logging.info(f"[PyTorch] TinyLlama.forward called with input_ids shape: {input_ids.shape}, pos={pos}")
         if not torch.is_tensor(input_ids):
             input_ids = torch.tensor(input_ids, dtype=torch.long)
         # Ensure input_ids is on the same device as embedding weights
@@ -372,7 +453,23 @@ class TinyLlama(nn.Module):
             attention_mask = attention_mask.to(x.device)
 
         for i, block in enumerate(self.blocks):
-            x = block(x, attn_mask=attention_mask, layer_idx=i)
+            x = block(x, attn_mask=attention_mask, layer_idx=i, pos=pos,
+                      k_cache=self.k_cache[i] if pos is not None else None, 
+                      v_cache=self.v_cache[i] if pos is not None else None) # Pass relevant cache slice
+            # --- Log output from block (Strategy 1 target) ---
+            if pos == 1 and i == 0: # Specifically for Strategy 1 comparison
+                log_tensor_stats(f"PyT L{i} Output (pos=1)", x)
+                logging.info(f"--- PyTorch Layer {i} End for pos=1 ---")
+        
         x = self.norm(x)
+        # --- Log final norm output ---
+        # if pos is not None: # Log only if generating token-by-token
+        #     log_tensor_stats(f"PyT Final Norm Output (pos={pos})", x)
+
         logits = self.output_head(x)
+        # --- Log final logits ---
+        # if pos is not None:
+        #     log_tensor_stats(f"PyT Final Logits (pos={pos})", logits)
+        
+        logging.info(f"[PyTorch] TinyLlama.forward returning logits shape: {logits.shape}")
         return logits # Return float32 logits 

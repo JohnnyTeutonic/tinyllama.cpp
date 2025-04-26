@@ -7,6 +7,7 @@ import logging
 import re
 import scipy.special
 import numpy as np
+import argparse # Import argparse
 
 # Configure logging (same as in tinyllama.py)
 logging.basicConfig(filename='pytorch/debugging.log', level=logging.INFO, 
@@ -14,6 +15,14 @@ logging.basicConfig(filename='pytorch/debugging.log', level=logging.INFO,
                     filemode='w') # 'w' to overwrite the file each run
 
 def main():
+    # --- Add Argument Parsing --- 
+    parser = argparse.ArgumentParser(description='Run TinyLlama inference.')
+    parser.add_argument('--token_by_token', action='store_true', 
+                        help='Use token-by-token generation with KVCache instead of full sequence reprocessing.')
+    args = parser.parse_args()
+    logging.info(f"Running with args: {args}")
+    # --- End Argument Parsing ---
+
     # Load tokenizer config for special tokens
     with open("data/tokenizer_config.json", "r", encoding="utf-8") as f:
         tokenizer_config = json.load(f)
@@ -183,25 +192,77 @@ def main():
         max_new_tokens = 50 # Max tokens to generate
         logging.info(f"Starting generation loop (max_new_tokens={max_new_tokens}, eos_token_id={eos_token_id})")
 
-        with torch.no_grad():
-            for i in range(max_new_tokens):
-                current_ids_tensor = torch.tensor([generated_ids], dtype=torch.long).to(model.embedding.weight.device)
-                seq_len = current_ids_tensor.shape[1]
-                attn_mask = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool, device=current_ids_tensor.device))
-                logits = model(current_ids_tensor, attention_mask=attn_mask)
-                last_token_logits = logits[:, -1, :]
-                if i == 0:
-                    first_10_logits = last_token_logits[0, :10].tolist()
-                    print("First generated token logits (first 10):", first_10_logits)
-                    logging.info(f"First generated token logits (first 10): {first_10_logits}")
-                next_token_id = torch.argmax(last_token_logits, dim=-1).item()
-                logging.info(f"Step {i+1}: Predicted token ID: {next_token_id}")
-                generated_ids.append(next_token_id)
-                if next_token_id == eos_token_id:
-                    logging.info(f"EOS token ({eos_token_id}) generated. Stopping generation.")
-                    break
-            else:
-                logging.warning(f"Max new tokens ({max_new_tokens}) reached before EOS token.")
+        # === Conditional Generation Logic ===
+        if not args.token_by_token:
+            logging.info("Using full sequence generation mode.")
+            with torch.no_grad():
+                for i in range(max_new_tokens):
+                    current_ids_tensor = torch.tensor([generated_ids], dtype=torch.long).to(model.embedding.weight.device)
+                    seq_len = current_ids_tensor.shape[1]
+                    # --- Use full attention mask for full sequence --- 
+                    attn_mask = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool, device=current_ids_tensor.device))
+                    # Call model without pos, using attention mask
+                    logits = model(current_ids_tensor, attention_mask=attn_mask, pos=None)
+                    last_token_logits = logits[:, -1, :] # Get logits for the last token
+                    if i == 0:
+                        first_10_logits = last_token_logits[0, :10].tolist()
+                        print("First generated token logits (full seq, first 10):", first_10_logits)
+                        logging.info(f"First generated token logits (full seq, first 10): {first_10_logits}")
+                    next_token_id = torch.argmax(last_token_logits, dim=-1).item()
+                    logging.info(f"Step {i+1} (Full Seq): Predicted token ID: {next_token_id}")
+                    generated_ids.append(next_token_id)
+                    if next_token_id == eos_token_id:
+                        logging.info(f"EOS token ({eos_token_id}) generated. Stopping generation.")
+                        break
+                else:
+                    logging.warning(f"Max new tokens ({max_new_tokens}) reached before EOS token.")
+        
+        else: # Token-by-token generation
+            logging.info("Using token-by-token generation mode with KVCache.")
+            model.init_kv_cache() # Reset/Initialize KVCache
+            current_token_ids = initial_input_ids # Use the full prompt initially
+            
+            with torch.no_grad():
+                # --- Prime the KVCache with the prompt --- 
+                logging.info(f"Priming KVCache with prompt tokens (excluding last): {current_token_ids[:-1]}")
+                for pos, token_id in enumerate(current_token_ids[:-1]):
+                    input_tensor = torch.tensor([[token_id]], dtype=torch.long).to(model.embedding.weight.device)
+                    _ = model(input_tensor, pos=pos) # Call model to update cache, ignore logits
+                    logging.info(f"Primed KVCache for pos={pos}")
+                
+                # --- Start generation from the last prompt token --- 
+                last_token_id = current_token_ids[-1]
+                generated_ids = current_token_ids.copy() # Include prompt in final output IDs
+
+                for i in range(max_new_tokens):
+                    current_pos = len(initial_input_ids) - 1 + i # Position of the token being predicted
+                    input_tensor = torch.tensor([[last_token_id]], dtype=torch.long).to(model.embedding.weight.device)
+                    
+                    # Call model with single token and current position
+                    logits = model(input_tensor, pos=current_pos)
+                    # Logits shape should be [1, 1, vocab_size], take the only sequence element
+                    last_token_logits = logits[:, -1, :] 
+
+                    if i == 0:
+                        first_10_logits = last_token_logits[0, :10].tolist()
+                        print("First generated token logits (token-by-token, first 10):", first_10_logits)
+                        logging.info(f"First generated token logits (token-by-token, first 10): {first_10_logits}")
+                    
+                    # Sample next token (greedy decoding)
+                    next_token_id = torch.argmax(last_token_logits, dim=-1).item()
+                    logging.info(f"Step {i+1} (Token-by-Token, pos={current_pos}): Predicted token ID: {next_token_id}")
+                    
+                    # Update for next iteration
+                    generated_ids.append(next_token_id)
+                    last_token_id = next_token_id
+                    
+                    if next_token_id == eos_token_id:
+                        logging.info(f"EOS token ({eos_token_id}) generated. Stopping generation.")
+                        break
+                else:
+                    logging.warning(f"Max new tokens ({max_new_tokens}) reached before EOS token.")
+
+        # === End Conditional Generation Logic ===
 
         # Decode the full generated sequence
         try:
