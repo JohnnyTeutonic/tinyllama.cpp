@@ -701,12 +701,20 @@ std::vector<float> TinyLlamaModel::forward(torch::Tensor& x_tensor, int pos, KVC
         torch::Tensor attn_proj_tensor = matvec(bf16vec_to_tensor(lw.o_proj, {hs, hs}), attn_out_tensor);
         log_vec_stats("Attention Projection Output (L" + std::to_string(l) + " P" + std::to_string(pos) + ")", std::vector<float>(static_cast<float*>(attn_proj_tensor.data_ptr()), static_cast<float*>(attn_proj_tensor.data_ptr()) + hs));
 
-        // f) First residual connection (Tensor addition)
-        x_tensor = x_resid1_tensor + attn_proj_tensor;
+        // f) First residual connection (Using C++ Vector version)
+        // x_tensor = x_resid1_tensor + attn_proj_tensor; // Torch version removed
+        std::vector<float> x_resid1_vec(static_cast<float*>(x_resid1_tensor.data_ptr()), static_cast<float*>(x_resid1_tensor.data_ptr()) + hs);
+        std::vector<float> attn_proj_vec(static_cast<float*>(attn_proj_tensor.data_ptr()), static_cast<float*>(attn_proj_tensor.data_ptr()) + hs);
+        std::vector<float> x_after_resid1_vec(hs);
+        #pragma omp parallel for
+        for(size_t i=0; i<hs; ++i) {
+            x_after_resid1_vec[i] = x_resid1_vec[i] + attn_proj_vec[i];
+        }
+        x_tensor = vec_to_tensor(x_after_resid1_vec, {hs}); // Update x_tensor with vector sum result
+        
         if (log_target_layer) { 
-            // Logging requires converting back to vector for summary function
             log_vector_summary("TROUBLESHOOTING L0 P1 State BEFORE 1st Residual", std::vector<float>(static_cast<float*>(x_resid1_tensor.data_ptr()), static_cast<float*>(x_resid1_tensor.data_ptr()) + hs));
-            log_vector_summary("TROUBLESHOOTING L0 P1 State AFTER 1st Residual", std::vector<float>(static_cast<float*>(x_tensor.data_ptr()), static_cast<float*>(x_tensor.data_ptr()) + hs));
+            log_vector_summary("TROUBLESHOOTING L0 P1 State AFTER 1st C++ Residual", std::vector<float>(static_cast<float*>(x_tensor.data_ptr()), static_cast<float*>(x_tensor.data_ptr()) + hs));
         }
 
         // g) MLP block
@@ -759,11 +767,20 @@ std::vector<float> TinyLlamaModel::forward(torch::Tensor& x_tensor, int pos, KVC
         
         log_vec_stats("MLP Output (L" + std::to_string(l) + " P" + std::to_string(pos) + ")", std::vector<float>(static_cast<float*>(mlp_out_tensor.data_ptr()), static_cast<float*>(mlp_out_tensor.data_ptr()) + hs));
         
-        // h) Second residual connection (Tensor addition)
-        x_tensor = x_resid2_tensor + mlp_out_tensor;
+        // h) Second residual connection (Using C++ Vector version)
+        // x_tensor = x_resid2_tensor + mlp_out_tensor; // Torch version removed
+        std::vector<float> x_resid2_vec(static_cast<float*>(x_resid2_tensor.data_ptr()), static_cast<float*>(x_resid2_tensor.data_ptr()) + hs);
+        std::vector<float> mlp_out_vec(static_cast<float*>(mlp_out_tensor.data_ptr()), static_cast<float*>(mlp_out_tensor.data_ptr()) + hs);
+        std::vector<float> x_after_resid2_vec(hs);
+        #pragma omp parallel for
+        for(size_t i=0; i<hs; ++i) {
+            x_after_resid2_vec[i] = x_resid2_vec[i] + mlp_out_vec[i];
+        }
+        x_tensor = vec_to_tensor(x_after_resid2_vec, {hs}); // Update x_tensor with vector sum result
+
         if (log_target_layer) { 
             log_vector_summary("TROUBLESHOOTING L0 P1 State BEFORE 2nd Residual", std::vector<float>(static_cast<float*>(x_resid2_tensor.data_ptr()), static_cast<float*>(x_resid2_tensor.data_ptr()) + hs));
-            log_vector_summary("TROUBLESHOOTING L0 P1 State AFTER 2nd Residual", std::vector<float>(static_cast<float*>(x_tensor.data_ptr()), static_cast<float*>(x_tensor.data_ptr()) + hs));
+            log_vector_summary("TROUBLESHOOTING L0 P1 State AFTER 2nd C++ Residual", std::vector<float>(static_cast<float*>(x_tensor.data_ptr()), static_cast<float*>(x_tensor.data_ptr()) + hs));
             Logger::info("--- TROUBLESHOOTING L0 P1 C++ Layer End ---");
         }
     } // End layer loop
