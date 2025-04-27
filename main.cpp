@@ -244,16 +244,20 @@ int main(int argc, char** argv) {
                 // 1. Determine Input Token ID & Prepare State x
                 int input_token_id = (pos < num_prompt_tokens) ? prompt_ids[pos] : next_token_id;
                 Logger::info("main loop: input_token_id=" + std::to_string(input_token_id));
-                // Lookup embedding (returns tensor)
-                current_x_tensor = model.lookup_embedding(input_token_id);
+                
+                // Lookup embedding (NOW returns vector)
+                std::vector<float> current_x_vec = model.lookup_embedding(input_token_id);
+                // Convert vector back to tensor immediately for forward pass interface
+                current_x_tensor = vec_to_tensor(current_x_vec, {static_cast<int64_t>(mcfg.hidden_size)});
+                
                 // Log tensor stats directly if possible, or convert for old logger
-                log_vector_summary("main loop: current_x after lookup", std::vector<float>(static_cast<float*>(current_x_tensor.data_ptr()), static_cast<float*>(current_x_tensor.data_ptr()) + mcfg.hidden_size));
+                // log_vector_summary("main loop: current_x after lookup", std::vector<float>(static_cast<float*>(current_x_tensor.data_ptr()), static_cast<float*>(current_x_tensor.data_ptr()) + mcfg.hidden_size));
+                log_vector_summary("main loop: current_x after lookup (C++ Vec)", current_x_vec); // Log the vector
 
                 // 2. Call the Forward Pass (token-by-token)
                 // Pass tensor by reference. It will be updated in place by some layers?
                 // Or does forward return the new state? CHECK MODEL.CPP SIGNATURE
-                // --> forward modifies x_tensor in place via RMSNorm, RoPE, residuals
-                // --> forward *returns* logits as vector<float>
+                // --> forward still expects torch::Tensor& x_tensor
                 Logger::info("main loop: Calling model.forward for pos=" + std::to_string(pos));
                 std::vector<float> logits = model.forward(current_x_tensor, pos, &cache, nullptr); // Pass tensor state
                 Logger::info("main loop: Returned from model.forward for pos=" + std::to_string(pos));

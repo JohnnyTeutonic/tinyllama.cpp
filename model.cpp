@@ -22,9 +22,6 @@
 #include <iostream> // Include for std::cout in logging
 #include <torch/torch.h>
 #include <torch/nn/functional.h> // Include for functional::silu
-
-// --- PASTE: Definition of logging helper moved here ---
-// (Declaration is in model.h)
 void log_vector_summary(const std::string& name, const std::vector<float>& v, int head_count) {
     if (v.empty()) {
         Logger::info(name + ": EMPTY");
@@ -44,10 +41,7 @@ void log_vector_summary(const std::string& name, const std::vector<float>& v, in
     bool all_finite = std::all_of(v.begin(), v.end(), [](float x){ return std::isfinite(x); });
     ss << ", min=" << minv << ", max=" << maxv << ", mean=" << mean << ", finite=" << (all_finite ? "yes" : "NO");
     Logger::info(ss.str());
-}
-// --- END PASTE ---
-
-// --- START: New Helper Functions for BFloat16 ---
+}-
 
 // Improved BFloat16 to Float32 conversion with proper handling of special values
 float bfloat16_to_float32(uint16_t bf16) {
@@ -112,23 +106,10 @@ int argmax(const std::vector<float>& v) {
     return std::distance(v.begin(), std::max_element(v.begin(), v.end()));
 }
 // --- END: Argmax Helper ---
-
-// Replace matvec_bf16_f32 with libtorch matmul
 // mat: [M, N], vec: [N] -> out: [M]
 torch::Tensor matvec(const torch::Tensor& mat, const torch::Tensor& vec) {
     return torch::matmul(mat, vec);
 }
-
-// Replace RMSNorm with libtorch version -> REVERTING to C++ vector version
-/* // Torch version commented out
-torch::Tensor rmsnorm(const torch::Tensor& x, const torch::Tensor& weight, float eps) {
-    // Ensure input tensor x is float32 for norm calculation
-    auto x_float = x.to(torch::kFloat32);
-    auto norm = x_float.norm(2, -1, true);
-    auto normalized_x = x_float / (norm / std::sqrt(x_float.size(-1)) + eps);
-    return normalized_x * weight; // weight should also be float32
-}
-*/
 
 // --- START: C++ Vector RMSNorm ---
 static void rmsnorm_vector(const std::vector<float>& x, const std::vector<float>& weight, std::vector<float>& out, float eps) {
@@ -158,8 +139,6 @@ static void rmsnorm_vector(const std::vector<float>& x, const std::vector<float>
     }
 }
 // --- END: C++ Vector RMSNorm ---
-
-// Replace softmax with libtorch version -> Keep Torch version for now
 torch::Tensor softmax(const torch::Tensor& x) {
     return torch::softmax(x.to(torch::kFloat32), -1);
 }
@@ -197,8 +176,6 @@ static void silu(const std::vector<float>& x, std::vector<float>& out) {
         out[i] = x[i] * sigmoid_x; // Multiply
     }
 }
-
-// Refactor apply_rope to work with torch::Tensor -> RENAME BACK to apply_rope
 void apply_rope(torch::Tensor& x, int num_heads, int head_dim, int pos, 
                 const std::vector<std::pair<float, float>>& freqs_cis) {
     // x shape: [num_heads * head_dim] or potentially [num_tokens, num_heads * head_dim]
@@ -249,16 +226,8 @@ void apply_rope(torch::Tensor& x, int num_heads, int head_dim, int pos,
         // rotated_x1 = x1 * cos - x2 * sin
         // rotated_x2 = x1 * sin + x2 * cos
         torch::Tensor rotated_x1 = x1 * cos_t - x2 * sin_t;
-        torch::Tensor rotated_x2 = x1 * sin_t + x2 * cos_t;
-        
-        // --- Potential In-place Modification (use with caution) ---
-        // It might be possible to write back in-place if x1 and x2 are views
-        // x_head.slice(0, 0, dim_half).copy_(rotated_x1);
-        // x_head.slice(0, dim_half, head_dim).copy_(rotated_x2);
-        // --- Let's create a new tensor and copy back for clarity/safety --- 
-        
+        torch::Tensor rotated_x2 = x1 * sin_t + x2 * cos_t;        
         torch::Tensor rotated_head = torch::cat({rotated_x1, rotated_x2}, /*dim=*/0);
-        
         // Copy the rotated result back into the original tensor's slice for this head
         x.slice(/*dim=*/0, /*start=*/h * head_dim, /*end=*/(h + 1) * head_dim).copy_(rotated_head);
     }
@@ -513,8 +482,6 @@ static void calculate_attention_scores(const std::vector<float>& Q,
     }
 }
 // --- END: C++ Attention Scores ---
-
-// --- START: C++ Vector RoPE (User provided) ---
 static void apply_rope_vector(std::vector<float>& x, int num_heads, int head_dim, int pos, 
                        const std::vector<std::pair<float, float>>& freqs_cis) {
     if (x.size() != num_heads * head_dim) {
@@ -535,13 +502,6 @@ static void apply_rope_vector(std::vector<float>& x, int num_heads, int head_dim
     for (int h = 0; h < num_heads; ++h) {
         size_t head_offset = h * head_dim;
         for (int i = 0; i < dim_half; ++i) { // Iterate up to dim_half
-            // --- Log Frequencies (Optional, keep for now) ---
-            if (pos == 1 && h == 0 && i < 5) { // Log first 5 pairs for head 0
-                 double cos_val_log = static_cast<double>(freqs_cis[i].first); 
-                 double sin_val_log = static_cast<double>(freqs_cis[i].second);
-                 Logger::info("C++ RoPE Freqs (Pos=1, Head=0, DimPair=" + std::to_string(i) + "): cos=" + std::to_string(cos_val_log) + " sin=" + std::to_string(sin_val_log));
-            }
-
             // Get corresponding elements from first and second halves
             double x0 = static_cast<double>(x[head_offset + i]);          // Element from first half
             double x1 = static_cast<double>(x[head_offset + i + dim_half]); // Element from second half
@@ -682,32 +642,30 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& config, const SafeTensorsLoade
     Logger::info("Precomputed RoPE cos/sin frequencies.");
 }
 
-// Update lookup_embedding to return torch::Tensor
-torch::Tensor TinyLlamaModel::lookup_embedding(int token_id) {
+// Update lookup_embedding to return std::vector<float>
+std::vector<float> TinyLlamaModel::lookup_embedding(int token_id) {
     int hs = config_.hidden_size;
     int vs = config_.vocab_size;
     if (token_id < 0 || token_id >= vs) {
         Logger::error("Token ID out of bounds in lookup_embedding: " + std::to_string(token_id));
-        // Return a zero tensor of the correct shape
-        return torch::zeros({hs}, torch::TensorOptions().dtype(torch::kFloat32)); 
+        // Return a zero vector of the correct shape
+        return std::vector<float>(hs, 0.0f); 
     }
     
     size_t offset = (size_t)token_id * hs;
     if (offset + hs > embed_tokens.size()) {
          Logger::error("Embedding offset out of bounds in lookup_embedding for token: " + std::to_string(token_id));
-         return torch::zeros({hs}, torch::TensorOptions().dtype(torch::kFloat32));
+         return std::vector<float>(hs, 0.0f);
     }
 
-    // Create a sub-vector view (or copy) - avoid direct pointer if unsafe
-    // Copying is safer if embed_tokens might reallocate elsewhere, but slower.
-    // Let's copy for safety for now.
+    // Create a sub-vector view (or copy)
     std::vector<uint16_t> token_embedding_bf16(embed_tokens.begin() + offset, embed_tokens.begin() + offset + hs);
     
-    // Convert the bfloat16 vector slice to a float32 tensor
-    torch::Tensor embedding_tensor = bf16vec_to_tensor(token_embedding_bf16, {hs});
+    // Convert the bfloat16 vector slice to a float32 vector
+    std::vector<float> embedding_vec = bf16vec_to_float_vec(token_embedding_bf16);
     
     // Logger::info("Performed embedding lookup for token: " + std::to_string(token_id));
-    return embedding_tensor;
+    return embedding_vec; // Return the vector
 }
 
 // --- RESTORED: Token-by-Token + KVCache Forward ---

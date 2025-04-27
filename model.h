@@ -77,8 +77,8 @@ public:
     // Getter for layers (for debugging)
     const std::vector<LayerWeights>& get_layers() const { return layers; }
 
-    // Lookup embedding for a token
-    torch::Tensor lookup_embedding(int token_id);
+    // Lookup embedding for a token (NOW returns std::vector<float>)
+    std::vector<float> lookup_embedding(int token_id);
 
     int get_vocab_size() const;
 
