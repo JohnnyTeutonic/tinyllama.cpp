@@ -4,20 +4,6 @@ project(TinyLlamaCpp LANGUAGES CXX CUDA)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# include(FetchContent) // REMOVED FetchContent
-
-# Download and configure libtorch (CPU version) // REMOVED LibTorch section
-# set(LIBTORCH_URL ...) 
-# FetchContent_Declare(
-#   libtorch
-#   URL      ${LIBTORCH_URL}
-# )
-# FetchContent_MakeAvailable(libtorch)
-
-# Set Torch_DIR for find_package // REMOVED
-# set(Torch_DIR ${libtorch_SOURCE_DIR}/share/cmake/Torch)
-# find_package(Torch REQUIRED) // REMOVED
-
 # Find necessary libraries
 find_package(Threads REQUIRED)
 find_package(nlohmann_json 3.2.0 REQUIRED)
@@ -26,9 +12,7 @@ find_package(CUDA REQUIRED)
 
 if(CUDA_FOUND)
     message(STATUS "Found CUDA toolkit version: ${CUDA_VERSION}")
-    # Set default CUDA architectures. Adjust these to match your target GPU(s)
     set(CMAKE_CUDA_ARCHITECTURES 60 61 70 75 80 86 CACHE STRING "CUDA architectures") 
-    # Optional: Set CUDA standard if needed (e.g., 17)
     # set(CMAKE_CUDA_STANDARD 17)
     # set(CMAKE_CUDA_STANDARD_REQUIRED ON)
     
@@ -40,13 +24,22 @@ else()
 endif()
 
 # Add source files
-add_executable(tinyllama main.cpp model.cpp safetensors_loader.cpp tokenizer.cpp logger.cpp prompt.cpp vocab_loader.cpp)
+add_executable(tinyllama 
+    main.cpp 
+    model.cpp 
+    safetensors_loader.cpp 
+    tokenizer.cpp 
+    logger.cpp 
+    prompt.cpp 
+    vocab_loader.cpp
+    cuda_kernels.cu
+)
 
 # Include directories
 target_include_directories(tinyllama PRIVATE
     ${nlohmann_json_INCLUDE_DIRS}
-    # ${libtorch_SOURCE_DIR}/include  # REMOVED
     ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CUDA_INCLUDE_DIRS}
 )
 
 # Link libraries
@@ -54,8 +47,6 @@ target_link_libraries(tinyllama PRIVATE
     Threads::Threads
     nlohmann_json::nlohmann_json
     OpenMP::OpenMP_CXX
-    # "${TORCH_LIBRARIES}" // REMOVED
-    # Torch::torch // REMOVED
 )
 
 # Conditionally link CUDA libraries
@@ -95,6 +86,4 @@ endif()
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 
-# Print debug info
-# message(STATUS "Libtorch directory: ${libtorch_SOURCE_DIR}") // REMOVED
 message(STATUS "Project source directory: ${CMAKE_CURRENT_SOURCE_DIR}")

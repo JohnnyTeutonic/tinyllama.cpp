@@ -1,5 +1,8 @@
 #include "model.h"
 #include "logger.h"
+#ifdef HAS_CUDA
+#include "cuda_kernels.h" // Include CUDA kernel declarations
+#endif
 #include <stdexcept>
 #include <cstring>
 #include <cmath>
@@ -111,6 +114,13 @@ int argmax(const std::vector<float>& v) {
 
 // --- START: C++ Vector RMSNorm ---
 static void rmsnorm_vector(const std::vector<float>& x, const std::vector<float>& weight, std::vector<float>& out, float eps) {
+#ifdef HAS_CUDA
+    // Logger::info("Using CUDA RMSNorm"); // Optional: Log which version is used
+    // Call the CUDA wrapper function
+    rmsnorm_vector_cuda(x, weight, out, x.size(), eps); 
+#else
+    // Logger::info("Using CPU RMSNorm (OpenMP)"); // Optional: Log which version is used
+    // Original OpenMP implementation
     if (x.empty() || x.size() != weight.size()) {
         Logger::error("RMSNorm vector size mismatch or empty input.");
         out.assign(x.size(), 0.0f); // Zero out output on error
@@ -135,6 +145,7 @@ static void rmsnorm_vector(const std::vector<float>& x, const std::vector<float>
     for (size_t i = 0; i < n; ++i) {
         out[i] = x[i] * norm_factor * weight[i];
     }
+#endif // HAS_CUDA
 }
 // --- END: C++ Vector RMSNorm ---
 
@@ -304,13 +315,20 @@ static std::vector<float> bf16vec_to_float_vec(const std::vector<uint16_t>& v_bf
 // --- START: C++ Vector MatVec BF16 * F32 -> F32 with Kahan Summation ---
 // Performs matrix-vector multiplication: out = mat (bf16) * vec (f32)
 // mat shape: [rows, cols], vec shape: [cols], out shape: [rows]
-static void matvec_bf16_f32_vector(const std::vector<uint16_t>& mat_bf16, 
-                                   const std::vector<float>& vec_f32, 
-                                   std::vector<float>& out_f32, 
+static void matvec_bf16_f32_vector(const std::vector<uint16_t>& mat_bf16,
+                                   const std::vector<float>& vec_f32,
+                                   std::vector<float>& out_f32,
                                    int rows, int cols) {
+#ifdef HAS_CUDA
+    // Logger::info("Using CUDA MatVec (BF16*F32->F32)"); // Optional log
+    // Call the CUDA wrapper function
+    matvec_bf16_f32_cuda(mat_bf16, vec_f32, out_f32, rows, cols);
+#else
+    // Logger::info("Using CPU MatVec (BF16*F32->F32, OpenMP+Kahan)"); // Optional log
+    // Original OpenMP + Kahan implementation
     if (mat_bf16.size() != (size_t)rows * cols || vec_f32.size() != (size_t)cols) {
-        Logger::error("matvec_bf16_f32_vector: Size mismatch. Mat: " + std::to_string(mat_bf16.size()) + 
-                     " (Expected " + std::to_string(rows*cols) + "), Vec: " + std::to_string(vec_f32.size()) + 
+        Logger::error("matvec_bf16_f32_vector: Size mismatch. Mat: " + std::to_string(mat_bf16.size()) +
+                     " (Expected " + std::to_string(rows*cols) + "), Vec: " + std::to_string(vec_f32.size()) +
                      " (Expected " + std::to_string(cols) + ")");
         out_f32.assign(rows, 0.0f); // Zero out output on error
         return;
@@ -336,6 +354,7 @@ static void matvec_bf16_f32_vector(const std::vector<uint16_t>& mat_bf16,
         }
         out_f32[r] = static_cast<float>(sum); // Assign final sum (cast back to float)
     }
+#endif // HAS_CUDA
 }
 // --- END: C++ Vector MatVec with Kahan ---
 
