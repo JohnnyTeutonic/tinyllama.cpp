@@ -81,6 +81,11 @@ public:
 
     int get_vocab_size() const;
 
+#ifdef HAS_CUDA
+    float* lookup_embedding_device(int token_id);
+    std::vector<float> forward_device(int token_id, int pos, KVCache* cache = nullptr, const std::vector<int>* attention_mask = nullptr);
+#endif
+
 private:
     ModelConfig config_;
 

@@ -1,7 +1,7 @@
 #include "model.h"
 #include "logger.h"
 #ifdef HAS_CUDA
-#include "cuda_kernels.h" // Include CUDA kernel declarations
+#include "cuda_kernels.h"
 #endif
 #include <stdexcept>
 #include <cstring>
@@ -637,6 +637,65 @@ std::vector<float> TinyLlamaModel::lookup_embedding(int token_id) {
     return embedding_vec; // Return the vector
 }
 
+// Device-only embedding lookup
+float* TinyLlamaModel::lookup_embedding_device(int token_id) {
+    int hs = config_.hidden_size;
+    int vs = config_.vocab_size;
+    if (token_id < 0 || token_id >= vs) {
+        Logger::error("Token ID out of bounds in lookup_embedding_device: " + std::to_string(token_id));
+        float* zero_dev = nullptr;
+        gpuErrchk(cudaMalloc(&zero_dev, hs * sizeof(float)));
+        gpuErrchk(cudaMemset(zero_dev, 0, hs * sizeof(float)));
+        return zero_dev;
+    }
+    size_t offset = (size_t)token_id * hs;
+    if (offset + hs > embed_tokens.size()) {
+        Logger::error("Embedding offset out of bounds in lookup_embedding_device for token: " + std::to_string(token_id));
+        float* zero_dev = nullptr;
+        gpuErrchk(cudaMalloc(&zero_dev, hs * sizeof(float)));
+        gpuErrchk(cudaMemset(zero_dev, 0, hs * sizeof(float)));
+        return zero_dev;
+    }
+    std::vector<uint16_t> token_embedding_bf16(embed_tokens.begin() + offset, embed_tokens.begin() + offset + hs);
+    std::vector<float> embedding_vec = bf16vec_to_float_vec(token_embedding_bf16);
+    float* emb_dev = nullptr;
+    gpuErrchk(cudaMalloc(&emb_dev, hs * sizeof(float)));
+    gpuErrchk(cudaMemcpy(emb_dev, embedding_vec.data(), hs * sizeof(float), cudaMemcpyHostToDevice));
+    return emb_dev;
+}
+
+// --- Forward Pass (Device-only start, incremental) ---
+#ifdef HAS_CUDA
+// New device-only forward pass start
+std::vector<float> TinyLlamaModel::forward_device(int token_id, int pos, KVCache* cache, const std::vector<int>* attention_mask) {
+    int hs = config_.hidden_size;
+    int vs = config_.vocab_size;
+    float eps = config_.rms_norm_eps;
+    // 1. Device-only embedding lookup
+    float* emb_dev = lookup_embedding_device(token_id);
+    // 2. Allocate device buffer for RMSNorm output
+    float* x_norm_dev = nullptr;
+    gpuErrchk(cudaMalloc(&x_norm_dev, hs * sizeof(float)));
+    // 3. Allocate and copy RMSNorm weights to device (use layer 0 for now)
+    std::vector<float> w_norm1_vec = bf16vec_to_float_vec(layers[0].input_layernorm);
+    float* w_norm1_dev = nullptr;
+    gpuErrchk(cudaMalloc(&w_norm1_dev, hs * sizeof(float)));
+    gpuErrchk(cudaMemcpy(w_norm1_dev, w_norm1_vec.data(), hs * sizeof(float), cudaMemcpyHostToDevice));
+    // 4. Call CUDA RMSNorm
+    rmsnorm_vector_cuda(emb_dev, w_norm1_dev, x_norm_dev, hs, eps);
+    gpuErrchk(cudaDeviceSynchronize());
+    // 5. Copy RMSNorm output back to host
+    std::vector<float> x_norm_host(hs);
+    gpuErrchk(cudaMemcpy(x_norm_host.data(), x_norm_dev, hs * sizeof(float), cudaMemcpyDeviceToHost));
+    // 6. Free device buffers
+    gpuErrchk(cudaFree(emb_dev));
+    gpuErrchk(cudaFree(x_norm_dev));
+    gpuErrchk(cudaFree(w_norm1_dev));
+    // 7. Call the original host-based forward pass
+    return forward(x_norm_host, pos, cache, attention_mask);
+}
+#endif
+
 // --- Forward Pass (Now takes std::vector<float>&) ---
 std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, KVCache* cache, const std::vector<int>* attention_mask) {
     // Config dimensions
@@ -929,7 +988,16 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, K
 #endif
 
         // Fused SwiGLU: no separate SiLU call needed
+#ifdef HAS_CUDA
         swiglu_cuda(gate_vec, up_vec, swiglu_result_vec, is);
+#else
+        // CPU version with separate SiLU
+        silu(gate_vec, silu_out_vec);
+        #pragma omp parallel for
+        for(size_t i = 0; i < is; ++i) {
+            swiglu_result_vec[i] = silu_out_vec[i] * up_vec[i];
+        }
+#endif
         
         if (log_target_layer) {
             log_vector_summary("TROUBLESHOOTING L0 P1 Gate Proj Result (C++ Vec)", gate_vec);
