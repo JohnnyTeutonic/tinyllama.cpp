@@ -98,6 +98,8 @@ void swiglu_cuda(const std::vector<float>& gate_host,
 
 void rope_cuda(std::vector<float>& x, int num_heads, int head_dim, const std::vector<float>& freqs_cis);
 
+void rope_cuda_device(float* x_dev, int num_heads, int head_dim, const std::vector<float>& freqs_cis);
+
 #endif // HAS_CUDA
 
 #endif // CUDA_KERNELS_H 

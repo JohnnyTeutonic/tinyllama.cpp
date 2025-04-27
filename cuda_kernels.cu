@@ -497,4 +497,16 @@ void rope_cuda(std::vector<float>& x, int num_heads, int head_dim, const std::ve
     gpuErrchk(cudaFree(freqs_dev));
 }
 
+void rope_cuda_device(float* x_dev, int num_heads, int head_dim, const std::vector<float>& freqs_cis) {
+    float* freqs_dev = nullptr;
+    gpuErrchk(cudaMalloc(&freqs_dev, freqs_cis.size() * sizeof(float)));
+    gpuErrchk(cudaMemcpy(freqs_dev, freqs_cis.data(), freqs_cis.size() * sizeof(float), cudaMemcpyHostToDevice));
+    int total_pairs = num_heads * (head_dim / 2);
+    int threads_per_block = 256;
+    int num_blocks = (total_pairs + threads_per_block - 1) / threads_per_block;
+    rope_kernel<<<num_blocks, threads_per_block>>>(x_dev, num_heads, head_dim, freqs_dev);
+    gpuErrchk(cudaGetLastError());
+    gpuErrchk(cudaFree(freqs_dev));
+}
+
 #endif // HAS_CUDA 

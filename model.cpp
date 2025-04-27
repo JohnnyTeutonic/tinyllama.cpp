@@ -579,11 +579,6 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& config, const SafeTensorsLoade
                  }
             }
 
-            // Print first 5 raw uint16_t values of q_proj for this layer (for basic check)
-            std::ostringstream oss;
-            oss << "C++ layer " << i << " q_proj first 5 (uint16_t): ";
-            for (int j = 0; j < 5 && j < lw.q_proj.size(); ++j) oss << lw.q_proj[j] << " ";
-            Logger::info(oss.str());
         } catch (const std::exception& e) {
             Logger::error("Missing or malformed weights in layer " + std::to_string(i) + ": " + e.what());
         }
@@ -602,10 +597,6 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& config, const SafeTensorsLoade
             float cos_val = std::cos(angle);
             float sin_val = std::sin(angle);
             precomputed_freqs_cis_[(pos * head_dim / 2) + (i / 2)] = {cos_val, sin_val};
-            // Log first few values for pos=1
-            if (pos == 1 && (i/2) < 5) { // Log first 5 pairs for pos=1
-                 Logger::info("C++ RoPE Precompute (Pos=1, FreqDim=" + std::to_string(i/2) + "): cos=" + std::to_string(cos_val) + " sin=" + std::to_string(sin_val));
-            }
         }
     }
     Logger::info("Precomputed RoPE cos/sin frequencies.");
@@ -700,20 +691,33 @@ std::vector<float> TinyLlamaModel::forward_device(int token_id, int pos, KVCache
     matvec_bf16_f32_cuda(layers[0].k_proj, x_norm_dev, k_dev, n_kv_heads * head_dim, hs);
     matvec_bf16_f32_cuda(layers[0].v_proj, x_norm_dev, v_dev, n_kv_heads * head_dim, hs);
     gpuErrchk(cudaDeviceSynchronize());
-    // 6. Copy Q, K, V to host
+    gpuErrchk(cudaFree(x_norm_dev));
+    // 6. RoPE on device for Q and K
+    size_t freqs_offset = (pos * head_dim / 2);
+    std::vector<std::pair<float, float>> current_freqs_cis(precomputed_freqs_cis_.begin() + freqs_offset, precomputed_freqs_cis_.begin() + freqs_offset + head_dim / 2);
+    // Flatten freqs_cis for CUDA kernel
+    std::vector<float> flat_freqs;
+    flat_freqs.reserve(current_freqs_cis.size() * 2);
+    for (const auto& p : current_freqs_cis) {
+        flat_freqs.push_back(p.first);
+        flat_freqs.push_back(p.second);
+    }
+    // Apply RoPE to Q
+    rope_cuda_device(q_dev, n_heads, head_dim, flat_freqs);
+    // Apply RoPE to K
+    rope_cuda_device(k_dev, n_kv_heads, head_dim, flat_freqs);
+    // 7. Copy Q, K, V to host
     std::vector<float> q_host(hs);
     std::vector<float> k_host(n_kv_heads * head_dim);
     std::vector<float> v_host(n_kv_heads * head_dim);
     gpuErrchk(cudaMemcpy(q_host.data(), q_dev, hs * sizeof(float), cudaMemcpyDeviceToHost));
     gpuErrchk(cudaMemcpy(k_host.data(), k_dev, n_kv_heads * head_dim * sizeof(float), cudaMemcpyDeviceToHost));
     gpuErrchk(cudaMemcpy(v_host.data(), v_dev, n_kv_heads * head_dim * sizeof(float), cudaMemcpyDeviceToHost));
-    // 7. Free device buffers
-    gpuErrchk(cudaFree(x_norm_dev));
+    // 8. Free device buffers
     gpuErrchk(cudaFree(q_dev));
     gpuErrchk(cudaFree(k_dev));
     gpuErrchk(cudaFree(v_dev));
-    // 8. Call the original host-based forward pass, but inject Q, K, V (for now, just pass Q as x_vec)
-    // TODO: For full correctness, you would need to refactor forward() to accept Q, K, V, but for incremental testing, just pass Q as x_vec
+    // 9. Call the original host-based forward pass, passing Q as x_vec for now
     return forward(q_host, pos, cache, attention_mask);
 }
 #endif
