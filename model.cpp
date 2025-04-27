@@ -930,8 +930,21 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, K
         }
         
         // Down projection
+#ifdef HAS_CUDA
+        float* swiglu_result_dev = nullptr;
+        float* mlp_out_dev = nullptr;
+        gpuErrchk(cudaMalloc(&swiglu_result_dev, is * sizeof(float)));
+        gpuErrchk(cudaMemcpy(swiglu_result_dev, swiglu_result_vec.data(), is * sizeof(float), cudaMemcpyHostToDevice));
+        gpuErrchk(cudaMalloc(&mlp_out_dev, hs * sizeof(float)));
+        matvec_bf16_f32_cuda(lw.down_proj, swiglu_result_dev, mlp_out_dev, hs, is);
+        gpuErrchk(cudaDeviceSynchronize());
+        gpuErrchk(cudaMemcpy(mlp_out_vec.data(), mlp_out_dev, hs * sizeof(float), cudaMemcpyDeviceToHost));
+        gpuErrchk(cudaFree(swiglu_result_dev));
+        gpuErrchk(cudaFree(mlp_out_dev));
+#else
         matvec_bf16_f32_vector(lw.down_proj, swiglu_result_vec, mlp_out_vec, hs, is);
-        
+#endif
+
         log_vec_stats("MLP Output (C++ Vec) (L" + std::to_string(l) + " P" + std::to_string(pos) + ")", mlp_out_vec);
         
         // h) Second residual connection
@@ -973,12 +986,19 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, K
 
     // 4. Output projection to logits
     std::vector<float> logits(vs); 
-    matvec_bf16_f32_vector(lm_head, x_final_norm_vec, logits, vs, hs); 
-    
 #ifdef HAS_CUDA
-    Logger::info("[CUDA] Freeing device buffers for RMSNorm");
-    gpuErrchk(cudaFree(x_norm_dev));
-    gpuErrchk(cudaFree(w_norm1_dev));
+    float* x_final_norm_dev = nullptr;
+    float* logits_dev = nullptr;
+    gpuErrchk(cudaMalloc(&x_final_norm_dev, hs * sizeof(float)));
+    gpuErrchk(cudaMemcpy(x_final_norm_dev, x_final_norm_vec.data(), hs * sizeof(float), cudaMemcpyHostToDevice));
+    gpuErrchk(cudaMalloc(&logits_dev, vs * sizeof(float)));
+    matvec_bf16_f32_cuda(lm_head, x_final_norm_dev, logits_dev, vs, hs);
+    gpuErrchk(cudaDeviceSynchronize());
+    gpuErrchk(cudaMemcpy(logits.data(), logits_dev, vs * sizeof(float), cudaMemcpyDeviceToHost));
+    gpuErrchk(cudaFree(x_final_norm_dev));
+    gpuErrchk(cudaFree(logits_dev));
+#else
+    matvec_bf16_f32_vector(lm_head, x_final_norm_vec, logits, vs, hs);
 #endif
 
     if (log_initial) {
