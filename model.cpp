@@ -889,8 +889,30 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, K
         log_vec_stats("Input to MLP C++ RMSNorm (L" + std::to_string(l) + " P" + std::to_string(pos) + ")", x_norm_vec2);
 
         // MLP MatVecs
+#ifdef HAS_CUDA
+        float* x_norm2_dev = nullptr;
+        float* gate_vec_dev = nullptr;
+        gpuErrchk(cudaMalloc(&x_norm2_dev, hs * sizeof(float)));
+        gpuErrchk(cudaMemcpy(x_norm2_dev, x_norm_vec2.data(), hs * sizeof(float), cudaMemcpyHostToDevice));
+        gpuErrchk(cudaMalloc(&gate_vec_dev, is * sizeof(float)));
+        matvec_bf16_f32_cuda(lw.gate_proj, x_norm2_dev, gate_vec_dev, is, hs);
+        gpuErrchk(cudaDeviceSynchronize());
+        gpuErrchk(cudaMemcpy(gate_vec.data(), gate_vec_dev, is * sizeof(float), cudaMemcpyDeviceToHost));
+        gpuErrchk(cudaFree(gate_vec_dev));
+
+        // Add missing up_proj calculation
+        float* up_vec_dev = nullptr;
+        gpuErrchk(cudaMalloc(&up_vec_dev, is * sizeof(float)));
+        matvec_bf16_f32_cuda(lw.up_proj, x_norm2_dev, up_vec_dev, is, hs);
+        gpuErrchk(cudaDeviceSynchronize());
+        gpuErrchk(cudaMemcpy(up_vec.data(), up_vec_dev, is * sizeof(float), cudaMemcpyDeviceToHost));
+        gpuErrchk(cudaFree(up_vec_dev));
+        
+        gpuErrchk(cudaFree(x_norm2_dev));
+#else
         matvec_bf16_f32_vector(lw.gate_proj, x_norm_vec2, gate_vec, is, hs);
         matvec_bf16_f32_vector(lw.up_proj, x_norm_vec2, up_vec, is, hs);
+#endif
 
         // SiLU
         silu(gate_vec, silu_out_vec);

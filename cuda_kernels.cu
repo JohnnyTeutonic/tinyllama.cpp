@@ -143,31 +143,28 @@ __global__ void matvec_bf16_f32_kernel(const uint16_t* mat_bf16,
                                        int rows,
                                        int cols)
 {
-    int row = blockIdx.x * blockDim.y + threadIdx.y; // Assign threads to rows
-    if (row >= rows) return; // Boundary check
+    int row = blockIdx.x * blockDim.y + threadIdx.y;
+    if (row >= rows) return;
 
-    // Use shared memory for accumulating dot product within a block/row
-    // This specific kernel structure assigns one row per block for simplicity,
-    // so shared memory might not be strictly necessary here, but shows the pattern.
-    // A more optimized version would use shared memory to cache parts of vec_f32
-    // if multiple rows are processed per block.
-    extern __shared__ float s_dot_product[]; 
+    // Use double for higher precision accumulation in shared memory
+    extern __shared__ double s_dot_product[]; // <-- Changed to double
     
-    // Each thread calculates a partial sum
-    float partial_sum = 0.0f;
+    // Each thread calculates a partial sum using double
+    double partial_sum = 0.0; // <-- Changed to double
     int thread_col_start = threadIdx.x;
     int stride = blockDim.x;
 
     for (int c = thread_col_start; c < cols; c += stride) {
         float mat_val = bf16_to_float32_device(mat_bf16[row * cols + c]);
-        partial_sum += mat_val * vec_f32[c];
+        // Cast input vec value to double for multiplication
+        partial_sum += static_cast<double>(mat_val) * static_cast<double>(vec_f32[c]); // <-- Accumulate in double
     }
     
     // Store partial sum in shared memory
     s_dot_product[threadIdx.x] = partial_sum;
     __syncthreads();
 
-    // Reduce partial sums within the block (assuming blockDim.x is power of 2)
+    // Reduce partial sums within the block (using double)
     for (int s = blockDim.x / 2; s > 0; s >>= 1) {
         if (threadIdx.x < s) {
             s_dot_product[threadIdx.x] += s_dot_product[threadIdx.x + s];
@@ -175,9 +172,9 @@ __global__ void matvec_bf16_f32_kernel(const uint16_t* mat_bf16,
         __syncthreads();
     }
 
-    // Write final result for the row
+    // Write final result for the row (cast back to float)
     if (threadIdx.x == 0) {
-        out_f32[row] = s_dot_product[0];
+        out_f32[row] = static_cast<float>(s_dot_product[0]); // <-- Cast final result back to float
     }
 }
 
@@ -199,7 +196,7 @@ void matvec_bf16_f32_cuda(const std::vector<uint16_t>& mat_bf16_host,
     int num_blocks_x = (rows + threads_per_block_y -1) / threads_per_block_y;
     int num_blocks_y = 1;
     dim3 num_blocks(num_blocks_x, num_blocks_y);
-    size_t shared_mem_size = threads_per_block_x * sizeof(float);
+    size_t shared_mem_size = threads_per_block_x * sizeof(double); // <-- Adjusted for double
     // Launch kernel
     matvec_bf16_f32_kernel<<<num_blocks, threads_per_block, shared_mem_size, stream>>>(
         mat_bf16_dev, vec_f32_dev, out_f32_dev, rows, cols
