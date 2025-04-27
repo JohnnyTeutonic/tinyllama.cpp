@@ -408,4 +408,53 @@ void softmax_vector_cuda(const std::vector<float>& x_host,
     gpuErrchk(cudaFree(partial_sum_dev));
 }
 
+// <<< SWIGLU KERNEL (Fused SiLU) >>>
+__global__ void swiglu_kernel(const float* gate, const float* up, float* out, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        float gate_val = gate[i];
+        float silu_gate = gate_val / (1.0f + expf(-gate_val));
+        out[i] = silu_gate * up[i];
+    }
+}
+
+// --- SwiGLU C++ Wrapper (Fused) ---
+void swiglu_cuda(const std::vector<float>& gate_host,
+                 const std::vector<float>& up_host,
+                 std::vector<float>& out_host,
+                 int n)
+{
+    if (gate_host.size() != n || up_host.size() != n) {
+        throw std::runtime_error("SwiGLU CUDA: Input vector size mismatch.");
+    }
+    out_host.resize(n);
+
+    // --- Device Memory ---
+    float* gate_dev = nullptr;
+    float* up_dev = nullptr;
+    float* out_dev = nullptr;
+    gpuErrchk(cudaMalloc(&gate_dev, n * sizeof(float)));
+    gpuErrchk(cudaMalloc(&up_dev, n * sizeof(float)));
+    gpuErrchk(cudaMalloc(&out_dev, n * sizeof(float)));
+
+    // --- Copy Host -> Device ---
+    gpuErrchk(cudaMemcpy(gate_dev, gate_host.data(), n * sizeof(float), cudaMemcpyHostToDevice));
+    gpuErrchk(cudaMemcpy(up_dev, up_host.data(), n * sizeof(float), cudaMemcpyHostToDevice));
+
+    // --- Kernel Launch ---
+    const int threads_per_block = 256;
+    int num_blocks = (n + threads_per_block - 1) / threads_per_block;
+    swiglu_kernel<<<num_blocks, threads_per_block>>>(gate_dev, up_dev, out_dev, n);
+    gpuErrchk(cudaGetLastError());
+
+    // --- Copy Device -> Host ---
+    gpuErrchk(cudaMemcpy(out_host.data(), out_dev, n * sizeof(float), cudaMemcpyDeviceToHost));
+    gpuErrchk(cudaDeviceSynchronize());
+
+    // --- Cleanup ---
+    gpuErrchk(cudaFree(gate_dev));
+    gpuErrchk(cudaFree(up_dev));
+    gpuErrchk(cudaFree(out_dev));
+}
+
 #endif // HAS_CUDA 

@@ -914,14 +914,8 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, K
         matvec_bf16_f32_vector(lw.up_proj, x_norm_vec2, up_vec, is, hs);
 #endif
 
-        // SiLU
-        silu(gate_vec, silu_out_vec);
-
-        // SwiGLU
-        #pragma omp parallel for
-        for(size_t i = 0; i < is; ++i) {
-            swiglu_result_vec[i] = silu_out_vec[i] * up_vec[i];
-        }
+        // Fused SwiGLU: no separate SiLU call needed
+        swiglu_cuda(gate_vec, up_vec, swiglu_result_vec, is);
         
         if (log_target_layer) {
             log_vector_summary("TROUBLESHOOTING L0 P1 Gate Proj Result (C++ Vec)", gate_vec);

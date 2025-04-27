@@ -91,6 +91,11 @@ void softmax_vector_cuda(const std::vector<float>& x_host,
                          std::vector<float>& out_host,
                          int n);
 
+void swiglu_cuda(const std::vector<float>& gate_host,
+                 const std::vector<float>& up_host,
+                 std::vector<float>& out_host,
+                 int n);
+
 #endif // HAS_CUDA
 
 #endif // CUDA_KERNELS_H 
