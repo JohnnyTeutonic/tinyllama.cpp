@@ -514,6 +514,61 @@ static void calculate_attention_scores(const std::vector<float>& Q,
 }
 // --- END: C++ Attention Scores ---
 
+// --- START: C++ Vector RoPE (User provided) ---
+static void apply_rope_vector(std::vector<float>& x, int num_heads, int head_dim, int pos, 
+                       const std::vector<std::pair<float, float>>& freqs_cis) {
+    if (x.size() != num_heads * head_dim) {
+        Logger::error("apply_rope_vector: Input vector x has incorrect size. Expected " + 
+                     std::to_string(num_heads * head_dim) + ", got " + std::to_string(x.size()));
+        return;
+    }
+    if (head_dim % 2 != 0) {
+        Logger::error("apply_rope_vector: head_dim must be even, got " + std::to_string(head_dim));
+        return;
+    }
+
+    const int dim_half = head_dim / 2;
+    // No need to check freqs_cis size here, it's derived from head_dim which is checked
+    // The caller slicing precomputed_freqs_cis_ should ensure correctness.
+
+    #pragma omp parallel for // Re-enable OMP
+    for (int h = 0; h < num_heads; ++h) {
+        size_t head_offset = h * head_dim;
+        for (int i = 0; i < dim_half; ++i) { // Iterate up to dim_half
+            // --- Log Frequencies (Optional, keep for now) ---
+            if (pos == 1 && h == 0 && i < 5) { // Log first 5 pairs for head 0
+                 double cos_val_log = static_cast<double>(freqs_cis[i].first); 
+                 double sin_val_log = static_cast<double>(freqs_cis[i].second);
+                 Logger::info("C++ RoPE Freqs (Pos=1, Head=0, DimPair=" + std::to_string(i) + "): cos=" + std::to_string(cos_val_log) + " sin=" + std::to_string(sin_val_log));
+            }
+
+            // Get corresponding elements from first and second halves
+            double x0 = static_cast<double>(x[head_offset + i]);          // Element from first half
+            double x1 = static_cast<double>(x[head_offset + i + dim_half]); // Element from second half
+            
+            // Get frequencies for this dimension index 'i'
+            double cos_val = static_cast<double>(freqs_cis[i].first); 
+            double sin_val = static_cast<double>(freqs_cis[i].second);
+            
+            // Apply rotation correctly
+            double rotated_x0 = x0 * cos_val - x1 * sin_val; // Rotated first half element
+            double rotated_x1 = x0 * sin_val + x1 * cos_val; // Rotated second half element
+
+            // Write rotated values back to their original positions
+            x[head_offset + i] = static_cast<float>(rotated_x0); 
+            x[head_offset + i + dim_half] = static_cast<float>(rotated_x1);
+        }
+    }
+}
+// --- END: C++ Vector RoPE ---
+
+/* // Torch tensor apply_rope REMOVED
+void apply_rope(torch::Tensor& x, int num_heads, int head_dim, int pos, 
+                const std::vector<std::pair<float, float>>& freqs_cis) {
+    // ... 
+}
+*/
+
 // TinyLlamaModel constructor: load all weights from safetensors into uint16_t vectors
 TinyLlamaModel::TinyLlamaModel(const ModelConfig& config, const SafeTensorsLoader& loader)
     : config_(config)
@@ -717,9 +772,9 @@ std::vector<float> TinyLlamaModel::forward(torch::Tensor& x_tensor, int pos, KVC
         matvec_bf16_f32_vector(lw.v_proj, x_norm_vec_for_qkv, v_vec, n_kv_heads * head_dim, hs);
         
         // Convert results back to tensors for RoPE and KVCache
-        torch::Tensor q_tensor = vec_to_tensor(q_vec, {hs});
-        torch::Tensor k_current_tensor = vec_to_tensor(k_vec, {(int64_t)(n_kv_heads * head_dim)});
-        torch::Tensor v_current_tensor = vec_to_tensor(v_vec, {(int64_t)(n_kv_heads * head_dim)});
+        // torch::Tensor q_tensor = vec_to_tensor(q_vec, {hs});
+        // torch::Tensor k_current_tensor = vec_to_tensor(k_vec, {(int64_t)(n_kv_heads * head_dim)});
+        torch::Tensor v_current_tensor = vec_to_tensor(v_vec, {(int64_t)(n_kv_heads * head_dim)}); // Still need V tensor for KVCache write below?
         
         // Original Torch calls removed:
         // torch::Tensor q_tensor = matvec(bf16vec_to_tensor(lw.q_proj, {hs, hs}), x_norm_tensor);
@@ -727,101 +782,90 @@ std::vector<float> TinyLlamaModel::forward(torch::Tensor& x_tensor, int pos, KVC
         // torch::Tensor v_current_tensor = matvec(bf16vec_to_tensor(lw.v_proj, {n_kv_heads * head_dim, hs}), x_norm_tensor);
         
         if (log_target_layer) {
-            log_vector_summary("TROUBLESHOOTING L0 P1 Q Proj Output (C++ Vec)", std::vector<float>(static_cast<float*>(q_tensor.data_ptr()), static_cast<float*>(q_tensor.data_ptr()) + hs));
-            log_vector_summary("TROUBLESHOOTING L0 P1 K Proj Output (C++ Vec)", std::vector<float>(static_cast<float*>(k_current_tensor.data_ptr()), static_cast<float*>(k_current_tensor.data_ptr()) + n_kv_heads * head_dim));
-            log_vector_summary("TROUBLESHOOTING L0 P1 V Proj Output (C++ Vec)", std::vector<float>(static_cast<float*>(v_current_tensor.data_ptr()), static_cast<float*>(v_current_tensor.data_ptr()) + n_kv_heads * head_dim));
+            log_vector_summary("TROUBLESHOOTING L0 P1 Q Proj Output (C++ Vec, Before RoPE)", q_vec);
+            log_vector_summary("TROUBLESHOOTING L0 P1 K Proj Output (C++ Vec, Before RoPE)", k_vec);
+            log_vector_summary("TROUBLESHOOTING L0 P1 V Proj Output (C++ Vec)", v_vec);
         }
 
-        // c) RoPE for Q, K (using Tensor version - requires tensor input)
-        torch::Tensor q_before_rope = q_tensor.clone(); // Copy for logging
-        torch::Tensor k_before_rope = k_current_tensor.clone(); // Copy for logging
-        
+        // c) RoPE for Q, K (Using C++ Vector version)
         // --- Get precomputed freqs for the current position --- 
         size_t freqs_offset = (pos * head_dim / 2);
         std::vector<std::pair<float, float>> current_freqs_cis(precomputed_freqs_cis_.begin() + freqs_offset, 
                                                                precomputed_freqs_cis_.begin() + freqs_offset + head_dim / 2);
         
-        // --- Apply RoPE (Tensor version RESTORED) --- 
-        apply_rope(q_tensor, n_heads, head_dim, pos, current_freqs_cis);
-        apply_rope(k_current_tensor, n_kv_heads, head_dim, pos, current_freqs_cis);
+        // --- Apply C++ RoPE directly to vectors --- 
+        apply_rope_vector(q_vec, n_heads, head_dim, pos, current_freqs_cis);
+        apply_rope_vector(k_vec, n_kv_heads, head_dim, pos, current_freqs_cis);
+        
         if (log_target_layer) {
-            log_vector_summary("TROUBLESHOOTING L0 P1 Q BEFORE RoPE", std::vector<float>(static_cast<float*>(q_before_rope.data_ptr()), static_cast<float*>(q_before_rope.data_ptr()) + hs));
-            log_vector_summary("TROUBLESHOOTING L0 P1 Q AFTER RoPE", std::vector<float>(static_cast<float*>(q_tensor.data_ptr()), static_cast<float*>(q_tensor.data_ptr()) + hs));
-            log_vector_summary("TROUBLESHOOTING L0 P1 K BEFORE RoPE", std::vector<float>(static_cast<float*>(k_before_rope.data_ptr()), static_cast<float*>(k_before_rope.data_ptr()) + n_kv_heads * head_dim));
-            log_vector_summary("TROUBLESHOOTING L0 P1 K AFTER RoPE", std::vector<float>(static_cast<float*>(k_current_tensor.data_ptr()), static_cast<float*>(k_current_tensor.data_ptr()) + n_kv_heads * head_dim));
+            log_vector_summary("TROUBLESHOOTING L0 P1 Q AFTER C++ RoPE", q_vec);
+            log_vector_summary("TROUBLESHOOTING L0 P1 K AFTER C++ RoPE", k_vec);
         }
 
-        // Write to KV Cache (still uses std::vector, requires copy from tensor)
-        float* k_current_ptr = static_cast<float*>(k_current_tensor.data_ptr());
-        float* v_current_ptr = static_cast<float*>(v_current_tensor.data_ptr());
-            for (int kvh = 0; kvh < n_kv_heads; ++kvh) {
-                size_t current_k_offset = (size_t)kvh * head_dim;
-                size_t current_v_offset = (size_t)kvh * head_dim;
+        // Write to KV Cache (use RoPE-modified k_vec, original v_vec)
+        float* k_current_ptr = k_vec.data(); // Use pointer from RoPE-modified k_vec
+        float* v_current_ptr = v_vec.data(); // Use pointer from original v_vec
+        for (int kvh = 0; kvh < n_kv_heads; ++kvh) {
+            size_t current_k_offset = (size_t)kvh * head_dim;
+            size_t current_v_offset = (size_t)kvh * head_dim;
             size_t write_offset = pos * n_kv_heads * head_dim + kvh * head_dim;
             if (write_offset + head_dim <= cache->layers[l].k.size()) {
                 std::memcpy(&cache->layers[l].k[write_offset], k_current_ptr + current_k_offset, head_dim * sizeof(float));
                 std::memcpy(&cache->layers[l].v[write_offset], v_current_ptr + current_v_offset, head_dim * sizeof(float));
-                } else {
+            } else {
                 Logger::error("KVCache write out of bounds: write_offset=" + std::to_string(write_offset) + ", cache size=" + std::to_string(cache->layers[l].k.size()));
-             }
+            }
         }
 
-        // d) Attention (using LibTorch)
-        torch::Tensor attn_out_tensor = torch::zeros({hs}, torch::TensorOptions().dtype(torch::kFloat32));
+        // d) Attention (using C++ Scores and Weighted Sum)
+        torch::Tensor attn_out_tensor = torch::zeros({hs}, torch::TensorOptions().dtype(torch::kFloat32)); // Still need final tensor output
         int current_seq_len = pos + 1;
         float scale = 1.0f / std::sqrt(head_dim);
         
         // Iterate over query heads
-            for (int h = 0; h < n_heads; ++h) {
-            // Get Q head tensor
-            torch::Tensor q_head = q_tensor.slice(/*dim=*/0, /*start=*/h * head_dim, /*end=*/(h + 1) * head_dim).unsqueeze(0); // Shape [1, head_dim]
+        for (int h = 0; h < n_heads; ++h) {
+            // Get Q head slice from RoPE-modified q_vec
+            // torch::Tensor q_head = q_tensor.slice(/*dim=*/0, /*start=*/h * head_dim, /*end=*/(h + 1) * head_dim).unsqueeze(0); // Shape [1, head_dim]
+            std::vector<float> q_head_rope_vec(q_vec.begin() + h * head_dim, q_vec.begin() + (h + 1) * head_dim);
             
             // Determine corresponding KV head index for GQA
             int kv_head_idx = h / (n_heads / n_kv_heads);
             
             // --- Retrieve K and V from cache for this KV head --- 
-            // This part still reads from std::vector cache and converts to tensor
-            std::vector<float> k_cache_head_vec(current_seq_len * head_dim);
-            std::vector<float> v_cache_head_vec(current_seq_len * head_dim);
+            std::vector<float> k_cache_head_vec(current_seq_len * head_dim); // K values from cache (already have RoPE applied)
+            std::vector<float> v_cache_head_vec(current_seq_len * head_dim); // V values from cache
             for (int j = 0; j < current_seq_len; ++j) {
                 size_t cache_pos_offset = j * n_kv_heads * head_dim + kv_head_idx * head_dim;
                 if (cache_pos_offset + head_dim <= cache->layers[l].k.size()) {
                     std::memcpy(k_cache_head_vec.data() + j * head_dim, &cache->layers[l].k[cache_pos_offset], head_dim * sizeof(float));
                     std::memcpy(v_cache_head_vec.data() + j * head_dim, &cache->layers[l].v[cache_pos_offset], head_dim * sizeof(float));
-             } else {
+                } else {
                     // Fill with zeros or handle error - For now, fill with zeros
                     std::fill(k_cache_head_vec.begin() + j * head_dim, k_cache_head_vec.begin() + (j + 1) * head_dim, 0.0f);
                     std::fill(v_cache_head_vec.begin() + j * head_dim, v_cache_head_vec.begin() + (j + 1) * head_dim, 0.0f);
                     Logger::error("Attention K/V access out of bounds: cache_pos_offset=" + std::to_string(cache_pos_offset));
                 }
             }
-            torch::Tensor k_cache_head = vec_to_tensor(k_cache_head_vec, {current_seq_len, head_dim}); // Shape [seq_len, head_dim]
-            torch::Tensor v_cache_head = vec_to_tensor(v_cache_head_vec, {current_seq_len, head_dim}); // Shape [seq_len, head_dim]
+            // torch::Tensor k_cache_head = vec_to_tensor(k_cache_head_vec, {current_seq_len, head_dim}); // Don't need tensor
+            // torch::Tensor v_cache_head = vec_to_tensor(v_cache_head_vec, {current_seq_len, head_dim}); // Don't need tensor
             // --- End retrieve K and V --- 
             
             // Calculate Scores: Q * K^T (Using C++ Vector version)
-            // torch::Tensor scores = torch::matmul(q_head, k_cache_head.transpose(0, 1)) * scale; // Shape [1, seq_len] // Torch version removed
-            std::vector<float> q_head_vec(static_cast<float*>(q_head.data_ptr()), static_cast<float*>(q_head.data_ptr()) + head_dim);
+            // std::vector<float> q_head_vec(...); // q_head_rope_vec is ready
             // k_cache_head_vec is already available from cache retrieval step
             std::vector<float> scores_vec(current_seq_len);
-            calculate_attention_scores(q_head_vec, k_cache_head_vec, scores_vec, current_seq_len, head_dim, scale);
+            calculate_attention_scores(q_head_rope_vec, k_cache_head_vec, scores_vec, current_seq_len, head_dim, scale);
 
             // --- Apply Softmax (C++ vector version) ---
-            // Convert scores tensor to vector // No longer needed, input is scores_vec
-            // std::vector<float> scores_vec(...);
             std::vector<float> probs_vec(current_seq_len);
-            // Call C++ softmax
             softmax_vector(scores_vec, probs_vec);
-            // Convert result back to tensor // Still needed for weighted sum unless that's also C++
-            torch::Tensor probs = vec_to_tensor(probs_vec, {1, current_seq_len}); // Reshape to [1, seq_len]
+            // torch::Tensor probs = vec_to_tensor(probs_vec, {1, current_seq_len}); // Don't need tensor for C++ weighted sum
             // --- End Apply Softmax ---
             
             // Calculate Weighted Sum: Probs * V (Using C++ Vector version)
-            // torch::Tensor head_attn_out = torch::matmul(probs, v_cache_head); // Shape [1, head_dim] // Torch version removed
             std::vector<float> head_attn_out_vec(head_dim);
-            // Use the existing v_cache_head_vec populated from the cache earlier
             weighted_sum_probs_v(probs_vec, v_cache_head_vec, head_attn_out_vec, current_seq_len, head_dim);
-            torch::Tensor head_attn_out = vec_to_tensor(head_attn_out_vec, {1, (int64_t)head_dim}); // Convert back to tensor [1, head_dim]
+            torch::Tensor head_attn_out = vec_to_tensor(head_attn_out_vec, {1, (int64_t)head_dim}); // Convert back for accumulation
             
             // Accumulate head output into attn_out_tensor
             attn_out_tensor.slice(/*dim=*/0, /*start=*/h * head_dim, /*end=*/(h + 1) * head_dim).copy_(head_attn_out.squeeze(0));
