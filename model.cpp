@@ -546,14 +546,14 @@ std::vector<float> TinyLlamaModel::forward(torch::Tensor& x_tensor, int pos, KVC
         // Write to KV Cache (still uses std::vector, requires copy from tensor)
         float* k_current_ptr = static_cast<float*>(k_current_tensor.data_ptr());
         float* v_current_ptr = static_cast<float*>(v_current_tensor.data_ptr());
-        for (int kvh = 0; kvh < n_kv_heads; ++kvh) {
-            size_t current_k_offset = (size_t)kvh * head_dim;
-            size_t current_v_offset = (size_t)kvh * head_dim;
+            for (int kvh = 0; kvh < n_kv_heads; ++kvh) {
+                size_t current_k_offset = (size_t)kvh * head_dim;
+                size_t current_v_offset = (size_t)kvh * head_dim;
             size_t write_offset = pos * n_kv_heads * head_dim + kvh * head_dim;
             if (write_offset + head_dim <= cache->layers[l].k.size()) {
                 std::memcpy(&cache->layers[l].k[write_offset], k_current_ptr + current_k_offset, head_dim * sizeof(float));
                 std::memcpy(&cache->layers[l].v[write_offset], v_current_ptr + current_v_offset, head_dim * sizeof(float));
-             } else {
+                } else {
                 Logger::error("KVCache write out of bounds: write_offset=" + std::to_string(write_offset) + ", cache size=" + std::to_string(cache->layers[l].k.size()));
              }
         }
@@ -564,7 +564,7 @@ std::vector<float> TinyLlamaModel::forward(torch::Tensor& x_tensor, int pos, KVC
         float scale = 1.0f / std::sqrt(head_dim);
         
         // Iterate over query heads
-        for (int h = 0; h < n_heads; ++h) {
+            for (int h = 0; h < n_heads; ++h) {
             // Get Q head tensor
             torch::Tensor q_head = q_tensor.slice(/*dim=*/0, /*start=*/h * head_dim, /*end=*/(h + 1) * head_dim).unsqueeze(0); // Shape [1, head_dim]
             
@@ -580,7 +580,7 @@ std::vector<float> TinyLlamaModel::forward(torch::Tensor& x_tensor, int pos, KVC
                 if (cache_pos_offset + head_dim <= cache->layers[l].k.size()) {
                     std::memcpy(k_cache_head_vec.data() + j * head_dim, &cache->layers[l].k[cache_pos_offset], head_dim * sizeof(float));
                     std::memcpy(v_cache_head_vec.data() + j * head_dim, &cache->layers[l].v[cache_pos_offset], head_dim * sizeof(float));
-                } else {
+                    } else {
                     // Fill with zeros or handle error - For now, fill with zeros
                     std::fill(k_cache_head_vec.begin() + j * head_dim, k_cache_head_vec.begin() + (j + 1) * head_dim, 0.0f);
                     std::fill(v_cache_head_vec.begin() + j * head_dim, v_cache_head_vec.begin() + (j + 1) * head_dim, 0.0f);

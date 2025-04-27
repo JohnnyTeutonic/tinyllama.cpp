@@ -153,7 +153,7 @@ std::vector<std::string> Tokenizer::bpe_tokenize(const std::string& text) const 
                 current_word = " ";
                 in_whitespace = false;
             }
-        } else {
+    } else {
             current_word.push_back(c);
             in_whitespace = false;
         }
