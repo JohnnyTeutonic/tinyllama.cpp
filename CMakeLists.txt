@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.11)
-project(TinyLlamaCpp)
+project(TinyLlamaCpp LANGUAGES CXX CUDA)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -22,6 +22,22 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(Threads REQUIRED)
 find_package(nlohmann_json 3.2.0 REQUIRED)
 find_package(OpenMP REQUIRED)
+find_package(CUDA REQUIRED)
+
+if(CUDA_FOUND)
+    message(STATUS "Found CUDA toolkit version: ${CUDA_VERSION}")
+    # Set default CUDA architectures. Adjust these to match your target GPU(s)
+    set(CMAKE_CUDA_ARCHITECTURES 60 61 70 75 80 86 CACHE STRING "CUDA architectures") 
+    # Optional: Set CUDA standard if needed (e.g., 17)
+    # set(CMAKE_CUDA_STANDARD 17)
+    # set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+    
+    # Set the HAS_CUDA preprocessor definition
+    add_compile_definitions(HAS_CUDA)
+    message(STATUS "CUDA Found. Defining HAS_CUDA macro.")
+else()
+    message(WARNING "CUDA Toolkit not found. Building CPU-only version.")
+endif()
 
 # Add source files
 add_executable(tinyllama main.cpp model.cpp safetensors_loader.cpp tokenizer.cpp logger.cpp prompt.cpp vocab_loader.cpp)
@@ -41,6 +57,11 @@ target_link_libraries(tinyllama PRIVATE
     # "${TORCH_LIBRARIES}" // REMOVED
     # Torch::torch // REMOVED
 )
+
+# Conditionally link CUDA libraries
+if(CUDA_FOUND)
+    target_link_libraries(tinyllama PRIVATE ${CUDA_LIBRARIES})
+endif()
 
 # Find OpenMP and set compiler flags
 find_package(OpenMP REQUIRED)
