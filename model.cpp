@@ -625,24 +625,40 @@ std::vector<float> TinyLlamaModel::forward(torch::Tensor& x_tensor, int pos, KVC
         torch::Tensor x_norm2_tensor = rmsnorm(x_tensor, w_norm2_tensor, eps);
         log_vec_stats("Input to MLP RMSNorm (L" + std::to_string(l) + " P" + std::to_string(pos) + ")", std::vector<float>(static_cast<float*>(x_norm2_tensor.data_ptr()), static_cast<float*>(x_norm2_tensor.data_ptr()) + hs));
 
-        // --- START: Corrected MLP Logic (Already using Tensors) ---
-        torch::Tensor gate_proj_tensor = matvec(bf16vec_to_tensor(lw.gate_proj, {is, hs}), x_norm2_tensor); // Use x_norm2_tensor
-        torch::Tensor up_proj_tensor = matvec(bf16vec_to_tensor(lw.up_proj, {is, hs}), x_norm2_tensor);   // Use x_norm2_tensor
+        // --- START: MLP Logic with C++ SiLU --- 
+        torch::Tensor gate_proj_tensor = matvec(bf16vec_to_tensor(lw.gate_proj, {is, hs}), x_norm2_tensor);
+        torch::Tensor up_proj_tensor = matvec(bf16vec_to_tensor(lw.up_proj, {is, hs}), x_norm2_tensor);
+
+        // Convert tensors needed for C++ SiLU to vectors
+        std::vector<float> gate_vec(static_cast<float*>(gate_proj_tensor.data_ptr()), static_cast<float*>(gate_proj_tensor.data_ptr()) + is);
+        std::vector<float> up_vec(static_cast<float*>(up_proj_tensor.data_ptr()), static_cast<float*>(up_proj_tensor.data_ptr()) + is);
+        std::vector<float> silu_out_vec(is);
+
+        // Call the C++ SiLU function
+        silu(gate_vec, silu_out_vec);
+
+        // Perform element-wise multiplication for SwiGLU using vectors
+        std::vector<float> swiglu_result_vec(is);
+        #pragma omp parallel for
+        for(size_t i = 0; i < is; ++i) {
+            swiglu_result_vec[i] = silu_out_vec[i] * up_vec[i];
+        }
+
+        // Convert the final SwiGLU result back to a tensor
+        torch::Tensor swiglu_result_tensor = vec_to_tensor(swiglu_result_vec, {is});
 
         // Perform SwiGLU: silu(gate) * up 
-        // torch::silu is available, or compute manually: gate * torch::sigmoid(gate)
-        torch::Tensor swiglu_result_tensor = torch::nn::functional::silu(gate_proj_tensor) * up_proj_tensor; // Shape [is]
+        // torch::Tensor swiglu_result_tensor = torch::nn::functional::silu(gate_proj_tensor) * up_proj_tensor; // Shape [is] // <<< Torch version REMOVED
         
         if (log_target_layer) {
-            // Logging requires converting tensors to vectors
-            log_vector_summary("TROUBLESHOOTING L0 P1 Gate Proj Result", std::vector<float>(static_cast<float*>(gate_proj_tensor.data_ptr()), static_cast<float*>(gate_proj_tensor.data_ptr()) + is));
-            log_vector_summary("TROUBLESHOOTING L0 P1 Up Proj Result", std::vector<float>(static_cast<float*>(up_proj_tensor.data_ptr()), static_cast<float*>(up_proj_tensor.data_ptr()) + is));
-            log_vector_summary("TROUBLESHOOTING L0 P1 SwiGLU Result (SiLU(Gate) * Up)", std::vector<float>(static_cast<float*>(swiglu_result_tensor.data_ptr()), static_cast<float*>(swiglu_result_tensor.data_ptr()) + is));
+            log_vector_summary("TROUBLESHOOTING L0 P1 Gate Proj Result (Tensor)", std::vector<float>(static_cast<float*>(gate_proj_tensor.data_ptr()), static_cast<float*>(gate_proj_tensor.data_ptr()) + is));
+            log_vector_summary("TROUBLESHOOTING L0 P1 Up Proj Result (Tensor)", std::vector<float>(static_cast<float*>(up_proj_tensor.data_ptr()), static_cast<float*>(up_proj_tensor.data_ptr()) + is));
+            log_vector_summary("TROUBLESHOOTING L0 P1 SwiGLU Result (Vec->Tensor)", std::vector<float>(static_cast<float*>(swiglu_result_tensor.data_ptr()), static_cast<float*>(swiglu_result_tensor.data_ptr()) + is));
         }
         
-        // Calculate down projection
+        // Calculate down projection (uses the swiglu_result_tensor)
         torch::Tensor mlp_out_tensor = matvec(bf16vec_to_tensor(lw.down_proj, {hs, is}), swiglu_result_tensor); // Use swiglu_result_tensor
-        // --- END: Corrected MLP Logic ---
+        // --- END: MLP Logic with C++ SiLU ---
         
         log_vec_stats("MLP Output (L" + std::to_string(l) + " P" + std::to_string(pos) + ")", std::vector<float>(static_cast<float*>(mlp_out_tensor.data_ptr()), static_cast<float*>(mlp_out_tensor.data_ptr()) + hs));
         
