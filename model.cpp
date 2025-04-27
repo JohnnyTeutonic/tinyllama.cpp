@@ -105,7 +105,9 @@ std::vector<uint16_t> uint8_vector_to_uint16_vector(const std::vector<uint8_t>& 
 // Find the index of the maximum element in a vector
 int argmax(const std::vector<float>& v) {
     if (v.empty()) {
-        throw std::runtime_error("Cannot perform argmax on empty vector");
+        // throw std::runtime_error("Cannot perform argmax on empty vector");
+        Logger::error("Cannot perform argmax on empty vector"); // Log instead of throwing
+        return -1; // Return an invalid index
     }
     return std::distance(v.begin(), std::max_element(v.begin(), v.end()));
 }
@@ -119,16 +121,44 @@ torch::Tensor matvec(const torch::Tensor& mat, const torch::Tensor& vec) {
 
 // Replace RMSNorm with libtorch version
 torch::Tensor rmsnorm(const torch::Tensor& x, const torch::Tensor& weight, float eps) {
-    auto norm = x.norm(2, -1, true);
-    return x * (weight / (norm / std::sqrt(x.size(-1)) + eps));
+    // Ensure input tensor x is float32 for norm calculation
+    auto x_float = x.to(torch::kFloat32);
+    auto norm = x_float.norm(2, -1, true);
+    auto normalized_x = x_float / (norm / std::sqrt(x_float.size(-1)) + eps);
+    return normalized_x * weight; // weight should also be float32
 }
 
-// Replace softmax with libtorch version
+// Replace softmax with libtorch version -> Keep Torch version for now
 torch::Tensor softmax(const torch::Tensor& x) {
-    return torch::softmax(x, -1);
+    return torch::softmax(x.to(torch::kFloat32), -1);
 }
 
-// SiLU activation: y = x * sigmoid(x) - Match PyTorch structure
+// --- START: C++ Vector Softmax ---
+// Compute softmax for a vector in-place (or return new vector)
+static void softmax_vector(const std::vector<float>& x, std::vector<float>& out) {
+    if (x.empty()) return;
+    out.resize(x.size());
+
+    // Find max element for numerical stability
+    float max_val = *std::max_element(x.begin(), x.end());
+
+    // Compute exponentials and sum
+    float exp_sum = 0.0f;
+    for (size_t i = 0; i < x.size(); ++i) {
+        out[i] = std::exp(x[i] - max_val);
+        exp_sum += out[i];
+    }
+
+    // Normalize
+    float inv_sum = 1.0f / exp_sum;
+    #pragma omp parallel for
+    for (size_t i = 0; i < x.size(); ++i) {
+        out[i] *= inv_sum;
+    }
+}
+// --- END: C++ Vector Softmax ---
+
+// C++ Vector-based SiLU activation: y = x * sigmoid(x)
 static void silu(const std::vector<float>& x, std::vector<float>& out) {
     #pragma omp parallel for
     for (size_t i = 0; i < x.size(); ++i) {
@@ -137,7 +167,7 @@ static void silu(const std::vector<float>& x, std::vector<float>& out) {
     }
 }
 
-// Refactor apply_rope to work with torch::Tensor
+// Refactor apply_rope to work with torch::Tensor -> RENAME BACK to apply_rope
 void apply_rope(torch::Tensor& x, int num_heads, int head_dim, int pos, 
                 const std::vector<std::pair<float, float>>& freqs_cis) {
     // x shape: [num_heads * head_dim] or potentially [num_tokens, num_heads * head_dim]
@@ -205,6 +235,10 @@ void apply_rope(torch::Tensor& x, int num_heads, int head_dim, int pos,
 
 // Helper: log vector stats (min, max, mean, all finite)
 static void log_vec_stats(const std::string& name, const std::vector<float>& v) {
+    if (v.empty()) {
+        Logger::info(name + ": EMPTY VECTOR");
+        return;
+    }
     float minv = *std::min_element(v.begin(), v.end());
     float maxv = *std::max_element(v.begin(), v.end());
     float mean = std::accumulate(v.begin(), v.end(), 0.0f) / v.size();
@@ -320,6 +354,7 @@ void KVCache::initialize(int num_layers, int max_seq_len, int num_kv_heads, int 
 // Helper to convert std::vector<float> to torch::Tensor
 inline torch::Tensor vec_to_tensor(const std::vector<float>& v, std::vector<int64_t> shape) {
     if (shape.empty()) shape = {static_cast<int64_t>(v.size())};
+    // Ensure the tensor created owns its memory by cloning
     return torch::from_blob((void*)v.data(), shape, torch::TensorOptions().dtype(torch::kFloat32)).clone();
 }
 
@@ -328,6 +363,7 @@ inline torch::Tensor bf16vec_to_tensor(const std::vector<uint16_t>& v, std::vect
     std::vector<float> f32(v.size());
     for (size_t i = 0; i < v.size(); ++i) f32[i] = bfloat16_to_float32(v[i]);
     if (shape.empty()) shape = {static_cast<int64_t>(f32.size())};
+    // Ensure the tensor created owns its memory by cloning
     return torch::from_blob(f32.data(), shape, torch::TensorOptions().dtype(torch::kFloat32)).clone();
 }
 
@@ -526,14 +562,16 @@ std::vector<float> TinyLlamaModel::forward(torch::Tensor& x_tensor, int pos, KVC
             log_vector_summary("TROUBLESHOOTING L0 P1 V Proj Output", std::vector<float>(static_cast<float*>(v_current_tensor.data_ptr()), static_cast<float*>(v_current_tensor.data_ptr()) + n_kv_heads * head_dim));
         }
 
-        // c) RoPE for Q, K (operates in-place on tensors)
+        // c) RoPE for Q, K (using Tensor version)
         torch::Tensor q_before_rope = q_tensor.clone(); // Copy for logging
         torch::Tensor k_before_rope = k_current_tensor.clone(); // Copy for logging
+        
         // --- Get precomputed freqs for the current position --- 
         size_t freqs_offset = (pos * head_dim / 2);
         std::vector<std::pair<float, float>> current_freqs_cis(precomputed_freqs_cis_.begin() + freqs_offset, 
                                                                precomputed_freqs_cis_.begin() + freqs_offset + head_dim / 2);
-        // --- Apply RoPE --- 
+        
+        // --- Apply RoPE (Tensor version RESTORED) --- 
         apply_rope(q_tensor, n_heads, head_dim, pos, current_freqs_cis);
         apply_rope(k_current_tensor, n_kv_heads, head_dim, pos, current_freqs_cis);
         if (log_target_layer) {
@@ -595,8 +633,15 @@ std::vector<float> TinyLlamaModel::forward(torch::Tensor& x_tensor, int pos, KVC
             // q_head [1, head_dim], k_cache_head.t() [head_dim, seq_len]
             torch::Tensor scores = torch::matmul(q_head, k_cache_head.transpose(0, 1)) * scale; // Shape [1, seq_len]
             
-            // Apply Softmax
-            torch::Tensor probs = torch::softmax(scores, /*dim=*/-1); // Shape [1, seq_len]
+            // --- Apply Softmax (C++ vector version) ---
+            // Convert scores tensor to vector
+            std::vector<float> scores_vec(static_cast<float*>(scores.data_ptr()), static_cast<float*>(scores.data_ptr()) + current_seq_len); 
+            std::vector<float> probs_vec(current_seq_len);
+            // Call C++ softmax
+            softmax_vector(scores_vec, probs_vec);
+            // Convert result back to tensor
+            torch::Tensor probs = vec_to_tensor(probs_vec, {1, current_seq_len}); // Reshape to [1, seq_len]
+            // --- End Apply Softmax ---
             
             // Calculate Weighted Sum: Probs * V
             // probs [1, seq_len], v_cache_head [seq_len, head_dim]
@@ -618,7 +663,7 @@ std::vector<float> TinyLlamaModel::forward(torch::Tensor& x_tensor, int pos, KVC
             log_vector_summary("TROUBLESHOOTING L0 P1 State AFTER 1st Residual", std::vector<float>(static_cast<float*>(x_tensor.data_ptr()), static_cast<float*>(x_tensor.data_ptr()) + hs));
         }
 
-        // g) MLP block (using LibTorch)
+        // g) MLP block (using C++ SiLU, Torch matvec)
         torch::Tensor x_resid2_tensor = x_tensor.clone(); // Residual connection 2
         if (log_target_layer) log_vector_summary("TROUBLESHOOTING L0 P1 Input to MLP", std::vector<float>(static_cast<float*>(x_resid2_tensor.data_ptr()), static_cast<float*>(x_resid2_tensor.data_ptr()) + hs));
         torch::Tensor w_norm2_tensor = bf16vec_to_tensor(lw.post_attention_layernorm, {hs});
