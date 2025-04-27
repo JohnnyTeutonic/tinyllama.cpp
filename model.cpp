@@ -119,7 +119,8 @@ torch::Tensor matvec(const torch::Tensor& mat, const torch::Tensor& vec) {
     return torch::matmul(mat, vec);
 }
 
-// Replace RMSNorm with libtorch version
+// Replace RMSNorm with libtorch version -> REVERTING to C++ vector version
+/* // Torch version commented out
 torch::Tensor rmsnorm(const torch::Tensor& x, const torch::Tensor& weight, float eps) {
     // Ensure input tensor x is float32 for norm calculation
     auto x_float = x.to(torch::kFloat32);
@@ -127,6 +128,36 @@ torch::Tensor rmsnorm(const torch::Tensor& x, const torch::Tensor& weight, float
     auto normalized_x = x_float / (norm / std::sqrt(x_float.size(-1)) + eps);
     return normalized_x * weight; // weight should also be float32
 }
+*/
+
+// --- START: C++ Vector RMSNorm ---
+static void rmsnorm_vector(const std::vector<float>& x, const std::vector<float>& weight, std::vector<float>& out, float eps) {
+    if (x.empty() || x.size() != weight.size()) {
+        Logger::error("RMSNorm vector size mismatch or empty input.");
+        out.assign(x.size(), 0.0f); // Zero out output on error
+        return;
+    }
+    out.resize(x.size());
+    size_t n = x.size();
+
+    // Calculate sum of squares
+    double ssq = 0.0;
+    #pragma omp parallel for reduction(+:ssq)
+    for (size_t i = 0; i < n; ++i) {
+        ssq += static_cast<double>(x[i]) * static_cast<double>(x[i]);
+    }
+    ssq /= n;
+
+    // Compute normalization factor
+    float norm_factor = 1.0f / std::sqrt(static_cast<float>(ssq) + eps);
+
+    // Normalize and apply weight
+    #pragma omp parallel for
+    for (size_t i = 0; i < n; ++i) {
+        out[i] = x[i] * norm_factor * weight[i];
+    }
+}
+// --- END: C++ Vector RMSNorm ---
 
 // Replace softmax with libtorch version -> Keep Torch version for now
 torch::Tensor softmax(const torch::Tensor& x) {
@@ -367,6 +398,16 @@ inline torch::Tensor bf16vec_to_tensor(const std::vector<uint16_t>& v, std::vect
     return torch::from_blob(f32.data(), shape, torch::TensorOptions().dtype(torch::kFloat32)).clone();
 }
 
+// Helper function to convert bfloat16 vector to float vector
+static std::vector<float> bf16vec_to_float_vec(const std::vector<uint16_t>& v_bf16) {
+    std::vector<float> v_f32(v_bf16.size());
+    #pragma omp parallel for
+    for (size_t i = 0; i < v_bf16.size(); ++i) {
+        v_f32[i] = bfloat16_to_float32(v_bf16[i]);
+    }
+    return v_f32;
+}
+
 // TinyLlamaModel constructor: load all weights from safetensors into uint16_t vectors
 TinyLlamaModel::TinyLlamaModel(const ModelConfig& config, const SafeTensorsLoader& loader)
     : config_(config)
@@ -547,12 +588,17 @@ std::vector<float> TinyLlamaModel::forward(torch::Tensor& x_tensor, int pos, KVC
         torch::Tensor x_resid1_tensor = x_tensor.clone(); // Residual connection 1
         if (log_target_layer) log_vector_summary("TROUBLESHOOTING L0 P1 Input", std::vector<float>(static_cast<float*>(x_resid1_tensor.data_ptr()), static_cast<float*>(x_resid1_tensor.data_ptr()) + hs));
 
-        // a) Input RMSNorm
-        torch::Tensor w_norm1_tensor = bf16vec_to_tensor(lw.input_layernorm, {hs});
-        torch::Tensor x_norm_tensor = rmsnorm(x_tensor, w_norm1_tensor, eps);
-        if (log_target_layer) log_vector_summary("TROUBLESHOOTING L0 P1 Output RMSNorm1", std::vector<float>(static_cast<float*>(x_norm_tensor.data_ptr()), static_cast<float*>(x_norm_tensor.data_ptr()) + hs));
+        // a) Input RMSNorm (Using C++ Vector version)
+        // torch::Tensor w_norm1_tensor = bf16vec_to_tensor(lw.input_layernorm, {hs}); // Torch weight tensor not needed
+        // torch::Tensor x_norm_tensor = rmsnorm(x_tensor, w_norm1_tensor, eps); // Torch version call removed
+        std::vector<float> x_vec_in_norm1(static_cast<float*>(x_tensor.data_ptr()), static_cast<float*>(x_tensor.data_ptr()) + hs);
+        std::vector<float> w_norm1_vec = bf16vec_to_float_vec(lw.input_layernorm); // Convert weights to float vector
+        std::vector<float> x_norm_vec1(hs);
+        rmsnorm_vector(x_vec_in_norm1, w_norm1_vec, x_norm_vec1, eps);
+        torch::Tensor x_norm_tensor = vec_to_tensor(x_norm_vec1, {hs}); // Convert result back to tensor
+        if (log_target_layer) log_vector_summary("TROUBLESHOOTING L0 P1 Output C++ RMSNorm1", std::vector<float>(static_cast<float*>(x_norm_tensor.data_ptr()), static_cast<float*>(x_norm_tensor.data_ptr()) + hs));
 
-        // b) Q, K, V projections (all result in tensors)
+        // b) Q, K, V projections (Input is x_norm_tensor from above)
         torch::Tensor q_tensor = matvec(bf16vec_to_tensor(lw.q_proj, {hs, hs}), x_norm_tensor);
         torch::Tensor k_current_tensor = matvec(bf16vec_to_tensor(lw.k_proj, {n_kv_heads * head_dim, hs}), x_norm_tensor);
         torch::Tensor v_current_tensor = matvec(bf16vec_to_tensor(lw.v_proj, {n_kv_heads * head_dim, hs}), x_norm_tensor);
@@ -663,14 +709,20 @@ std::vector<float> TinyLlamaModel::forward(torch::Tensor& x_tensor, int pos, KVC
             log_vector_summary("TROUBLESHOOTING L0 P1 State AFTER 1st Residual", std::vector<float>(static_cast<float*>(x_tensor.data_ptr()), static_cast<float*>(x_tensor.data_ptr()) + hs));
         }
 
-        // g) MLP block (using C++ SiLU, Torch matvec)
+        // g) MLP block
         torch::Tensor x_resid2_tensor = x_tensor.clone(); // Residual connection 2
         if (log_target_layer) log_vector_summary("TROUBLESHOOTING L0 P1 Input to MLP", std::vector<float>(static_cast<float*>(x_resid2_tensor.data_ptr()), static_cast<float*>(x_resid2_tensor.data_ptr()) + hs));
-        torch::Tensor w_norm2_tensor = bf16vec_to_tensor(lw.post_attention_layernorm, {hs});
-        torch::Tensor x_norm2_tensor = rmsnorm(x_tensor, w_norm2_tensor, eps);
-        log_vec_stats("Input to MLP RMSNorm (L" + std::to_string(l) + " P" + std::to_string(pos) + ")", std::vector<float>(static_cast<float*>(x_norm2_tensor.data_ptr()), static_cast<float*>(x_norm2_tensor.data_ptr()) + hs));
+        // Post-attention RMSNorm (Using C++ Vector version)
+        // torch::Tensor w_norm2_tensor = bf16vec_to_tensor(lw.post_attention_layernorm, {hs}); // Torch weight tensor not needed
+        // torch::Tensor x_norm2_tensor = rmsnorm(x_tensor, w_norm2_tensor, eps); // Torch version call removed
+        std::vector<float> x_vec_in_norm2(static_cast<float*>(x_tensor.data_ptr()), static_cast<float*>(x_tensor.data_ptr()) + hs);
+        std::vector<float> w_norm2_vec = bf16vec_to_float_vec(lw.post_attention_layernorm); // Convert weights to float vector
+        std::vector<float> x_norm_vec2(hs);
+        rmsnorm_vector(x_vec_in_norm2, w_norm2_vec, x_norm_vec2, eps);
+        torch::Tensor x_norm2_tensor = vec_to_tensor(x_norm_vec2, {hs}); // Convert result back to tensor
+        log_vec_stats("Input to MLP C++ RMSNorm (L" + std::to_string(l) + " P" + std::to_string(pos) + ")", std::vector<float>(static_cast<float*>(x_norm2_tensor.data_ptr()), static_cast<float*>(x_norm2_tensor.data_ptr()) + hs));
 
-        // --- START: MLP Logic with C++ SiLU --- 
+        // --- START: MLP Logic with C++ SiLU --- (Input is x_norm2_tensor from above)
         torch::Tensor gate_proj_tensor = matvec(bf16vec_to_tensor(lw.gate_proj, {is, hs}), x_norm2_tensor);
         torch::Tensor up_proj_tensor = matvec(bf16vec_to_tensor(lw.up_proj, {is, hs}), x_norm2_tensor);
 
@@ -716,16 +768,21 @@ std::vector<float> TinyLlamaModel::forward(torch::Tensor& x_tensor, int pos, KVC
         }
     } // End layer loop
 
-    // 3. Final RMSNorm
+    // 3. Final RMSNorm (Using C++ Vector version)
     torch::Tensor x_final_norm_input_tensor = x_tensor.clone(); // Copy for logging
-    torch::Tensor w_final_norm_tensor = bf16vec_to_tensor(final_norm, {hs});
-    torch::Tensor x_final_norm_tensor = rmsnorm(x_tensor, w_final_norm_tensor, eps);
+    // torch::Tensor w_final_norm_tensor = bf16vec_to_tensor(final_norm, {hs}); // Torch weight tensor not needed
+    // torch::Tensor x_final_norm_tensor = rmsnorm(x_tensor, w_final_norm_tensor, eps); // Torch version call removed
+    std::vector<float> x_vec_in_final_norm(static_cast<float*>(x_tensor.data_ptr()), static_cast<float*>(x_tensor.data_ptr()) + hs);
+    std::vector<float> w_final_norm_vec = bf16vec_to_float_vec(final_norm); // Convert final_norm weights
+    std::vector<float> x_final_norm_vec(hs);
+    rmsnorm_vector(x_vec_in_final_norm, w_final_norm_vec, x_final_norm_vec, eps);
+    torch::Tensor x_final_norm_tensor = vec_to_tensor(x_final_norm_vec, {hs}); // Convert result back to tensor
     if (log_initial) { 
         log_vector_summary("TROUBLESHOOTING Input to Final RMSNorm (P0)", std::vector<float>(static_cast<float*>(x_final_norm_input_tensor.data_ptr()), static_cast<float*>(x_final_norm_input_tensor.data_ptr()) + hs));
-        log_vector_summary("TROUBLESHOOTING Output of Final RMSNorm (P0)", std::vector<float>(static_cast<float*>(x_final_norm_tensor.data_ptr()), static_cast<float*>(x_final_norm_tensor.data_ptr()) + hs));
+        log_vector_summary("TROUBLESHOOTING Output of Final C++ RMSNorm (P0)", std::vector<float>(static_cast<float*>(x_final_norm_tensor.data_ptr()), static_cast<float*>(x_final_norm_tensor.data_ptr()) + hs));
     }
 
-    // 4. Output projection to logits
+    // 4. Output projection to logits (Input is x_final_norm_tensor from above)
     torch::Tensor logits_tensor = matvec(bf16vec_to_tensor(lm_head, {vs, hs}), x_final_norm_tensor);
     
     // --- Convert final logits tensor back to std::vector<float> --- 
