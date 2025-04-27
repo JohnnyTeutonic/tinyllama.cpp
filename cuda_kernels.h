@@ -51,21 +51,23 @@ void rmsnorm_vector_cuda(const std::vector<float>& x_in_host,
                          float eps);
 
 /**
- * @brief Performs Matrix-Vector multiplication (BF16 * F32 -> F32) on the GPU.
- *
- * Computes out = mat * vec.
- * 
- * @param mat_bf16_host Input matrix (row-major, bfloat16, host memory).
- * @param vec_f32_host Input vector (float32, host memory).
- * @param out_f32_host Output vector (float32, host memory, will be resized and filled).
- * @param rows Number of rows in the matrix (size of output vector).
- * @param cols Number of columns in the matrix (size of input vector).
+ * @brief Host-vector version: for use with std::vector<float> input/output.
  */
 void matvec_bf16_f32_cuda(const std::vector<uint16_t>& mat_bf16_host,
                           const std::vector<float>& vec_f32_host,
                           std::vector<float>& out_f32_host,
                           int rows,
                           int cols);
+
+/**
+ * @brief Device-pointer version: for use with device input/output buffers.
+ */
+void matvec_bf16_f32_cuda(const std::vector<uint16_t>& mat_bf16_host,
+                          const float* vec_f32_dev,
+                          float* out_f32_dev,
+                          int rows,
+                          int cols,
+                          cudaStream_t stream = 0);
 
 /**
  * @brief Performs element-wise SiLU activation (x * sigmoid(x)) on the GPU.

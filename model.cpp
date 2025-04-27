@@ -725,8 +725,24 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, K
         if (log_target_layer) log_vector_summary("TROUBLESHOOTING L0 P1 Output C++ RMSNorm1", x_norm_vec1);
 
         // b) Q, K, V projections (Using C++ Vector MatVec)
+#ifdef HAS_CUDA
+        // Q projection
+        float* x_norm1_dev = nullptr;
+        float* q_vec_dev = nullptr;
+        gpuErrchk(cudaMalloc(&x_norm1_dev, hs * sizeof(float)));
+        gpuErrchk(cudaMemcpy(x_norm1_dev, x_norm_vec1.data(), hs * sizeof(float), cudaMemcpyHostToDevice));
+        gpuErrchk(cudaMalloc(&q_vec_dev, hs * sizeof(float)));
+        matvec_bf16_f32_cuda(lw.q_proj, x_norm1_dev, q_vec_dev, hs, hs);
+        gpuErrchk(cudaDeviceSynchronize());
+        gpuErrchk(cudaMemcpy(q_vec.data(), q_vec_dev, hs * sizeof(float), cudaMemcpyDeviceToHost));
+        gpuErrchk(cudaFree(x_norm1_dev));
+        gpuErrchk(cudaFree(q_vec_dev));
+#else
         matvec_bf16_f32_vector(lw.q_proj, x_norm_vec1, q_vec, hs, hs);
+#endif
+        // K projection
         matvec_bf16_f32_vector(lw.k_proj, x_norm_vec1, k_vec, n_kv_heads * head_dim, hs);
+        // V projection
         matvec_bf16_f32_vector(lw.v_proj, x_norm_vec1, v_vec, n_kv_heads * head_dim, hs);
         
         // Log vectors BEFORE RoPE

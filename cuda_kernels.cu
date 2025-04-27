@@ -181,56 +181,48 @@ __global__ void matvec_bf16_f32_kernel(const uint16_t* mat_bf16,
     }
 }
 
-// --- MatVec C++ Wrapper ---
+// --- MatVec C++ Wrapper (device pointer version) ---
+void matvec_bf16_f32_cuda(const std::vector<uint16_t>& mat_bf16_host,
+                          const float* vec_f32_dev,
+                          float* out_f32_dev,
+                          int rows,
+                          int cols,
+                          cudaStream_t stream) {
+    // Copy weights to device
+    uint16_t* mat_bf16_dev = nullptr;
+    gpuErrchk(cudaMalloc(&mat_bf16_dev, rows * cols * sizeof(uint16_t)));
+    gpuErrchk(cudaMemcpy(mat_bf16_dev, mat_bf16_host.data(), rows * cols * sizeof(uint16_t), cudaMemcpyHostToDevice));
+    // Kernel launch config
+    const int threads_per_block_x = 256;
+    const int threads_per_block_y = 1;
+    dim3 threads_per_block(threads_per_block_x, threads_per_block_y);
+    int num_blocks_x = (rows + threads_per_block_y -1) / threads_per_block_y;
+    int num_blocks_y = 1;
+    dim3 num_blocks(num_blocks_x, num_blocks_y);
+    size_t shared_mem_size = threads_per_block_x * sizeof(float);
+    // Launch kernel
+    matvec_bf16_f32_kernel<<<num_blocks, threads_per_block, shared_mem_size, stream>>>(
+        mat_bf16_dev, vec_f32_dev, out_f32_dev, rows, cols
+    );
+    gpuErrchk(cudaGetLastError());
+    gpuErrchk(cudaFree(mat_bf16_dev));
+}
+
+// Host-vector version: allocates/copies, calls device-pointer version, copies back
 void matvec_bf16_f32_cuda(const std::vector<uint16_t>& mat_bf16_host,
                           const std::vector<float>& vec_f32_host,
                           std::vector<float>& out_f32_host,
                           int rows,
-                          int cols)
-{
-    if (mat_bf16_host.size() != (size_t)rows * cols || vec_f32_host.size() != cols) {
-         throw std::runtime_error("MatVec CUDA: Input size mismatch.");
-    }
+                          int cols) {
     out_f32_host.resize(rows);
-
-    // --- Device Memory Allocation ---
-    uint16_t* mat_bf16_dev = nullptr;
     float* vec_f32_dev = nullptr;
     float* out_f32_dev = nullptr;
-
-    gpuErrchk(cudaMalloc(&mat_bf16_dev, rows * cols * sizeof(uint16_t)));
     gpuErrchk(cudaMalloc(&vec_f32_dev, cols * sizeof(float)));
     gpuErrchk(cudaMalloc(&out_f32_dev, rows * sizeof(float)));
-
-    // --- Copy Data Host -> Device ---
-    gpuErrchk(cudaMemcpy(mat_bf16_dev, mat_bf16_host.data(), rows * cols * sizeof(uint16_t), cudaMemcpyHostToDevice));
     gpuErrchk(cudaMemcpy(vec_f32_dev, vec_f32_host.data(), cols * sizeof(float), cudaMemcpyHostToDevice));
-
-    // --- Kernel Launch Configuration ---
-    // Needs tuning! Using simple defaults.
-    // Assign threads along columns for reduction, blocks along rows.
-    const int threads_per_block_x = 256; // Threads cooperating on one row's dot product
-    const int threads_per_block_y = 1;   // Process one row per block
-    dim3 threads_per_block(threads_per_block_x, threads_per_block_y);
-    
-    int num_blocks_x = (rows + threads_per_block_y -1) / threads_per_block_y;
-    int num_blocks_y = 1;
-    dim3 num_blocks(num_blocks_x, num_blocks_y); 
-
-    size_t shared_mem_size = threads_per_block_x * sizeof(float); // Shared memory for reduction within a block
-
-    // --- Launch Kernel ---
-    matvec_bf16_f32_kernel<<<num_blocks, threads_per_block, shared_mem_size>>>(
-        mat_bf16_dev, vec_f32_dev, out_f32_dev, rows, cols
-    );
-    gpuErrchk(cudaGetLastError()); // Check for kernel launch errors
-
-    // --- Copy Result Device -> Host ---
+    matvec_bf16_f32_cuda(mat_bf16_host, vec_f32_dev, out_f32_dev, rows, cols);
+    gpuErrchk(cudaDeviceSynchronize());
     gpuErrchk(cudaMemcpy(out_f32_host.data(), out_f32_dev, rows * sizeof(float), cudaMemcpyDeviceToHost));
-    gpuErrchk(cudaDeviceSynchronize()); // Ensure copy is complete
-
-    // --- Cleanup ---
-    gpuErrchk(cudaFree(mat_bf16_dev));
     gpuErrchk(cudaFree(vec_f32_dev));
     gpuErrchk(cudaFree(out_f32_dev));
 }
