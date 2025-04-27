@@ -96,6 +96,8 @@ void swiglu_cuda(const std::vector<float>& gate_host,
                  std::vector<float>& out_host,
                  int n);
 
+void rope_cuda(std::vector<float>& x, int num_heads, int head_dim, const std::vector<float>& freqs_cis);
+
 #endif // HAS_CUDA
 
 #endif // CUDA_KERNELS_H 

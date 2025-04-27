@@ -457,4 +457,44 @@ void swiglu_cuda(const std::vector<float>& gate_host,
     gpuErrchk(cudaFree(out_dev));
 }
 
+// <<< ROPE KERNEL >>>
+__global__ void rope_kernel(float* x, int num_heads, int head_dim, const float* freqs_cis) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_pairs = num_heads * (head_dim / 2);
+    if (idx >= total_pairs) return;
+    int head = idx / (head_dim / 2);
+    int pair = idx % (head_dim / 2);
+    int base = head * head_dim + pair;
+    int base2 = head * head_dim + pair + head_dim / 2;
+    float x0 = x[base];
+    float x1 = x[base2];
+    float cos_val = freqs_cis[2 * pair];
+    float sin_val = freqs_cis[2 * pair + 1];
+    x[base]  = x0 * cos_val - x1 * sin_val;
+    x[base2] = x0 * sin_val + x1 * cos_val;
+}
+
+void rope_cuda(std::vector<float>& x, int num_heads, int head_dim, const std::vector<float>& freqs_cis) {
+    if (x.size() != (size_t)(num_heads * head_dim)) {
+        throw std::runtime_error("RoPE CUDA: x size mismatch.");
+    }
+    if (freqs_cis.size() != (size_t)head_dim) {
+        throw std::runtime_error("RoPE CUDA: freqs_cis size mismatch.");
+    }
+    float* x_dev = nullptr;
+    float* freqs_dev = nullptr;
+    gpuErrchk(cudaMalloc(&x_dev, x.size() * sizeof(float)));
+    gpuErrchk(cudaMalloc(&freqs_dev, freqs_cis.size() * sizeof(float)));
+    gpuErrchk(cudaMemcpy(x_dev, x.data(), x.size() * sizeof(float), cudaMemcpyHostToDevice));
+    gpuErrchk(cudaMemcpy(freqs_dev, freqs_cis.data(), freqs_cis.size() * sizeof(float), cudaMemcpyHostToDevice));
+    int total_pairs = num_heads * (head_dim / 2);
+    int threads_per_block = 256;
+    int num_blocks = (total_pairs + threads_per_block - 1) / threads_per_block;
+    rope_kernel<<<num_blocks, threads_per_block>>>(x_dev, num_heads, head_dim, freqs_dev);
+    gpuErrchk(cudaGetLastError());
+    gpuErrchk(cudaMemcpy(x.data(), x_dev, x.size() * sizeof(float), cudaMemcpyDeviceToHost));
+    gpuErrchk(cudaFree(x_dev));
+    gpuErrchk(cudaFree(freqs_dev));
+}
+
 #endif // HAS_CUDA 

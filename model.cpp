@@ -153,28 +153,31 @@ static void rmsnorm_vector(const std::vector<float>& x, const std::vector<float>
 // Compute softmax for a vector in-place (or return new vector)
 static void softmax_vector(const std::vector<float>& x, std::vector<float>& out) {
 #ifdef HAS_CUDA
-    // Logger::info("Using CUDA Softmax"); // Optional log
     softmax_vector_cuda(x, out, x.size());
 #else
-    // Logger::info("Using CPU Softmax (OpenMP)"); // Optional log
-    // Original OpenMP Implementation
     if (x.empty()) return;
     out.resize(x.size());
+    size_t n = x.size();
 
-    // Find max element for numerical stability
-    float max_val = *std::max_element(x.begin(), x.end());
+    // 1. Find max element for numerical stability
+    float max_val = x[0];
+    #pragma omp parallel for reduction(max:max_val)
+    for (size_t i = 1; i < n; ++i) {
+        if (x[i] > max_val) max_val = x[i];
+    }
 
-    // Compute exponentials and sum
+    // 2. Compute exponentials and sum
     float exp_sum = 0.0f;
-    for (size_t i = 0; i < x.size(); ++i) {
+    #pragma omp parallel for reduction(+:exp_sum)
+    for (size_t i = 0; i < n; ++i) {
         out[i] = std::exp(x[i] - max_val);
         exp_sum += out[i];
     }
 
-    // Normalize
+    // 3. Normalize
     float inv_sum = 1.0f / exp_sum;
     #pragma omp parallel for
-    for (size_t i = 0; i < x.size(); ++i) {
+    for (size_t i = 0; i < n; ++i) {
         out[i] *= inv_sum;
     }
 #endif // HAS_CUDA
@@ -442,6 +445,16 @@ static void calculate_attention_scores(const std::vector<float>& Q,
 // --- END: C++ Attention Scores ---
 static void apply_rope_vector(std::vector<float>& x, int num_heads, int head_dim, int pos, 
                        const std::vector<std::pair<float, float>>& freqs_cis) {
+#ifdef HAS_CUDA
+    // Flatten freqs_cis to interleaved [cos0, sin0, cos1, sin1, ...]
+    std::vector<float> flat_freqs;
+    flat_freqs.reserve(freqs_cis.size() * 2);
+    for (const auto& p : freqs_cis) {
+        flat_freqs.push_back(p.first);
+        flat_freqs.push_back(p.second);
+    }
+    rope_cuda(x, num_heads, head_dim, flat_freqs);
+#else
     if (x.size() != num_heads * head_dim) {
         Logger::error("apply_rope_vector: Input vector x has incorrect size. Expected " + 
                      std::to_string(num_heads * head_dim) + ", got " + std::to_string(x.size()));
@@ -475,6 +488,7 @@ static void apply_rope_vector(std::vector<float>& x, int num_heads, int head_dim
             x[head_offset + i + dim_half] = static_cast<float>(rotated_x1);
         }
     }
+#endif
 }
 
 /* // Torch tensor apply_rope REMOVED
