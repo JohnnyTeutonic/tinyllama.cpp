@@ -827,8 +827,22 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, K
         if (log_target_layer) log_vector_summary("TROUBLESHOOTING L0 P1 Input to MLP", x_resid2_vec);
         
         // Post-attention RMSNorm
+#ifdef HAS_CUDA
         std::vector<float> w_norm2_vec = bf16vec_to_float_vec(lw.post_attention_layernorm);
-        rmsnorm_vector(x_vec, w_norm2_vec, x_norm_vec2, eps); // Input x_vec, output x_norm_vec2
+        gpuErrchk(cudaMemcpy(x_dev, x_vec.data(), hs * sizeof(float), cudaMemcpyHostToDevice));
+        float* w_norm2_dev = nullptr;
+        gpuErrchk(cudaMalloc(&w_norm2_dev, hs * sizeof(float)));
+        gpuErrchk(cudaMemcpy(w_norm2_dev, w_norm2_vec.data(), hs * sizeof(float), cudaMemcpyHostToDevice));
+        Logger::info("[CUDA] Calling device-pointer RMSNorm for post-attention");
+        rmsnorm_vector_cuda(x_dev, w_norm2_dev, x_norm_dev, hs, eps);
+        gpuErrchk(cudaDeviceSynchronize());
+        Logger::info("[CUDA] Copying post-attention RMSNorm output back to host");
+        cudaMemcpy(x_norm_vec2.data(), x_norm_dev, hs * sizeof(float), cudaMemcpyDeviceToHost);
+        gpuErrchk(cudaFree(w_norm2_dev));
+#else
+        std::vector<float> w_norm2_vec = bf16vec_to_float_vec(lw.post_attention_layernorm);
+        rmsnorm_vector(x_vec, w_norm2_vec, x_norm_vec2, eps);
+#endif
         log_vec_stats("Input to MLP C++ RMSNorm (L" + std::to_string(l) + " P" + std::to_string(pos) + ")", x_norm_vec2);
 
         // MLP MatVecs
@@ -870,9 +884,23 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, K
 
     // 3. Final RMSNorm
     std::vector<float> x_final_norm_input_vec = x_vec; // Copy for logging if needed
+    std::vector<float> x_final_norm_vec(hs); // <-- Declare here so both branches can use it
+#ifdef HAS_CUDA
     std::vector<float> w_final_norm_vec = bf16vec_to_float_vec(final_norm);
-    std::vector<float> x_final_norm_vec(hs);
-    rmsnorm_vector(x_vec, w_final_norm_vec, x_final_norm_vec, eps); // Input x_vec, output x_final_norm_vec
+    gpuErrchk(cudaMemcpy(x_dev, x_vec.data(), hs * sizeof(float), cudaMemcpyHostToDevice));
+    float* w_final_norm_dev = nullptr;
+    gpuErrchk(cudaMalloc(&w_final_norm_dev, hs * sizeof(float)));
+    gpuErrchk(cudaMemcpy(w_final_norm_dev, w_final_norm_vec.data(), hs * sizeof(float), cudaMemcpyHostToDevice));
+    Logger::info("[CUDA] Calling device-pointer RMSNorm for final norm");
+    rmsnorm_vector_cuda(x_dev, w_final_norm_dev, x_norm_dev, hs, eps);
+    gpuErrchk(cudaDeviceSynchronize());
+    Logger::info("[CUDA] Copying final RMSNorm output back to host");
+    cudaMemcpy(x_final_norm_vec.data(), x_norm_dev, hs * sizeof(float), cudaMemcpyDeviceToHost);
+    gpuErrchk(cudaFree(w_final_norm_dev));
+#else
+    std::vector<float> w_final_norm_vec = bf16vec_to_float_vec(final_norm);
+    rmsnorm_vector(x_vec, w_final_norm_vec, x_final_norm_vec, eps);
+#endif
     if (log_initial) { 
         log_vector_summary("TROUBLESHOOTING Input to Final RMSNorm (P0)", x_final_norm_input_vec);
         log_vector_summary("TROUBLESHOOTING Output of Final C++ RMSNorm (P0)", x_final_norm_vec); 
