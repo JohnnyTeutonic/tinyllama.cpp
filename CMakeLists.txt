@@ -17,8 +17,8 @@ if(CUDA_FOUND)
     # set(CMAKE_CUDA_STANDARD_REQUIRED ON)
     
     # Set the HAS_CUDA preprocessor definition
-    add_compile_definitions(HAS_CUDA)
-    message(STATUS "CUDA Found. Defining HAS_CUDA macro.")
+    #add_compile_definitions(HAS_CUDA)
+    #message(STATUS "CUDA Found. Defining HAS_CUDA macro.")
 else()
     message(WARNING "CUDA Toolkit not found. Building CPU-only version.")
 endif()

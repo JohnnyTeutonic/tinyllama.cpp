@@ -64,6 +64,9 @@ public:
     // --- Forward Pass (NOW uses std::vector<float>) --- 
     std::vector<float> forward(std::vector<float>& x_vec, int pos, KVCache* cache = nullptr, const std::vector<int>* attention_mask = nullptr);
 
+    // New: Device-only forward pass for incremental GPU pipeline
+    std::vector<float> forward_device(int token_id, int pos, KVCache* cache = nullptr, const std::vector<int>* attention_mask = nullptr);
+
     // Get model config
     const ModelConfig& get_config() const { return config_; }
 
@@ -80,11 +83,6 @@ public:
     std::vector<float> lookup_embedding(int token_id);
 
     int get_vocab_size() const;
-
-#ifdef HAS_CUDA
-    float* lookup_embedding_device(int token_id);
-    std::vector<float> forward_device(int token_id, int pos, KVCache* cache = nullptr, const std::vector<int>* attention_mask = nullptr);
-#endif
 
 private:
     ModelConfig config_;

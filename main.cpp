@@ -188,7 +188,7 @@ int main(int argc, char** argv) {
             // Option 1: Use the low-level API as before
             std::vector<std::string> prompt_tokens = tokenizer.tokenize(prompt);
             std::vector<int> prompt_ids = tokenizer.tokens_to_ids(prompt_tokens);
-            
+
             // Option 2 (alternative): Use the encode method which can add special tokens if configured
             // std::vector<int> prompt_ids = tokenizer.encode(prompt, true); // true to add BOS/EOS if configured
             
@@ -206,10 +206,10 @@ int main(int argc, char** argv) {
             int max_new_tokens = 30; // Set max generated tokens to 30
             int num_prompt_tokens = prompt_ids.size();
             std::vector<int> generated_ids = prompt_ids;
-            std::vector<int> generated_only_ids;
+            std::vector<int> generated_only_ids; 
             std::vector<float> current_x_vec; // Use std::vector for state
             cache.seq_len = 0; // Reset cache length
-
+            
             Logger::info("Starting token-by-token processing loop with KVCache...");
             std::cout << "Generating tokens..." << std::endl; // Initial message
             
@@ -294,7 +294,7 @@ int main(int argc, char** argv) {
                     // --- END LOGGING ---\
 
                     // Store generated token
-                    generated_only_ids.push_back(next_token_id);
+                        generated_only_ids.push_back(next_token_id);
                     generated_ids.push_back(next_token_id); // Keep track of the full sequence for context
                     generated_count++;
 
@@ -329,6 +329,13 @@ int main(int argc, char** argv) {
             }());
             Logger::info("Generated answer: " + generated_text);
             std::cout << "\nGenerated Answer:\n" << generated_text << std::endl;
+
+            // After model construction, call forward_device for a test
+#ifdef HAS_CUDA
+            Logger::info("[TEST] Running forward_device for token 0, pos 0");
+            std::vector<float> device_out = model.forward_device(0, 0);
+            Logger::info("[TEST] forward_device output (first 5): " + std::to_string(device_out[0]) + ", " + std::to_string(device_out[1]) + ", " + std::to_string(device_out[2]) + ", " + std::to_string(device_out[3]) + ", " + std::to_string(device_out[4]));
+#endif
         } catch (const std::exception& e) {
             Logger::error(std::string("Model weight loading error: ") + e.what());
             return 1;

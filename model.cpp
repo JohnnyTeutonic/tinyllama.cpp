@@ -1,7 +1,8 @@
 #include "model.h"
 #include "logger.h"
+#include "cuda_kernels.h" // Include CUDA kernel declarations (ALWAYS INCLUDE THIS)
 #ifdef HAS_CUDA
-#include "cuda_kernels.h"
+// extern declaration removed as it's handled by the header now
 #endif
 #include <stdexcept>
 #include <cstring>
@@ -579,6 +580,11 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& config, const SafeTensorsLoade
                  }
             }
 
+            // Print first 5 raw uint16_t values of q_proj for this layer (for basic check)
+            std::ostringstream oss;
+            oss << "C++ layer " << i << " q_proj first 5 (uint16_t): ";
+            for (int j = 0; j < 5 && j < lw.q_proj.size(); ++j) oss << lw.q_proj[j] << " ";
+            Logger::info(oss.str());
         } catch (const std::exception& e) {
             Logger::error("Missing or malformed weights in layer " + std::to_string(i) + ": " + e.what());
         }
@@ -597,6 +603,10 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& config, const SafeTensorsLoade
             float cos_val = std::cos(angle);
             float sin_val = std::sin(angle);
             precomputed_freqs_cis_[(pos * head_dim / 2) + (i / 2)] = {cos_val, sin_val};
+            // Log first few values for pos=1
+            if (pos == 1 && (i/2) < 5) { // Log first 5 pairs for pos=1
+                 Logger::info("C++ RoPE Precompute (Pos=1, FreqDim=" + std::to_string(i/2) + "): cos=" + std::to_string(cos_val) + " sin=" + std::to_string(sin_val));
+            }
         }
     }
     Logger::info("Precomputed RoPE cos/sin frequencies.");
@@ -627,100 +637,6 @@ std::vector<float> TinyLlamaModel::lookup_embedding(int token_id) {
     // Logger::info("Performed embedding lookup for token: " + std::to_string(token_id));
     return embedding_vec; // Return the vector
 }
-
-// Device-only embedding lookup
-float* TinyLlamaModel::lookup_embedding_device(int token_id) {
-    int hs = config_.hidden_size;
-    int vs = config_.vocab_size;
-    if (token_id < 0 || token_id >= vs) {
-        Logger::error("Token ID out of bounds in lookup_embedding_device: " + std::to_string(token_id));
-        float* zero_dev = nullptr;
-        gpuErrchk(cudaMalloc(&zero_dev, hs * sizeof(float)));
-        gpuErrchk(cudaMemset(zero_dev, 0, hs * sizeof(float)));
-        return zero_dev;
-    }
-    size_t offset = (size_t)token_id * hs;
-    if (offset + hs > embed_tokens.size()) {
-        Logger::error("Embedding offset out of bounds in lookup_embedding_device for token: " + std::to_string(token_id));
-        float* zero_dev = nullptr;
-        gpuErrchk(cudaMalloc(&zero_dev, hs * sizeof(float)));
-        gpuErrchk(cudaMemset(zero_dev, 0, hs * sizeof(float)));
-        return zero_dev;
-    }
-    std::vector<uint16_t> token_embedding_bf16(embed_tokens.begin() + offset, embed_tokens.begin() + offset + hs);
-    std::vector<float> embedding_vec = bf16vec_to_float_vec(token_embedding_bf16);
-    float* emb_dev = nullptr;
-    gpuErrchk(cudaMalloc(&emb_dev, hs * sizeof(float)));
-    gpuErrchk(cudaMemcpy(emb_dev, embedding_vec.data(), hs * sizeof(float), cudaMemcpyHostToDevice));
-    return emb_dev;
-}
-
-// --- Forward Pass (Device-only start, incremental) ---
-#ifdef HAS_CUDA
-// New device-only forward pass start
-std::vector<float> TinyLlamaModel::forward_device(int token_id, int pos, KVCache* cache, const std::vector<int>* attention_mask) {
-    int hs = config_.hidden_size;
-    int vs = config_.vocab_size;
-    int n_kv_heads = config_.num_key_value_heads;
-    int n_heads = config_.num_attention_heads;
-    int head_dim = hs / n_heads;
-    float eps = config_.rms_norm_eps;
-    // 1. Device-only embedding lookup
-    float* emb_dev = lookup_embedding_device(token_id);
-    // 2. Allocate device buffer for RMSNorm output
-    float* x_norm_dev = nullptr;
-    gpuErrchk(cudaMalloc(&x_norm_dev, hs * sizeof(float)));
-    // 3. Allocate and copy RMSNorm weights to device (use layer 0 for now)
-    std::vector<float> w_norm1_vec = bf16vec_to_float_vec(layers[0].input_layernorm);
-    float* w_norm1_dev = nullptr;
-    gpuErrchk(cudaMalloc(&w_norm1_dev, hs * sizeof(float)));
-    gpuErrchk(cudaMemcpy(w_norm1_dev, w_norm1_vec.data(), hs * sizeof(float), cudaMemcpyHostToDevice));
-    // 4. Call CUDA RMSNorm
-    rmsnorm_vector_cuda(emb_dev, w_norm1_dev, x_norm_dev, hs, eps);
-    gpuErrchk(cudaDeviceSynchronize());
-    gpuErrchk(cudaFree(emb_dev));
-    gpuErrchk(cudaFree(w_norm1_dev));
-    // 5. Q, K, V projections on device
-    float* q_dev = nullptr;
-    float* k_dev = nullptr;
-    float* v_dev = nullptr;
-    gpuErrchk(cudaMalloc(&q_dev, hs * sizeof(float)));
-    gpuErrchk(cudaMalloc(&k_dev, n_kv_heads * head_dim * sizeof(float)));
-    gpuErrchk(cudaMalloc(&v_dev, n_kv_heads * head_dim * sizeof(float)));
-    matvec_bf16_f32_cuda(layers[0].q_proj, x_norm_dev, q_dev, hs, hs);
-    matvec_bf16_f32_cuda(layers[0].k_proj, x_norm_dev, k_dev, n_kv_heads * head_dim, hs);
-    matvec_bf16_f32_cuda(layers[0].v_proj, x_norm_dev, v_dev, n_kv_heads * head_dim, hs);
-    gpuErrchk(cudaDeviceSynchronize());
-    gpuErrchk(cudaFree(x_norm_dev));
-    // 6. RoPE on device for Q and K
-    size_t freqs_offset = (pos * head_dim / 2);
-    std::vector<std::pair<float, float>> current_freqs_cis(precomputed_freqs_cis_.begin() + freqs_offset, precomputed_freqs_cis_.begin() + freqs_offset + head_dim / 2);
-    // Flatten freqs_cis for CUDA kernel
-    std::vector<float> flat_freqs;
-    flat_freqs.reserve(current_freqs_cis.size() * 2);
-    for (const auto& p : current_freqs_cis) {
-        flat_freqs.push_back(p.first);
-        flat_freqs.push_back(p.second);
-    }
-    // Apply RoPE to Q
-    rope_cuda_device(q_dev, n_heads, head_dim, flat_freqs);
-    // Apply RoPE to K
-    rope_cuda_device(k_dev, n_kv_heads, head_dim, flat_freqs);
-    // 7. Copy Q, K, V to host
-    std::vector<float> q_host(hs);
-    std::vector<float> k_host(n_kv_heads * head_dim);
-    std::vector<float> v_host(n_kv_heads * head_dim);
-    gpuErrchk(cudaMemcpy(q_host.data(), q_dev, hs * sizeof(float), cudaMemcpyDeviceToHost));
-    gpuErrchk(cudaMemcpy(k_host.data(), k_dev, n_kv_heads * head_dim * sizeof(float), cudaMemcpyDeviceToHost));
-    gpuErrchk(cudaMemcpy(v_host.data(), v_dev, n_kv_heads * head_dim * sizeof(float), cudaMemcpyDeviceToHost));
-    // 8. Free device buffers
-    gpuErrchk(cudaFree(q_dev));
-    gpuErrchk(cudaFree(k_dev));
-    gpuErrchk(cudaFree(v_dev));
-    // 9. Call the original host-based forward pass, passing Q as x_vec for now
-    return forward(q_host, pos, cache, attention_mask);
-}
-#endif
 
 // --- Forward Pass (Now takes std::vector<float>&) ---
 std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, KVCache* cache, const std::vector<int>* attention_mask) {
@@ -911,7 +827,7 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, K
                 if (cache_pos_offset + head_dim <= cache->layers[l].k.size()) {
                     std::memcpy(k_cache_head_vec.data() + j * head_dim, &cache->layers[l].k[cache_pos_offset], head_dim * sizeof(float));
                     std::memcpy(v_cache_head_vec.data() + j * head_dim, &cache->layers[l].v[cache_pos_offset], head_dim * sizeof(float));
-                    } else {
+             } else {
                     std::fill(k_cache_head_vec.begin() + j * head_dim, k_cache_head_vec.begin() + (j + 1) * head_dim, 0.0f);
                     std::fill(v_cache_head_vec.begin() + j * head_dim, v_cache_head_vec.begin() + (j + 1) * head_dim, 0.0f);
                     Logger::error("Attention K/V access out of bounds: cache_pos_offset=" + std::to_string(cache_pos_offset));
@@ -1013,11 +929,11 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, K
         matvec_bf16_f32_vector(lw.up_proj, x_norm_vec2, up_vec, is, hs);
 #endif
 
-        // Fused SwiGLU: no separate SiLU call needed
 #ifdef HAS_CUDA
+        // Fused SwiGLU: no separate SiLU call needed
         swiglu_cuda(gate_vec, up_vec, swiglu_result_vec, is);
 #else
-        // CPU version with separate SiLU
+        // CPU SwiGLU (using separate SiLU for clarity)
         silu(gate_vec, silu_out_vec);
         #pragma omp parallel for
         for(size_t i = 0; i < is; ++i) {
@@ -1114,4 +1030,51 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, K
 // --- Get Vocab Size --- 
 int TinyLlamaModel::get_vocab_size() const {
     return config_.vocab_size;
+}
+
+std::vector<float> TinyLlamaModel::forward_device(int token_id, int pos, KVCache* cache, const std::vector<int>* attention_mask) {
+#ifdef HAS_CUDA
+    int hs = config_.hidden_size;
+    int vs = config_.vocab_size;
+    float eps = config_.rms_norm_eps;
+
+    // 1. Embedding lookup (host to device ONCE)
+    if (token_id < 0 || token_id >= vs) {
+        Logger::error("Token ID out of bounds in forward_device: " + std::to_string(token_id));
+        return std::vector<float>(hs, 0.0f);
+    }
+    size_t offset = (size_t)token_id * hs;
+    std::vector<uint16_t> token_embedding_bf16(embed_tokens.begin() + offset, embed_tokens.begin() + offset + hs);
+    std::vector<float> embedding_vec = bf16vec_to_float_vec(token_embedding_bf16);
+
+    float* x_dev = nullptr;
+    gpuErrchk(cudaMalloc(&x_dev, hs * sizeof(float)));
+    gpuErrchk(cudaMemcpy(x_dev, embedding_vec.data(), hs * sizeof(float), cudaMemcpyHostToDevice));
+
+    // 2. First RMSNorm (on device)
+    std::vector<float> w_norm1_vec = bf16vec_to_float_vec(layers[0].input_layernorm);
+    float* w_norm1_dev = nullptr;
+    gpuErrchk(cudaMalloc(&w_norm1_dev, hs * sizeof(float)));
+    gpuErrchk(cudaMemcpy(w_norm1_dev, w_norm1_vec.data(), hs * sizeof(float), cudaMemcpyHostToDevice));
+    float* x_norm_dev = nullptr;
+    gpuErrchk(cudaMalloc(&x_norm_dev, hs * sizeof(float)));
+    rmsnorm_vector_cuda(x_dev, w_norm1_dev, x_norm_dev, hs, eps);
+    gpuErrchk(cudaDeviceSynchronize());
+
+    // Copy result back to host for now
+    std::vector<float> x_norm_vec1(hs);
+    gpuErrchk(cudaMemcpy(x_norm_vec1.data(), x_norm_dev, hs * sizeof(float), cudaMemcpyDeviceToHost));
+
+    // Cleanup
+    gpuErrchk(cudaFree(x_dev));
+    gpuErrchk(cudaFree(w_norm1_dev));
+    gpuErrchk(cudaFree(x_norm_dev));
+
+    // Now call the host forward() starting from x_norm_vec1 as the input state
+    // We'll need to add a new overload for forward that takes the normalized vector as input
+    return forward(x_norm_vec1, pos, cache, attention_mask);
+#else
+    Logger::error("forward_device called but HAS_CUDA is not defined!");
+    return std::vector<float>();
+#endif
 } 
