@@ -21,6 +21,7 @@
 #include <cassert> // For assert()
 #include <iostream> // Include for std::cout in logging
 #include <torch/torch.h>
+#include <torch/nn/functional.h> // Include for functional::silu
 
 // --- PASTE: Definition of logging helper moved here ---
 // (Declaration is in model.h)
@@ -136,60 +137,69 @@ static void silu(const std::vector<float>& x, std::vector<float>& out) {
     }
 }
 
-// Fix for RoPE implementation with better position handling
-void apply_rope(std::vector<float>& x, int num_heads, int head_dim, int pos, 
+// Refactor apply_rope to work with torch::Tensor
+void apply_rope(torch::Tensor& x, int num_heads, int head_dim, int pos, 
                 const std::vector<std::pair<float, float>>& freqs_cis) {
-    // Validate input
+    // x shape: [num_heads * head_dim] or potentially [num_tokens, num_heads * head_dim]
+    // We assume the input x is already the correct slice for the current position, 
+    // shape [num_heads * head_dim]
+    
+    // Validate input tensor
+    if (x.dim() != 1 || x.size(0) != num_heads * head_dim) {
+        Logger::error("apply_rope: Input tensor x has incorrect shape. Expected [" + 
+                     std::to_string(num_heads * head_dim) + "], got " + 
+                     c10::str(x.sizes()));
+        return;
+    }
     if (head_dim % 2 != 0) {
         Logger::error("apply_rope: head_dim must be even, got " + std::to_string(head_dim));
         return;
     }
-    
-    // Required vector size check
+
     const int dim_half = head_dim / 2;
-    const size_t expected_size = static_cast<size_t>(num_heads * head_dim);
-    if (x.size() != expected_size) {
-        Logger::error("apply_rope: Input vector size mismatch. Expected " + 
-                     std::to_string(expected_size) + ", got " + std::to_string(x.size()));
-        return;
-    }
-    
-    // Validate freqs_cis has enough elements
+    // Validate freqs_cis size
     if (freqs_cis.size() < static_cast<size_t>(dim_half)) {
         Logger::error("apply_rope: freqs_cis too small. Expected at least " + 
                      std::to_string(dim_half) + ", got " + std::to_string(freqs_cis.size()));
         return;
     }
-    
+
+    // Create tensors for cos and sin values for the current position
+    // We only need the first dim_half values from freqs_cis
+    std::vector<float> cos_vals(dim_half);
+    std::vector<float> sin_vals(dim_half);
+    for(int i=0; i<dim_half; ++i) {
+        cos_vals[i] = freqs_cis[i].first;
+        sin_vals[i] = freqs_cis[i].second;
+    }
+    torch::Tensor cos_t = vec_to_tensor(cos_vals, {dim_half});
+    torch::Tensor sin_t = vec_to_tensor(sin_vals, {dim_half});
+
     // Apply rotation for each head
     for (int h = 0; h < num_heads; ++h) {
-        const int head_start = h * head_dim;
+        // Get slices for the current head
+        torch::Tensor x_head = x.slice(/*dim=*/0, /*start=*/h * head_dim, /*end=*/(h + 1) * head_dim);
         
-        for (int d = 0; d < dim_half; ++d) {
-            // Get indices for the feature dimension and its pair
-            const int i = head_start + d;
-            const int i_pair = head_start + d + dim_half;
-            
-            // Ensure indices are in bounds
-            if (i >= static_cast<int>(x.size()) || i_pair >= static_cast<int>(x.size())) {
-                Logger::error("apply_rope: Index out of bounds: i=" + std::to_string(i) + 
-                             ", i_pair=" + std::to_string(i_pair) + 
-                             ", x.size()=" + std::to_string(x.size()));
-                continue;
-            }
-            
-            // Get the original values
-            const float x_i = x[i];
-            const float x_i_pair = x[i_pair];
-            
-            // Get position-specific rotation factors
-            const float cos_pos = freqs_cis[d].first;
-            const float sin_pos = freqs_cis[d].second;
-            
-            // Apply the rotation
-            x[i] = x_i * cos_pos - x_i_pair * sin_pos;
-            x[i_pair] = x_i * sin_pos + x_i_pair * cos_pos;
-        }
+        // Split head into two halves
+        torch::Tensor x1 = x_head.slice(/*dim=*/0, /*start=*/0, /*end=*/dim_half);
+        torch::Tensor x2 = x_head.slice(/*dim=*/0, /*start=*/dim_half, /*end=*/head_dim);
+        
+        // Apply rotation using tensor operations
+        // rotated_x1 = x1 * cos - x2 * sin
+        // rotated_x2 = x1 * sin + x2 * cos
+        torch::Tensor rotated_x1 = x1 * cos_t - x2 * sin_t;
+        torch::Tensor rotated_x2 = x1 * sin_t + x2 * cos_t;
+        
+        // --- Potential In-place Modification (use with caution) ---
+        // It might be possible to write back in-place if x1 and x2 are views
+        // x_head.slice(0, 0, dim_half).copy_(rotated_x1);
+        // x_head.slice(0, dim_half, head_dim).copy_(rotated_x2);
+        // --- Let's create a new tensor and copy back for clarity/safety --- 
+        
+        torch::Tensor rotated_head = torch::cat({rotated_x1, rotated_x2}, /*dim=*/0);
+        
+        // Copy the rotated result back into the original tensor's slice for this head
+        x.slice(/*dim=*/0, /*start=*/h * head_dim, /*end=*/(h + 1) * head_dim).copy_(rotated_head);
     }
 }
 
@@ -308,13 +318,13 @@ void KVCache::initialize(int num_layers, int max_seq_len, int num_kv_heads, int 
 }
 
 // Helper to convert std::vector<float> to torch::Tensor
-inline torch::Tensor vec_to_tensor(const std::vector<float>& v, std::vector<int64_t> shape = {}) {
+inline torch::Tensor vec_to_tensor(const std::vector<float>& v, std::vector<int64_t> shape) {
     if (shape.empty()) shape = {static_cast<int64_t>(v.size())};
     return torch::from_blob((void*)v.data(), shape, torch::TensorOptions().dtype(torch::kFloat32)).clone();
 }
 
 // Helper to convert std::vector<uint16_t> (BF16) to torch::Tensor (float32)
-inline torch::Tensor bf16vec_to_tensor(const std::vector<uint16_t>& v, std::vector<int64_t> shape = {}) {
+inline torch::Tensor bf16vec_to_tensor(const std::vector<uint16_t>& v, std::vector<int64_t> shape) {
     std::vector<float> f32(v.size());
     for (size_t i = 0; i < v.size(); ++i) f32[i] = bfloat16_to_float32(v[i]);
     if (shape.empty()) shape = {static_cast<int64_t>(f32.size())};
@@ -434,34 +444,37 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& config, const SafeTensorsLoade
     Logger::info("Precomputed RoPE cos/sin frequencies.");
 }
 
-// --- ADDED: Embedding Lookup Method --- 
-std::vector<float> TinyLlamaModel::lookup_embedding(int token_id) {
+// Update lookup_embedding to return torch::Tensor
+torch::Tensor TinyLlamaModel::lookup_embedding(int token_id) {
     int hs = config_.hidden_size;
     int vs = config_.vocab_size;
     if (token_id < 0 || token_id >= vs) {
         Logger::error("Token ID out of bounds in lookup_embedding: " + std::to_string(token_id));
-        // Return an empty or zero vector, or throw an exception
-        return std::vector<float>(hs, 0.0f); 
+        // Return a zero tensor of the correct shape
+        return torch::zeros({hs}, torch::TensorOptions().dtype(torch::kFloat32)); 
     }
     
-    std::vector<float> embedding(hs);
     size_t offset = (size_t)token_id * hs;
     if (offset + hs > embed_tokens.size()) {
          Logger::error("Embedding offset out of bounds in lookup_embedding for token: " + std::to_string(token_id));
-         return std::vector<float>(hs, 0.0f);
+         return torch::zeros({hs}, torch::TensorOptions().dtype(torch::kFloat32));
     }
 
-    for (int i = 0; i < hs; ++i) {
-        embedding[i] = bfloat16_to_float32(embed_tokens[offset + i]);
-    }
-    // Optional: Add logging here if needed
+    // Create a sub-vector view (or copy) - avoid direct pointer if unsafe
+    // Copying is safer if embed_tokens might reallocate elsewhere, but slower.
+    // Let's copy for safety for now.
+    std::vector<uint16_t> token_embedding_bf16(embed_tokens.begin() + offset, embed_tokens.begin() + offset + hs);
+    
+    // Convert the bfloat16 vector slice to a float32 tensor
+    torch::Tensor embedding_tensor = bf16vec_to_tensor(token_embedding_bf16, {hs});
+    
     // Logger::info("Performed embedding lookup for token: " + std::to_string(token_id));
-    return embedding;
+    return embedding_tensor;
 }
-// --- END ADDED --- 
 
 // --- RESTORED: Token-by-Token + KVCache Forward ---
-std::vector<float> TinyLlamaModel::forward(std::vector<float>& x, int pos, KVCache* cache, const std::vector<int>* attention_mask) {
+// Update signature to accept and return torch::Tensor for the state x
+std::vector<float> TinyLlamaModel::forward(torch::Tensor& x_tensor, int pos, KVCache* cache, const std::vector<int>* attention_mask) {
     // Config dimensions
     int hs = config_.hidden_size;
     int is = config_.intermediate_size;
@@ -475,9 +488,6 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x, int pos, KVCac
 
     // --- Flags for detailed logging --- 
     bool log_initial = (pos == 0); 
-    // bool log_details_l0_p1 = (pos == 1 && l == 0); // Restore this target
-
-    // if (log_initial) Logger::info("--- TROUBLESHOOTING INITIAL (C++) START pos=0 ---");
     
     if (pos >= max_seq_len) {
         Logger::error("Position index exceeds max_position_embeddings");
@@ -488,209 +498,186 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x, int pos, KVCac
         return {};
     }
 
+    // Ensure input tensor has the correct shape
+    if (x_tensor.dim() != 1 || x_tensor.size(0) != hs) {
+        Logger::error("Input tensor x_tensor has incorrect shape. Expected [" + std::to_string(hs) + "], got " + c10::str(x_tensor.sizes()));
+        return {};
+    }
+
     // 2. Process through all transformer layers
     for (int l = 0; l < nhl; ++l) {
-        // --- Restore logging target to L0 P1 --- 
         bool log_target_layer = (pos == 1 && l == 0); 
         const auto& lw = layers[l];
-        std::vector<float> x_resid1 = x; 
-        // --- Use L0 P1 flag --- 
-        if (log_target_layer) log_vector_summary("TROUBLESHOOTING L0 P1 Input", x_resid1);
+        torch::Tensor x_resid1_tensor = x_tensor.clone(); // Residual connection 1
+        if (log_target_layer) log_vector_summary("TROUBLESHOOTING L0 P1 Input", std::vector<float>(static_cast<float*>(x_resid1_tensor.data_ptr()), static_cast<float*>(x_resid1_tensor.data_ptr()) + hs));
 
         // a) Input RMSNorm
-        torch::Tensor x_tensor = vec_to_tensor(x, {hs});
-        torch::Tensor w_tensor = bf16vec_to_tensor(lw.input_layernorm, {hs});
-        torch::Tensor x_norm_tensor = rmsnorm(x_tensor, w_tensor, eps);
-        std::vector<float> x_norm(x_norm_tensor.template data_ptr<float>(), x_norm_tensor.template data_ptr<float>() + hs);
-        // --- Use L0 P1 flag --- 
-        if (log_target_layer) log_vector_summary("TROUBLESHOOTING L0 P1 Output RMSNorm1", x_norm);
+        torch::Tensor w_norm1_tensor = bf16vec_to_tensor(lw.input_layernorm, {hs});
+        torch::Tensor x_norm_tensor = rmsnorm(x_tensor, w_norm1_tensor, eps);
+        if (log_target_layer) log_vector_summary("TROUBLESHOOTING L0 P1 Output RMSNorm1", std::vector<float>(static_cast<float*>(x_norm_tensor.data_ptr()), static_cast<float*>(x_norm_tensor.data_ptr()) + hs));
 
-        // b) Q, K, V projections
+        // b) Q, K, V projections (all result in tensors)
         torch::Tensor q_tensor = matvec(bf16vec_to_tensor(lw.q_proj, {hs, hs}), x_norm_tensor);
         torch::Tensor k_current_tensor = matvec(bf16vec_to_tensor(lw.k_proj, {n_kv_heads * head_dim, hs}), x_norm_tensor);
         torch::Tensor v_current_tensor = matvec(bf16vec_to_tensor(lw.v_proj, {n_kv_heads * head_dim, hs}), x_norm_tensor);
-        std::vector<float> q(q_tensor.template data_ptr<float>(), q_tensor.template data_ptr<float>() + hs);
-        std::vector<float> k_current(k_current_tensor.template data_ptr<float>(), k_current_tensor.template data_ptr<float>() + n_kv_heads * head_dim);
-        std::vector<float> v_current(v_current_tensor.template data_ptr<float>(), v_current_tensor.template data_ptr<float>() + n_kv_heads * head_dim);
-        // --- Use L0 P1 flag --- 
         if (log_target_layer) {
-            log_vector_summary("TROUBLESHOOTING L0 P1 Q Proj Output", q);
-            log_vector_summary("TROUBLESHOOTING L0 P1 K Proj Output", k_current);
-            log_vector_summary("TROUBLESHOOTING L0 P1 V Proj Output", v_current);
+            log_vector_summary("TROUBLESHOOTING L0 P1 Q Proj Output", std::vector<float>(static_cast<float*>(q_tensor.data_ptr()), static_cast<float*>(q_tensor.data_ptr()) + hs));
+            log_vector_summary("TROUBLESHOOTING L0 P1 K Proj Output", std::vector<float>(static_cast<float*>(k_current_tensor.data_ptr()), static_cast<float*>(k_current_tensor.data_ptr()) + n_kv_heads * head_dim));
+            log_vector_summary("TROUBLESHOOTING L0 P1 V Proj Output", std::vector<float>(static_cast<float*>(v_current_tensor.data_ptr()), static_cast<float*>(v_current_tensor.data_ptr()) + n_kv_heads * head_dim));
         }
 
-        // c) RoPE for Q, K
-        std::vector<float> q_before_rope = q; // Copy for logging
-        apply_rope(q, n_heads, head_dim, pos, precomputed_freqs_cis_);
-        std::vector<float> k_before_rope = k_current; // Copy for logging
-        apply_rope(k_current, n_kv_heads, head_dim, pos, precomputed_freqs_cis_);
-        // --- Use L0 P1 flag --- 
+        // c) RoPE for Q, K (operates in-place on tensors)
+        torch::Tensor q_before_rope = q_tensor.clone(); // Copy for logging
+        torch::Tensor k_before_rope = k_current_tensor.clone(); // Copy for logging
+        // --- Get precomputed freqs for the current position --- 
+        size_t freqs_offset = (pos * head_dim / 2);
+        std::vector<std::pair<float, float>> current_freqs_cis(precomputed_freqs_cis_.begin() + freqs_offset, 
+                                                               precomputed_freqs_cis_.begin() + freqs_offset + head_dim / 2);
+        // --- Apply RoPE --- 
+        apply_rope(q_tensor, n_heads, head_dim, pos, current_freqs_cis);
+        apply_rope(k_current_tensor, n_kv_heads, head_dim, pos, current_freqs_cis);
         if (log_target_layer) {
-            log_vector_summary("TROUBLESHOOTING L0 P1 Q BEFORE RoPE", q_before_rope);
-            log_vector_summary("TROUBLESHOOTING L0 P1 Q AFTER RoPE", q);
-            log_vector_summary("TROUBLESHOOTING L0 P1 K BEFORE RoPE", k_before_rope);
-            log_vector_summary("TROUBLESHOOTING L0 P1 K AFTER RoPE", k_current);
+            log_vector_summary("TROUBLESHOOTING L0 P1 Q BEFORE RoPE", std::vector<float>(static_cast<float*>(q_before_rope.data_ptr()), static_cast<float*>(q_before_rope.data_ptr()) + hs));
+            log_vector_summary("TROUBLESHOOTING L0 P1 Q AFTER RoPE", std::vector<float>(static_cast<float*>(q_tensor.data_ptr()), static_cast<float*>(q_tensor.data_ptr()) + hs));
+            log_vector_summary("TROUBLESHOOTING L0 P1 K BEFORE RoPE", std::vector<float>(static_cast<float*>(k_before_rope.data_ptr()), static_cast<float*>(k_before_rope.data_ptr()) + n_kv_heads * head_dim));
+            log_vector_summary("TROUBLESHOOTING L0 P1 K AFTER RoPE", std::vector<float>(static_cast<float*>(k_current_tensor.data_ptr()), static_cast<float*>(k_current_tensor.data_ptr()) + n_kv_heads * head_dim));
         }
 
-        // Write to KV Cache
-            for (int kvh = 0; kvh < n_kv_heads; ++kvh) {
-            // Calculate offsets into current K and V vectors
-                size_t current_k_offset = (size_t)kvh * head_dim;
-                size_t current_v_offset = (size_t)kvh * head_dim;
-            
-            // Calculate write position in cache (matching the read pattern used in attention)
-            // Structure: pos → kv_head → head_dim
+        // Write to KV Cache (still uses std::vector, requires copy from tensor)
+        float* k_current_ptr = static_cast<float*>(k_current_tensor.data_ptr());
+        float* v_current_ptr = static_cast<float*>(v_current_tensor.data_ptr());
+        for (int kvh = 0; kvh < n_kv_heads; ++kvh) {
+            size_t current_k_offset = (size_t)kvh * head_dim;
+            size_t current_v_offset = (size_t)kvh * head_dim;
             size_t write_offset = pos * n_kv_heads * head_dim + kvh * head_dim;
-            
-            // Bounds check before writing
             if (write_offset + head_dim <= cache->layers[l].k.size()) {
-                // Write K and V vectors to cache
-                std::memcpy(&cache->layers[l].k[write_offset], &k_current[current_k_offset], head_dim * sizeof(float));
-                std::memcpy(&cache->layers[l].v[write_offset], &v_current[current_v_offset], head_dim * sizeof(float));
+                std::memcpy(&cache->layers[l].k[write_offset], k_current_ptr + current_k_offset, head_dim * sizeof(float));
+                std::memcpy(&cache->layers[l].v[write_offset], v_current_ptr + current_v_offset, head_dim * sizeof(float));
              } else {
-                Logger::error("KVCache write out of bounds: write_offset=" + 
-                             std::to_string(write_offset) + ", cache size=" + 
-                             std::to_string(cache->layers[l].k.size()));
+                Logger::error("KVCache write out of bounds: write_offset=" + std::to_string(write_offset) + ", cache size=" + std::to_string(cache->layers[l].k.size()));
              }
         }
 
-        // d) Attention
-        std::vector<float> attn_out(hs, 0.0f);
-        if (pos > 0) {
-            int current_seq_len = pos + 1; // Include current position
-            if (current_seq_len > 0) { 
-                #pragma omp parallel for
-            for (int h = 0; h < n_heads; ++h) {
-                    const float* q_ptr = q.data() + h * head_dim;
-                    std::vector<float> scores(current_seq_len);
-                    
-                    // Determine which KV head this Q head maps to for Grouped Query Attention (GQA)
-                    int kv_head_idx = h / (n_heads / n_kv_heads); // This ensures proper GQA head mapping
-                    
-                    // Calculate Scores
-                    for (int j = 0; j < current_seq_len; ++j) {
-                        // Calculate cache position for current KV head and sequence position
-                        size_t cache_pos_offset = j * n_kv_heads * head_dim + kv_head_idx * head_dim;
-                        
-                        // Bounds checking
-                        if (cache_pos_offset + head_dim <= cache->layers[l].k.size()) {
-                            const float* k_ptr = &cache->layers[l].k[cache_pos_offset];
-                            
-                            // Calculate attention score (dot product of Q and K)
-                            float score = 0.0f;
-                            for (int d = 0; d < head_dim; ++d) {
-                                score += q_ptr[d] * k_ptr[d];
-                            }
-                            score /= std::sqrt(head_dim); // Scale by sqrt(head_dim)
-                            scores[j] = score;
+        // d) Attention (using LibTorch)
+        torch::Tensor attn_out_tensor = torch::zeros({hs}, torch::TensorOptions().dtype(torch::kFloat32));
+        int current_seq_len = pos + 1;
+        float scale = 1.0f / std::sqrt(head_dim);
+        
+        // Iterate over query heads
+        for (int h = 0; h < n_heads; ++h) {
+            // Get Q head tensor
+            torch::Tensor q_head = q_tensor.slice(/*dim=*/0, /*start=*/h * head_dim, /*end=*/(h + 1) * head_dim).unsqueeze(0); // Shape [1, head_dim]
+            
+            // Determine corresponding KV head index for GQA
+            int kv_head_idx = h / (n_heads / n_kv_heads);
+            
+            // --- Retrieve K and V from cache for this KV head --- 
+            // This part still reads from std::vector cache and converts to tensor
+            std::vector<float> k_cache_head_vec(current_seq_len * head_dim);
+            std::vector<float> v_cache_head_vec(current_seq_len * head_dim);
+            for (int j = 0; j < current_seq_len; ++j) {
+                size_t cache_pos_offset = j * n_kv_heads * head_dim + kv_head_idx * head_dim;
+                if (cache_pos_offset + head_dim <= cache->layers[l].k.size()) {
+                    std::memcpy(k_cache_head_vec.data() + j * head_dim, &cache->layers[l].k[cache_pos_offset], head_dim * sizeof(float));
+                    std::memcpy(v_cache_head_vec.data() + j * head_dim, &cache->layers[l].v[cache_pos_offset], head_dim * sizeof(float));
                 } else {
-                            Logger::error("Attention K access out of bounds: cache_pos_offset=" + 
-                                         std::to_string(cache_pos_offset) + ", cache size=" + 
-                                         std::to_string(cache->layers[l].k.size()));
-                            scores[j] = -1e9f; // Large negative value to avoid NaN after softmax
-                        }
-                    }
-                    
-                    // Convert scores vector to tensor and apply softmax
-                    torch::Tensor scores_tensor = vec_to_tensor(scores);
-                    torch::Tensor probs_tensor = softmax(scores_tensor);
-                    // Convert probs back to vector if needed, or use tensor directly
-                    std::vector<float> probs(probs_tensor.template data_ptr<float>(), probs_tensor.template data_ptr<float>() + current_seq_len);
-                    log_vector_stats("Attention Scores Post-Softmax (L" + std::to_string(l) + " H" + std::to_string(h) + " P" + std::to_string(pos) + ")", probs);
-
-                    // Compute weighted sum of V vectors using the probabilities
-                    std::vector<float> head_attn_out(head_dim, 0.0f);
-                    for (int d = 0; d < head_dim; ++d) {
-                        double val = 0.0; // Use double for accumulation
-                        for (int j = 0; j < current_seq_len; ++j) {
-                            // Use the same cache position calculation for V
-                            size_t cache_pos_offset = j * n_kv_heads * head_dim + kv_head_idx * head_dim;
-                            
-                            if (cache_pos_offset + head_dim <= cache->layers[l].v.size()) {
-                                const float* v_ptr = &cache->layers[l].v[cache_pos_offset];
-                                // Use the probability from the softmax result
-                                val += static_cast<double>(probs[j]) * static_cast<double>(v_ptr[d]); 
-                } else {
-                                // Error already logged during K access, skip V access
-                            }
-                        }
-                        head_attn_out[d] = static_cast<float>(val);
-                    }
-                    
-                    // Copy this head's output to the correct position in attn_out
-                    std::memcpy(attn_out.data() + h * head_dim, head_attn_out.data(), head_dim * sizeof(float));
+                    // Fill with zeros or handle error - For now, fill with zeros
+                    std::fill(k_cache_head_vec.begin() + j * head_dim, k_cache_head_vec.begin() + (j + 1) * head_dim, 0.0f);
+                    std::fill(v_cache_head_vec.begin() + j * head_dim, v_cache_head_vec.begin() + (j + 1) * head_dim, 0.0f);
+                    Logger::error("Attention K/V access out of bounds: cache_pos_offset=" + std::to_string(cache_pos_offset));
                 }
             }
-        } else {
-            // For pos=0, no attention is calculated (output is all zeros)
-            // existing code...
+            torch::Tensor k_cache_head = vec_to_tensor(k_cache_head_vec, {current_seq_len, head_dim}); // Shape [seq_len, head_dim]
+            torch::Tensor v_cache_head = vec_to_tensor(v_cache_head_vec, {current_seq_len, head_dim}); // Shape [seq_len, head_dim]
+            // --- End retrieve K and V --- 
+            
+            // Calculate Scores: Q * K^T
+            // q_head [1, head_dim], k_cache_head.t() [head_dim, seq_len]
+            torch::Tensor scores = torch::matmul(q_head, k_cache_head.transpose(0, 1)) * scale; // Shape [1, seq_len]
+            
+            // Apply Softmax
+            torch::Tensor probs = torch::softmax(scores, /*dim=*/-1); // Shape [1, seq_len]
+            
+            // Calculate Weighted Sum: Probs * V
+            // probs [1, seq_len], v_cache_head [seq_len, head_dim]
+            torch::Tensor head_attn_out = torch::matmul(probs, v_cache_head); // Shape [1, head_dim]
+            
+            // Accumulate head output into attn_out_tensor
+            attn_out_tensor.slice(/*dim=*/0, /*start=*/h * head_dim, /*end=*/(h + 1) * head_dim).copy_(head_attn_out.squeeze(0));
         }
 
         // e) Output projection
-        std::vector<float> attn_out_copy = attn_out; 
-        torch::Tensor attn_proj_tensor = matvec(bf16vec_to_tensor(lw.o_proj, {hs, hs}), vec_to_tensor(attn_out, {hs}));
-        std::vector<float> attn_proj(attn_proj_tensor.template data_ptr<float>(), attn_proj_tensor.template data_ptr<float>() + hs);
-        log_vector_stats("Attention Projection Output (L" + std::to_string(l) + " P" + std::to_string(pos) + ")", attn_proj);
+        torch::Tensor attn_proj_tensor = matvec(bf16vec_to_tensor(lw.o_proj, {hs, hs}), attn_out_tensor);
+        log_vec_stats("Attention Projection Output (L" + std::to_string(l) + " P" + std::to_string(pos) + ")", std::vector<float>(static_cast<float*>(attn_proj_tensor.data_ptr()), static_cast<float*>(attn_proj_tensor.data_ptr()) + hs));
 
-        // f) First residual connection
-        std::vector<float> x_resid1_copy = x_resid1;
-        for (int i = 0; i < hs; ++i) x[i] = x_resid1[i] + attn_proj[i];
-        // --- Use L0 P1 flag --- 
+        // f) First residual connection (Tensor addition)
+        x_tensor = x_resid1_tensor + attn_proj_tensor;
         if (log_target_layer) { 
-            log_vector_summary("TROUBLESHOOTING L0 P1 State BEFORE 1st Residual", x_resid1_copy);
-            log_vector_summary("TROUBLESHOOTING L0 P1 State AFTER 1st Residual", x);
+            // Logging requires converting back to vector for summary function
+            log_vector_summary("TROUBLESHOOTING L0 P1 State BEFORE 1st Residual", std::vector<float>(static_cast<float*>(x_resid1_tensor.data_ptr()), static_cast<float*>(x_resid1_tensor.data_ptr()) + hs));
+            log_vector_summary("TROUBLESHOOTING L0 P1 State AFTER 1st Residual", std::vector<float>(static_cast<float*>(x_tensor.data_ptr()), static_cast<float*>(x_tensor.data_ptr()) + hs));
         }
 
-        // g) MLP block
-        std::vector<float> x_resid2 = x; 
-        // --- Use L0 P1 flag --- 
-        if (log_target_layer) log_vector_summary("TROUBLESHOOTING L0 P1 Input to MLP", x_resid2);
-        torch::Tensor x_norm2_tensor = rmsnorm(vec_to_tensor(x, {hs}), bf16vec_to_tensor(lw.post_attention_layernorm, {hs}), eps);
-        std::vector<float> x_norm2(x_norm2_tensor.template data_ptr<float>(), x_norm2_tensor.template data_ptr<float>() + hs);
-        log_vector_stats("Input to MLP RMSNorm (L" + std::to_string(l) + " P" + std::to_string(pos) + ")", x_norm2);
+        // g) MLP block (using LibTorch)
+        torch::Tensor x_resid2_tensor = x_tensor.clone(); // Residual connection 2
+        if (log_target_layer) log_vector_summary("TROUBLESHOOTING L0 P1 Input to MLP", std::vector<float>(static_cast<float*>(x_resid2_tensor.data_ptr()), static_cast<float*>(x_resid2_tensor.data_ptr()) + hs));
+        torch::Tensor w_norm2_tensor = bf16vec_to_tensor(lw.post_attention_layernorm, {hs});
+        torch::Tensor x_norm2_tensor = rmsnorm(x_tensor, w_norm2_tensor, eps);
+        log_vec_stats("Input to MLP RMSNorm (L" + std::to_string(l) + " P" + std::to_string(pos) + ")", std::vector<float>(static_cast<float*>(x_norm2_tensor.data_ptr()), static_cast<float*>(x_norm2_tensor.data_ptr()) + hs));
 
-        std::vector<float> gate(is), up(is);
-        torch::Tensor gate_proj_tensor = matvec(bf16vec_to_tensor(lw.gate_proj, {is, hs}), vec_to_tensor(x_norm2, {is}));
-        torch::Tensor up_proj_tensor = matvec(bf16vec_to_tensor(lw.up_proj, {is, hs}), vec_to_tensor(x_norm2, {is}));
-        std::vector<float> gate_orig = gate; 
-        for (int d = 0; d < is; ++d) {
-            gate[d] = (gate[d] / (1.0f + std::exp(-gate[d]))) * up[d]; // SiLU * Up
-        }
-        if (log_target_layer) {
-            log_vector_summary("TROUBLESHOOTING L0 P1 Gate BEFORE SiLU*Up", gate_orig);
-            log_vector_summary("TROUBLESHOOTING L0 P1 Gate * Up", gate);
-        }
-        torch::Tensor mlp_out_tensor = matvec(bf16vec_to_tensor(lw.down_proj, {hs, is}), vec_to_tensor(gate, {hs}));
-        std::vector<float> mlp_out(mlp_out_tensor.template data_ptr<float>(), mlp_out_tensor.template data_ptr<float>() + hs);
-        log_vector_stats("MLP Output (L" + std::to_string(l) + " P" + std::to_string(pos) + ")", mlp_out);
+        // --- START: Corrected MLP Logic (Already using Tensors) ---
+        torch::Tensor gate_proj_tensor = matvec(bf16vec_to_tensor(lw.gate_proj, {is, hs}), x_norm2_tensor); // Use x_norm2_tensor
+        torch::Tensor up_proj_tensor = matvec(bf16vec_to_tensor(lw.up_proj, {is, hs}), x_norm2_tensor);   // Use x_norm2_tensor
+
+        // Perform SwiGLU: silu(gate) * up 
+        // torch::silu is available, or compute manually: gate * torch::sigmoid(gate)
+        torch::Tensor swiglu_result_tensor = torch::nn::functional::silu(gate_proj_tensor) * up_proj_tensor; // Shape [is]
         
-        // h) Second residual connection
-        std::vector<float> x_resid2_copy = x_resid2; 
-        for (int i = 0; i < hs; ++i) x[i] = x_resid2[i] + mlp_out[i];
+        if (log_target_layer) {
+            // Logging requires converting tensors to vectors
+            log_vector_summary("TROUBLESHOOTING L0 P1 Gate Proj Result", std::vector<float>(static_cast<float*>(gate_proj_tensor.data_ptr()), static_cast<float*>(gate_proj_tensor.data_ptr()) + is));
+            log_vector_summary("TROUBLESHOOTING L0 P1 Up Proj Result", std::vector<float>(static_cast<float*>(up_proj_tensor.data_ptr()), static_cast<float*>(up_proj_tensor.data_ptr()) + is));
+            log_vector_summary("TROUBLESHOOTING L0 P1 SwiGLU Result (SiLU(Gate) * Up)", std::vector<float>(static_cast<float*>(swiglu_result_tensor.data_ptr()), static_cast<float*>(swiglu_result_tensor.data_ptr()) + is));
+        }
+        
+        // Calculate down projection
+        torch::Tensor mlp_out_tensor = matvec(bf16vec_to_tensor(lw.down_proj, {hs, is}), swiglu_result_tensor); // Use swiglu_result_tensor
+        // --- END: Corrected MLP Logic ---
+        
+        log_vec_stats("MLP Output (L" + std::to_string(l) + " P" + std::to_string(pos) + ")", std::vector<float>(static_cast<float*>(mlp_out_tensor.data_ptr()), static_cast<float*>(mlp_out_tensor.data_ptr()) + hs));
+        
+        // h) Second residual connection (Tensor addition)
+        x_tensor = x_resid2_tensor + mlp_out_tensor;
         if (log_target_layer) { 
-            log_vector_summary("TROUBLESHOOTING L0 P1 State BEFORE 2nd Residual", x_resid2_copy);
-            log_vector_summary("TROUBLESHOOTING L0 P1 State AFTER 2nd Residual", x);
+            log_vector_summary("TROUBLESHOOTING L0 P1 State BEFORE 2nd Residual", std::vector<float>(static_cast<float*>(x_resid2_tensor.data_ptr()), static_cast<float*>(x_resid2_tensor.data_ptr()) + hs));
+            log_vector_summary("TROUBLESHOOTING L0 P1 State AFTER 2nd Residual", std::vector<float>(static_cast<float*>(x_tensor.data_ptr()), static_cast<float*>(x_tensor.data_ptr()) + hs));
             Logger::info("--- TROUBLESHOOTING L0 P1 C++ Layer End ---");
         }
     } // End layer loop
 
     // 3. Final RMSNorm
-    std::vector<float> x_final_norm_input = x; // Copy for logging
-    torch::Tensor x_final_norm_tensor = rmsnorm(vec_to_tensor(x, {hs}), bf16vec_to_tensor(final_norm, {hs}), eps);
-    std::vector<float> x_norm_final(x_final_norm_tensor.template data_ptr<float>(), x_final_norm_tensor.template data_ptr<float>() + hs);
+    torch::Tensor x_final_norm_input_tensor = x_tensor.clone(); // Copy for logging
+    torch::Tensor w_final_norm_tensor = bf16vec_to_tensor(final_norm, {hs});
+    torch::Tensor x_final_norm_tensor = rmsnorm(x_tensor, w_final_norm_tensor, eps);
     if (log_initial) { 
-        log_vector_summary("TROUBLESHOOTING L0 P1 Input to Final RMSNorm (P1)", x_final_norm_input);
-        log_vector_summary("TROUBLESHOOTING L0 P1 Output of Final RMSNorm (P1)", x_norm_final);
+        log_vector_summary("TROUBLESHOOTING Input to Final RMSNorm (P0)", std::vector<float>(static_cast<float*>(x_final_norm_input_tensor.data_ptr()), static_cast<float*>(x_final_norm_input_tensor.data_ptr()) + hs));
+        log_vector_summary("TROUBLESHOOTING Output of Final RMSNorm (P0)", std::vector<float>(static_cast<float*>(x_final_norm_tensor.data_ptr()), static_cast<float*>(x_final_norm_tensor.data_ptr()) + hs));
     }
 
     // 4. Output projection to logits
     torch::Tensor logits_tensor = matvec(bf16vec_to_tensor(lm_head, {vs, hs}), x_final_norm_tensor);
-    std::vector<float> logits(logits_tensor.template data_ptr<float>(), logits_tensor.template data_ptr<float>() + vs);
+    
+    // --- Convert final logits tensor back to std::vector<float> --- 
+    // The function signature still requires returning vector<float>
+    float* logits_ptr = static_cast<float*>(logits_tensor.data_ptr());
+    std::vector<float> logits(logits_ptr, logits_ptr + vs);
+    // --- End Conversion ---
+    
     if (log_initial) {
-        log_vector_summary("TROUBLESHOOTING L0 P1 Final Logits (P1)", logits, 10);
+        log_vector_summary("TROUBLESHOOTING Final Logits (P0)", logits, 10);
     }
 
-    if (log_initial) Logger::info("--- TROUBLESHOOTING L0 P1 (C++) END pos=1 ---");
+    if (log_initial) Logger::info("--- TROUBLESHOOTING L0 P0 (C++) END pos=0 ---");
     return logits; 
 }
 

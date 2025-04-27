@@ -7,3 +7,5 @@ build/
 myenv/
 *.log
 *.pyc
+*/debugging.log
+deps/

@@ -8,6 +8,7 @@
 #include "safetensors_loader.h"
 #include <functional>
 #include <cstdint> // Include for uint16_t
+#include <torch/torch.h>
 
 struct ModelConfig {
     int hidden_size;
@@ -62,7 +63,7 @@ public:
     TinyLlamaModel(const ModelConfig& config, const SafeTensorsLoader& loader);
 
     // --- RESTORED: Token-by-Token + KVCache Forward --- 
-    std::vector<float> forward(std::vector<float>& x, int pos, KVCache* cache = nullptr, const std::vector<int>* attention_mask = nullptr); // Keep optional mask for now, though not used by token-by-token
+    std::vector<float> forward(torch::Tensor& x_tensor, int pos, KVCache* cache = nullptr, const std::vector<int>* attention_mask = nullptr); // Keep optional mask for now, though not used by token-by-token
 
     // Get model config
     const ModelConfig& get_config() const { return config_; }
@@ -77,7 +78,7 @@ public:
     const std::vector<LayerWeights>& get_layers() const { return layers; }
 
     // Lookup embedding for a token
-    std::vector<float> lookup_embedding(int token_id);
+    torch::Tensor lookup_embedding(int token_id);
 
     int get_vocab_size() const;
 
@@ -95,6 +96,10 @@ private:
     std::vector<std::pair<float, float>> precomputed_freqs_cis_;
 };
 
+// Forward declarations for tensor conversion helpers
+inline torch::Tensor vec_to_tensor(const std::vector<float>& v, std::vector<int64_t> shape = {});
+inline torch::Tensor bf16vec_to_tensor(const std::vector<uint16_t>& v, std::vector<int64_t> shape = {});
+
 // Utility: parse ModelConfig from nlohmann::json
 ModelConfig parse_model_config(const nlohmann::json& json);
 
@@ -110,8 +115,9 @@ void rmsnorm(const std::vector<float>& x, const std::vector<uint16_t>& weight, f
 // matvec_bf16_f32 declaration
 void matvec_bf16_f32(const std::vector<uint16_t>& mat, const std::vector<float>& vec, std::vector<float>& out, int M, int N);
 
-// apply_rope declaration
-void apply_rope(std::vector<float>& x, int num_heads, int head_dim, int pos, float rope_theta);
+// Update apply_rope signature to accept torch::Tensor
+void apply_rope(torch::Tensor& x, int num_heads, int head_dim, int pos, 
+                const std::vector<std::pair<float, float>>& freqs_cis);
 
 // softmax declaration
 void softmax(std::vector<float>& x);

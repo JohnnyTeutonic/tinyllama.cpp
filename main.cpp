@@ -5,7 +5,6 @@
 #include <memory>
 #include <stdexcept>
 #include <nlohmann/json.hpp>
-#include <sentencepiece_processor.h>
 #include <map>
 #include "safetensors_loader.h"
 #include "tokenizer.h"
@@ -19,6 +18,8 @@
 #include <sstream>
 #include <numeric>
 #include <iomanip> // Include for std::setw, std::fixed, std::setprecision
+#include "vocab_loader.h"
+#include <torch/torch.h>
 
 // TODO: Implement safetensors loader
 // TODO: Implement TinyLlama model and inference
@@ -98,14 +99,15 @@ int main(int argc, char** argv) {
         data_dir = argv[1];
     }
     std::string config_path = data_dir + "/config.json";
-    std::string tokenizer_path = data_dir + "/tokenizer.model";
+    std::string tokenizer_path = data_dir + "/tokenizer.json";
+    std::string vocab_path = tokenizer_path; // Use tokenizer.json for vocab
     std::string safetensors_path = data_dir + "/model.safetensors";
-    std::string tokenizer_config_path = data_dir + "/tokenizer_config.json"; // Path to tokenizer config
+    // std::string tokenizer_config_path = data_dir + "/tokenizer_config.json"; // No longer needed
 
     Logger::info("Using data directory: " + data_dir);
     Logger::info("Loading config: " + config_path);
 
-    // 1. Load config.json
+    // 1. Load model config.json
     nlohmann::json config;
     try {
         std::string config_str = read_file(config_path);
@@ -115,44 +117,24 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // Load tokenizer_config.json for special token strings
-    nlohmann::json tokenizer_config;
-    std::string bos_token_string = "<s>"; // Default BOS token
-    try {
-        std::string tok_config_str = read_file(tokenizer_config_path);
-        tokenizer_config = nlohmann::json::parse(tok_config_str);
-        if (tokenizer_config.contains("bos_token") && tokenizer_config["bos_token"].is_string()) {
-            bos_token_string = tokenizer_config["bos_token"].get<std::string>();
-            Logger::info("Using BOS token string from config: " + bos_token_string);
-        } else {
-            Logger::info("Could not find string 'bos_token' in tokenizer_config.json, using default: " + bos_token_string);
-        }
-    } catch (const std::exception& e) {
-        Logger::info(std::string("Error loading tokenizer_config.json: ") + e.what() + ". Using default BOS token: " + bos_token_string);
-    }
+    // --- REMOVED tokenizer_config.json loading --- 
 
-    // 2. Load tokenizer.model (SentencePiece)
-    sentencepiece::SentencePieceProcessor sp;
-    auto sp_status = sp.Load(tokenizer_path);
-    if (!sp_status.ok()) {
-        Logger::error("Failed to load SentencePiece model: " + sp_status.ToString());
+    // 2. Load tokenizer (using mlc-ai/tokenizers-cpp wrapper)
+    std::unique_ptr<Tokenizer> tokenizer_ptr;
+    try {
+        tokenizer_ptr = std::make_unique<Tokenizer>(tokenizer_path, vocab_path);
+        Logger::info("Loaded tokenizer: " + tokenizer_path);
+    } catch (const std::exception& e) {
+        Logger::error(std::string("Error loading tokenizer: ") + e.what());
         return 1;
     }
+    const Tokenizer& tokenizer = *tokenizer_ptr;
+
     // 3. Load model.safetensors
     try {
         SafeTensorsLoader st_loader(safetensors_path);
         auto names = st_loader.tensor_names();
         Logger::info("Loaded " + std::to_string(names.size()) + " tensors from model.safetensors:");
-        for (const auto& n : names) {
-            const auto& info = st_loader.get_tensor_info(n);
-            std::string shape_str = "[";
-            for (size_t i = 0; i < info.shape.size(); ++i) {
-                shape_str += std::to_string(info.shape[i]);
-                if (i + 1 < info.shape.size()) shape_str += ", ";
-            }
-            shape_str += "]";
-            Logger::info("  " + n + " | dtype: " + info.dtype + ", shape: " + shape_str);
-        }
 
         // Model weight loading example
         try {
@@ -184,16 +166,35 @@ int main(int argc, char** argv) {
                 return 1;
             }
 
-            Tokenizer tokenizer(data_dir);
-            int eos_id = tokenizer.get_special_token_id("eos");
+            // --- Special Token Handling --- 
+            // Use tokenizer's accessors to get special token IDs
+            int eos_id = tokenizer.eos_token_id();
+            int bos_id = tokenizer.bos_token_id();
+            int unk_id = tokenizer.unk_token_id();
+            int pad_id = tokenizer.pad_token_id();
+            
+            Logger::info("Special token IDs from tokenizer: EOS=" + std::to_string(eos_id) + 
+                         ", BOS=" + std::to_string(bos_id) + 
+                         ", UNK=" + std::to_string(unk_id) + 
+                         ", PAD=" + std::to_string(pad_id));
+            
+            // Check if EOS token is valid
+            if (eos_id < 0) {
+                Logger::info("Warning: Invalid EOS token ID. Using default value of 2.");
+                eos_id = 2;  // Fallback to common default
+            }
 
             // Use only the PyTorch prompt template
             std::string prompt = "Q: What is the capital of France?\nA:";
-            std::string full_prompt = bos_token_string + prompt;
-            Logger::info("Full Prompt (with BOS string): " + full_prompt);
+            // Option 1: Use the low-level API as before
+            std::vector<std::string> prompt_tokens = tokenizer.tokenize(prompt);
+            std::vector<int> prompt_ids = tokenizer.tokens_to_ids(prompt_tokens);
+            
+            // Option 2 (alternative): Use the encode method which can add special tokens if configured
+            // std::vector<int> prompt_ids = tokenizer.encode(prompt, true); // true to add BOS/EOS if configured
+            
+            Logger::info("Tokenizing prompt...");
 
-            // Tokenize the full prompt string
-            std::vector<int> prompt_ids = tokenizer.tokenize(full_prompt);
             Logger::info("Tokenized IDs: Count=" + std::to_string(prompt_ids.size()));
             std::stringstream ss_token_ids;
             ss_token_ids << "Prompt token IDs: [ ";
@@ -207,7 +208,7 @@ int main(int argc, char** argv) {
             int num_prompt_tokens = prompt_ids.size();
             std::vector<int> generated_ids = prompt_ids;
             std::vector<int> generated_only_ids;
-            std::vector<float> current_x(mcfg.hidden_size); // State vector
+            torch::Tensor current_x_tensor; // Use Tensor for state
             cache.seq_len = 0; // Reset cache length
 
             Logger::info("Starting token-by-token processing loop with KVCache...");
@@ -215,6 +216,7 @@ int main(int argc, char** argv) {
             
             int total_steps = num_prompt_tokens + max_new_tokens -1; // Prompt processing + generation
             int generated_count = 0;
+            std::mt19937 rng(1234); // Random number generator for sampling
 
             for (int pos = 0; pos < total_steps; ++pos) {
                 Logger::info("--- main loop: START pos=" + std::to_string(pos) + " ---");
@@ -242,18 +244,18 @@ int main(int argc, char** argv) {
                 // 1. Determine Input Token ID & Prepare State x
                 int input_token_id = (pos < num_prompt_tokens) ? prompt_ids[pos] : next_token_id;
                 Logger::info("main loop: input_token_id=" + std::to_string(input_token_id));
-                if (pos == 0) {
-                    current_x = model.lookup_embedding(input_token_id); // Initialize state for first token
-                    log_vec_stats("main loop: current_x after lookup (pos=0)", current_x);
-                } // For pos > 0, current_x holds the output state from the previous iteration
-                else {
-                    log_vec_stats("main loop: current_x before forward (pos>0)", current_x);
-                }
+                // Lookup embedding (returns tensor)
+                current_x_tensor = model.lookup_embedding(input_token_id);
+                // Log tensor stats directly if possible, or convert for old logger
+                log_vector_summary("main loop: current_x after lookup", std::vector<float>(static_cast<float*>(current_x_tensor.data_ptr()), static_cast<float*>(current_x_tensor.data_ptr()) + mcfg.hidden_size));
 
                 // 2. Call the Forward Pass (token-by-token)
-                // Pass 'current_x' by reference. It will be updated in place.
+                // Pass tensor by reference. It will be updated in place by some layers?
+                // Or does forward return the new state? CHECK MODEL.CPP SIGNATURE
+                // --> forward modifies x_tensor in place via RMSNorm, RoPE, residuals
+                // --> forward *returns* logits as vector<float>
                 Logger::info("main loop: Calling model.forward for pos=" + std::to_string(pos));
-                std::vector<float> logits = model.forward(current_x, pos, &cache, nullptr); // Pass cache
+                std::vector<float> logits = model.forward(current_x_tensor, pos, &cache, nullptr); // Pass tensor state
                 Logger::info("main loop: Returned from model.forward for pos=" + std::to_string(pos));
                 
                 // --- Crucial: Increment cache sequence length *AFTER* forward call for position `pos`
@@ -265,13 +267,14 @@ int main(int argc, char** argv) {
                     Logger::error("model.forward returned empty logits at pos " + std::to_string(pos));
                     break;
                 }
-                if (current_x.size() != mcfg.hidden_size) {
-                    Logger::error("current_x size mismatch after forward at pos " + std::to_string(pos) + ". Expected " + std::to_string(mcfg.hidden_size) + ", got " + std::to_string(current_x.size()));
+                // Check tensor state after forward pass
+                if (current_x_tensor.numel() != mcfg.hidden_size) { // Check tensor size
+                    Logger::error("current_x_tensor size mismatch after forward at pos " + std::to_string(pos) + ". Expected " + std::to_string(mcfg.hidden_size) + ", got " + std::to_string(current_x_tensor.numel()));
                     break;
                 }
                 
-                log_vec_stats("main loop: logits after forward", logits);
-                log_vec_stats("main loop: current_x after forward (state)", current_x);
+                log_vector_summary("main loop: logits after forward", logits); // Logits are still vector
+                log_vector_summary("main loop: current_x_tensor after forward (state)", std::vector<float>(static_cast<float*>(current_x_tensor.data_ptr()), static_cast<float*>(current_x_tensor.data_ptr()) + mcfg.hidden_size));
                 
                 // 3. Sample Next Token (Only during Generation Phase)
                 if (pos >= num_prompt_tokens - 1) {
@@ -281,21 +284,23 @@ int main(int argc, char** argv) {
                     }
                     
                     // Sample from the returned logits (which are only for the current position)
-                    next_token_id = argmax(logits);
+                    next_token_id = sample_top_k_top_p_temperature(logits, /*temp=*/0.7f, /*top_k=*/50, /*top_p=*/0.9f, rng);
                     
                     // --- ADD LOGGING HERE ---
                     Logger::info("C++ Generation: pos=" + std::to_string(pos) + ", sampled_token_id=" + std::to_string(next_token_id));
                     // --- END LOGGING ---
-
-                    std::string next_token_str = tokenizer.detokenize({next_token_id});
-                    Logger::info("Step " + std::to_string(generated_count+1) + ": Predicted token ID: " + std::to_string(next_token_id) + " ('" + next_token_str + "')");
 
                     // Store generated token
                     generated_only_ids.push_back(next_token_id);
                     generated_ids.push_back(next_token_id); // Keep track of the full sequence for context
                     generated_count++;
 
-                    // Check for EOS or max tokens
+                    // Print the token as it's generated
+                    std::string next_token_str = tokenizer.decode(std::vector<int>{next_token_id}, true); // Skip special tokens
+                    Logger::info("Step " + std::to_string(generated_count+1) + ": Predicted token ID: " + std::to_string(next_token_id) + " ('" + next_token_str + "')");
+                    std::cout << next_token_str << std::flush; // Print token immediately, with flush
+
+                    // --- Use eos_id from tokenizer --- 
                     if (next_token_id == eos_id || generated_count >= max_new_tokens) {
                         if (next_token_id == eos_id) Logger::info("EOS token (" + std::to_string(eos_id) + ") generated. Stopping generation.");
                         else Logger::info("Max new tokens reached. Stopping generation.");
@@ -303,15 +308,15 @@ int main(int argc, char** argv) {
                     }
                 } else {
                      // During prompt processing, we don't sample, just process the next prompt token.
-                     // The state `current_x` is updated in-place by model.forward().
+                     // The state `current_x_tensor` is updated in-place by model.forward().
                      Logger::info("Processed prompt token at pos " + std::to_string(pos) + ".");
                 }
                 Logger::info("--- main loop: END pos=" + std::to_string(pos) + " ---");
             } // End generation loop
             std::cout << std::endl; // Move to the next line after progress bar finishes
 
-            // Decode and print the generated part
-            std::string generated_text = tokenizer.detokenize(generated_only_ids);
+            // Decode and print the generated part using the improved decode method
+            std::string generated_text = tokenizer.decode(generated_only_ids, true); // Skip special tokens
             Logger::info("Generated Token IDs: " + [&](){
                 std::stringstream ss;
                 ss << "[ ";
