@@ -152,6 +152,12 @@ static void rmsnorm_vector(const std::vector<float>& x, const std::vector<float>
 // --- START: C++ Vector Softmax ---
 // Compute softmax for a vector in-place (or return new vector)
 static void softmax_vector(const std::vector<float>& x, std::vector<float>& out) {
+#ifdef HAS_CUDA
+    // Logger::info("Using CUDA Softmax"); // Optional log
+    softmax_vector_cuda(x, out, x.size());
+#else
+    // Logger::info("Using CPU Softmax (OpenMP)"); // Optional log
+    // Original OpenMP Implementation
     if (x.empty()) return;
     out.resize(x.size());
 
@@ -171,16 +177,25 @@ static void softmax_vector(const std::vector<float>& x, std::vector<float>& out)
     for (size_t i = 0; i < x.size(); ++i) {
         out[i] *= inv_sum;
     }
+#endif // HAS_CUDA
 }
 // --- END: C++ Vector Softmax ---
 
 // C++ Vector-based SiLU activation: y = x * sigmoid(x)
 static void silu(const std::vector<float>& x, std::vector<float>& out) {
+#ifdef HAS_CUDA
+    // Logger::info("Using CUDA SiLU"); // Optional log
+    silu_cuda(x, out, x.size());
+#else
+    // Logger::info("Using CPU SiLU (OpenMP)"); // Optional log
+    // Original OpenMP implementation
+    if (x.size() != out.size()) out.resize(x.size()); // Ensure output is sized correctly
     #pragma omp parallel for
     for (size_t i = 0; i < x.size(); ++i) {
         float sigmoid_x = 1.0f / (1.0f + std::exp(-x[i])); // Calculate sigmoid explicitly
         out[i] = x[i] * sigmoid_x; // Multiply
     }
+#endif // HAS_CUDA
 }
 
 // Helper: log vector stats (min, max, mean, all finite)
@@ -621,6 +636,24 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, K
     int max_seq_len = config_.max_position_embeddings;
     float eps = config_.rms_norm_eps;
 
+#ifdef HAS_CUDA
+    Logger::info("[CUDA] Allocating device buffer for x_vec");
+    float* x_dev = nullptr;
+    gpuErrchk(cudaMalloc(&x_dev, hs * sizeof(float)));
+    Logger::info("[CUDA] Device buffer allocated");
+    Logger::info("[CUDA] Copying initial embedding to device");
+    gpuErrchk(cudaMemcpy(x_dev, x_vec.data(), hs * sizeof(float), cudaMemcpyHostToDevice));
+    Logger::info("[CUDA] Initial embedding copied to device");
+    // Allocate device buffer for RMSNorm output
+    float* x_norm_dev = nullptr;
+    gpuErrchk(cudaMalloc(&x_norm_dev, hs * sizeof(float)));
+    // Copy RMSNorm weights to device once
+    float* w_norm1_dev = nullptr;
+    std::vector<float> w_norm1_vec = bf16vec_to_float_vec(layers[0].input_layernorm); // Use layer 0 for now
+    gpuErrchk(cudaMalloc(&w_norm1_dev, hs * sizeof(float)));
+    gpuErrchk(cudaMemcpy(w_norm1_dev, w_norm1_vec.data(), hs * sizeof(float), cudaMemcpyHostToDevice));
+#endif
+
     bool log_initial = (pos == 0);
     
     if (pos >= max_seq_len) {
@@ -660,8 +693,35 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, K
         if (log_target_layer) log_vector_summary("TROUBLESHOOTING L0 P1 Input", x_resid1_vec);
 
         // a) Input RMSNorm (Using C++ Vector version)
+#ifdef HAS_CUDA
+        // Log input and weights before RMSNorm
+        std::stringstream ss_in, ss_w;
+        ss_in << "[CUDA RMSNorm] x_vec first 5: ";
+        for (int i = 0; i < 5 && i < x_vec.size(); ++i) ss_in << x_vec[i] << " ";
+        Logger::info(ss_in.str());
+        std::vector<float> w_norm1_vec = bf16vec_to_float_vec(lw.input_layernorm);
+        ss_w << "[CUDA RMSNorm] w_norm1_vec first 5: ";
+        for (int i = 0; i < 5 && i < w_norm1_vec.size(); ++i) ss_w << w_norm1_vec[i] << " ";
+        Logger::info(ss_w.str());
+        gpuErrchk(cudaMemcpy(x_dev, x_vec.data(), hs * sizeof(float), cudaMemcpyHostToDevice));
+        float* w_norm1_dev = nullptr;
+        gpuErrchk(cudaMalloc(&w_norm1_dev, hs * sizeof(float)));
+        gpuErrchk(cudaMemcpy(w_norm1_dev, w_norm1_vec.data(), hs * sizeof(float), cudaMemcpyHostToDevice));
+        Logger::info("[CUDA] Calling device-pointer RMSNorm for input");
+        rmsnorm_vector_cuda(x_dev, w_norm1_dev, x_norm_dev, hs, eps);
+        gpuErrchk(cudaDeviceSynchronize());
+        Logger::info("[CUDA] Copying RMSNorm output back to host");
+        cudaMemcpy(x_norm_vec1.data(), x_norm_dev, hs * sizeof(float), cudaMemcpyDeviceToHost);
+        // Log output after RMSNorm
+        std::stringstream ss_out;
+        ss_out << "[CUDA RMSNorm] x_norm_vec1 first 5: ";
+        for (int i = 0; i < 5 && i < x_norm_vec1.size(); ++i) ss_out << x_norm_vec1[i] << " ";
+        Logger::info(ss_out.str());
+        gpuErrchk(cudaFree(w_norm1_dev));
+#else
         std::vector<float> w_norm1_vec = bf16vec_to_float_vec(lw.input_layernorm); 
         rmsnorm_vector(x_vec, w_norm1_vec, x_norm_vec1, eps); // Input is x_vec, output x_norm_vec1
+#endif
         if (log_target_layer) log_vector_summary("TROUBLESHOOTING L0 P1 Output C++ RMSNorm1", x_norm_vec1);
 
         // b) Q, K, V projections (Using C++ Vector MatVec)
@@ -822,6 +882,12 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, K
     std::vector<float> logits(vs); 
     matvec_bf16_f32_vector(lm_head, x_final_norm_vec, logits, vs, hs); 
     
+#ifdef HAS_CUDA
+    Logger::info("[CUDA] Freeing device buffers for RMSNorm");
+    gpuErrchk(cudaFree(x_norm_dev));
+    gpuErrchk(cudaFree(w_norm1_dev));
+#endif
+
     if (log_initial) {
         log_vector_summary("TROUBLESHOOTING Final Logits (P0, C++ MatVec)", logits, 10);
     }

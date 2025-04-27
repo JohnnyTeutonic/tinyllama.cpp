@@ -28,14 +28,22 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=t
 // --- Kernel Wrapper Declarations --- 
 
 /**
- * @brief Performs RMS Normalization on the GPU.
- * 
- * @param x_in_host Input vector (host memory).
- * @param weight_host Normalization weights (host memory).
- * @param out_host Output vector (host memory, will be resized and filled).
+ * @brief Performs RMS Normalization on the GPU (device pointers version).
+ * @param x_dev Input vector (device pointer).
+ * @param weight_dev Normalization weights (device pointer).
+ * @param out_dev Output vector (device pointer).
  * @param n Size of the vectors.
  * @param eps Epsilon value for numerical stability.
+ * @param stream CUDA stream (optional, default 0).
  */
+void rmsnorm_vector_cuda(const float* x_dev,
+                         const float* weight_dev,
+                         float* out_dev,
+                         int n,
+                         float eps,
+                         cudaStream_t stream = 0);
+
+// (Optional: keep the host vector overload for now)
 void rmsnorm_vector_cuda(const std::vector<float>& x_in_host,
                          const std::vector<float>& weight_host,
                          std::vector<float>& out_host,
@@ -59,6 +67,27 @@ void matvec_bf16_f32_cuda(const std::vector<uint16_t>& mat_bf16_host,
                           int rows,
                           int cols);
 
+/**
+ * @brief Performs element-wise SiLU activation (x * sigmoid(x)) on the GPU.
+ * 
+ * @param x_host Input vector (host memory).
+ * @param out_host Output vector (host memory, will be resized and filled).
+ * @param n Size of the vectors.
+ */
+void silu_cuda(const std::vector<float>& x_host,
+               std::vector<float>& out_host,
+               int n);
+
+/**
+ * @brief Computes the Softmax of a vector on the GPU.
+ * 
+ * @param x_host Input vector (host memory).
+ * @param out_host Output vector (host memory, will be resized and filled).
+ * @param n Size of the vectors.
+ */
+void softmax_vector_cuda(const std::vector<float>& x_host, 
+                         std::vector<float>& out_host,
+                         int n);
 
 #endif // HAS_CUDA
 

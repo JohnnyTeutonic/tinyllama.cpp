@@ -67,72 +67,68 @@ __global__ void rmsnorm_apply_kernel(const float* x, const float* weight, float*
     }
 }
 
-// --- RMSNorm C++ Wrapper --- 
-void rmsnorm_vector_cuda(const std::vector<float>& x_in_host,
-                         const std::vector<float>& weight_host,
-                         std::vector<float>& out_host,
+// --- RMSNorm C++ Wrapper (device pointer version) ---
+void rmsnorm_vector_cuda(const float* x_dev,
+                         const float* weight_dev,
+                         float* out_dev,
                          int n,
-                         float eps) 
+                         float eps,
+                         cudaStream_t stream) 
 {
-    if (x_in_host.size() != n || weight_host.size() != n) {
-        throw std::runtime_error("RMSNorm CUDA: Input vector size mismatch.");
-    }
-    out_host.resize(n);
-
-    // --- Device Memory Allocation ---
-    float *x_in_dev = nullptr;
-    float *weight_dev = nullptr;
-    float *out_dev = nullptr;
-    float *partial_sums_dev = nullptr;
-    
-    // Determine grid/block size for reduction
-    // Needs careful tuning, using simple defaults for now
+    // --- Device Memory is already allocated and filled ---
+    // --- Kernel Launch Configuration ---
     const int threads_per_block = 256;
     int num_blocks_reduce = (n + threads_per_block - 1) / threads_per_block;
     size_t shared_mem_size = threads_per_block * sizeof(float);
 
-    float *partial_sums_host = new float[num_blocks_reduce]; // Host buffer for final reduction
-
-    gpuErrchk(cudaMalloc(&x_in_dev, n * sizeof(float)));
-    gpuErrchk(cudaMalloc(&weight_dev, n * sizeof(float)));
-    gpuErrchk(cudaMalloc(&out_dev, n * sizeof(float)));
+    // Allocate partial_sums on device
+    float* partial_sums_dev = nullptr;
     gpuErrchk(cudaMalloc(&partial_sums_dev, num_blocks_reduce * sizeof(float)));
 
-    // --- Copy Data Host -> Device ---
-    gpuErrchk(cudaMemcpy(x_in_dev, x_in_host.data(), n * sizeof(float), cudaMemcpyHostToDevice));
-    gpuErrchk(cudaMemcpy(weight_dev, weight_host.data(), n * sizeof(float), cudaMemcpyHostToDevice));
-
-    // --- Launch Kernel 1: Sum of Squares Reduction ---
-    rmsnorm_sum_squares_kernel<<<num_blocks_reduce, threads_per_block, shared_mem_size>>>(x_in_dev, partial_sums_dev, n);
-    gpuErrchk(cudaGetLastError()); // Check for kernel launch errors
+    // --- Kernel 1: Sum of Squares Reduction ---
+    rmsnorm_sum_squares_kernel<<<num_blocks_reduce, threads_per_block, shared_mem_size, stream>>>(x_dev, partial_sums_dev, n);
+    gpuErrchk(cudaGetLastError());
 
     // --- Copy Partial Sums Device -> Host for Final Reduction ---
-    gpuErrchk(cudaMemcpy(partial_sums_host, partial_sums_dev, num_blocks_reduce * sizeof(float), cudaMemcpyDeviceToHost));
-    gpuErrchk(cudaDeviceSynchronize()); // Ensure copy is complete before CPU access
+    float* partial_sums_host = new float[num_blocks_reduce];
+    gpuErrchk(cudaMemcpyAsync(partial_sums_host, partial_sums_dev, num_blocks_reduce * sizeof(float), cudaMemcpyDeviceToHost, stream));
+    gpuErrchk(cudaStreamSynchronize(stream));
 
     // --- Final Reduction on CPU ---
     double total_ssq = 0.0;
     for(int i=0; i < num_blocks_reduce; ++i) {
         total_ssq += partial_sums_host[i];
     }
-    total_ssq /= n; // Calculate mean sum of squares
+    total_ssq /= n;
     float inv_norm_factor = 1.0f / std::sqrt(static_cast<float>(total_ssq) + eps);
-
-    // --- Launch Kernel 2: Apply Normalization ---
-    int num_blocks_apply = (n + threads_per_block - 1) / threads_per_block;
-    rmsnorm_apply_kernel<<<num_blocks_apply, threads_per_block>>>(x_in_dev, weight_dev, out_dev, n, inv_norm_factor);
-    gpuErrchk(cudaGetLastError());
-
-    // --- Copy Result Device -> Host ---
-    gpuErrchk(cudaMemcpy(out_host.data(), out_dev, n * sizeof(float), cudaMemcpyDeviceToHost));
-    gpuErrchk(cudaDeviceSynchronize()); // Ensure final copy is done
-
-    // --- Cleanup --- 
     delete[] partial_sums_host;
-    gpuErrchk(cudaFree(x_in_dev));
+    gpuErrchk(cudaFree(partial_sums_dev));
+
+    // --- Kernel 2: Apply Normalization ---
+    int num_blocks_apply = (n + threads_per_block - 1) / threads_per_block;
+    rmsnorm_apply_kernel<<<num_blocks_apply, threads_per_block, 0, stream>>>(x_dev, weight_dev, out_dev, n, inv_norm_factor);
+    gpuErrchk(cudaGetLastError());
+}
+
+// --- Old host-vector overload (calls device-pointer version internally) ---
+void rmsnorm_vector_cuda(const std::vector<float>& x_in_host,
+                         const std::vector<float>& weight_host,
+                         std::vector<float>& out_host,
+                         int n,
+                         float eps)
+{
+    out_host.resize(n);
+    float *x_dev = nullptr, *weight_dev = nullptr, *out_dev = nullptr;
+    gpuErrchk(cudaMalloc(&x_dev, n * sizeof(float)));
+    gpuErrchk(cudaMalloc(&weight_dev, n * sizeof(float)));
+    gpuErrchk(cudaMalloc(&out_dev, n * sizeof(float)));
+    gpuErrchk(cudaMemcpy(x_dev, x_in_host.data(), n * sizeof(float), cudaMemcpyHostToDevice));
+    gpuErrchk(cudaMemcpy(weight_dev, weight_host.data(), n * sizeof(float), cudaMemcpyHostToDevice));
+    rmsnorm_vector_cuda(x_dev, weight_dev, out_dev, n, eps);
+    gpuErrchk(cudaMemcpy(out_host.data(), out_dev, n * sizeof(float), cudaMemcpyDeviceToHost));
+    gpuErrchk(cudaFree(x_dev));
     gpuErrchk(cudaFree(weight_dev));
     gpuErrchk(cudaFree(out_dev));
-    gpuErrchk(cudaFree(partial_sums_dev));
 }
 
 
@@ -237,6 +233,190 @@ void matvec_bf16_f32_cuda(const std::vector<uint16_t>& mat_bf16_host,
     gpuErrchk(cudaFree(mat_bf16_dev));
     gpuErrchk(cudaFree(vec_f32_dev));
     gpuErrchk(cudaFree(out_f32_dev));
+}
+
+
+// <<< SILU KERNEL >>>
+
+__global__ void silu_kernel(const float* x, float* out, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        float x_val = x[i];
+        out[i] = x_val / (1.0f + expf(-x_val)); // x * sigmoid(x)
+    }
+}
+
+// --- SiLU C++ Wrapper ---
+void silu_cuda(const std::vector<float>& x_host,
+               std::vector<float>& out_host,
+               int n)
+{
+    if (x_host.size() != n) {
+        throw std::runtime_error("SiLU CUDA: Input vector size mismatch.");
+    }
+    out_host.resize(n);
+
+    // --- Device Memory ---
+    float* x_dev = nullptr;
+    float* out_dev = nullptr;
+    gpuErrchk(cudaMalloc(&x_dev, n * sizeof(float)));
+    gpuErrchk(cudaMalloc(&out_dev, n * sizeof(float)));
+
+    // --- Copy Host -> Device ---
+    gpuErrchk(cudaMemcpy(x_dev, x_host.data(), n * sizeof(float), cudaMemcpyHostToDevice));
+
+    // --- Kernel Launch ---
+    const int threads_per_block = 256;
+    int num_blocks = (n + threads_per_block - 1) / threads_per_block;
+    silu_kernel<<<num_blocks, threads_per_block>>>(x_dev, out_dev, n);
+    gpuErrchk(cudaGetLastError());
+
+    // --- Copy Device -> Host ---
+    gpuErrchk(cudaMemcpy(out_host.data(), out_dev, n * sizeof(float), cudaMemcpyDeviceToHost));
+    gpuErrchk(cudaDeviceSynchronize());
+
+    // --- Cleanup ---
+    gpuErrchk(cudaFree(x_dev));
+    gpuErrchk(cudaFree(out_dev));
+}
+
+
+// <<< SOFTMAX KERNELS >>>
+
+// Kernel 1: Find max element in the vector (Reduction)
+__global__ void softmax_find_max_kernel(const float* x, float* partial_max, int n) {
+    extern __shared__ float sdata[];
+    unsigned int tid = threadIdx.x;
+    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    // Load element into shared memory, using negative infinity for out-of-bounds
+    sdata[tid] = (i < n) ? x[i] : -INFINITY;
+    __syncthreads();
+
+    // Max reduction in shared memory
+    for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            sdata[tid] = fmaxf(sdata[tid], sdata[tid + s]);
+        }
+        __syncthreads();
+    }
+
+    // Write block's maximum to global memory
+    if (tid == 0) {
+        partial_max[blockIdx.x] = sdata[0];
+    }
+}
+
+// Kernel 2: Calculate exponentials and sum (Reduction)
+__global__ void softmax_exp_sum_kernel(const float* x, float* partial_sums, int n, float max_val) {
+    extern __shared__ float sdata[];
+    unsigned int tid = threadIdx.x;
+    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+
+    // Load shifted exponential into shared memory
+    sdata[tid] = (i < n) ? expf(x[i] - max_val) : 0.0f;
+    __syncthreads();
+
+    // Sum reduction in shared memory
+    for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            sdata[tid] += sdata[tid + s];
+        }
+        __syncthreads();
+    }
+
+    // Write block's sum to global memory
+    if (tid == 0) {
+        partial_sums[blockIdx.x] = sdata[0];
+    }
+}
+
+// Kernel 3: Normalize the output vector
+__global__ void softmax_normalize_kernel(const float* x, float* out, int n, float max_val, float inv_sum) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        out[i] = expf(x[i] - max_val) * inv_sum;
+    }
+}
+
+// --- Softmax C++ Wrapper ---
+void softmax_vector_cuda(const std::vector<float>& x_host,
+                         std::vector<float>& out_host,
+                         int n)
+{
+    if (x_host.size() != n) {
+        throw std::runtime_error("Softmax CUDA: Input vector size mismatch.");
+    }
+    if (n == 0) {
+        out_host.clear();
+        return;
+    }
+    out_host.resize(n);
+
+    // --- Device Memory ---
+    float* x_dev = nullptr;
+    float* out_dev = nullptr;
+    float* partial_max_dev = nullptr;
+    float* partial_sum_dev = nullptr;
+
+    const int threads_per_block = 256; // Common block size
+    int num_blocks = (n + threads_per_block - 1) / threads_per_block;
+    size_t shared_mem_size = threads_per_block * sizeof(float);
+
+    // Allocate host buffers for partial results
+    float* partial_max_host = new float[num_blocks];
+    float* partial_sum_host = new float[num_blocks];
+
+    gpuErrchk(cudaMalloc(&x_dev, n * sizeof(float)));
+    gpuErrchk(cudaMalloc(&out_dev, n * sizeof(float)));
+    gpuErrchk(cudaMalloc(&partial_max_dev, num_blocks * sizeof(float)));
+    gpuErrchk(cudaMalloc(&partial_sum_dev, num_blocks * sizeof(float)));
+
+    // --- Copy Host -> Device ---
+    gpuErrchk(cudaMemcpy(x_dev, x_host.data(), n * sizeof(float), cudaMemcpyHostToDevice));
+
+    // --- Kernel 1: Find Max --- 
+    softmax_find_max_kernel<<<num_blocks, threads_per_block, shared_mem_size>>>(x_dev, partial_max_dev, n);
+    gpuErrchk(cudaGetLastError());
+    gpuErrchk(cudaMemcpy(partial_max_host, partial_max_dev, num_blocks * sizeof(float), cudaMemcpyDeviceToHost));
+    gpuErrchk(cudaDeviceSynchronize()); 
+
+    // --- Final Max Reduction on CPU ---
+    float max_val = -INFINITY;
+    for (int i = 0; i < num_blocks; ++i) {
+        if (partial_max_host[i] > max_val) {
+            max_val = partial_max_host[i];
+        }
+    }
+
+    // --- Kernel 2: Calculate Exp Sum --- 
+    softmax_exp_sum_kernel<<<num_blocks, threads_per_block, shared_mem_size>>>(x_dev, partial_sum_dev, n, max_val);
+    gpuErrchk(cudaGetLastError());
+    gpuErrchk(cudaMemcpy(partial_sum_host, partial_sum_dev, num_blocks * sizeof(float), cudaMemcpyDeviceToHost));
+    gpuErrchk(cudaDeviceSynchronize());
+
+    // --- Final Sum Reduction on CPU ---
+    double exp_sum = 0.0;
+    for (int i = 0; i < num_blocks; ++i) {
+        exp_sum += partial_sum_host[i];
+    }
+    float inv_sum = 1.0f / static_cast<float>(exp_sum);
+
+    // --- Kernel 3: Normalize Output --- 
+    softmax_normalize_kernel<<<num_blocks, threads_per_block>>>(x_dev, out_dev, n, max_val, inv_sum);
+    gpuErrchk(cudaGetLastError());
+
+    // --- Copy Result Device -> Host ---
+    gpuErrchk(cudaMemcpy(out_host.data(), out_dev, n * sizeof(float), cudaMemcpyDeviceToHost));
+    gpuErrchk(cudaDeviceSynchronize());
+
+    // --- Cleanup ---
+    delete[] partial_max_host;
+    delete[] partial_sum_host;
+    gpuErrchk(cudaFree(x_dev));
+    gpuErrchk(cudaFree(out_dev));
+    gpuErrchk(cudaFree(partial_max_dev));
+    gpuErrchk(cudaFree(partial_sum_dev));
 }
 
 #endif // HAS_CUDA 
