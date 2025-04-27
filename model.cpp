@@ -753,20 +753,22 @@ std::vector<float> TinyLlamaModel::forward(torch::Tensor& x_tensor, int pos, KVC
             attn_out_tensor.slice(/*dim=*/0, /*start=*/h * head_dim, /*end=*/(h + 1) * head_dim).copy_(head_attn_out.squeeze(0));
         }
 
-        // e) Output projection
-        torch::Tensor attn_proj_tensor = matvec(bf16vec_to_tensor(lw.o_proj, {hs, hs}), attn_out_tensor);
-        log_vec_stats("Attention Projection Output (L" + std::to_string(l) + " P" + std::to_string(pos) + ")", std::vector<float>(static_cast<float*>(attn_proj_tensor.data_ptr()), static_cast<float*>(attn_proj_tensor.data_ptr()) + hs));
+        // e) Output projection (Using C++ Vector MatVec)
+        // torch::Tensor attn_proj_tensor = matvec(bf16vec_to_tensor(lw.o_proj, {hs, hs}), attn_out_tensor); // Torch version removed
+        std::vector<float> attn_out_vec(static_cast<float*>(attn_out_tensor.data_ptr()), static_cast<float*>(attn_out_tensor.data_ptr()) + hs);
+        std::vector<float> attn_proj_vec(hs);
+        matvec_bf16_f32_vector(lw.o_proj, attn_out_vec, attn_proj_vec, hs, hs);
+        // log_vec_stats("Attention Projection Output (C++ Vec) ...", attn_proj_vec); // Log the vector if needed
 
         // f) First residual connection (Using C++ Vector version)
-        // x_tensor = x_resid1_tensor + attn_proj_tensor; // Torch version removed
         std::vector<float> x_resid1_vec(static_cast<float*>(x_resid1_tensor.data_ptr()), static_cast<float*>(x_resid1_tensor.data_ptr()) + hs);
-        std::vector<float> attn_proj_vec(static_cast<float*>(attn_proj_tensor.data_ptr()), static_cast<float*>(attn_proj_tensor.data_ptr()) + hs);
+        // std::vector<float> attn_proj_vec(...) // Already computed above
         std::vector<float> x_after_resid1_vec(hs);
         #pragma omp parallel for
         for(size_t i=0; i<hs; ++i) {
-            x_after_resid1_vec[i] = x_resid1_vec[i] + attn_proj_vec[i];
+            x_after_resid1_vec[i] = x_resid1_vec[i] + attn_proj_vec[i]; // Use attn_proj_vec directly
         }
-        x_tensor = vec_to_tensor(x_after_resid1_vec, {hs}); // Update x_tensor with vector sum result
+        x_tensor = vec_to_tensor(x_after_resid1_vec, {hs}); // Update x_tensor for next layer input/final norm
         
         if (log_target_layer) { 
             log_vector_summary("TROUBLESHOOTING L0 P1 State BEFORE 1st Residual", std::vector<float>(static_cast<float*>(x_resid1_tensor.data_ptr()), static_cast<float*>(x_resid1_tensor.data_ptr()) + hs));
@@ -786,53 +788,58 @@ std::vector<float> TinyLlamaModel::forward(torch::Tensor& x_tensor, int pos, KVC
         torch::Tensor x_norm2_tensor = vec_to_tensor(x_norm_vec2, {hs}); // Convert result back to tensor
         log_vec_stats("Input to MLP C++ RMSNorm (L" + std::to_string(l) + " P" + std::to_string(pos) + ")", std::vector<float>(static_cast<float*>(x_norm2_tensor.data_ptr()), static_cast<float*>(x_norm2_tensor.data_ptr()) + hs));
 
-        // --- START: MLP Logic with C++ SiLU --- (Input is x_norm2_tensor from above)
-        torch::Tensor gate_proj_tensor = matvec(bf16vec_to_tensor(lw.gate_proj, {is, hs}), x_norm2_tensor);
-        torch::Tensor up_proj_tensor = matvec(bf16vec_to_tensor(lw.up_proj, {is, hs}), x_norm2_tensor);
+        // --- START: MLP Logic with C++ SiLU and C++ MatVec ---
+        // torch::Tensor gate_proj_tensor = matvec(bf16vec_to_tensor(lw.gate_proj, {is, hs}), x_norm2_tensor); // Torch version removed
+        // torch::Tensor up_proj_tensor = matvec(bf16vec_to_tensor(lw.up_proj, {is, hs}), x_norm2_tensor); // Torch version removed
+        
+        // Use x_norm2_vec from the C++ RMSNorm step above
+        std::vector<float> gate_vec(is);
+        std::vector<float> up_vec(is);
+        matvec_bf16_f32_vector(lw.gate_proj, x_norm_vec2, gate_vec, is, hs); // Use x_norm_vec2 as input
+        matvec_bf16_f32_vector(lw.up_proj, x_norm_vec2, up_vec, is, hs);   // Use x_norm_vec2 as input
 
-        // Convert tensors needed for C++ SiLU to vectors
-        std::vector<float> gate_vec(static_cast<float*>(gate_proj_tensor.data_ptr()), static_cast<float*>(gate_proj_tensor.data_ptr()) + is);
-        std::vector<float> up_vec(static_cast<float*>(up_proj_tensor.data_ptr()), static_cast<float*>(up_proj_tensor.data_ptr()) + is);
+        // Convert tensors needed for C++ SiLU to vectors // No longer needed
+        // std::vector<float> gate_vec(...);
+        // std::vector<float> up_vec(...);
         std::vector<float> silu_out_vec(is);
 
-        // Call the C++ SiLU function
+        // Call the C++ SiLU function (Input gate_vec, output silu_out_vec)
         silu(gate_vec, silu_out_vec);
 
-        // Perform element-wise multiplication for SwiGLU using vectors
+        // Perform element-wise multiplication for SwiGLU using vectors (Inputs silu_out_vec, up_vec)
         std::vector<float> swiglu_result_vec(is);
         #pragma omp parallel for
         for(size_t i = 0; i < is; ++i) {
             swiglu_result_vec[i] = silu_out_vec[i] * up_vec[i];
         }
 
-        // Convert the final SwiGLU result back to a tensor
-        torch::Tensor swiglu_result_tensor = vec_to_tensor(swiglu_result_vec, {is});
-
-        // Perform SwiGLU: silu(gate) * up 
-        // torch::Tensor swiglu_result_tensor = torch::nn::functional::silu(gate_proj_tensor) * up_proj_tensor; // Shape [is] // <<< Torch version REMOVED
+        // Convert the final SwiGLU result back to a tensor // No longer needed for C++ Down Proj
+        // torch::Tensor swiglu_result_tensor = vec_to_tensor(swiglu_result_vec, {is});
         
         if (log_target_layer) {
-            log_vector_summary("TROUBLESHOOTING L0 P1 Gate Proj Result (Tensor)", std::vector<float>(static_cast<float*>(gate_proj_tensor.data_ptr()), static_cast<float*>(gate_proj_tensor.data_ptr()) + is));
-            log_vector_summary("TROUBLESHOOTING L0 P1 Up Proj Result (Tensor)", std::vector<float>(static_cast<float*>(up_proj_tensor.data_ptr()), static_cast<float*>(up_proj_tensor.data_ptr()) + is));
-            log_vector_summary("TROUBLESHOOTING L0 P1 SwiGLU Result (Vec->Tensor)", std::vector<float>(static_cast<float*>(swiglu_result_tensor.data_ptr()), static_cast<float*>(swiglu_result_tensor.data_ptr()) + is));
+            // Logging requires converting tensors to vectors // Log vectors directly
+            log_vector_summary("TROUBLESHOOTING L0 P1 Gate Proj Result (C++ Vec)", gate_vec);
+            log_vector_summary("TROUBLESHOOTING L0 P1 Up Proj Result (C++ Vec)", up_vec);
+            log_vector_summary("TROUBLESHOOTING L0 P1 SwiGLU Result (C++ Vec)", swiglu_result_vec);
         }
         
-        // Calculate down projection (uses the swiglu_result_tensor)
-        torch::Tensor mlp_out_tensor = matvec(bf16vec_to_tensor(lw.down_proj, {hs, is}), swiglu_result_tensor); // Use swiglu_result_tensor
-        // --- END: MLP Logic with C++ SiLU ---
+        // Calculate down projection (Using C++ Vector MatVec)
+        // torch::Tensor mlp_out_tensor = matvec(bf16vec_to_tensor(lw.down_proj, {hs, is}), swiglu_result_tensor); // Torch version removed
+        std::vector<float> mlp_out_vec(hs);
+        matvec_bf16_f32_vector(lw.down_proj, swiglu_result_vec, mlp_out_vec, hs, is); // Use swiglu_result_vec as input
+        // --- END: MLP Logic with C++ ---
         
-        log_vec_stats("MLP Output (L" + std::to_string(l) + " P" + std::to_string(pos) + ")", std::vector<float>(static_cast<float*>(mlp_out_tensor.data_ptr()), static_cast<float*>(mlp_out_tensor.data_ptr()) + hs));
+        log_vec_stats("MLP Output (C++ Vec) (L" + std::to_string(l) + " P" + std::to_string(pos) + ")", mlp_out_vec);
         
         // h) Second residual connection (Using C++ Vector version)
-        // x_tensor = x_resid2_tensor + mlp_out_tensor; // Torch version removed
         std::vector<float> x_resid2_vec(static_cast<float*>(x_resid2_tensor.data_ptr()), static_cast<float*>(x_resid2_tensor.data_ptr()) + hs);
-        std::vector<float> mlp_out_vec(static_cast<float*>(mlp_out_tensor.data_ptr()), static_cast<float*>(mlp_out_tensor.data_ptr()) + hs);
+        // std::vector<float> mlp_out_vec(...) // Already computed above
         std::vector<float> x_after_resid2_vec(hs);
         #pragma omp parallel for
         for(size_t i=0; i<hs; ++i) {
-            x_after_resid2_vec[i] = x_resid2_vec[i] + mlp_out_vec[i];
+            x_after_resid2_vec[i] = x_resid2_vec[i] + mlp_out_vec[i]; // Use mlp_out_vec directly
         }
-        x_tensor = vec_to_tensor(x_after_resid2_vec, {hs}); // Update x_tensor with vector sum result
+        x_tensor = vec_to_tensor(x_after_resid2_vec, {hs}); // Update x_tensor for next layer input/final norm
 
         if (log_target_layer) { 
             log_vector_summary("TROUBLESHOOTING L0 P1 State BEFORE 2nd Residual", std::vector<float>(static_cast<float*>(x_resid2_tensor.data_ptr()), static_cast<float*>(x_resid2_tensor.data_ptr()) + hs));
