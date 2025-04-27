@@ -479,6 +479,41 @@ static void weighted_sum_probs_v(const std::vector<float>& probs,
 }
 // --- END: C++ Weighted Sum (Probs * V) ---
 
+// --- START: C++ Attention Scores (Q * K^T) ---
+// Calculates attention scores: scores = (Q @ K^T) * scale
+// Q shape: [head_dim], K shape: [seq_len, head_dim], scores shape: [seq_len]
+static void calculate_attention_scores(const std::vector<float>& Q, 
+                                     const std::vector<float>& K, 
+                                     std::vector<float>& scores, 
+                                     int seq_len, int head_dim, float scale) {
+    if (Q.size() != head_dim || K.size() != (size_t)seq_len * head_dim) {
+        Logger::error("calculate_attention_scores: Size mismatch. Q: " + std::to_string(Q.size()) + 
+                     " (Expected " + std::to_string(head_dim) + "), K: " + std::to_string(K.size()) + 
+                     " (Expected " + std::to_string(seq_len * head_dim) + ")");
+        scores.assign(seq_len, 0.0f);
+        return;
+    }
+    scores.resize(seq_len);
+
+    #pragma omp parallel for
+    for (int t = 0; t < seq_len; ++t) { // Iterate over each K vector (timestep)
+        double dot_product = 0.0;
+        double c_kahan = 0.0; // Kahan compensation
+        size_t k_offset = t * head_dim;
+        
+        for (int i = 0; i < head_dim; ++i) { // Dot product calculation
+            double term = static_cast<double>(Q[i]) * static_cast<double>(K[k_offset + i]);
+            // Kahan sum
+            double y = term - c_kahan;
+            double t_sum = dot_product + y;
+            c_kahan = (t_sum - dot_product) - y;
+            dot_product = t_sum;
+        }
+        scores[t] = static_cast<float>(dot_product) * scale; // Apply scale
+    }
+}
+// --- END: C++ Attention Scores ---
+
 // TinyLlamaModel constructor: load all weights from safetensors into uint16_t vectors
 TinyLlamaModel::TinyLlamaModel(const ModelConfig& config, const SafeTensorsLoader& loader)
     : config_(config)
@@ -764,24 +799,27 @@ std::vector<float> TinyLlamaModel::forward(torch::Tensor& x_tensor, int pos, KVC
             torch::Tensor v_cache_head = vec_to_tensor(v_cache_head_vec, {current_seq_len, head_dim}); // Shape [seq_len, head_dim]
             // --- End retrieve K and V --- 
             
-            // Calculate Scores: Q * K^T
-            // q_head [1, head_dim], k_cache_head.t() [head_dim, seq_len]
-            torch::Tensor scores = torch::matmul(q_head, k_cache_head.transpose(0, 1)) * scale; // Shape [1, seq_len]
-            
+            // Calculate Scores: Q * K^T (Using C++ Vector version)
+            // torch::Tensor scores = torch::matmul(q_head, k_cache_head.transpose(0, 1)) * scale; // Shape [1, seq_len] // Torch version removed
+            std::vector<float> q_head_vec(static_cast<float*>(q_head.data_ptr()), static_cast<float*>(q_head.data_ptr()) + head_dim);
+            // k_cache_head_vec is already available from cache retrieval step
+            std::vector<float> scores_vec(current_seq_len);
+            calculate_attention_scores(q_head_vec, k_cache_head_vec, scores_vec, current_seq_len, head_dim, scale);
+
             // --- Apply Softmax (C++ vector version) ---
-            // Convert scores tensor to vector
-            std::vector<float> scores_vec(static_cast<float*>(scores.data_ptr()), static_cast<float*>(scores.data_ptr()) + current_seq_len); 
+            // Convert scores tensor to vector // No longer needed, input is scores_vec
+            // std::vector<float> scores_vec(...);
             std::vector<float> probs_vec(current_seq_len);
             // Call C++ softmax
             softmax_vector(scores_vec, probs_vec);
-            // Convert result back to tensor
+            // Convert result back to tensor // Still needed for weighted sum unless that's also C++
             torch::Tensor probs = vec_to_tensor(probs_vec, {1, current_seq_len}); // Reshape to [1, seq_len]
             // --- End Apply Softmax ---
             
             // Calculate Weighted Sum: Probs * V (Using C++ Vector version)
             // torch::Tensor head_attn_out = torch::matmul(probs, v_cache_head); // Shape [1, head_dim] // Torch version removed
-            std::vector<float> v_cache_head_vec(static_cast<float*>(v_cache_head.data_ptr()), static_cast<float*>(v_cache_head.data_ptr()) + current_seq_len * head_dim);
             std::vector<float> head_attn_out_vec(head_dim);
+            // Use the existing v_cache_head_vec populated from the cache earlier
             weighted_sum_probs_v(probs_vec, v_cache_head_vec, head_attn_out_vec, current_seq_len, head_dim);
             torch::Tensor head_attn_out = vec_to_tensor(head_attn_out_vec, {1, (int64_t)head_dim}); // Convert back to tensor [1, head_dim]
             
