@@ -735,16 +735,30 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, K
         matvec_bf16_f32_cuda(lw.q_proj, x_norm1_dev, q_vec_dev, hs, hs);
         gpuErrchk(cudaDeviceSynchronize());
         gpuErrchk(cudaMemcpy(q_vec.data(), q_vec_dev, hs * sizeof(float), cudaMemcpyDeviceToHost));
-        gpuErrchk(cudaFree(x_norm1_dev));
         gpuErrchk(cudaFree(q_vec_dev));
+
+        // K projection
+        float* k_vec_dev = nullptr;
+        gpuErrchk(cudaMalloc(&k_vec_dev, n_kv_heads * head_dim * sizeof(float)));
+        matvec_bf16_f32_cuda(lw.k_proj, x_norm1_dev, k_vec_dev, n_kv_heads * head_dim, hs);
+        gpuErrchk(cudaDeviceSynchronize());
+        gpuErrchk(cudaMemcpy(k_vec.data(), k_vec_dev, n_kv_heads * head_dim * sizeof(float), cudaMemcpyDeviceToHost));
+        gpuErrchk(cudaFree(k_vec_dev));
+
+        // V projection
+        float* v_vec_dev = nullptr;
+        gpuErrchk(cudaMalloc(&v_vec_dev, n_kv_heads * head_dim * sizeof(float)));
+        matvec_bf16_f32_cuda(lw.v_proj, x_norm1_dev, v_vec_dev, n_kv_heads * head_dim, hs);
+        gpuErrchk(cudaDeviceSynchronize());
+        gpuErrchk(cudaMemcpy(v_vec.data(), v_vec_dev, n_kv_heads * head_dim * sizeof(float), cudaMemcpyDeviceToHost));
+        gpuErrchk(cudaFree(v_vec_dev));
+
+        gpuErrchk(cudaFree(x_norm1_dev));
 #else
         matvec_bf16_f32_vector(lw.q_proj, x_norm_vec1, q_vec, hs, hs);
-#endif
-        // K projection
         matvec_bf16_f32_vector(lw.k_proj, x_norm_vec1, k_vec, n_kv_heads * head_dim, hs);
-        // V projection
         matvec_bf16_f32_vector(lw.v_proj, x_norm_vec1, v_vec, n_kv_heads * head_dim, hs);
-        
+#endif
         // Log vectors BEFORE RoPE
         if (log_target_layer) {
             log_vector_summary("TROUBLESHOOTING L0 P1 Q Proj Output (C++ Vec, Before RoPE)", q_vec);
