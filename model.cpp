@@ -839,7 +839,20 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, K
         }
 
         // e) Output projection (Using C++ Vector MatVec)
+#ifdef HAS_CUDA
+        float* attn_out_dev = nullptr;
+        float* attn_proj_dev = nullptr;
+        gpuErrchk(cudaMalloc(&attn_out_dev, hs * sizeof(float)));
+        gpuErrchk(cudaMemcpy(attn_out_dev, attn_out_vec.data(), hs * sizeof(float), cudaMemcpyHostToDevice));
+        gpuErrchk(cudaMalloc(&attn_proj_dev, hs * sizeof(float)));
+        matvec_bf16_f32_cuda(lw.o_proj, attn_out_dev, attn_proj_dev, hs, hs);
+        gpuErrchk(cudaDeviceSynchronize());
+        gpuErrchk(cudaMemcpy(attn_proj_vec.data(), attn_proj_dev, hs * sizeof(float), cudaMemcpyDeviceToHost));
+        gpuErrchk(cudaFree(attn_out_dev));
+        gpuErrchk(cudaFree(attn_proj_dev));
+#else
         matvec_bf16_f32_vector(lw.o_proj, attn_out_vec, attn_proj_vec, hs, hs);
+#endif
 
         // f) First residual connection (Using C++ Vector version)
         #pragma omp parallel for
