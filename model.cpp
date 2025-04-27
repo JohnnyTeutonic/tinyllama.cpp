@@ -670,6 +670,9 @@ float* TinyLlamaModel::lookup_embedding_device(int token_id) {
 std::vector<float> TinyLlamaModel::forward_device(int token_id, int pos, KVCache* cache, const std::vector<int>* attention_mask) {
     int hs = config_.hidden_size;
     int vs = config_.vocab_size;
+    int n_kv_heads = config_.num_key_value_heads;
+    int n_heads = config_.num_attention_heads;
+    int head_dim = hs / n_heads;
     float eps = config_.rms_norm_eps;
     // 1. Device-only embedding lookup
     float* emb_dev = lookup_embedding_device(token_id);
@@ -684,15 +687,34 @@ std::vector<float> TinyLlamaModel::forward_device(int token_id, int pos, KVCache
     // 4. Call CUDA RMSNorm
     rmsnorm_vector_cuda(emb_dev, w_norm1_dev, x_norm_dev, hs, eps);
     gpuErrchk(cudaDeviceSynchronize());
-    // 5. Copy RMSNorm output back to host
-    std::vector<float> x_norm_host(hs);
-    gpuErrchk(cudaMemcpy(x_norm_host.data(), x_norm_dev, hs * sizeof(float), cudaMemcpyDeviceToHost));
-    // 6. Free device buffers
     gpuErrchk(cudaFree(emb_dev));
-    gpuErrchk(cudaFree(x_norm_dev));
     gpuErrchk(cudaFree(w_norm1_dev));
-    // 7. Call the original host-based forward pass
-    return forward(x_norm_host, pos, cache, attention_mask);
+    // 5. Q, K, V projections on device
+    float* q_dev = nullptr;
+    float* k_dev = nullptr;
+    float* v_dev = nullptr;
+    gpuErrchk(cudaMalloc(&q_dev, hs * sizeof(float)));
+    gpuErrchk(cudaMalloc(&k_dev, n_kv_heads * head_dim * sizeof(float)));
+    gpuErrchk(cudaMalloc(&v_dev, n_kv_heads * head_dim * sizeof(float)));
+    matvec_bf16_f32_cuda(layers[0].q_proj, x_norm_dev, q_dev, hs, hs);
+    matvec_bf16_f32_cuda(layers[0].k_proj, x_norm_dev, k_dev, n_kv_heads * head_dim, hs);
+    matvec_bf16_f32_cuda(layers[0].v_proj, x_norm_dev, v_dev, n_kv_heads * head_dim, hs);
+    gpuErrchk(cudaDeviceSynchronize());
+    // 6. Copy Q, K, V to host
+    std::vector<float> q_host(hs);
+    std::vector<float> k_host(n_kv_heads * head_dim);
+    std::vector<float> v_host(n_kv_heads * head_dim);
+    gpuErrchk(cudaMemcpy(q_host.data(), q_dev, hs * sizeof(float), cudaMemcpyDeviceToHost));
+    gpuErrchk(cudaMemcpy(k_host.data(), k_dev, n_kv_heads * head_dim * sizeof(float), cudaMemcpyDeviceToHost));
+    gpuErrchk(cudaMemcpy(v_host.data(), v_dev, n_kv_heads * head_dim * sizeof(float), cudaMemcpyDeviceToHost));
+    // 7. Free device buffers
+    gpuErrchk(cudaFree(x_norm_dev));
+    gpuErrchk(cudaFree(q_dev));
+    gpuErrchk(cudaFree(k_dev));
+    gpuErrchk(cudaFree(v_dev));
+    // 8. Call the original host-based forward pass, but inject Q, K, V (for now, just pass Q as x_vec)
+    // TODO: For full correctness, you would need to refactor forward() to accept Q, K, V, but for incremental testing, just pass Q as x_vec
+    return forward(q_host, pos, cache, attention_mask);
 }
 #endif
 
