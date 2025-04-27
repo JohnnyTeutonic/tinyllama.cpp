@@ -135,7 +135,7 @@ static void rmsnorm_vector(const std::vector<float>& x, const std::vector<float>
     if (x.empty() || x.size() != weight.size()) {
         Logger::error("RMSNorm vector size mismatch or empty input.");
         out.assign(x.size(), 0.0f); // Zero out output on error
-        return;
+        return; 
     }
     out.resize(x.size());
     size_t n = x.size();
@@ -446,6 +446,39 @@ static void matvec_bf16_f32_vector(const std::vector<uint16_t>& mat_bf16,
 }
 // --- END: C++ Vector MatVec with Kahan ---
 
+// --- START: C++ Weighted Sum (Probs * V) ---
+// Calculates weighted sum: out = probs @ V
+// probs shape: [seq_len], V shape: [seq_len, head_dim], out shape: [head_dim]
+static void weighted_sum_probs_v(const std::vector<float>& probs, 
+                                 const std::vector<float>& V, 
+                                 std::vector<float>& out, 
+                                 int seq_len, int head_dim) {
+    if (probs.size() != seq_len || V.size() != (size_t)seq_len * head_dim) {
+        Logger::error("weighted_sum_probs_v: Size mismatch. Probs: " + std::to_string(probs.size()) + 
+                     " (Expected " + std::to_string(seq_len) + "), V: " + std::to_string(V.size()) + 
+                     " (Expected " + std::to_string(seq_len * head_dim) + ")");
+        out.assign(head_dim, 0.0f);
+        return;
+    }
+    out.resize(head_dim);
+
+    #pragma omp parallel for
+    for (int j = 0; j < head_dim; ++j) {
+        double sum = 0.0;
+        double c_kahan = 0.0; // Kahan summation compensation
+        for (int i = 0; i < seq_len; ++i) {
+            double term = static_cast<double>(probs[i]) * static_cast<double>(V[i * head_dim + j]);
+            // Kahan sum
+            double y = term - c_kahan;
+            double t = sum + y;
+            c_kahan = (t - sum) - y;
+            sum = t;
+        }
+        out[j] = static_cast<float>(sum);
+    }
+}
+// --- END: C++ Weighted Sum (Probs * V) ---
+
 // TinyLlamaModel constructor: load all weights from safetensors into uint16_t vectors
 TinyLlamaModel::TinyLlamaModel(const ModelConfig& config, const SafeTensorsLoader& loader)
     : config_(config)
@@ -720,7 +753,7 @@ std::vector<float> TinyLlamaModel::forward(torch::Tensor& x_tensor, int pos, KVC
                 if (cache_pos_offset + head_dim <= cache->layers[l].k.size()) {
                     std::memcpy(k_cache_head_vec.data() + j * head_dim, &cache->layers[l].k[cache_pos_offset], head_dim * sizeof(float));
                     std::memcpy(v_cache_head_vec.data() + j * head_dim, &cache->layers[l].v[cache_pos_offset], head_dim * sizeof(float));
-                    } else {
+             } else {
                     // Fill with zeros or handle error - For now, fill with zeros
                     std::fill(k_cache_head_vec.begin() + j * head_dim, k_cache_head_vec.begin() + (j + 1) * head_dim, 0.0f);
                     std::fill(v_cache_head_vec.begin() + j * head_dim, v_cache_head_vec.begin() + (j + 1) * head_dim, 0.0f);
@@ -745,9 +778,12 @@ std::vector<float> TinyLlamaModel::forward(torch::Tensor& x_tensor, int pos, KVC
             torch::Tensor probs = vec_to_tensor(probs_vec, {1, current_seq_len}); // Reshape to [1, seq_len]
             // --- End Apply Softmax ---
             
-            // Calculate Weighted Sum: Probs * V
-            // probs [1, seq_len], v_cache_head [seq_len, head_dim]
-            torch::Tensor head_attn_out = torch::matmul(probs, v_cache_head); // Shape [1, head_dim]
+            // Calculate Weighted Sum: Probs * V (Using C++ Vector version)
+            // torch::Tensor head_attn_out = torch::matmul(probs, v_cache_head); // Shape [1, head_dim] // Torch version removed
+            std::vector<float> v_cache_head_vec(static_cast<float*>(v_cache_head.data_ptr()), static_cast<float*>(v_cache_head.data_ptr()) + current_seq_len * head_dim);
+            std::vector<float> head_attn_out_vec(head_dim);
+            weighted_sum_probs_v(probs_vec, v_cache_head_vec, head_attn_out_vec, current_seq_len, head_dim);
+            torch::Tensor head_attn_out = vec_to_tensor(head_attn_out_vec, {1, (int64_t)head_dim}); // Convert back to tensor [1, head_dim]
             
             // Accumulate head output into attn_out_tensor
             attn_out_tensor.slice(/*dim=*/0, /*start=*/h * head_dim, /*end=*/(h + 1) * head_dim).copy_(head_attn_out.squeeze(0));
