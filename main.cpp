@@ -19,7 +19,6 @@
 #include <numeric>
 #include <iomanip> // Include for std::setw, std::fixed, std::setprecision
 #include "vocab_loader.h"
-#include <torch/torch.h>
 
 // TODO: Implement safetensors loader
 // TODO: Implement TinyLlama model and inference
@@ -208,7 +207,7 @@ int main(int argc, char** argv) {
             int num_prompt_tokens = prompt_ids.size();
             std::vector<int> generated_ids = prompt_ids;
             std::vector<int> generated_only_ids;
-            torch::Tensor current_x_tensor; // Use Tensor for state
+            std::vector<float> current_x_vec; // Use std::vector for state
             cache.seq_len = 0; // Reset cache length
 
             Logger::info("Starting token-by-token processing loop with KVCache...");
@@ -245,40 +244,37 @@ int main(int argc, char** argv) {
                 int input_token_id = (pos < num_prompt_tokens) ? prompt_ids[pos] : next_token_id;
                 Logger::info("main loop: input_token_id=" + std::to_string(input_token_id));
                 
-                // Lookup embedding (NOW returns vector)
-                std::vector<float> current_x_vec = model.lookup_embedding(input_token_id);
-                // Convert vector back to tensor immediately for forward pass interface
-                current_x_tensor = vec_to_tensor(current_x_vec, {static_cast<int64_t>(mcfg.hidden_size)});
+                // Lookup embedding (returns vector)
+                current_x_vec = model.lookup_embedding(input_token_id);
+                // Convert vector back to tensor immediately for forward pass interface // REMOVED
+                // current_x_tensor = vec_to_tensor(current_x_vec, {static_cast<int64_t>(mcfg.hidden_size)});
                 
-                // Log tensor stats directly if possible, or convert for old logger
-                // log_vector_summary("main loop: current_x after lookup", std::vector<float>(static_cast<float*>(current_x_tensor.data_ptr()), static_cast<float*>(current_x_tensor.data_ptr()) + mcfg.hidden_size));
-                log_vector_summary("main loop: current_x after lookup (C++ Vec)", current_x_vec); // Log the vector
+                // Log the vector state
+                log_vector_summary("main loop: current_x after lookup (C++ Vec)", current_x_vec); 
 
                 // 2. Call the Forward Pass (token-by-token)
-                // Pass tensor by reference. It will be updated in place by some layers?
-                // Or does forward return the new state? CHECK MODEL.CPP SIGNATURE
-                // --> forward still expects torch::Tensor& x_tensor
+                // Pass vector by reference. It will be updated in place.
                 Logger::info("main loop: Calling model.forward for pos=" + std::to_string(pos));
-                std::vector<float> logits = model.forward(current_x_tensor, pos, &cache, nullptr); // Pass tensor state
+                std::vector<float> logits = model.forward(current_x_vec, pos, &cache, nullptr); // Pass vector state
                 Logger::info("main loop: Returned from model.forward for pos=" + std::to_string(pos));
                 
                 // --- Crucial: Increment cache sequence length *AFTER* forward call for position `pos`
                 cache.seq_len = pos + 1; 
                 Logger::info("main loop: Updated cache.seq_len=" + std::to_string(cache.seq_len));
                 
-                // --- RUNTIME CHECKS ---
+                // --- RUNTIME CHECKS --- // Updated for vector state
                 if (logits.empty()) {
                     Logger::error("model.forward returned empty logits at pos " + std::to_string(pos));
                     break;
                 }
-                // Check tensor state after forward pass
-                if (current_x_tensor.numel() != mcfg.hidden_size) { // Check tensor size
-                    Logger::error("current_x_tensor size mismatch after forward at pos " + std::to_string(pos) + ". Expected " + std::to_string(mcfg.hidden_size) + ", got " + std::to_string(current_x_tensor.numel()));
+                // Check vector state after forward pass
+                if (current_x_vec.size() != mcfg.hidden_size) { // Check vector size
+                    Logger::error("current_x_vec size mismatch after forward at pos " + std::to_string(pos) + ". Expected " + std::to_string(mcfg.hidden_size) + ", got " + std::to_string(current_x_vec.size()));
                     break;
                 }
                 
                 log_vector_summary("main loop: logits after forward", logits); // Logits are still vector
-                log_vector_summary("main loop: current_x_tensor after forward (state)", std::vector<float>(static_cast<float*>(current_x_tensor.data_ptr()), static_cast<float*>(current_x_tensor.data_ptr()) + mcfg.hidden_size));
+                log_vector_summary("main loop: current_x_vec after forward (state)", current_x_vec); // Log vector state
                 
                 // 3. Sample Next Token (Only during Generation Phase)
                 if (pos >= num_prompt_tokens - 1) {

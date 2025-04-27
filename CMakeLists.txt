@@ -1,26 +1,22 @@
 cmake_minimum_required(VERSION 3.11)
-project(TinyLlamaCppWithLibtorch)
+project(TinyLlamaCpp)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-include(FetchContent)
+# include(FetchContent) // REMOVED FetchContent
 
-# Download and configure libtorch (CPU version)
-# Use the latest without-deps version (GAMBLE!)
-# set(LIBTORCH_URL "https://download.pytorch.org/libtorch/cpu/libtorch-shared-without-deps-latest.zip") # LATEST
-set(LIBTORCH_URL "https://download.pytorch.org/libtorch/cpu/libtorch-shared-with-deps-2.2.2%2Bcpu.zip") # 2.2.2 with deps
-# set(LIBTORCH_URL "https://download.pytorch.org/libtorch/cpu/libtorch-shared-without-deps-2.2.2%2Bcpu.zip") # INVALID
-# set(LIBTORCH_URL "https://download.pytorch.org/libtorch/cpu/libtorch-shared-with-deps-2.2.2%2Bcpu.zip") # OLD
-FetchContent_Declare(
-  libtorch
-  URL      ${LIBTORCH_URL}
-)
-FetchContent_MakeAvailable(libtorch)
+# Download and configure libtorch (CPU version) // REMOVED LibTorch section
+# set(LIBTORCH_URL ...) 
+# FetchContent_Declare(
+#   libtorch
+#   URL      ${LIBTORCH_URL}
+# )
+# FetchContent_MakeAvailable(libtorch)
 
-# Set Torch_DIR for find_package
-set(Torch_DIR ${libtorch_SOURCE_DIR}/share/cmake/Torch)
-find_package(Torch REQUIRED)
+# Set Torch_DIR for find_package // REMOVED
+# set(Torch_DIR ${libtorch_SOURCE_DIR}/share/cmake/Torch)
+# find_package(Torch REQUIRED) // REMOVED
 
 # Find necessary libraries
 find_package(Threads REQUIRED)
@@ -33,7 +29,7 @@ add_executable(tinyllama main.cpp model.cpp safetensors_loader.cpp tokenizer.cpp
 # Include directories
 target_include_directories(tinyllama PRIVATE
     ${nlohmann_json_INCLUDE_DIRS}
-    # ${libtorch_SOURCE_DIR}/include  # Let find_package handle Torch includes
+    # ${libtorch_SOURCE_DIR}/include  # REMOVED
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
@@ -42,8 +38,8 @@ target_link_libraries(tinyllama PRIVATE
     Threads::Threads
     nlohmann_json::nlohmann_json
     OpenMP::OpenMP_CXX
-    "${TORCH_LIBRARIES}" # Revert to using the variable as Torch::torch target wasn't found
-    # Torch::torch 
+    # "${TORCH_LIBRARIES}" // REMOVED
+    # Torch::torch // REMOVED
 )
 
 # Find OpenMP and set compiler flags
@@ -79,5 +75,5 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 
 # Print debug info
-message(STATUS "Libtorch directory: ${libtorch_SOURCE_DIR}")
+# message(STATUS "Libtorch directory: ${libtorch_SOURCE_DIR}") // REMOVED
 message(STATUS "Project source directory: ${CMAKE_CURRENT_SOURCE_DIR}")
