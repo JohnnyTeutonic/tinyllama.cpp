@@ -284,11 +284,14 @@ int main(int argc, char** argv) {
                     }
                     
                     // Sample from the returned logits (which are only for the current position)
-                    next_token_id = sample_top_k_top_p_temperature(logits, /*temp=*/0.7f, /*top_k=*/50, /*top_p=*/0.9f, rng);
+                    // next_token_id = sample_top_k_top_p_temperature(logits, /*temp=*/0.7f, /*top_k=*/50, /*top_p=*/0.9f, rng); // Use sampling
+                    next_token_id = argmax(logits); // Use greedy sampling (match Python)
                     
                     // --- ADD LOGGING HERE ---
-                    Logger::info("C++ Generation: pos=" + std::to_string(pos) + ", sampled_token_id=" + std::to_string(next_token_id));
-                    // --- END LOGGING ---
+                    Logger::info("C++ Generation: pos=" + std::to_string(pos) +
+                                 ", sampled_token_id=" + std::to_string(next_token_id) +
+                                 ", checking against eos_id=" + std::to_string(eos_id)); // Log sampled ID and EOS ID
+                    // --- END LOGGING ---\
 
                     // Store generated token
                     generated_only_ids.push_back(next_token_id);
@@ -296,7 +299,7 @@ int main(int argc, char** argv) {
                     generated_count++;
 
                     // Print the token as it's generated
-                    std::string next_token_str = tokenizer.decode(std::vector<int>{next_token_id}, true); // Skip special tokens
+                    std::string next_token_str = tokenizer.decode(std::vector<int>{next_token_id}, false);
                     Logger::info("Step " + std::to_string(generated_count+1) + ": Predicted token ID: " + std::to_string(next_token_id) + " ('" + next_token_str + "')");
                     std::cout << next_token_str << std::flush; // Print token immediately, with flush
 
