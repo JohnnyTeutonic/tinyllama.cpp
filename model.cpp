@@ -408,6 +408,44 @@ static std::vector<float> bf16vec_to_float_vec(const std::vector<uint16_t>& v_bf
     return v_f32;
 }
 
+// --- START: C++ Vector MatVec BF16 * F32 -> F32 with Kahan Summation ---
+// Performs matrix-vector multiplication: out = mat (bf16) * vec (f32)
+// mat shape: [rows, cols], vec shape: [cols], out shape: [rows]
+static void matvec_bf16_f32_vector(const std::vector<uint16_t>& mat_bf16, 
+                                   const std::vector<float>& vec_f32, 
+                                   std::vector<float>& out_f32, 
+                                   int rows, int cols) {
+    if (mat_bf16.size() != (size_t)rows * cols || vec_f32.size() != (size_t)cols) {
+        Logger::error("matvec_bf16_f32_vector: Size mismatch. Mat: " + std::to_string(mat_bf16.size()) + 
+                     " (Expected " + std::to_string(rows*cols) + "), Vec: " + std::to_string(vec_f32.size()) + 
+                     " (Expected " + std::to_string(cols) + ")");
+        out_f32.assign(rows, 0.0f); // Zero out output on error
+        return;
+    }
+    out_f32.resize(rows);
+
+    #pragma omp parallel for
+    for (int r = 0; r < rows; ++r) {
+        double sum = 0.0;        // Running sum (using double for intermediate precision)
+        double c = 0.0;          // Kahan summation compensation
+        size_t row_offset = r * cols;
+        
+        for (int c_idx = 0; c_idx < cols; ++c_idx) {
+            // Get weight and input value
+            float weight = bfloat16_to_float32(mat_bf16[row_offset + c_idx]);
+            double term = static_cast<double>(weight) * static_cast<double>(vec_f32[c_idx]);
+            
+            // Kahan Summation step
+            double y = term - c;
+            double t = sum + y;
+            c = (t - sum) - y;
+            sum = t;
+        }
+        out_f32[r] = static_cast<float>(sum); // Assign final sum (cast back to float)
+    }
+}
+// --- END: C++ Vector MatVec with Kahan ---
+
 // TinyLlamaModel constructor: load all weights from safetensors into uint16_t vectors
 TinyLlamaModel::TinyLlamaModel(const ModelConfig& config, const SafeTensorsLoader& loader)
     : config_(config)
@@ -598,17 +636,35 @@ std::vector<float> TinyLlamaModel::forward(torch::Tensor& x_tensor, int pos, KVC
         torch::Tensor x_norm_tensor = vec_to_tensor(x_norm_vec1, {hs}); // Convert result back to tensor
         if (log_target_layer) log_vector_summary("TROUBLESHOOTING L0 P1 Output C++ RMSNorm1", std::vector<float>(static_cast<float*>(x_norm_tensor.data_ptr()), static_cast<float*>(x_norm_tensor.data_ptr()) + hs));
 
-        // b) Q, K, V projections (Input is x_norm_tensor from above)
-        torch::Tensor q_tensor = matvec(bf16vec_to_tensor(lw.q_proj, {hs, hs}), x_norm_tensor);
-        torch::Tensor k_current_tensor = matvec(bf16vec_to_tensor(lw.k_proj, {n_kv_heads * head_dim, hs}), x_norm_tensor);
-        torch::Tensor v_current_tensor = matvec(bf16vec_to_tensor(lw.v_proj, {n_kv_heads * head_dim, hs}), x_norm_tensor);
+        // b) Q, K, V projections (Using C++ Vector MatVec)
+        // Convert input tensor from RMSNorm to vector
+        std::vector<float> x_norm_vec_for_qkv(static_cast<float*>(x_norm_tensor.data_ptr()), static_cast<float*>(x_norm_tensor.data_ptr()) + hs);
+        
+        // Calculate Q, K, V using C++ matvec
+        std::vector<float> q_vec(hs);
+        std::vector<float> k_vec(n_kv_heads * head_dim);
+        std::vector<float> v_vec(n_kv_heads * head_dim);
+        matvec_bf16_f32_vector(lw.q_proj, x_norm_vec_for_qkv, q_vec, hs, hs);
+        matvec_bf16_f32_vector(lw.k_proj, x_norm_vec_for_qkv, k_vec, n_kv_heads * head_dim, hs);
+        matvec_bf16_f32_vector(lw.v_proj, x_norm_vec_for_qkv, v_vec, n_kv_heads * head_dim, hs);
+        
+        // Convert results back to tensors for RoPE and KVCache
+        torch::Tensor q_tensor = vec_to_tensor(q_vec, {hs});
+        torch::Tensor k_current_tensor = vec_to_tensor(k_vec, {(int64_t)(n_kv_heads * head_dim)});
+        torch::Tensor v_current_tensor = vec_to_tensor(v_vec, {(int64_t)(n_kv_heads * head_dim)});
+        
+        // Original Torch calls removed:
+        // torch::Tensor q_tensor = matvec(bf16vec_to_tensor(lw.q_proj, {hs, hs}), x_norm_tensor);
+        // torch::Tensor k_current_tensor = matvec(bf16vec_to_tensor(lw.k_proj, {n_kv_heads * head_dim, hs}), x_norm_tensor);
+        // torch::Tensor v_current_tensor = matvec(bf16vec_to_tensor(lw.v_proj, {n_kv_heads * head_dim, hs}), x_norm_tensor);
+        
         if (log_target_layer) {
-            log_vector_summary("TROUBLESHOOTING L0 P1 Q Proj Output", std::vector<float>(static_cast<float*>(q_tensor.data_ptr()), static_cast<float*>(q_tensor.data_ptr()) + hs));
-            log_vector_summary("TROUBLESHOOTING L0 P1 K Proj Output", std::vector<float>(static_cast<float*>(k_current_tensor.data_ptr()), static_cast<float*>(k_current_tensor.data_ptr()) + n_kv_heads * head_dim));
-            log_vector_summary("TROUBLESHOOTING L0 P1 V Proj Output", std::vector<float>(static_cast<float*>(v_current_tensor.data_ptr()), static_cast<float*>(v_current_tensor.data_ptr()) + n_kv_heads * head_dim));
+            log_vector_summary("TROUBLESHOOTING L0 P1 Q Proj Output (C++ Vec)", std::vector<float>(static_cast<float*>(q_tensor.data_ptr()), static_cast<float*>(q_tensor.data_ptr()) + hs));
+            log_vector_summary("TROUBLESHOOTING L0 P1 K Proj Output (C++ Vec)", std::vector<float>(static_cast<float*>(k_current_tensor.data_ptr()), static_cast<float*>(k_current_tensor.data_ptr()) + n_kv_heads * head_dim));
+            log_vector_summary("TROUBLESHOOTING L0 P1 V Proj Output (C++ Vec)", std::vector<float>(static_cast<float*>(v_current_tensor.data_ptr()), static_cast<float*>(v_current_tensor.data_ptr()) + n_kv_heads * head_dim));
         }
 
-        // c) RoPE for Q, K (using Tensor version)
+        // c) RoPE for Q, K (using Tensor version - requires tensor input)
         torch::Tensor q_before_rope = q_tensor.clone(); // Copy for logging
         torch::Tensor k_before_rope = k_current_tensor.clone(); // Copy for logging
         
@@ -787,33 +843,25 @@ std::vector<float> TinyLlamaModel::forward(torch::Tensor& x_tensor, int pos, KVC
 
     // 3. Final RMSNorm (Using C++ Vector version)
     torch::Tensor x_final_norm_input_tensor = x_tensor.clone(); // Copy for logging
-    // torch::Tensor w_final_norm_tensor = bf16vec_to_tensor(final_norm, {hs}); // Torch weight tensor not needed
-    // torch::Tensor x_final_norm_tensor = rmsnorm(x_tensor, w_final_norm_tensor, eps); // Torch version call removed
     std::vector<float> x_vec_in_final_norm(static_cast<float*>(x_tensor.data_ptr()), static_cast<float*>(x_tensor.data_ptr()) + hs);
     std::vector<float> w_final_norm_vec = bf16vec_to_float_vec(final_norm); // Convert final_norm weights
     std::vector<float> x_final_norm_vec(hs);
     rmsnorm_vector(x_vec_in_final_norm, w_final_norm_vec, x_final_norm_vec, eps);
-    torch::Tensor x_final_norm_tensor = vec_to_tensor(x_final_norm_vec, {hs}); // Convert result back to tensor
     if (log_initial) { 
         log_vector_summary("TROUBLESHOOTING Input to Final RMSNorm (P0)", std::vector<float>(static_cast<float*>(x_final_norm_input_tensor.data_ptr()), static_cast<float*>(x_final_norm_input_tensor.data_ptr()) + hs));
-        log_vector_summary("TROUBLESHOOTING Output of Final C++ RMSNorm (P0)", std::vector<float>(static_cast<float*>(x_final_norm_tensor.data_ptr()), static_cast<float*>(x_final_norm_tensor.data_ptr()) + hs));
+        log_vector_summary("TROUBLESHOOTING Output of Final C++ RMSNorm (P0)", x_final_norm_vec); // Log the vector directly
     }
 
-    // 4. Output projection to logits (Input is x_final_norm_tensor from above)
-    torch::Tensor logits_tensor = matvec(bf16vec_to_tensor(lm_head, {vs, hs}), x_final_norm_tensor);
-    
-    // --- Convert final logits tensor back to std::vector<float> --- 
-    // The function signature still requires returning vector<float>
-    float* logits_ptr = static_cast<float*>(logits_tensor.data_ptr());
-    std::vector<float> logits(logits_ptr, logits_ptr + vs);
-    // --- End Conversion ---
+    // 4. Output projection to logits (Using C++ Vector version)
+    std::vector<float> logits(vs); // Output vector
+    matvec_bf16_f32_vector(lm_head, x_final_norm_vec, logits, vs, hs); // Call C++ matvec
     
     if (log_initial) {
-        log_vector_summary("TROUBLESHOOTING Final Logits (P0)", logits, 10);
+        log_vector_summary("TROUBLESHOOTING Final Logits (P0, C++ MatVec)", logits, 10);
     }
 
     if (log_initial) Logger::info("--- TROUBLESHOOTING L0 P0 (C++) END pos=0 ---");
-    return logits; 
+    return logits; // Already a std::vector<float>
 }
 
 // --- Get Vocab Size --- 
