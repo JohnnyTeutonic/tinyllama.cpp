@@ -96,6 +96,15 @@ private:
 
     // Precomputed RoPE cos/sin values
     std::vector<std::pair<float, float>> precomputed_freqs_cis_;
+
+    std::vector<float> forward_from_qkv_host(
+        const std::vector<float>& x_resid1_vec, // Input embedding for residual 1
+        std::vector<float>& q_vec,
+        std::vector<float>& k_vec,
+        std::vector<float>& v_vec,
+        int pos,
+        KVCache* cache,
+        const std::vector<int>* attention_mask);
 };
 
 // Utility: parse ModelConfig from nlohmann::json

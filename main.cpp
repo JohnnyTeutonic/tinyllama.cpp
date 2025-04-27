@@ -254,9 +254,9 @@ int main(int argc, char** argv) {
 
                 // 2. Call the Forward Pass (token-by-token)
                 // Pass vector by reference. It will be updated in place.
-                Logger::info("main loop: Calling model.forward for pos=" + std::to_string(pos));
-                std::vector<float> logits = model.forward(current_x_vec, pos, &cache, nullptr); // Pass vector state
-                Logger::info("main loop: Returned from model.forward for pos=" + std::to_string(pos));
+                Logger::info("main loop: Calling model.forward_device for pos=" + std::to_string(pos));
+                std::vector<float> logits = model.forward_device(input_token_id, pos, &cache, nullptr); // Use device pipeline
+                Logger::info("main loop: Returned from model.forward_device for pos=" + std::to_string(pos));
                 
                 // --- Crucial: Increment cache sequence length *AFTER* forward call for position `pos`
                 cache.seq_len = pos + 1; 
@@ -264,7 +264,7 @@ int main(int argc, char** argv) {
                 
                 // --- RUNTIME CHECKS --- // Updated for vector state
                 if (logits.empty()) {
-                    Logger::error("model.forward returned empty logits at pos " + std::to_string(pos));
+                    Logger::error("model.forward_device returned empty logits at pos " + std::to_string(pos));
                     break;
                 }
                 // Check vector state after forward pass
@@ -279,7 +279,7 @@ int main(int argc, char** argv) {
                 // 3. Sample Next Token (Only during Generation Phase)
                 if (pos >= num_prompt_tokens - 1) {
                     if (logits.empty()) {
-                        Logger::error("model.forward returned empty logits at pos " + std::to_string(pos));
+                        Logger::error("model.forward_device returned empty logits at pos " + std::to_string(pos));
                         break;
                     }
                     
@@ -311,7 +311,7 @@ int main(int argc, char** argv) {
                     }
                 } else {
                      // During prompt processing, we don't sample, just process the next prompt token.
-                     // The state `current_x_tensor` is updated in-place by model.forward().
+                     // The state `current_x_tensor` is updated in-place by model.forward_device().
                      Logger::info("Processed prompt token at pos " + std::to_string(pos) + ".");
                 }
                 Logger::info("--- main loop: END pos=" + std::to_string(pos) + " ---");
@@ -329,13 +329,6 @@ int main(int argc, char** argv) {
             }());
             Logger::info("Generated answer: " + generated_text);
             std::cout << "\nGenerated Answer:\n" << generated_text << std::endl;
-
-            // After model construction, call forward_device for a test
-#ifdef HAS_CUDA
-            Logger::info("[TEST] Running forward_device for token 0, pos 0");
-            std::vector<float> device_out = model.forward_device(0, 0);
-            Logger::info("[TEST] forward_device output (first 5): " + std::to_string(device_out[0]) + ", " + std::to_string(device_out[1]) + ", " + std::to_string(device_out[2]) + ", " + std::to_string(device_out[3]) + ", " + std::to_string(device_out[4]));
-#endif
         } catch (const std::exception& e) {
             Logger::error(std::string("Model weight loading error: ") + e.what());
             return 1;

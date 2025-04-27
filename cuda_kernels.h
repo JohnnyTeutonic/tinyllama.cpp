@@ -94,10 +94,7 @@ void softmax_vector_cuda(const std::vector<float>& x_host,
 void rope_cuda(std::vector<float>& x, int num_heads, int head_dim, const std::vector<float>& freqs_cis);
 
 // --- Moved SwiGLU declaration OUTSIDE HAS_CUDA --- 
-void swiglu_cuda(const std::vector<float>& gate_host,
-                 const std::vector<float>& up_host,
-                 std::vector<float>& out_host,
-                 int n);
+void swiglu_cuda(const float* gate_dev, const float* up_dev, float* out_dev, int n);
 
 #endif // HAS_CUDA
 

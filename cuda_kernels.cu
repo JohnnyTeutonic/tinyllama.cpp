@@ -457,6 +457,14 @@ void swiglu_cuda(const std::vector<float>& gate_host,
     gpuErrchk(cudaFree(out_dev));
 }
 
+// Device-pointer version of SwiGLU
+void swiglu_cuda(const float* gate_dev, const float* up_dev, float* out_dev, int n) {
+    const int threads_per_block = 256;
+    int num_blocks = (n + threads_per_block - 1) / threads_per_block;
+    swiglu_kernel<<<num_blocks, threads_per_block>>>(gate_dev, up_dev, out_dev, n);
+    gpuErrchk(cudaGetLastError());
+}
+
 // <<< ROPE KERNEL >>>
 __global__ void rope_kernel(float* x, int num_heads, int head_dim, const float* freqs_cis) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
