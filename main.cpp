@@ -9,7 +9,6 @@
 #include "safetensors_loader.h"
 #include "tokenizer.h"
 #include "logger.h"
-#include "prompt.h"
 #include "model.h"
 #include <limits>
 #include <random>
@@ -239,8 +238,6 @@ int main(int argc, char** argv) {
                 
                 // Lookup embedding (returns vector)
                 current_x_vec = model.lookup_embedding(input_token_id);
-                // Convert vector back to tensor immediately for forward pass interface // REMOVED
-                // current_x_tensor = vec_to_tensor(current_x_vec, {static_cast<int64_t>(mcfg.hidden_size)});
                 
                 // Log the vector state
                 log_vector_summary("main loop: current_x after lookup (C++ Vec)", current_x_vec); 
@@ -304,7 +301,7 @@ int main(int argc, char** argv) {
                     // --- END LOGGING ---\
 
                     // Store generated token
-                        generated_only_ids.push_back(next_token_id);
+                    generated_only_ids.push_back(next_token_id);
                     generated_ids.push_back(next_token_id); // Keep track of the full sequence for context
                     generated_count++;
 
@@ -320,7 +317,6 @@ int main(int argc, char** argv) {
                         break; 
                     }
                 } else {
-                     // During prompt processing, we don't sample, just process the next prompt token.
                      // The state `current_x_tensor` is updated in-place by model.forward_device().
                      Logger::info("Processed prompt token at pos " + std::to_string(pos) + ".");
                 }

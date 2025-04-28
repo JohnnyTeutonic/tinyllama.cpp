@@ -70,7 +70,6 @@ endif()
 # --- Original Executable (Now uses the library) ---
 add_executable(tinyllama 
     main.cpp 
-    prompt.cpp # Keep prompt helper with main for now?
 )
 
 # Link tinyllama executable against the core library
