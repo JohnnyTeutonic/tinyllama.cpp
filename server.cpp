@@ -83,9 +83,9 @@ int main(int argc, char** argv) {
         res.set_header("Access-Control-Allow-Headers", "Content-Type");
 
         std::string user_message;
-        std::vector<std::pair<std::string, std::string>> history; // Placeholder for future history
+        // std::vector<std::pair<std::string, std::string>> history; // Original placeholder
         float temperature = 0.7f;
-        int max_new_tokens = 100;
+        int max_new_tokens = 60;
         int top_k = 50;
         float top_p = 0.9f;
 
@@ -93,30 +93,30 @@ int main(int argc, char** argv) {
             // Parse request JSON
             json req_json = json::parse(req.body);
             if (req_json.contains("message")) {
-                user_message = req_json["message"].get<std::string>();
+                // This message field now contains the *entire* formatted prompt from the client
+                user_message = req_json["message"].get<std::string>(); 
             } else {
                  throw std::runtime_error("Missing 'message' field in request JSON");
             }
-             // Remove parsing of unused sampling parameters
-             // if (req_json.contains("temperature")) temperature = req_json["temperature"].get<float>();
-             // if (req_json.contains("max_new_tokens")) max_new_tokens = req_json["max_new_tokens"].get<int>();
-             // if (req_json.contains("top_k")) top_k = req_json["top_k"].get<int>();
-             // if (req_json.contains("top_p")) top_p = req_json["top_p"].get<float>();
-             
-             // Still parse max_new_tokens as it's used in the loop limit
-             if (req_json.contains("max_new_tokens")) max_new_tokens = req_json["max_new_tokens"].get<int>();
-             
-             // Optional: Add history parsing here if client sends it
+            // Remove parsing of unused sampling parameters
+            // if (req_json.contains("temperature")) temperature = req_json["temperature"].get<float>();
+            // if (req_json.contains("max_new_tokens")) max_new_tokens = req_json["max_new_tokens"].get<int>();
+            // if (req_json.contains("top_k")) top_k = req_json["top_k"].get<int>();
+            // if (req_json.contains("top_p")) top_p = req_json["top_p"].get<float>();
+            
+            // Still parse max_new_tokens as it's used in the loop limit
+            if (req_json.contains("max_new_tokens")) max_new_tokens = req_json["max_new_tokens"].get<int>();
+            
+            // Optional: Add history parsing here if client sends it
 
-             Logger::info("Processing message: " + user_message.substr(0, 50) + "...");
-             
-             // Construct the prompt using the expected Q&A format
-             std::string prompt = "Q: " + user_message + "\nA:";
-             Logger::info("Formatted prompt: " + prompt.substr(0, 100) + "..."); // Log formatted prompt
+            Logger::info("Processing prompt received from client: " + user_message.substr(0, 100) + "...");
+            
+            // Use the received message (which is the full formatted prompt) directly
+            std::string prompt = user_message; 
 
-             // Call generate method (remove unused sampling parameters)
-             std::string reply = session->generate(prompt, max_new_tokens /*, temperature, top_k, top_p */);
-             Logger::info("Generated reply: " + reply.substr(0, 50) + "...");
+            // Call generate method (remove unused sampling parameters)
+            std::string reply = session->generate(prompt, max_new_tokens /*, temperature, top_k, top_p */);
+            Logger::info("Generated reply: " + reply.substr(0, 50) + "...");
 
             // Create response JSON
             json res_json;

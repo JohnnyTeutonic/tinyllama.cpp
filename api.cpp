@@ -283,15 +283,19 @@ std::string TinyLlamaSession::generate(
             // next_token_id = sample_top_k_top_p_temperature(logits, temperature, top_k, top_p, rng);
             Logger::info("Greedy sampled token ID: " + std::to_string(next_token_id));
 
+            // Check for EOS *before* adding the token
+            if (next_token_id == eos_id) {
+                Logger::info("EOS token generated. Stopping generation.");
+                break; 
+            }
+
             generated_only_ids.push_back(next_token_id);
             generated_count++;
 
-            // Check for EOS
-            if (next_token_id == eos_id || generated_count >= max_new_tokens) {
-                if (next_token_id == eos_id) Logger::info("EOS token generated.");
-                else Logger::info("Max new tokens reached.");
-                Logger::info("Stopping generation.");
-                break; 
+            // Check for max tokens reached (already checked EOS)
+            if (generated_count >= max_new_tokens) {
+                 Logger::info("Max new tokens reached. Stopping generation.");
+                 break; 
             }
         } else {
             // Processing prompt, no sampling needed
@@ -300,9 +304,34 @@ std::string TinyLlamaSession::generate(
         Logger::info("--- Generate loop: END pos=" + std::to_string(pos) + " ---");
     } // End generation loop
 
+    // +++ LOGGING: Print the generated token IDs before decoding +++
+    std::string ids_str = "Generated token IDs: [";
+    for(size_t i = 0; i < generated_only_ids.size(); ++i) {
+        ids_str += std::to_string(generated_only_ids[i]) + (i == generated_only_ids.size() - 1 ? "" : ", ");
+    }
+    ids_str += "]";
+    Logger::info(ids_str);
+    // +++ END LOGGING +++
+
     // Decode the generated IDs
-    std::string generated_text = tokenizer.decode(generated_only_ids, true); // Skip special tokens
-    Logger::info("Decoding complete. Generated text length: " + std::to_string(generated_text.length()));
+    std::string generated_text = tokenizer.decode(generated_only_ids, true); 
+    Logger::info("Decoding complete (skip_special_tokens=true). Generated text length: " + std::to_string(generated_text.length()));
+
+    // +++ START MANUAL CLEANUP +++
+    // Remove known garbage prefix (specific emoji bytes)
+    const std::string garbage_prefix = "<0xF0><0x9F><0x98><0x8A>";
+    if (generated_text.rfind(garbage_prefix, 0) == 0) { // Check if string starts with the prefix
+        generated_text = generated_text.substr(garbage_prefix.length());
+        Logger::info("Removed garbage prefix.");
+    }
+    // Remove </s> and anything after it
+    size_t eos_pos = generated_text.find("</s>");
+    if (eos_pos != std::string::npos) {
+        generated_text = generated_text.substr(0, eos_pos);
+        Logger::info("Truncated text at first EOS marker.");
+    }
+    // +++ END MANUAL CLEANUP +++
+
     return generated_text;
 }
 

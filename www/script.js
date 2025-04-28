@@ -4,47 +4,53 @@ document.addEventListener('DOMContentLoaded', () => {
     const historyDiv = document.getElementById('history');
     const serverUrl = '/chat'; // Endpoint defined in server.cpp
 
-    let conversationHistory = []; // Optional: Store history for context
+    let conversationHistory = []; // Store history as {role: 'user'/'assistant', content: '...'} 
 
-    function addMessageToHistory(text, sender) {
-        const messageElement = document.createElement('p');
-        messageElement.textContent = text;
-        messageElement.classList.add(sender === 'user' ? 'user-message' : 'server-message');
-        historyDiv.appendChild(messageElement);
-        // Scroll to bottom
-        historyDiv.scrollTop = historyDiv.scrollHeight;
+    function addMessageToHistory(role, text, isError = false) {
+        conversationHistory.push({ role: role, content: text });
+        const messageDiv = document.createElement('div');
+        messageDiv.classList.add('message', role === 'user' ? 'user-message' : 'server-message');
+        if (isError) {
+            messageDiv.classList.add('error-message');
+        }
+        // Add prefix based on role
+        const prefix = role === 'user' ? 'You: ' : 'AI: ';
+        messageDiv.textContent = prefix + text; // Display with prefix
+        historyDiv.appendChild(messageDiv);
+        historyDiv.scrollTop = historyDiv.scrollHeight; // Scroll to the bottom
     }
 
     async function sendMessage() {
         const messageText = messageInput.value.trim();
         if (!messageText) return; // Don't send empty messages
 
-        addMessageToHistory(`You: ${messageText}`, 'user');
-        messageInput.value = ''; // Clear input
-        sendButton.disabled = true; // Disable button while waiting
+        addMessageToHistory('user', messageText);
+        messageInput.value = ''; // Clear input field
 
-        // --- Construct Prompt with History (Simple Example) ---
-        // let currentPrompt = "";
-        // conversationHistory.forEach(entry => {
-        //     currentPrompt += `${entry.sender}: ${entry.text}\n`;
-        // });
-        // currentPrompt += `User: ${messageText}\nAI:`; // Add current message and prompt AI
-        // --- For now, just send the last message --- 
-        const currentPrompt = messageText; 
-        conversationHistory.push({ sender: 'User', text: messageText });
+        // Construct the prompt using the official chat template format
+        let promptString = "<|system|>\nYou are a helpful AI.</s>\n"; // Default system prompt
+        conversationHistory.forEach(message => {
+            if (message.role === 'user') {
+                promptString += `<|user|>\n${message.content}</s>\n`;
+            } else if (message.role === 'assistant') {
+                // Check if the content is not an error message before adding
+                if (!message.isError) { // Assuming isError property exists or can be added
+                     promptString += `<|assistant|>\n${message.content}</s>\n`;
+                }
+            }
+        });
+        promptString += "<|assistant|>\n"; // Add the final assistant marker
+
+        console.log("Sending prompt:", JSON.stringify(promptString)); // Log the exact prompt being sent
 
         try {
-            const response = await fetch(serverUrl, {
+            const response = await fetch('/chat', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                 },
-                body: JSON.stringify({ 
-                    message: currentPrompt, // Send the potentially constructed prompt
-                    // Optional: Send other parameters
-                    // temperature: 0.7,
-                    // max_new_tokens: 150 
-                }),
+                // Send the constructed prompt string directly
+                body: JSON.stringify({ message: promptString })
             });
 
             if (!response.ok) {
@@ -53,16 +59,13 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             const data = await response.json();
-            const reply = data.reply.trim();
-            addMessageToHistory(`AI: ${reply}`, 'server');
-            conversationHistory.push({ sender: 'AI', text: reply });
+            // Add the AI's response, ensuring it's not marked as an error
+            addMessageToHistory('assistant', data.reply);
 
         } catch (error) {
             console.error('Error sending message:', error);
-            addMessageToHistory(`Error: ${error.message}`, 'server-error'); // Add an error class if needed
-        } finally {
-            sendButton.disabled = false; // Re-enable button
-            messageInput.focus(); // Focus input for next message
+            // Add error message to history, marked as an error
+            addMessageToHistory('assistant', `Error: ${error.message}`, true);
         }
     }
 
@@ -74,5 +77,11 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
      // Initial focus
+     // Add AI prefix to initial message in history display
+     const initialAIMessage = historyDiv.querySelector('.server-message');
+     if(initialAIMessage) initialAIMessage.textContent = "AI: Hello! How can I help you today?";
+     // Add initial message to conversationHistory array?
+     // Let's assume the initial greeting doesn't need to be part of the context sent back yet.
+     
      messageInput.focus();
 }); 
