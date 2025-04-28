@@ -252,22 +252,39 @@ int main(int argc, char** argv) {
                 // Log the vector state
                 log_vector_summary("main loop: current_x after lookup (C++ Vec)", current_x_vec); 
 
-                // 2. Call the Forward Pass (token-by-token)
-                // Pass vector by reference. It will be updated in place.
+                // --- Select Forward Pass based on CUDA availability ---
+                std::vector<float> logits;
+#ifdef HAS_CUDA
+                // Use CUDA-accelerated forward pass
                 Logger::info("main loop: Calling model.forward_device for pos=" + std::to_string(pos));
-                std::vector<float> logits = model.forward_device(input_token_id, pos, &cache, nullptr); // Use device pipeline
+                logits = model.forward_device(input_token_id, pos, &cache, nullptr); // Use device pipeline
                 Logger::info("main loop: Returned from model.forward_device for pos=" + std::to_string(pos));
+#else
+                // Use CPU forward pass
+                // Need the embedding vector for the CPU path
+                std::vector<float> current_x = model.lookup_embedding(input_token_id);
+                Logger::info("main loop: Calling model.forward (CPU) for pos=" + std::to_string(pos));
+                log_vector_summary("main loop: Input embedding to CPU forward", current_x); // Log input
+                logits = model.forward(current_x, pos, &cache, nullptr); // Use original CPU pipeline
+                Logger::info("main loop: Returned from model.forward (CPU) for pos=" + std::to_string(pos));
+#endif
+                // --- End Forward Pass Selection ---
+
+                // Check if logits are empty (could happen if forward fails)
+                if (logits.empty()) {
+#ifdef HAS_CUDA
+                     Logger::error("model.forward_device returned empty logits at pos " + std::to_string(pos));
+#else
+                     Logger::error("model.forward returned empty logits at pos " + std::to_string(pos));
+#endif
+                     break; // Stop generation if forward pass failed
+                }
                 
                 // --- Crucial: Increment cache sequence length *AFTER* forward call for position `pos`
                 cache.seq_len = pos + 1; 
                 Logger::info("main loop: Updated cache.seq_len=" + std::to_string(cache.seq_len));
                 
                 // --- RUNTIME CHECKS --- // Updated for vector state
-                if (logits.empty()) {
-                    Logger::error("model.forward_device returned empty logits at pos " + std::to_string(pos));
-                    break;
-                }
-                // Check vector state after forward pass
                 if (current_x_vec.size() != mcfg.hidden_size) { // Check vector size
                     Logger::error("current_x_vec size mismatch after forward at pos " + std::to_string(pos) + ". Expected " + std::to_string(mcfg.hidden_size) + ", got " + std::to_string(current_x_vec.size()));
                     break;
