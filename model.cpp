@@ -1113,6 +1113,7 @@ std::vector<float> TinyLlamaModel::forward_device(int token_id, int pos, KVCache
         matvec_bf16_f32_cuda(lw.q_proj, x_norm_dev, q_dev, hs, hs);
         matvec_bf16_f32_cuda(lw.k_proj, x_norm_dev, k_dev, n_kv_heads * head_dim, hs);
         matvec_bf16_f32_cuda(lw.v_proj, x_norm_dev, v_dev, n_kv_heads * head_dim, hs);
+        gpuErrchk(cudaDeviceSynchronize());
 
         // RoPE (Applied in-place to q_dev, k_dev)
         size_t freqs_offset = (pos * head_dim / 2);
@@ -1124,16 +1125,21 @@ std::vector<float> TinyLlamaModel::forward_device(int token_id, int pos, KVCache
             flat_freqs.push_back(p.first);
             flat_freqs.push_back(p.second);
         }
+        // Allocate and copy freqs directly to device
+        float* freqs_dev = nullptr;
         gpuErrchk(cudaMalloc(&freqs_dev, flat_freqs.size() * sizeof(float))); // Allocate freqs_dev
         gpuErrchk(cudaMemcpy(freqs_dev, flat_freqs.data(), flat_freqs.size() * sizeof(float), cudaMemcpyHostToDevice));
-        rope_cuda(q_dev, n_heads, head_dim, freqs_dev);
-        rope_cuda(k_dev, n_kv_heads, head_dim, freqs_dev);
+        
+        // Call device-pointer RoPE version directly
+        rope_cuda(q_dev, n_heads, head_dim, freqs_dev); // Apply to Q
+        rope_cuda(k_dev, n_kv_heads, head_dim, freqs_dev); // Apply to K
+        
         gpuErrchk(cudaFree(freqs_dev)); // Free freqs_dev for this layer
         gpuErrchk(cudaDeviceSynchronize());
 
         // KVCache Update 
         // 1. Copy K, V from device (k_dev, v_dev) to host cache (cache->layers[l].k/v)
-        // Assuming k_dev and v_dev contain the values for the *current* token
+        // Need to copy K/V back to host *after* RoPE for cache update
         float* k_current_ptr_host = new float[n_kv_heads * head_dim];
         float* v_current_ptr_host = new float[n_kv_heads * head_dim];
         gpuErrchk(cudaMemcpy(k_current_ptr_host, k_dev, n_kv_heads * head_dim * sizeof(float), cudaMemcpyDeviceToHost));
