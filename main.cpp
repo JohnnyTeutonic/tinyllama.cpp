@@ -20,9 +20,6 @@
 #include <iomanip> // Include for std::setw, std::fixed, std::setprecision
 #include "vocab_loader.h"
 
-// TODO: Implement safetensors loader
-// TODO: Implement TinyLlama model and inference
-
 // Utility: Read file into string
 std::string read_file(const std::string& path) {
     std::ifstream file(path, std::ios::binary);
@@ -101,7 +98,6 @@ int main(int argc, char** argv) {
     std::string tokenizer_path = data_dir + "/tokenizer.json";
     std::string vocab_path = tokenizer_path; // Use tokenizer.json for vocab
     std::string safetensors_path = data_dir + "/model.safetensors";
-    // std::string tokenizer_config_path = data_dir + "/tokenizer_config.json"; // No longer needed
 
     Logger::info("Using data directory: " + data_dir);
     Logger::info("Loading config: " + config_path);
