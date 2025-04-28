@@ -17,8 +17,8 @@ if(CUDA_FOUND)
     # set(CMAKE_CUDA_STANDARD_REQUIRED ON)
     
     # Set the HAS_CUDA preprocessor definition
-    add_compile_definitions(HAS_CUDA)
-    message(STATUS "CUDA Found. Defining HAS_CUDA macro.")
+    # add_compile_definitions(HAS_CUDA)
+    message(STATUS "CUDA Found. Will define HAS_CUDA for tinyllama target.")
 else()
     message(WARNING "CUDA Toolkit not found. Building CPU-only version.")
 endif()
@@ -34,6 +34,11 @@ add_executable(tinyllama
     vocab_loader.cpp
     cuda_kernels.cu
 )
+
+# Define HAS_CUDA specifically for the tinyllama target if CUDA is found
+if(CUDA_FOUND)
+    target_compile_definitions(tinyllama PRIVATE HAS_CUDA)
+endif()
 
 # Include directories
 target_include_directories(tinyllama PRIVATE
@@ -65,12 +70,6 @@ if(OpenMP_FOUND)
 else()
     message(WARNING "OpenMP not found. Performance will be suboptimal.")
 endif()
-
-# Add CMAKE_CURRENT_SOURCE_DIR for local headers
-target_include_directories(tinyllama PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-
-# Explicitly add include directory for nlohmann_json
-target_include_directories(tinyllama PRIVATE ${nlohmann_json_INCLUDE_DIRS})
 
 # If nlohmann_json is not found, provide a hint
 if(NOT nlohmann_json_FOUND)

@@ -505,4 +505,104 @@ void rope_cuda(std::vector<float>& x, int num_heads, int head_dim, const std::ve
     gpuErrchk(cudaFree(freqs_dev));
 }
 
-#endif // HAS_CUDA 
+// --- DEVICE-POINTER ROPE WRAPPER ---
+void rope_cuda(float* x_dev, int num_heads, int head_dim, const float* freqs_dev, cudaStream_t stream) {
+    int total_pairs = num_heads * (head_dim / 2);
+    int threads_per_block = 256;
+    int num_blocks = (total_pairs + threads_per_block - 1) / threads_per_block;
+    rope_kernel<<<num_blocks, threads_per_block, 0, stream>>>(x_dev, num_heads, head_dim, freqs_dev);
+    gpuErrchk(cudaGetLastError());
+}
+
+// <<< ATTENTION KERNEL (Modified for Single Query Position) >>>
+__global__ void attention_kernel(const float* Q_current, // Shape [num_heads * head_dim]
+                               const float* K_cache,   // Shape [num_heads * seq_len * head_dim]
+                               const float* V_cache,   // Shape [num_heads * seq_len * head_dim]
+                               float* out,         // Shape [num_heads * head_dim]
+                               int seq_len, int head_dim, float scale) {
+    // Each block = one head
+    int head = blockIdx.x;
+    // No q_pos loop needed, compute directly for the current query
+    if (head >= gridDim.x) return;
+
+    // Use shared memory for scores and probabilities for this head
+    extern __shared__ float shared[];
+    float* scores = shared; // [seq_len]
+    float* probs = &shared[seq_len]; // [seq_len]
+
+    // 1. Compute attention scores for the current query against all keys
+    float max_score = -INFINITY;
+    const float* q_head_ptr = Q_current + head * head_dim;
+    for (int k_pos = 0; k_pos < seq_len; ++k_pos) {
+        float dot = 0.0f;
+        const float* k_head_seq_ptr = K_cache + head * seq_len * head_dim + k_pos * head_dim;
+        for (int d = 0; d < head_dim; ++d) {
+            dot += q_head_ptr[d] * k_head_seq_ptr[d];
+        }
+        dot *= scale;
+        scores[k_pos] = dot;
+        if (dot > max_score) max_score = dot;
+    }
+
+    // 2. Softmax
+    float exp_sum = 0.0f;
+    for (int k_pos = 0; k_pos < seq_len; ++k_pos) {
+        probs[k_pos] = expf(scores[k_pos] - max_score);
+        exp_sum += probs[k_pos];
+    }
+    float inv_sum = 1.0f / (exp_sum + 1e-6f); // Add epsilon for stability
+    for (int k_pos = 0; k_pos < seq_len; ++k_pos) {
+        probs[k_pos] *= inv_sum;
+    }
+
+    // 3. Weighted sum over V cache values
+    // We parallelize the weighted sum over the head dimension
+    int d = threadIdx.x; // Each thread handles one dimension within the head
+    if (d < head_dim) {
+        float val = 0.0f;
+        for (int k_pos = 0; k_pos < seq_len; ++k_pos) {
+            val += probs[k_pos] * V_cache[head * seq_len * head_dim + k_pos * head_dim + d];
+        }
+        out[head * head_dim + d] = val;
+    }
+}
+
+// --- ATTENTION WRAPPER (Modified for Single Query Position) ---
+void attention_cuda(const float* Q_current_dev, // Shape [num_heads * head_dim]
+                    const float* K_cache_dev,   // Shape [num_heads * seq_len * head_dim]
+                    const float* V_cache_dev,   // Shape [num_heads * seq_len * head_dim]
+                    float* out_dev,         // Shape [num_heads * head_dim]
+                    int num_heads, int seq_len, int head_dim, float scale, cudaStream_t stream) {
+    // Each block = one head
+    // Each thread computes one dimension of the output vector within a head
+    dim3 grid(num_heads);
+    dim3 block(head_dim); // Threads iterate over head_dim for the weighted sum
+    size_t shared_mem = 2 * seq_len * sizeof(float); // Still need scores[seq_len] and probs[seq_len] per head
+    attention_kernel<<<grid, block, shared_mem, stream>>>(Q_current_dev, K_cache_dev, V_cache_dev, out_dev, seq_len, head_dim, scale);
+    gpuErrchk(cudaGetLastError());
+}
+
+// <<< VECTOR ADDITION KERNEL >>>
+
+__global__ void add_vectors_kernel(const float* a, const float* b, float* result, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        result[i] = a[i] + b[i];
+    }
+}
+
+// --- Vector Addition C++ Wrapper ---
+void add_vectors_cuda(const float* a_dev, 
+                      const float* b_dev, 
+                      float* result_dev, 
+                      int n, 
+                      cudaStream_t stream) 
+{
+    const int threads_per_block = 256;
+    const int num_blocks = (n + threads_per_block - 1) / threads_per_block;
+    
+    add_vectors_kernel<<<num_blocks, threads_per_block, 0, stream>>>(a_dev, b_dev, result_dev, n);
+    gpuErrchk(cudaGetLastError()); // Check for errors after kernel launch
+}
+
+#endif // HAS_CUDA

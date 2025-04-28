@@ -91,9 +91,28 @@ void softmax_vector_cuda(const std::vector<float>& x_host,
                          std::vector<float>& out_host,
                          int n);
 
-void rope_cuda(std::vector<float>& x, int num_heads, int head_dim, const std::vector<float>& freqs_cis);
+// Device-pointer RoPE wrapper
+void rope_cuda(float* x_dev, int num_heads, int head_dim, const float* freqs_dev, cudaStream_t stream = 0);
 
-// --- Moved SwiGLU declaration OUTSIDE HAS_CUDA --- 
+// CUDA Attention kernel wrapper (Modified for Single Query Position)
+void attention_cuda(const float* Q_current_dev, // Shape [num_heads * head_dim]
+                    const float* K_cache_dev,   // Shape [num_heads * seq_len * head_dim]
+                    const float* V_cache_dev,   // Shape [num_heads * seq_len * head_dim]
+                    float* out_dev,         // Shape [num_heads * head_dim]
+                    int num_heads, int seq_len, int head_dim, float scale, cudaStream_t stream = 0);
+
+/**
+ * @brief Performs element-wise addition of two vectors on the GPU (result = a + b).
+ * 
+ * @param a_dev First input vector (device pointer).
+ * @param b_dev Second input vector (device pointer).
+ * @param result_dev Output vector (device pointer).
+ * @param n Size of the vectors.
+ * @param stream CUDA stream (optional, default 0).
+ */
+void add_vectors_cuda(const float* a_dev, const float* b_dev, float* result_dev, int n, cudaStream_t stream = 0);
+
+// --- Moved SwiGLU declaration INSIDE HAS_CUDA --- 
 void swiglu_cuda(const float* gate_dev, const float* up_dev, float* out_dev, int n);
 
 #endif // HAS_CUDA

@@ -65,7 +65,7 @@ public:
     std::vector<float> forward(std::vector<float>& x_vec, int pos, KVCache* cache = nullptr, const std::vector<int>* attention_mask = nullptr);
 
     // New: Device-only forward pass for incremental GPU pipeline
-    std::vector<float> forward_device(int token_id, int pos, KVCache* cache = nullptr, const std::vector<int>* attention_mask = nullptr);
+    std::vector<float> forward_device(int token_id, int pos, KVCache* cache, const std::vector<int>* attention_mask);
 
     // Get model config
     const ModelConfig& get_config() const { return config_; }
