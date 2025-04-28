@@ -32,6 +32,19 @@ static std::string read_file_api(const std::string& path) {
     return std::string((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
 }
 
+// --- START: Argmax Helper --- (Copied from model.cpp)
+// Find the index of the maximum element in a vector
+// Made static as it's only used within this file for now.
+static int argmax(const std::vector<float>& v) {
+    if (v.empty()) {
+        Logger::error("Cannot perform argmax on empty vector"); 
+        return -1; // Return an invalid index
+    }
+    // Need <algorithm> for std::max_element and <iterator> for std::distance (already included indirectly)
+    return std::distance(v.begin(), std::max_element(v.begin(), v.end()));
+}
+// --- END: Argmax Helper ---
+
 // Sampling function (copied and adapted from main.cpp)
 static int sample_top_k_top_p_temperature(
     const std::vector<float>& logits, 
@@ -196,9 +209,9 @@ TinyLlamaSession::~TinyLlamaSession() {
 std::string TinyLlamaSession::generate(
     const std::string& prompt, 
     int max_new_tokens, 
-    float temperature, 
-    int top_k, 
-    float top_p)
+    float temperature, // Parameter remains but won't be used if using argmax
+    int top_k,         // Parameter remains but won't be used if using argmax
+    float top_p)       // Parameter remains but won't be used if using argmax
 {
     Logger::info("Generate called. Max new tokens: " + std::to_string(max_new_tokens));
     if (!pimpl_ || !pimpl_->model || !pimpl_->tokenizer || !pimpl_->kv_cache) {
@@ -265,10 +278,10 @@ std::string TinyLlamaSession::generate(
 
         // Sample next token (only during generation phase)
         if (pos >= num_prompt_tokens - 1) {
-            // Use sampling or argmax
-            // next_token_id = argmax(logits);
-            next_token_id = sample_top_k_top_p_temperature(logits, temperature, top_k, top_p, rng);
-            Logger::info("Sampled token ID: " + std::to_string(next_token_id));
+            // Use greedy sampling (argmax)
+            next_token_id = argmax(logits);
+            // next_token_id = sample_top_k_top_p_temperature(logits, temperature, top_k, top_p, rng);
+            Logger::info("Greedy sampled token ID: " + std::to_string(next_token_id));
 
             generated_only_ids.push_back(next_token_id);
             generated_count++;

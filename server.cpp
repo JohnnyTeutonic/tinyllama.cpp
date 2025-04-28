@@ -97,11 +97,15 @@ int main(int argc, char** argv) {
             } else {
                  throw std::runtime_error("Missing 'message' field in request JSON");
             }
-             // Optional: Parse other parameters if needed
-             if (req_json.contains("temperature")) temperature = req_json["temperature"].get<float>();
+             // Remove parsing of unused sampling parameters
+             // if (req_json.contains("temperature")) temperature = req_json["temperature"].get<float>();
+             // if (req_json.contains("max_new_tokens")) max_new_tokens = req_json["max_new_tokens"].get<int>();
+             // if (req_json.contains("top_k")) top_k = req_json["top_k"].get<int>();
+             // if (req_json.contains("top_p")) top_p = req_json["top_p"].get<float>();
+             
+             // Still parse max_new_tokens as it's used in the loop limit
              if (req_json.contains("max_new_tokens")) max_new_tokens = req_json["max_new_tokens"].get<int>();
-             if (req_json.contains("top_k")) top_k = req_json["top_k"].get<int>();
-             if (req_json.contains("top_p")) top_p = req_json["top_p"].get<float>();
+             
              // Optional: Add history parsing here if client sends it
 
              Logger::info("Processing message: " + user_message.substr(0, 50) + "...");
@@ -110,8 +114,8 @@ int main(int argc, char** argv) {
              std::string prompt = "Q: " + user_message + "\nA:";
              Logger::info("Formatted prompt: " + prompt.substr(0, 100) + "..."); // Log formatted prompt
 
-             // Call generate method
-             std::string reply = session->generate(prompt, max_new_tokens, temperature, top_k, top_p);
+             // Call generate method (remove unused sampling parameters)
+             std::string reply = session->generate(prompt, max_new_tokens /*, temperature, top_k, top_p */);
              Logger::info("Generated reply: " + reply.substr(0, 50) + "...");
 
             // Create response JSON
