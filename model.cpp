@@ -288,36 +288,69 @@ static void log_raw_float_pointer(const std::string& name, const float* ptr, siz
     Logger::info(ss.str());
 }
 
-// KVCache initialization method to add to the existing struct
+// KVCache initialization method definition
 void KVCache::initialize(int num_layers, int max_seq_len, int num_kv_heads, int head_dim) {
-    layers.resize(num_layers);
-    
-    // Calculate the size needed for each layer's K and V cache
-    // Structure: sequence_position → kv_head → head_dimension
+    layers.resize(num_layers); // Resize the vector of layers
+    seq_len = 0; // Reset sequence length
+
+#ifdef HAS_CUDA
+    // --- CUDA Path --- 
+    // Store allocation parameters for destructor and indexing
+    allocated_num_layers = num_layers;
+    allocated_max_seq_len = max_seq_len;
+    allocated_num_kv_heads = num_kv_heads;
+    allocated_head_dim = head_dim;
+
+    // Calculate the FLAT size needed PER LAYER for K and V caches
+    // Layout: [max_seq_len, num_kv_heads, head_dim]
+    size_t cache_elems_per_layer = static_cast<size_t>(max_seq_len) * 
+                                 static_cast<size_t>(num_kv_heads) * 
+                                 static_cast<size_t>(head_dim);
+    size_t cache_bytes_per_layer = cache_elems_per_layer * sizeof(float);
+
+    if (cache_elems_per_layer == 0) {
+        throw std::runtime_error("KVCache (CUDA): Calculated cache size per layer is zero. Check parameters.");
+    }
+
+    Logger::info("Allocating KVCache on GPU: " + std::to_string(num_layers) + " layers, size per layer: " + 
+                 std::to_string(cache_bytes_per_layer / (1024.0*1024.0)) + " MB");
+
+    // Allocate device memory for each layer's K and V cache
+    for (int l = 0; l < num_layers; ++l) {
+        // Free existing memory if re-initializing (should ideally happen only via destructor)
+        if (layers[l].k_dev) { Logger::info("Re-initializing KVCache layer K dev pointer without proper destruction?"); gpuErrchk(cudaFree(layers[l].k_dev)); }
+        if (layers[l].v_dev) { Logger::info("Re-initializing KVCache layer V dev pointer without proper destruction?"); gpuErrchk(cudaFree(layers[l].v_dev)); }
+        
+        gpuErrchk(cudaMalloc(&layers[l].k_dev, cache_bytes_per_layer));
+        gpuErrchk(cudaMalloc(&layers[l].v_dev, cache_bytes_per_layer));
+        // Optional: Zero out the allocated memory (good practice)
+        gpuErrchk(cudaMemset(layers[l].k_dev, 0, cache_bytes_per_layer));
+        gpuErrchk(cudaMemset(layers[l].v_dev, 0, cache_bytes_per_layer));
+    }
+    Logger::info("KVCache GPU allocation complete.");
+
+#else 
+    // --- CPU Path --- 
+    // Calculate the size needed for each layer's K and V cache (host vectors)
     size_t cache_size_per_layer = static_cast<size_t>(max_seq_len) * 
                                  static_cast<size_t>(num_kv_heads) * 
                                  static_cast<size_t>(head_dim);
-    
+
     if (cache_size_per_layer == 0) {
-        throw std::runtime_error("KVCache: Calculated cache size is zero. Check parameters: " +
-                           std::to_string(max_seq_len) + " * " + 
-                           std::to_string(num_kv_heads) + " * " + 
-                           std::to_string(head_dim));
+        throw std::runtime_error("KVCache (CPU): Calculated cache size is zero. Check parameters.");
     }
     
-    // Allocate and zero-initialize all cache tensors
+    // Allocate and zero-initialize all host cache vectors
     for (int l = 0; l < num_layers; ++l) {
-        layers[l].k.resize(cache_size_per_layer, 0.0f);
-        layers[l].v.resize(cache_size_per_layer, 0.0f);
+        layers[l].k.assign(cache_size_per_layer, 0.0f); // Use assign for resize + fill
+        layers[l].v.assign(cache_size_per_layer, 0.0f);
     }
-    
-    Logger::info("KVCache initialized with dimensions: " +
-               std::to_string(num_layers) + " layers, " +
-               std::to_string(max_seq_len) + " sequence length, " +
-               std::to_string(num_kv_heads) + " KV heads, " + 
-               std::to_string(head_dim) + " head dimension");
-    
-    seq_len = 0;
+     Logger::info("KVCache (CPU) initialized with dimensions: " +
+                   std::to_string(num_layers) + " layers, " +
+                   std::to_string(max_seq_len) + " seq len, " +
+                   std::to_string(num_kv_heads) + " KV heads, " +
+                   std::to_string(head_dim) + " head dim");
+#endif
 }
 
 
@@ -696,7 +729,7 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, K
     // --- Layer Loop (CUDA Path) ---
     for (int l = 0; l < nhl; ++l) {
         const auto& lw = layers[l];
-        
+
         // Residual 1
         gpuErrchk(cudaMemcpy(x_resid1_dev, x_dev, hs * sizeof(float), cudaMemcpyDeviceToDevice));
 
@@ -732,91 +765,70 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, K
         gpuErrchk(cudaFree(freqs_dev)); // Free freqs_dev for this layer
         gpuErrchk(cudaDeviceSynchronize());
 
-        // KVCache Update (Requires copying K, V from device to host cache)
-        std::vector<float> k_vec_host(n_kv_heads * head_dim);
-        std::vector<float> v_vec_host(n_kv_heads * head_dim);
-        gpuErrchk(cudaMemcpy(k_vec_host.data(), k_dev, n_kv_heads * head_dim * sizeof(float), cudaMemcpyDeviceToHost));
-        gpuErrchk(cudaMemcpy(v_vec_host.data(), v_dev, n_kv_heads * head_dim * sizeof(float), cudaMemcpyDeviceToHost));
+        // KVCache Update (Directly on Device)
+        // Call the new kernel for each K/V head
         for (int kvh = 0; kvh < n_kv_heads; ++kvh) {
-             size_t current_k_offset = (size_t)kvh * head_dim;
-             size_t current_v_offset = (size_t)kvh * head_dim;
-             size_t write_offset = pos * n_kv_heads * head_dim + kvh * head_dim;
-             if (write_offset + head_dim <= cache->layers[l].k.size()) {
-                 std::memcpy(&cache->layers[l].k[write_offset], k_vec_host.data() + current_k_offset, head_dim * sizeof(float));
-                 std::memcpy(&cache->layers[l].v[write_offset], v_vec_host.data() + current_v_offset, head_dim * sizeof(float));
-             } else {
-                 Logger::error("KVCache write out of bounds: layer=" + std::to_string(l) + ", pos=" + std::to_string(pos) + ", kv_head=" + std::to_string(kvh));
-             }
-         }
+            // Calculate pointer to the *start* of the data for this specific head in k_dev/v_dev
+            const float* current_k_head_ptr = k_dev + kvh * head_dim;
+            const float* current_v_head_ptr = v_dev + kvh * head_dim;
+            
+            // Call kernel to update K cache for this head
+            update_kv_cache_cuda(cache->layers[l].k_dev, // Base pointer for layer K cache
+                                 current_k_head_ptr,     // Pointer to current K data for this head
+                                 pos, 
+                                 kvh, 
+                                 cache->allocated_max_seq_len,
+                                 cache->allocated_num_kv_heads,
+                                 cache->allocated_head_dim);
+                                 
+            // Call kernel to update V cache for this head
+            update_kv_cache_cuda(cache->layers[l].v_dev, // Base pointer for layer V cache
+                                 current_v_head_ptr,     // Pointer to current V data for this head
+                                 pos, 
+                                 kvh, 
+                                 cache->allocated_max_seq_len,
+                                 cache->allocated_num_kv_heads,
+                                 cache->allocated_head_dim);
+        }
+        // No need to copy K/V back to host here anymore
+        // delete[] k_current_ptr_host;
+        // delete[] v_current_ptr_host;
 
-        // d) Attention
-        // --- DEVICE-SIDE ATTENTION ---
+        // --- Attention (Reads directly from Device Cache) --- 
         int current_seq_len = pos + 1;
         float scale = 1.0f / std::sqrt(head_dim);
-        
-        // Q_current_dev should be q_dev which is declared/filled earlier in the CUDA path
-        float* Q_current_dev = q_dev; 
 
-        // Allocate and fill K/V cache history buffers on device
-        float* K_cache_dev = nullptr;
-        float* V_cache_dev = nullptr;
-        size_t cache_buffer_size = (size_t)n_heads * current_seq_len * head_dim; 
-        gpuErrchk(cudaMalloc(&K_cache_dev, cache_buffer_size * sizeof(float)));
-        gpuErrchk(cudaMalloc(&V_cache_dev, cache_buffer_size * sizeof(float)));
-        std::vector<float> K_cache_host(cache_buffer_size);
-        std::vector<float> V_cache_host(cache_buffer_size);
-        for (int h = 0; h < n_heads; ++h) {
-            int kv_head_idx = h / (n_heads / n_kv_heads); 
-            for (int j = 0; j < current_seq_len; ++j) {
-                size_t cache_read_offset = (size_t)j * n_kv_heads * head_dim + (size_t)kv_head_idx * head_dim;
-                size_t buffer_write_offset = (size_t)h * current_seq_len * head_dim + (size_t)j * head_dim;
-                if (cache_read_offset + head_dim <= cache->layers[l].k.size()) {
-                    std::memcpy(&K_cache_host[buffer_write_offset], &cache->layers[l].k[cache_read_offset], head_dim * sizeof(float));
-                    std::memcpy(&V_cache_host[buffer_write_offset], &cache->layers[l].v[cache_read_offset], head_dim * sizeof(float));
-                } else {
-                     Logger::error("KVCache read out of bounds: layer=" + std::to_string(l) + ", pos=" + std::to_string(j) + ", kv_head=" + std::to_string(kv_head_idx));
-                     std::fill(K_cache_host.begin() + buffer_write_offset, K_cache_host.begin() + buffer_write_offset + head_dim, 0.0f);
-                     std::fill(V_cache_host.begin() + buffer_write_offset, V_cache_host.begin() + buffer_write_offset + head_dim, 0.0f);
-                }
-            }
-        }
-        gpuErrchk(cudaMemcpy(K_cache_dev, K_cache_host.data(), cache_buffer_size * sizeof(float), cudaMemcpyHostToDevice));
-        gpuErrchk(cudaMemcpy(V_cache_dev, V_cache_host.data(), cache_buffer_size * sizeof(float), cudaMemcpyHostToDevice));
+        // REMOVE preparation of K_cache_dev / V_cache_dev host/device buffers
+        // float* K_cache_dev = nullptr;
+        // float* V_cache_dev = nullptr;
+        // ... (remove allocation and H->D copy code) ...
 
-        // attn_out_dev needs to be declared in this scope if HAS_CUDA
-        float* attn_out_dev = nullptr; 
-        gpuErrchk(cudaMalloc(&attn_out_dev, hs * sizeof(float))); // Allocate it
-        attention_cuda(Q_current_dev, K_cache_dev, V_cache_dev, attn_out_dev, 
-                       n_heads, current_seq_len, head_dim, scale);
-        gpuErrchk(cudaFree(K_cache_dev));
-        gpuErrchk(cudaFree(V_cache_dev));
+        // Call Attention Kernel directly with layer cache base pointers
+        // Input Q: q_dev (current token's Q, shape [hs = n_heads * head_dim])
+        // Input K: cache->layers[l].k_dev (base pointer for layer K cache)
+        // Input V: cache->layers[l].v_dev (base pointer for layer V cache)
+        // Output: attn_out_dev (shape [hs])
+        attention_cuda(q_dev,                      // Q vector for current token
+                       cache->layers[l].k_dev,   // Base K cache pointer for this layer
+                       cache->layers[l].v_dev,   // Base V cache pointer for this layer
+                       attn_out_dev,             // Output attention result
+                       n_heads,                  // Number of Q heads
+                       current_seq_len,          // Current sequence length
+                       head_dim,                 // Head dimension
+                       scale,                    // Scaling factor
+                       cache->allocated_max_seq_len, // Cache max sequence length
+                       cache->allocated_num_kv_heads // Cache K/V head count
+                       /*, stream */);          // Optional stream omitted
         gpuErrchk(cudaDeviceSynchronize());
 
-        // e) Output projection 
-        // attn_proj_dev needs to be declared in this scope if HAS_CUDA
-        float* attn_proj_dev = nullptr; 
-        gpuErrchk(cudaMalloc(&attn_proj_dev, hs * sizeof(float))); // Allocate it
+        // Output projection (Input: attn_out_dev, Output: attn_proj_dev)
         matvec_bf16_f32_cuda(lw.o_proj, attn_out_dev, attn_proj_dev, hs, hs);
         gpuErrchk(cudaDeviceSynchronize());
 
-        // f) First residual connection 
-        // x_resid1_dev needs to be declared in this scope if HAS_CUDA
-        float* x_resid1_dev = nullptr; 
-        gpuErrchk(cudaMalloc(&x_resid1_dev, hs * sizeof(float))); // Allocate it
-        gpuErrchk(cudaMemcpy(x_resid1_dev, x_dev, hs * sizeof(float), cudaMemcpyDeviceToDevice)); // Copy previous state
-
-        // Fallback: Copy back, add on host, copy back to x_dev
-        // TODO: Implement Add kernel for performance
-        std::vector<float> attn_proj_host(hs);
-        std::vector<float> x_resid1_host(hs);
-        gpuErrchk(cudaMemcpy(attn_proj_host.data(), attn_proj_dev, hs * sizeof(float), cudaMemcpyDeviceToHost));
-        gpuErrchk(cudaMemcpy(x_resid1_host.data(), x_resid1_dev, hs * sizeof(float), cudaMemcpyDeviceToHost)); // Copy x_resid1_dev content
-        #pragma omp parallel for
-        for(int i=0; i<hs; ++i) { x_resid1_host[i] += attn_proj_host[i]; }
-        gpuErrchk(cudaMemcpy(x_dev, x_resid1_host.data(), hs * sizeof(float), cudaMemcpyHostToDevice)); 
-        gpuErrchk(cudaFree(attn_out_dev)); // Free allocated buffer
-        gpuErrchk(cudaFree(attn_proj_dev)); // Free allocated buffer
-        gpuErrchk(cudaFree(x_resid1_dev)); // Free allocated buffer
+        // First residual connection (x = x_resid1 + attn_proj)
+        // Using add_vectors_cuda kernel
+        add_vectors_cuda(x_resid1_dev, attn_proj_dev, x_dev, hs);
+        gpuErrchk(cudaDeviceSynchronize());
 
         // --- MLP Block --- 
         // Residual 2 Prep (Copy x_dev to x_resid2_dev)
@@ -953,7 +965,7 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, K
              if (write_offset + head_dim <= cache->layers[l].k.size()) {
                  std::memcpy(&cache->layers[l].k[write_offset], k_current_ptr + current_k_offset, head_dim * sizeof(float));
                  std::memcpy(&cache->layers[l].v[write_offset], v_current_ptr + current_v_offset, head_dim * sizeof(float));
-             } else {
+                     } else {
                  Logger::error("KVCache write out of bounds: layer=" + std::to_string(l) + ", pos=" + std::to_string(pos) + ", kv_head=" + std::to_string(kvh));
              }
          }
@@ -972,7 +984,7 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, K
                 if (cache_pos_offset + head_dim <= cache->layers[l].k.size()) {
                     std::memcpy(k_cache_head_vec.data() + j * head_dim, &cache->layers[l].k[cache_pos_offset], head_dim * sizeof(float));
                     std::memcpy(v_cache_head_vec.data() + j * head_dim, &cache->layers[l].v[cache_pos_offset], head_dim * sizeof(float));
-             } else {
+        } else {
                     std::fill(k_cache_head_vec.begin() + j * head_dim, k_cache_head_vec.begin() + (j + 1) * head_dim, 0.0f);
                     std::fill(v_cache_head_vec.begin() + j * head_dim, v_cache_head_vec.begin() + (j + 1) * head_dim, 0.0f);
                     Logger::error("Attention K/V access out of bounds: cache_pos_offset=" + std::to_string(cache_pos_offset));
@@ -1137,78 +1149,60 @@ std::vector<float> TinyLlamaModel::forward_device(int token_id, int pos, KVCache
         gpuErrchk(cudaFree(freqs_dev)); // Free freqs_dev for this layer
         gpuErrchk(cudaDeviceSynchronize());
 
-        // KVCache Update 
-        // 1. Copy K, V from device (k_dev, v_dev) to host cache (cache->layers[l].k/v)
-        // Need to copy K/V back to host *after* RoPE for cache update
-        float* k_current_ptr_host = new float[n_kv_heads * head_dim];
-        float* v_current_ptr_host = new float[n_kv_heads * head_dim];
-        gpuErrchk(cudaMemcpy(k_current_ptr_host, k_dev, n_kv_heads * head_dim * sizeof(float), cudaMemcpyDeviceToHost));
-        gpuErrchk(cudaMemcpy(v_current_ptr_host, v_dev, n_kv_heads * head_dim * sizeof(float), cudaMemcpyDeviceToHost));
-
-        // Write to the correct position in the cache
+        // KVCache Update (Directly on Device)
+        // Call the new kernel for each K/V head
         for (int kvh = 0; kvh < n_kv_heads; ++kvh) {
-            size_t current_k_offset = (size_t)kvh * head_dim;
-            size_t current_v_offset = (size_t)kvh * head_dim;
-            // Calculate the write offset within the flat cache vector for this layer, position, and head
-            size_t write_offset = (size_t)pos * n_kv_heads * head_dim + current_k_offset; // Assuming K/V layout [max_seq, n_kv_heads, head_dim]
-            if (write_offset + head_dim <= cache->layers[l].k.size()) {
-                std::memcpy(&cache->layers[l].k[write_offset], k_current_ptr_host + current_k_offset, head_dim * sizeof(float));
-                std::memcpy(&cache->layers[l].v[write_offset], v_current_ptr_host + current_v_offset, head_dim * sizeof(float));
-            } else {
-                Logger::error("KVCache write out of bounds: layer=" + std::to_string(l) + ", pos=" + std::to_string(pos) + ", kv_head=" + std::to_string(kvh));
-                // Consider breaking or handling this error more robustly
-            }
+            // Calculate pointer to the *start* of the data for this specific head in k_dev/v_dev
+            const float* current_k_head_ptr = k_dev + kvh * head_dim;
+            const float* current_v_head_ptr = v_dev + kvh * head_dim;
+            
+            // Call kernel to update K cache for this head
+            update_kv_cache_cuda(cache->layers[l].k_dev, // Base pointer for layer K cache
+                                 current_k_head_ptr,     // Pointer to current K data for this head
+                                 pos, 
+                                 kvh, 
+                                 cache->allocated_max_seq_len,
+                                 cache->allocated_num_kv_heads,
+                                 cache->allocated_head_dim);
+                                 
+            // Call kernel to update V cache for this head
+            update_kv_cache_cuda(cache->layers[l].v_dev, // Base pointer for layer V cache
+                                 current_v_head_ptr,     // Pointer to current V data for this head
+                                 pos, 
+                                 kvh, 
+                                 cache->allocated_max_seq_len,
+                                 cache->allocated_num_kv_heads,
+                                 cache->allocated_head_dim);
         }
-        delete[] k_current_ptr_host;
-        delete[] v_current_ptr_host;
+        // No need to copy K/V back to host here anymore
+        // delete[] k_current_ptr_host;
+        // delete[] v_current_ptr_host;
 
-        // --- Attention --- 
+        // --- Attention (Reads directly from Device Cache) --- 
         int current_seq_len = pos + 1;
         float scale = 1.0f / std::sqrt(head_dim);
 
-        // Prepare K/V Cache History on Device
-        float* K_cache_dev = nullptr;
-        float* V_cache_dev = nullptr;
-        // Total elements needed = num_heads * seq_len * head_dim (because attention kernel expects this shape)
-        // However, we store cache as [seq_len, num_kv_heads, head_dim]. We need to restructure/broadcast.
-        size_t cache_layer_size = (size_t)max_seq_len * n_kv_heads * head_dim;
-        size_t cache_buffer_size = (size_t)n_heads * current_seq_len * head_dim; 
-        // Allocate space for the full broadcasted K/V history needed by the attention kernel
-        gpuErrchk(cudaMalloc(&K_cache_dev, cache_buffer_size * sizeof(float)));
-        gpuErrchk(cudaMalloc(&V_cache_dev, cache_buffer_size * sizeof(float)));
+        // REMOVE preparation of K_cache_dev / V_cache_dev host/device buffers
+        // float* K_cache_dev = nullptr;
+        // float* V_cache_dev = nullptr;
+        // ... (remove allocation and H->D copy code) ...
 
-        // Copy relevant part of host cache and broadcast KV heads to Q heads on the fly for device transfer
-        std::vector<float> K_cache_host_buffer(cache_buffer_size);
-        std::vector<float> V_cache_host_buffer(cache_buffer_size);
-        int heads_per_kv = n_heads / n_kv_heads;
-        for (int h = 0; h < n_heads; ++h) {
-            int kv_head_idx = h / heads_per_kv;
-            for (int t = 0; t < current_seq_len; ++t) {
-                 size_t cache_read_offset = (size_t)t * n_kv_heads * head_dim + (size_t)kv_head_idx * head_dim;
-                 size_t buffer_write_offset = (size_t)h * current_seq_len * head_dim + (size_t)t * head_dim;
-                 if (cache_read_offset + head_dim <= cache->layers[l].k.size()) {
-                     std::memcpy(&K_cache_host_buffer[buffer_write_offset], &cache->layers[l].k[cache_read_offset], head_dim * sizeof(float));
-                     std::memcpy(&V_cache_host_buffer[buffer_write_offset], &cache->layers[l].v[cache_read_offset], head_dim * sizeof(float));
-                 } else {
-                    Logger::error("KVCache read out of bounds during attention prep: layer=" + std::to_string(l) + ", t=" + std::to_string(t) + ", kv_head=" + std::to_string(kv_head_idx));
-                     // Fill with zeros or handle appropriately
-                     std::fill(K_cache_host_buffer.begin() + buffer_write_offset, K_cache_host_buffer.begin() + buffer_write_offset + head_dim, 0.0f);
-                     std::fill(V_cache_host_buffer.begin() + buffer_write_offset, V_cache_host_buffer.begin() + buffer_write_offset + head_dim, 0.0f);
-                 }
-             }
-         }
-         gpuErrchk(cudaMemcpy(K_cache_dev, K_cache_host_buffer.data(), cache_buffer_size * sizeof(float), cudaMemcpyHostToDevice));
-         gpuErrchk(cudaMemcpy(V_cache_dev, V_cache_host_buffer.data(), cache_buffer_size * sizeof(float), cudaMemcpyHostToDevice));
-
-        // Call Attention Kernel
-        // Input Q: q_dev (current token's Q, shape [hs])
-        // Input K: K_cache_dev (history including current token, shape [n_heads, current_seq_len, head_dim])
-        // Input V: V_cache_dev (history including current token, shape [n_heads, current_seq_len, head_dim])
+        // Call Attention Kernel directly with layer cache base pointers
+        // Input Q: q_dev (current token's Q, shape [hs = n_heads * head_dim])
+        // Input K: cache->layers[l].k_dev (base pointer for layer K cache)
+        // Input V: cache->layers[l].v_dev (base pointer for layer V cache)
         // Output: attn_out_dev (shape [hs])
-        attention_cuda(q_dev, K_cache_dev, V_cache_dev, attn_out_dev,
-                       n_heads, current_seq_len, head_dim, scale);
-        gpuErrchk(cudaFree(K_cache_dev));
-        gpuErrchk(cudaFree(V_cache_dev));
+        attention_cuda(q_dev,                      // Q vector for current token
+                       cache->layers[l].k_dev,   // Base K cache pointer for this layer
+                       cache->layers[l].v_dev,   // Base V cache pointer for this layer
+                       attn_out_dev,             // Output attention result
+                       n_heads,                  // Number of Q heads
+                       current_seq_len,          // Current sequence length
+                       head_dim,                 // Head dimension
+                       scale,                    // Scaling factor
+                       cache->allocated_max_seq_len, // Cache max sequence length
+                       cache->allocated_num_kv_heads // Cache K/V head count
+                       /*, stream */);          // Optional stream omitted
         gpuErrchk(cudaDeviceSynchronize());
 
         // Output projection (Input: attn_out_dev, Output: attn_proj_dev)
@@ -1285,7 +1279,7 @@ std::vector<float> TinyLlamaModel::forward_device(int token_id, int pos, KVCache
     // freqs_dev was freed in loop
 
     return logits;
-}
+} 
 
 #else // If HAS_CUDA is not defined
 

@@ -514,71 +514,123 @@ void rope_cuda(float* x_dev, int num_heads, int head_dim, const float* freqs_dev
     gpuErrchk(cudaGetLastError());
 }
 
-// <<< ATTENTION KERNEL (Modified for Single Query Position) >>>
+// <<< ATTENTION KERNEL (Reads directly from Cache) >>>
 __global__ void attention_kernel(const float* Q_current, // Shape [num_heads * head_dim]
-                               const float* K_cache,   // Shape [num_heads * seq_len * head_dim]
-                               const float* V_cache,   // Shape [num_heads * seq_len * head_dim]
-                               float* out,         // Shape [num_heads * head_dim]
-                               int seq_len, int head_dim, float scale) {
-    // Each block = one head
-    int head = blockIdx.x;
-    // No q_pos loop needed, compute directly for the current query
-    if (head >= gridDim.x) return;
+                               const float* K_layer_cache_base, // Base ptr for layer's K cache
+                               const float* V_layer_cache_base, // Base ptr for layer's V cache
+                               float* out,              // Output, Shape [num_heads * head_dim]
+                               int current_seq_len,     // pos + 1
+                               int head_dim, 
+                               float scale, 
+                               int cache_num_kv_heads, // Num K/V heads in cache
+                               int num_q_heads)        // Num Query heads (gridDim.x)
+{
+    // Each block = one query head (q_head)
+    int q_head = blockIdx.x;
+    if (q_head >= num_q_heads) return;
 
-    // Use shared memory for scores and probabilities for this head
-    extern __shared__ float shared[];
-    float* scores = shared; // [seq_len]
-    float* probs = &shared[seq_len]; // [seq_len]
+    // Determine the corresponding K/V head index
+    // Assuming simple repetition if num_q_heads > cache_num_kv_heads (GQA)
+    int heads_per_kv = num_q_heads / cache_num_kv_heads; 
+    int kv_head_idx = q_head / heads_per_kv;
 
-    // 1. Compute attention scores for the current query against all keys
+    // Use shared memory for scores and probabilities for this q_head
+    // Size needs to accommodate current_seq_len
+    extern __shared__ float shared_scores[]; 
+    float* scores = shared_scores; // [current_seq_len]
+    // If not enough shared memory, this will fail kernel launch or cause errors.
+    // Ensure max_seq_len isn't too large for available shared memory.
+
+    // 1. Compute attention scores for the current q_head against all keys in its group
     float max_score = -INFINITY;
-    const float* q_head_ptr = Q_current + head * head_dim;
-    for (int k_pos = 0; k_pos < seq_len; ++k_pos) {
+    const float* q_head_ptr = Q_current + q_head * head_dim;
+    
+    for (int k_pos = 0; k_pos < current_seq_len; ++k_pos) { // Iterate up to current timestep
+        // Calculate offset into the FLAT K cache for the specific key vector
+        // Layout: [max_seq_len, num_kv_heads, head_dim] <-- This was WRONG assumption before. Model uses [pos, kv_head, dim]
+        // Correct Layout used in update kernel: [pos * num_kv_heads * head_dim + kv_head_idx * head_dim + d]
+        size_t k_cache_base_offset = (size_t)k_pos * cache_num_kv_heads * head_dim + 
+                                     (size_t)kv_head_idx * head_dim;
+        const float* k_vec_ptr = K_layer_cache_base + k_cache_base_offset;
+        
         float dot = 0.0f;
-        const float* k_head_seq_ptr = K_cache + head * seq_len * head_dim + k_pos * head_dim;
+        // Calculate dot product: Q[q_head] . K[kv_head_idx, k_pos]
         for (int d = 0; d < head_dim; ++d) {
-            dot += q_head_ptr[d] * k_head_seq_ptr[d];
+            dot += q_head_ptr[d] * k_vec_ptr[d];
         }
         dot *= scale;
         scores[k_pos] = dot;
         if (dot > max_score) max_score = dot;
     }
 
-    // 2. Softmax
+    // 2. Softmax (numerically stable)
     float exp_sum = 0.0f;
-    for (int k_pos = 0; k_pos < seq_len; ++k_pos) {
-        probs[k_pos] = expf(scores[k_pos] - max_score);
-        exp_sum += probs[k_pos];
+    for (int k_pos = 0; k_pos < current_seq_len; ++k_pos) {
+        // Reuse shared memory for probabilities after scores are computed
+        float prob = expf(scores[k_pos] - max_score);
+        scores[k_pos] = prob; // Store prob back in shared mem
+        exp_sum += prob;
     }
-    float inv_sum = 1.0f / (exp_sum + 1e-6f); // Add epsilon for stability
-    for (int k_pos = 0; k_pos < seq_len; ++k_pos) {
-        probs[k_pos] *= inv_sum;
+    float inv_sum = 1.0f / (exp_sum + 1e-9f); // Add epsilon for stability
+    // Normalize probabilities in shared memory
+    for (int k_pos = 0; k_pos < current_seq_len; ++k_pos) {
+        scores[k_pos] *= inv_sum; // scores now holds probabilities
     }
 
     // 3. Weighted sum over V cache values
-    // We parallelize the weighted sum over the head dimension
-    int d = threadIdx.x; // Each thread handles one dimension within the head
+    // Each thread computes one dimension 'd' of the output vector for this q_head
+    int d = threadIdx.x; // Thread index corresponds to element within head_dim
     if (d < head_dim) {
-        float val = 0.0f;
-        for (int k_pos = 0; k_pos < seq_len; ++k_pos) {
-            val += probs[k_pos] * V_cache[head * seq_len * head_dim + k_pos * head_dim + d];
+        double weighted_sum = 0.0; // Use double for accumulation
+        for (int k_pos = 0; k_pos < current_seq_len; ++k_pos) {
+            // Calculate offset into the FLAT V cache for the specific value vector
+            size_t v_cache_base_offset = (size_t)k_pos * cache_num_kv_heads * head_dim + 
+                                         (size_t)kv_head_idx * head_dim;
+            const float* v_vec_ptr = V_layer_cache_base + v_cache_base_offset;
+            
+            weighted_sum += static_cast<double>(scores[k_pos]) * static_cast<double>(v_vec_ptr[d]);
         }
-        out[head * head_dim + d] = val;
+        // Write the final result for dimension 'd' of the output head vector
+        out[q_head * head_dim + d] = static_cast<float>(weighted_sum);
     }
 }
 
-// --- ATTENTION WRAPPER (Modified for Single Query Position) ---
-void attention_cuda(const float* Q_current_dev, // Shape [num_heads * head_dim]
-                    const float* K_cache_dev,   // Shape [num_heads * seq_len * head_dim]
-                    const float* V_cache_dev,   // Shape [num_heads * seq_len * head_dim]
-                    float* out_dev,         // Shape [num_heads * head_dim]
-                    int num_heads, int seq_len, int head_dim, float scale, cudaStream_t stream) {
-    // Each block = one head
+// --- ATTENTION WRAPPER (Reads directly from flat K/V Cache) ---
+void attention_cuda(const float* Q_current_dev, 
+                    const float* K_layer_cache_base, // Base ptr for layer's K cache
+                    const float* V_layer_cache_base, // Base ptr for layer's V cache
+                    float* out_dev,        
+                    int num_q_heads,       // Renamed for clarity
+                    int current_seq_len, 
+                    int head_dim, 
+                    float scale, 
+                    int cache_max_seq_len, // Added - needed for kernel?
+                    int cache_num_kv_heads, // Added
+                    cudaStream_t stream) 
+{
+    // Each block = one query head
     // Each thread computes one dimension of the output vector within a head
-    dim3 grid(num_heads);
+    dim3 grid(num_q_heads);
     dim3 block(head_dim); // Threads iterate over head_dim for the weighted sum
-    size_t shared_mem = 2 * seq_len * sizeof(float); // Still need scores[seq_len] and probs[seq_len] per head
-    attention_kernel<<<grid, block, shared_mem, stream>>>(Q_current_dev, K_cache_dev, V_cache_dev, out_dev, seq_len, head_dim, scale);
+    
+    // Shared memory per block: need space for scores/probs for current_seq_len
+    // This might exceed limits if current_seq_len is very large!
+    size_t shared_mem_bytes = current_seq_len * sizeof(float); 
+    // TODO: Add check against device shared memory limits if max_seq_len is large
+    // cudaDeviceGetAttribute(&sharedMemPerBlock, cudaDevAttrMaxSharedMemoryPerBlock, devId);
+    // if (shared_mem_bytes > sharedMemPerBlock) { /* error or use different kernel strategy */ }
+
+    attention_kernel<<<grid, block, shared_mem_bytes, stream>>>(
+        Q_current_dev, 
+        K_layer_cache_base, 
+        V_layer_cache_base, 
+        out_dev, 
+        current_seq_len, 
+        head_dim, 
+        scale, 
+        cache_num_kv_heads, // Pass cache K/V head count
+        num_q_heads         // Pass query head count (gridDim.x)
+    );
     gpuErrchk(cudaGetLastError());
 }
 
@@ -602,6 +654,81 @@ void add_vectors_cuda(const float* a_dev,
     const int num_blocks = (n + threads_per_block - 1) / threads_per_block;
     
     add_vectors_kernel<<<num_blocks, threads_per_block, 0, stream>>>(a_dev, b_dev, result_dev, n);
+    gpuErrchk(cudaGetLastError()); // Check for errors after kernel launch
+}
+
+// <<< K/V CACHE UPDATE KERNEL >>>
+
+__global__ void update_kv_cache_kernel(float* cache_base_ptr,
+                                     const float* current_kv_vector,
+                                     int pos,
+                                     int kv_head_idx,
+                                     int max_seq_len,
+                                     int num_kv_heads,
+                                     int head_dim)
+{
+    int d = threadIdx.x; // Thread index corresponds to element within head_dim
+    if (d >= head_dim) return;
+
+    // Calculate the flat offset in the destination cache
+    // Layout is [max_seq_len, num_kv_heads, head_dim]
+    size_t cache_offset = (size_t)pos * num_kv_heads * head_dim + 
+                          (size_t)kv_head_idx * head_dim + 
+                          d;
+
+    // Calculate the offset in the source vector (current K or V for this head)
+    // Assuming current_kv_vector points to the start of the data for the target kv_head_idx
+    size_t source_offset = d;
+
+    // TODO: Add bounds checking for cache_offset against total cache size if needed, though parameters should guarantee validity if used correctly.
+    // Example: size_t total_cache_size = (size_t)max_seq_len * num_kv_heads * head_dim;
+    //          if (cache_offset >= total_cache_size) return; 
+
+    // Copy the float value
+    cache_base_ptr[cache_offset] = current_kv_vector[source_offset];
+}
+
+// --- K/V Cache Update C++ Wrapper ---
+void update_kv_cache_cuda(float* cache_base_ptr, // Base pointer for K or V for the layer
+                            const float* current_kv_vector, // Pointer to current token's K or V (just this head's data)
+                            int pos,
+                            int kv_head_idx,
+                            int max_seq_len, 
+                            int num_kv_heads, 
+                            int head_dim,
+                            cudaStream_t stream)
+{
+    // We need one thread per element in the head dimension to copy
+    dim3 blockDim(head_dim); 
+    dim3 gridDim(1); // Only need one block as kv_head_idx is specified
+
+    // Calculate pointer to the start of the data for the specific head within the full current K/V vector
+    // Assumes current_kv_vector passed to the *wrapper* might contain data for *all* heads.
+    // We need to adjust the pointer passed to the kernel to point *only* to the relevant head's data.
+    // NO - Let's simplify. Assume current_kv_vector passed to WRAPPER is ALREADY just for the target head.
+    // This makes the call site in model.cpp slightly more complex but simplifies this wrapper.
+    
+    // Check if pos is within bounds (optional but good practice)
+    if (pos < 0 || pos >= max_seq_len) {
+        Logger::error("update_kv_cache_cuda: pos out of bounds (" + std::to_string(pos) + " >= " + std::to_string(max_seq_len) + ")");
+        // Potentially throw or return an error code
+        return; 
+    }
+    // Check if kv_head_idx is within bounds
+    if (kv_head_idx < 0 || kv_head_idx >= num_kv_heads) {
+         Logger::error("update_kv_cache_cuda: kv_head_idx out of bounds (" + std::to_string(kv_head_idx) + " >= " + std::to_string(num_kv_heads) + ")");
+         return;
+    }
+    
+    update_kv_cache_kernel<<<gridDim, blockDim, 0, stream>>>(
+        cache_base_ptr,         // Pass base cache pointer for the layer
+        current_kv_vector,      // Pass pointer to the *current* head's K/V data
+        pos, 
+        kv_head_idx, 
+        max_seq_len, 
+        num_kv_heads, 
+        head_dim
+    );
     gpuErrchk(cudaGetLastError()); // Check for errors after kernel launch
 }
 

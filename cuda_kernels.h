@@ -94,12 +94,32 @@ void softmax_vector_cuda(const std::vector<float>& x_host,
 // Device-pointer RoPE wrapper
 void rope_cuda(float* x_dev, int num_heads, int head_dim, const float* freqs_dev, cudaStream_t stream = 0);
 
-// CUDA Attention kernel wrapper (Modified for Single Query Position)
-void attention_cuda(const float* Q_current_dev, // Shape [num_heads * head_dim]
-                    const float* K_cache_dev,   // Shape [num_heads * seq_len * head_dim]
-                    const float* V_cache_dev,   // Shape [num_heads * seq_len * head_dim]
-                    float* out_dev,         // Shape [num_heads * head_dim]
-                    int num_heads, int seq_len, int head_dim, float scale, cudaStream_t stream = 0);
+/**
+ * @brief CUDA Attention kernel wrapper (Reads directly from flat K/V Cache)
+ * 
+ * @param Q_current_dev Pointer to the current token's Q vector (all heads), device memory.
+ * @param K_layer_cache_base Pointer to the base of the K cache for the *current layer*, device memory.
+ * @param V_layer_cache_base Pointer to the base of the V cache for the *current layer*, device memory.
+ * @param out_dev Output attention vector (all heads), device memory.
+ * @param num_heads Number of query heads.
+ * @param current_seq_len The current sequence length (pos + 1).
+ * @param head_dim Dimension of each attention head.
+ * @param scale Scaling factor (1/sqrt(head_dim)).
+ * @param cache_max_seq_len Max sequence length dimension of the cache.
+ * @param cache_num_kv_heads Number of K/V heads dimension of the cache.
+ * @param stream CUDA stream (optional, default 0).
+ */
+void attention_cuda(const float* Q_current_dev, 
+                    const float* K_layer_cache_base,
+                    const float* V_layer_cache_base,
+                    float* out_dev,        
+                    int num_heads, 
+                    int current_seq_len,
+                    int head_dim, 
+                    float scale, 
+                    int cache_max_seq_len,
+                    int cache_num_kv_heads,
+                    cudaStream_t stream = 0);
 
 /**
  * @brief Performs element-wise addition of two vectors on the GPU (result = a + b).
@@ -111,6 +131,27 @@ void attention_cuda(const float* Q_current_dev, // Shape [num_heads * head_dim]
  * @param stream CUDA stream (optional, default 0).
  */
 void add_vectors_cuda(const float* a_dev, const float* b_dev, float* result_dev, int n, cudaStream_t stream = 0);
+
+/**
+ * @brief Updates a specific entry in the flat K/V cache on the device.
+ * 
+ * @param cache_base_ptr Base pointer to the K or V cache for the specific layer.
+ * @param current_kv_vector Pointer to the K or V vector for the current token.
+ * @param pos The current sequence position (timestep).
+ * @param kv_head_idx The index of the K/V head to update.
+ * @param max_seq_len Max sequence length dimension of the cache.
+ * @param num_kv_heads Number of K/V heads dimension of the cache.
+ * @param head_dim Head dimension of the cache.
+ * @param stream CUDA stream (optional, default 0).
+ */
+void update_kv_cache_cuda(float* cache_base_ptr,
+                            const float* current_kv_vector,
+                            int pos,
+                            int kv_head_idx,
+                            int max_seq_len, // Needed for offset calculation
+                            int num_kv_heads, // Needed for offset calculation
+                            int head_dim,
+                            cudaStream_t stream = 0);
 
 // --- Moved SwiGLU declaration INSIDE HAS_CUDA --- 
 void swiglu_cuda(const float* gate_dev, const float* up_dev, float* out_dev, int n);

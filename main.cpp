@@ -189,9 +189,6 @@ int main(int argc, char** argv) {
             std::vector<std::string> prompt_tokens = tokenizer.tokenize(prompt);
             std::vector<int> prompt_ids = tokenizer.tokens_to_ids(prompt_tokens);
 
-            // Option 2 (alternative): Use the encode method which can add special tokens if configured
-            // std::vector<int> prompt_ids = tokenizer.encode(prompt, true); // true to add BOS/EOS if configured
-            
             Logger::info("Tokenizing prompt...");
 
             Logger::info("Tokenized IDs: Count=" + std::to_string(prompt_ids.size()));
