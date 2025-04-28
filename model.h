@@ -8,6 +8,10 @@
 #include "safetensors_loader.h"
 #include <functional>
 #include <cstdint> // Include for uint16_t
+#ifdef HAS_CUDA
+#include <cuda_runtime.h> // Needed for cudaFree, cudaMalloc
+#include "cuda_kernels.h" // Needed for gpuErrchk
+#endif
 
 struct ModelConfig {
     int hidden_size;
@@ -26,15 +30,47 @@ struct ModelConfig {
 };
 
 // KVCache for autoregressive inference
+struct KVCacheLayer {
+#ifdef HAS_CUDA
+    float* k_dev = nullptr; // Device pointer for K cache of this layer
+    float* v_dev = nullptr; // Device pointer for V cache of this layer
+#else
+    std::vector<float> k; // Host vector for K cache (CPU path)
+    std::vector<float> v; // Host vector for V cache (CPU path)
+#endif
+};
+
 struct KVCache {
-    struct LayerKV {
-        std::vector<float> k; // [num_kv_heads, seq_len, head_dim] (flattened)
-        std::vector<float> v; // [num_kv_heads, seq_len, head_dim] (flattened)
-    };
-    std::vector<LayerKV> layers; // num_hidden_layers
-    int seq_len = 0;
-    
-    // Initialize KVCache with proper dimensions
+    std::vector<KVCacheLayer> layers; // One per hidden layer
+    int seq_len = 0; // Current sequence length stored in the cache
+
+#ifdef HAS_CUDA
+    // Store dimensions needed for indexing and freeing memory
+    int allocated_num_layers = 0;
+    int allocated_max_seq_len = 0;
+    int allocated_num_kv_heads = 0;
+    int allocated_head_dim = 0;
+
+    // Destructor to free CUDA memory
+    ~KVCache() {
+        if (allocated_num_layers > 0) { // Only free if initialized
+            Logger::info("Freeing KVCache CUDA memory...");
+            for (int l = 0; l < allocated_num_layers; ++l) {
+                if (layers[l].k_dev) {
+                    gpuErrchk(cudaFree(layers[l].k_dev));
+                    layers[l].k_dev = nullptr;
+                }
+                if (layers[l].v_dev) {
+                    gpuErrchk(cudaFree(layers[l].v_dev));
+                    layers[l].v_dev = nullptr;
+                }
+            }
+            Logger::info("KVCache CUDA memory freed.");
+        }
+    }
+#endif
+
+    // Initialize method declaration (remove implementation body)
     void initialize(int num_layers, int max_seq_len, int num_kv_heads, int head_dim);
 };
 
@@ -63,6 +99,9 @@ public:
 
     // --- Forward Pass (NOW uses std::vector<float>) --- 
     std::vector<float> forward(std::vector<float>& x_vec, int pos, KVCache* cache = nullptr, const std::vector<int>* attention_mask = nullptr);
+
+    // New: Device-only forward pass for incremental GPU pipeline
+    std::vector<float> forward_device(int token_id, int pos, KVCache* cache, const std::vector<int>* attention_mask);
 
     // Get model config
     const ModelConfig& get_config() const { return config_; }
@@ -93,6 +132,15 @@ private:
 
     // Precomputed RoPE cos/sin values
     std::vector<std::pair<float, float>> precomputed_freqs_cis_;
+
+    std::vector<float> forward_from_qkv_host(
+        const std::vector<float>& x_resid1_vec, // Input embedding for residual 1
+        std::vector<float>& q_vec,
+        std::vector<float>& k_vec,
+        std::vector<float>& v_vec,
+        int pos,
+        KVCache* cache,
+        const std::vector<int>* attention_mask);
 };
 
 // Utility: parse ModelConfig from nlohmann::json

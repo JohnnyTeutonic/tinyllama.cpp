@@ -1,5 +1,9 @@
 #include "model.h"
 #include "logger.h"
+#include "cuda_kernels.h" // Include CUDA kernel declarations (ALWAYS INCLUDE THIS)
+#ifdef HAS_CUDA
+// extern declaration removed as it's handled by the header now
+#endif
 #include <stdexcept>
 #include <cstring>
 #include <cmath>
@@ -111,6 +115,13 @@ int argmax(const std::vector<float>& v) {
 
 // --- START: C++ Vector RMSNorm ---
 static void rmsnorm_vector(const std::vector<float>& x, const std::vector<float>& weight, std::vector<float>& out, float eps) {
+#ifdef HAS_CUDA
+    // Logger::info("Using CUDA RMSNorm"); // Optional: Log which version is used
+    // Call the CUDA wrapper function
+    rmsnorm_vector_cuda(x, weight, out, x.size(), eps); 
+#else
+    // Logger::info("Using CPU RMSNorm (OpenMP)"); // Optional: Log which version is used
+    // Original OpenMP implementation
     if (x.empty() || x.size() != weight.size()) {
         Logger::error("RMSNorm vector size mismatch or empty input.");
         out.assign(x.size(), 0.0f); // Zero out output on error
@@ -135,41 +146,60 @@ static void rmsnorm_vector(const std::vector<float>& x, const std::vector<float>
     for (size_t i = 0; i < n; ++i) {
         out[i] = x[i] * norm_factor * weight[i];
     }
+#endif // HAS_CUDA
 }
 // --- END: C++ Vector RMSNorm ---
 
 // --- START: C++ Vector Softmax ---
 // Compute softmax for a vector in-place (or return new vector)
 static void softmax_vector(const std::vector<float>& x, std::vector<float>& out) {
+#ifdef HAS_CUDA
+    softmax_vector_cuda(x, out, x.size());
+#else
     if (x.empty()) return;
     out.resize(x.size());
+    size_t n = x.size();
 
-    // Find max element for numerical stability
-    float max_val = *std::max_element(x.begin(), x.end());
+    // 1. Find max element for numerical stability
+    float max_val = x[0];
+    #pragma omp parallel for reduction(max:max_val)
+    for (size_t i = 1; i < n; ++i) {
+        if (x[i] > max_val) max_val = x[i];
+    }
 
-    // Compute exponentials and sum
+    // 2. Compute exponentials and sum
     float exp_sum = 0.0f;
-    for (size_t i = 0; i < x.size(); ++i) {
+    #pragma omp parallel for reduction(+:exp_sum)
+    for (size_t i = 0; i < n; ++i) {
         out[i] = std::exp(x[i] - max_val);
         exp_sum += out[i];
     }
 
-    // Normalize
+    // 3. Normalize
     float inv_sum = 1.0f / exp_sum;
     #pragma omp parallel for
-    for (size_t i = 0; i < x.size(); ++i) {
+    for (size_t i = 0; i < n; ++i) {
         out[i] *= inv_sum;
     }
+#endif // HAS_CUDA
 }
 // --- END: C++ Vector Softmax ---
 
 // C++ Vector-based SiLU activation: y = x * sigmoid(x)
 static void silu(const std::vector<float>& x, std::vector<float>& out) {
+#ifdef HAS_CUDA
+    // Logger::info("Using CUDA SiLU"); // Optional log
+    silu_cuda(x, out, x.size());
+#else
+    // Logger::info("Using CPU SiLU (OpenMP)"); // Optional log
+    // Original OpenMP implementation
+    if (x.size() != out.size()) out.resize(x.size()); // Ensure output is sized correctly
     #pragma omp parallel for
     for (size_t i = 0; i < x.size(); ++i) {
         float sigmoid_x = 1.0f / (1.0f + std::exp(-x[i])); // Calculate sigmoid explicitly
         out[i] = x[i] * sigmoid_x; // Multiply
     }
+#endif // HAS_CUDA
 }
 
 // Helper: log vector stats (min, max, mean, all finite)
@@ -258,36 +288,69 @@ static void log_raw_float_pointer(const std::string& name, const float* ptr, siz
     Logger::info(ss.str());
 }
 
-// KVCache initialization method to add to the existing struct
+// KVCache initialization method definition
 void KVCache::initialize(int num_layers, int max_seq_len, int num_kv_heads, int head_dim) {
-    layers.resize(num_layers);
-    
-    // Calculate the size needed for each layer's K and V cache
-    // Structure: sequence_position → kv_head → head_dimension
+    layers.resize(num_layers); // Resize the vector of layers
+    seq_len = 0; // Reset sequence length
+
+#ifdef HAS_CUDA
+    // --- CUDA Path --- 
+    // Store allocation parameters for destructor and indexing
+    allocated_num_layers = num_layers;
+    allocated_max_seq_len = max_seq_len;
+    allocated_num_kv_heads = num_kv_heads;
+    allocated_head_dim = head_dim;
+
+    // Calculate the FLAT size needed PER LAYER for K and V caches
+    // Layout: [max_seq_len, num_kv_heads, head_dim]
+    size_t cache_elems_per_layer = static_cast<size_t>(max_seq_len) * 
+                                 static_cast<size_t>(num_kv_heads) * 
+                                 static_cast<size_t>(head_dim);
+    size_t cache_bytes_per_layer = cache_elems_per_layer * sizeof(float);
+
+    if (cache_elems_per_layer == 0) {
+        throw std::runtime_error("KVCache (CUDA): Calculated cache size per layer is zero. Check parameters.");
+    }
+
+    Logger::info("Allocating KVCache on GPU: " + std::to_string(num_layers) + " layers, size per layer: " + 
+                 std::to_string(cache_bytes_per_layer / (1024.0*1024.0)) + " MB");
+
+    // Allocate device memory for each layer's K and V cache
+    for (int l = 0; l < num_layers; ++l) {
+        // Free existing memory if re-initializing (should ideally happen only via destructor)
+        if (layers[l].k_dev) { Logger::info("Re-initializing KVCache layer K dev pointer without proper destruction?"); gpuErrchk(cudaFree(layers[l].k_dev)); }
+        if (layers[l].v_dev) { Logger::info("Re-initializing KVCache layer V dev pointer without proper destruction?"); gpuErrchk(cudaFree(layers[l].v_dev)); }
+        
+        gpuErrchk(cudaMalloc(&layers[l].k_dev, cache_bytes_per_layer));
+        gpuErrchk(cudaMalloc(&layers[l].v_dev, cache_bytes_per_layer));
+        // Optional: Zero out the allocated memory (good practice)
+        gpuErrchk(cudaMemset(layers[l].k_dev, 0, cache_bytes_per_layer));
+        gpuErrchk(cudaMemset(layers[l].v_dev, 0, cache_bytes_per_layer));
+    }
+    Logger::info("KVCache GPU allocation complete.");
+
+#else 
+    // --- CPU Path --- 
+    // Calculate the size needed for each layer's K and V cache (host vectors)
     size_t cache_size_per_layer = static_cast<size_t>(max_seq_len) * 
                                  static_cast<size_t>(num_kv_heads) * 
                                  static_cast<size_t>(head_dim);
-    
+
     if (cache_size_per_layer == 0) {
-        throw std::runtime_error("KVCache: Calculated cache size is zero. Check parameters: " +
-                           std::to_string(max_seq_len) + " * " + 
-                           std::to_string(num_kv_heads) + " * " + 
-                           std::to_string(head_dim));
+        throw std::runtime_error("KVCache (CPU): Calculated cache size is zero. Check parameters.");
     }
     
-    // Allocate and zero-initialize all cache tensors
+    // Allocate and zero-initialize all host cache vectors
     for (int l = 0; l < num_layers; ++l) {
-        layers[l].k.resize(cache_size_per_layer, 0.0f);
-        layers[l].v.resize(cache_size_per_layer, 0.0f);
+        layers[l].k.assign(cache_size_per_layer, 0.0f); // Use assign for resize + fill
+        layers[l].v.assign(cache_size_per_layer, 0.0f);
     }
-    
-    Logger::info("KVCache initialized with dimensions: " +
-               std::to_string(num_layers) + " layers, " +
-               std::to_string(max_seq_len) + " sequence length, " +
-               std::to_string(num_kv_heads) + " KV heads, " + 
-               std::to_string(head_dim) + " head dimension");
-    
-    seq_len = 0;
+     Logger::info("KVCache (CPU) initialized with dimensions: " +
+                   std::to_string(num_layers) + " layers, " +
+                   std::to_string(max_seq_len) + " seq len, " +
+                   std::to_string(num_kv_heads) + " KV heads, " +
+                   std::to_string(head_dim) + " head dim");
+#endif
 }
 
 
@@ -304,13 +367,20 @@ static std::vector<float> bf16vec_to_float_vec(const std::vector<uint16_t>& v_bf
 // --- START: C++ Vector MatVec BF16 * F32 -> F32 with Kahan Summation ---
 // Performs matrix-vector multiplication: out = mat (bf16) * vec (f32)
 // mat shape: [rows, cols], vec shape: [cols], out shape: [rows]
-static void matvec_bf16_f32_vector(const std::vector<uint16_t>& mat_bf16, 
-                                   const std::vector<float>& vec_f32, 
-                                   std::vector<float>& out_f32, 
+static void matvec_bf16_f32_vector(const std::vector<uint16_t>& mat_bf16,
+                                   const std::vector<float>& vec_f32,
+                                   std::vector<float>& out_f32,
                                    int rows, int cols) {
+#ifdef HAS_CUDA
+    // Logger::info("Using CUDA MatVec (BF16*F32->F32)"); // Optional log
+    // Call the CUDA wrapper function
+    matvec_bf16_f32_cuda(mat_bf16, vec_f32, out_f32, rows, cols);
+#else
+    // Logger::info("Using CPU MatVec (BF16*F32->F32, OpenMP+Kahan)"); // Optional log
+    // Original OpenMP + Kahan implementation
     if (mat_bf16.size() != (size_t)rows * cols || vec_f32.size() != (size_t)cols) {
-        Logger::error("matvec_bf16_f32_vector: Size mismatch. Mat: " + std::to_string(mat_bf16.size()) + 
-                     " (Expected " + std::to_string(rows*cols) + "), Vec: " + std::to_string(vec_f32.size()) + 
+        Logger::error("matvec_bf16_f32_vector: Size mismatch. Mat: " + std::to_string(mat_bf16.size()) +
+                     " (Expected " + std::to_string(rows*cols) + "), Vec: " + std::to_string(vec_f32.size()) +
                      " (Expected " + std::to_string(cols) + ")");
         out_f32.assign(rows, 0.0f); // Zero out output on error
         return;
@@ -336,6 +406,7 @@ static void matvec_bf16_f32_vector(const std::vector<uint16_t>& mat_bf16,
         }
         out_f32[r] = static_cast<float>(sum); // Assign final sum (cast back to float)
     }
+#endif // HAS_CUDA
 }
 // --- END: C++ Vector MatVec with Kahan ---
 
@@ -589,7 +660,7 @@ std::vector<float> TinyLlamaModel::lookup_embedding(int token_id) {
     return embedding_vec; // Return the vector
 }
 
-// --- Forward Pass (Now takes std::vector<float>&) ---
+// --- Forward Pass (Restructured) --- 
 std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, KVCache* cache, const std::vector<int>* attention_mask) {
     // Config dimensions
     int hs = config_.hidden_size;
@@ -602,11 +673,11 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, K
     int max_seq_len = config_.max_position_embeddings;
     float eps = config_.rms_norm_eps;
 
+    // --- Basic Input Validation ---
     bool log_initial = (pos == 0);
-    
     if (pos >= max_seq_len) {
         Logger::error("Position index exceeds max_position_embeddings");
-        return std::vector<float>(vs, 0.0f); // Return zero logits
+        return std::vector<float>(vs, 0.0f); 
     }
     if (!cache) {
         Logger::error("KVCache is required for token-by-token forward pass");
@@ -617,7 +688,239 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, K
         return std::vector<float>(vs, 0.0f);
     }
 
-    // Intermediate vectors needed within the loop
+#ifdef HAS_CUDA
+    // --- CUDA Path Setup ---
+    // Logger::info("[CUDA] Using CUDA path in forward()");
+    
+    // Allocate ALL necessary device buffers ONCE outside the loop
+    float* x_dev = nullptr;
+    float* x_norm_dev = nullptr;
+    float* x_resid1_dev = nullptr;
+    float* x_resid2_dev = nullptr;
+    float* q_dev = nullptr;
+    float* k_dev = nullptr;
+    float* v_dev = nullptr;
+    float* attn_out_dev = nullptr;
+    float* attn_proj_dev = nullptr;
+    float* gate_vec_dev = nullptr;
+    float* up_vec_dev = nullptr;
+    float* swiglu_vec_dev = nullptr;
+    float* mlp_down_dev = nullptr;
+    float* freqs_dev = nullptr; // For RoPE frequencies
+
+    gpuErrchk(cudaMalloc(&x_dev, hs * sizeof(float)));
+    gpuErrchk(cudaMalloc(&x_norm_dev, hs * sizeof(float)));
+    gpuErrchk(cudaMalloc(&x_resid1_dev, hs * sizeof(float)));
+    gpuErrchk(cudaMalloc(&x_resid2_dev, hs * sizeof(float)));
+    gpuErrchk(cudaMalloc(&q_dev, hs * sizeof(float)));
+    gpuErrchk(cudaMalloc(&k_dev, n_kv_heads * head_dim * sizeof(float)));
+    gpuErrchk(cudaMalloc(&v_dev, n_kv_heads * head_dim * sizeof(float)));
+    gpuErrchk(cudaMalloc(&attn_out_dev, hs * sizeof(float)));
+    gpuErrchk(cudaMalloc(&attn_proj_dev, hs * sizeof(float)));
+    gpuErrchk(cudaMalloc(&gate_vec_dev, is * sizeof(float)));
+    gpuErrchk(cudaMalloc(&up_vec_dev, is * sizeof(float)));
+    gpuErrchk(cudaMalloc(&swiglu_vec_dev, is * sizeof(float)));
+    gpuErrchk(cudaMalloc(&mlp_down_dev, hs * sizeof(float)));
+    // Note: freqs_dev allocated inside loop as size depends on pos
+
+    // Copy initial embedding to device
+    gpuErrchk(cudaMemcpy(x_dev, x_vec.data(), hs * sizeof(float), cudaMemcpyHostToDevice));
+
+    // --- Layer Loop (CUDA Path) ---
+    for (int l = 0; l < nhl; ++l) {
+        const auto& lw = layers[l];
+
+        // Residual 1
+        gpuErrchk(cudaMemcpy(x_resid1_dev, x_dev, hs * sizeof(float), cudaMemcpyDeviceToDevice));
+
+        // RMSNorm 1 (Input: x_dev, Output: x_norm_dev)
+        std::vector<float> w_norm1_vec = bf16vec_to_float_vec(lw.input_layernorm);
+        float* w_norm1_dev = nullptr;
+        gpuErrchk(cudaMalloc(&w_norm1_dev, hs * sizeof(float)));
+        gpuErrchk(cudaMemcpy(w_norm1_dev, w_norm1_vec.data(), hs * sizeof(float), cudaMemcpyHostToDevice));
+        rmsnorm_vector_cuda(x_dev, w_norm1_dev, x_norm_dev, hs, eps);
+        gpuErrchk(cudaFree(w_norm1_dev));
+        gpuErrchk(cudaDeviceSynchronize());
+
+        // Q, K, V projections (Input: x_norm_dev, Outputs: q_dev, k_dev, v_dev)
+        matvec_bf16_f32_cuda(lw.q_proj, x_norm_dev, q_dev, hs, hs);
+        matvec_bf16_f32_cuda(lw.k_proj, x_norm_dev, k_dev, n_kv_heads * head_dim, hs);
+        matvec_bf16_f32_cuda(lw.v_proj, x_norm_dev, v_dev, n_kv_heads * head_dim, hs);
+        gpuErrchk(cudaDeviceSynchronize());
+
+        // RoPE (Applied in-place to q_dev, k_dev)
+        size_t freqs_offset = (pos * head_dim / 2);
+        std::vector<std::pair<float, float>> current_freqs_cis(precomputed_freqs_cis_.begin() + freqs_offset, 
+                                                               precomputed_freqs_cis_.begin() + freqs_offset + head_dim / 2);
+        std::vector<float> flat_freqs; // Host vector
+        flat_freqs.reserve(current_freqs_cis.size() * 2);
+        for (const auto& p : current_freqs_cis) {
+            flat_freqs.push_back(p.first);
+            flat_freqs.push_back(p.second);
+        }
+        gpuErrchk(cudaMalloc(&freqs_dev, flat_freqs.size() * sizeof(float))); // Allocate freqs_dev
+        gpuErrchk(cudaMemcpy(freqs_dev, flat_freqs.data(), flat_freqs.size() * sizeof(float), cudaMemcpyHostToDevice));
+        rope_cuda(q_dev, n_heads, head_dim, freqs_dev);
+        rope_cuda(k_dev, n_kv_heads, head_dim, freqs_dev);
+        gpuErrchk(cudaFree(freqs_dev)); // Free freqs_dev for this layer
+        gpuErrchk(cudaDeviceSynchronize());
+
+        // KVCache Update (Directly on Device)
+        // Call the new kernel for each K/V head
+        for (int kvh = 0; kvh < n_kv_heads; ++kvh) {
+            // Calculate pointer to the *start* of the data for this specific head in k_dev/v_dev
+            const float* current_k_head_ptr = k_dev + kvh * head_dim;
+            const float* current_v_head_ptr = v_dev + kvh * head_dim;
+            
+            // Call kernel to update K cache for this head
+            update_kv_cache_cuda(cache->layers[l].k_dev, // Base pointer for layer K cache
+                                 current_k_head_ptr,     // Pointer to current K data for this head
+                                 pos, 
+                                 kvh, 
+                                 cache->allocated_max_seq_len,
+                                 cache->allocated_num_kv_heads,
+                                 cache->allocated_head_dim);
+                                 
+            // Call kernel to update V cache for this head
+            update_kv_cache_cuda(cache->layers[l].v_dev, // Base pointer for layer V cache
+                                 current_v_head_ptr,     // Pointer to current V data for this head
+                                 pos, 
+                                 kvh, 
+                                 cache->allocated_max_seq_len,
+                                 cache->allocated_num_kv_heads,
+                                 cache->allocated_head_dim);
+        }
+        // No need to copy K/V back to host here anymore
+        // delete[] k_current_ptr_host;
+        // delete[] v_current_ptr_host;
+
+        // --- Attention (Reads directly from Device Cache) --- 
+        int current_seq_len = pos + 1;
+        float scale = 1.0f / std::sqrt(head_dim);
+
+        // REMOVE preparation of K_cache_dev / V_cache_dev host/device buffers
+        // float* K_cache_dev = nullptr;
+        // float* V_cache_dev = nullptr;
+        // ... (remove allocation and H->D copy code) ...
+
+        // Call Attention Kernel directly with layer cache base pointers
+        // Input Q: q_dev (current token's Q, shape [hs = n_heads * head_dim])
+        // Input K: cache->layers[l].k_dev (base pointer for layer K cache)
+        // Input V: cache->layers[l].v_dev (base pointer for layer V cache)
+        // Output: attn_out_dev (shape [hs])
+        attention_cuda(q_dev,                      // Q vector for current token
+                       cache->layers[l].k_dev,   // Base K cache pointer for this layer
+                       cache->layers[l].v_dev,   // Base V cache pointer for this layer
+                       attn_out_dev,             // Output attention result
+                       n_heads,                  // Number of Q heads
+                       current_seq_len,          // Current sequence length
+                       head_dim,                 // Head dimension
+                       scale,                    // Scaling factor
+                       cache->allocated_max_seq_len, // Cache max sequence length
+                       cache->allocated_num_kv_heads // Cache K/V head count
+                       /*, stream */);          // Optional stream omitted
+        gpuErrchk(cudaDeviceSynchronize());
+
+        // Output projection (Input: attn_out_dev, Output: attn_proj_dev)
+        matvec_bf16_f32_cuda(lw.o_proj, attn_out_dev, attn_proj_dev, hs, hs);
+        gpuErrchk(cudaDeviceSynchronize());
+
+        // First residual connection (x = x_resid1 + attn_proj)
+        // Using add_vectors_cuda kernel
+        add_vectors_cuda(x_resid1_dev, attn_proj_dev, x_dev, hs);
+        gpuErrchk(cudaDeviceSynchronize());
+
+        // --- MLP Block --- 
+        // Residual 2 Prep (Copy x_dev to x_resid2_dev)
+        // x_resid2_dev needs declaration in this scope
+        float* x_resid2_dev = nullptr;
+        gpuErrchk(cudaMalloc(&x_resid2_dev, hs * sizeof(float))); // Allocate it
+        gpuErrchk(cudaMemcpy(x_resid2_dev, x_dev, hs * sizeof(float), cudaMemcpyDeviceToDevice)); 
+
+        // Post-attention RMSNorm
+        std::vector<float> w_norm2_vec = bf16vec_to_float_vec(lw.post_attention_layernorm);
+        float* w_norm2_dev = nullptr;
+        gpuErrchk(cudaMalloc(&w_norm2_dev, hs * sizeof(float)));
+        gpuErrchk(cudaMemcpy(w_norm2_dev, w_norm2_vec.data(), hs * sizeof(float), cudaMemcpyHostToDevice));
+        // Use x_norm_dev declared at the top of the function
+        rmsnorm_vector_cuda(x_dev, w_norm2_dev, x_norm_dev, hs, eps);
+        gpuErrchk(cudaFree(w_norm2_dev));
+        gpuErrchk(cudaDeviceSynchronize());
+
+        // MLP MatVecs & SwiGLU
+        // Declare device pointers needed for MLP within this scope
+        float* gate_vec_dev = nullptr;
+        float* up_vec_dev = nullptr;
+        float* swiglu_vec_dev = nullptr;
+        float* mlp_down_dev = nullptr;
+        gpuErrchk(cudaMalloc(&gate_vec_dev, is * sizeof(float)));
+        gpuErrchk(cudaMalloc(&up_vec_dev, is * sizeof(float)));
+        gpuErrchk(cudaMalloc(&swiglu_vec_dev, is * sizeof(float)));
+        gpuErrchk(cudaMalloc(&mlp_down_dev, hs * sizeof(float)));
+        // Use x_norm_dev as input
+        matvec_bf16_f32_cuda(lw.gate_proj, x_norm_dev, gate_vec_dev, is, hs);
+        matvec_bf16_f32_cuda(lw.up_proj, x_norm_dev, up_vec_dev, is, hs);
+        gpuErrchk(cudaDeviceSynchronize());
+        swiglu_cuda(gate_vec_dev, up_vec_dev, swiglu_vec_dev, is);
+        gpuErrchk(cudaDeviceSynchronize());
+        matvec_bf16_f32_cuda(lw.down_proj, swiglu_vec_dev, mlp_down_dev, hs, is);
+        gpuErrchk(cudaDeviceSynchronize());
+        
+        // Add residual 2 (Fallback)
+        std::vector<float> mlp_down_host(hs);
+        std::vector<float> x_resid2_host(hs);
+        gpuErrchk(cudaMemcpy(mlp_down_host.data(), mlp_down_dev, hs * sizeof(float), cudaMemcpyDeviceToHost));
+        gpuErrchk(cudaMemcpy(x_resid2_host.data(), x_resid2_dev, hs * sizeof(float), cudaMemcpyDeviceToHost)); // Copy x_resid2_dev content
+        #pragma omp parallel for
+        for(int i=0; i<hs; ++i) {
+            x_resid2_host[i] += mlp_down_host[i];
+        }
+        gpuErrchk(cudaMemcpy(x_dev, x_resid2_host.data(), hs * sizeof(float), cudaMemcpyHostToDevice));
+        
+        // Free CUDA MLP intermediates
+        gpuErrchk(cudaFree(gate_vec_dev));
+        gpuErrchk(cudaFree(up_vec_dev));
+        gpuErrchk(cudaFree(swiglu_vec_dev));
+        gpuErrchk(cudaFree(mlp_down_dev));
+        gpuErrchk(cudaFree(x_resid2_dev)); // Free residual buffer
+
+    } // End layer loop
+
+    // --- Final Steps (Outside Layer Loop) ---
+    // Final RMSNorm 
+    std::vector<float> w_final_norm_vec = bf16vec_to_float_vec(final_norm);
+    float* w_final_norm_dev = nullptr;
+    gpuErrchk(cudaMalloc(&w_final_norm_dev, hs * sizeof(float)));
+    gpuErrchk(cudaMemcpy(w_final_norm_dev, w_final_norm_vec.data(), hs * sizeof(float), cudaMemcpyHostToDevice));
+    // Use x_norm_dev declared at the top of the function
+    rmsnorm_vector_cuda(x_dev, w_final_norm_dev, x_norm_dev, hs, eps);
+    gpuErrchk(cudaFree(w_final_norm_dev));
+    gpuErrchk(cudaDeviceSynchronize());
+
+    // Final LM Head Projection 
+    float* logits_dev = nullptr;
+    gpuErrchk(cudaMalloc(&logits_dev, vs * sizeof(float)));
+    // Use x_norm_dev as input
+    matvec_bf16_f32_cuda(lm_head, x_norm_dev, logits_dev, vs, hs);
+    gpuErrchk(cudaDeviceSynchronize());
+
+    // Copy final logits from device to host
+    std::vector<float> logits(vs); 
+    gpuErrchk(cudaMemcpy(logits.data(), logits_dev, vs * sizeof(float), cudaMemcpyDeviceToHost));
+
+    // Free ALL CUDA Buffers allocated at the start
+    gpuErrchk(cudaFree(x_dev));
+    gpuErrchk(cudaFree(x_norm_dev)); 
+    // (Other device pointers freed inside loop or here)
+    gpuErrchk(cudaFree(logits_dev));
+
+    return logits;
+
+#else 
+    // --- CPU Path Setup ---
+    // Logger::info("[CPU] Using CPU path in forward()");
+
+    // Intermediate vectors needed within the loop (CPU Path)
     std::vector<float> x_norm_vec1(hs);
     std::vector<float> q_vec(hs);
     std::vector<float> k_vec(n_kv_heads * head_dim);
@@ -631,71 +934,49 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, K
     std::vector<float> swiglu_result_vec(is);
     std::vector<float> mlp_out_vec(hs);
 
-    // 2. Process through all transformer layers
+    // --- Layer Loop (CPU Path) ---
     for (int l = 0; l < nhl; ++l) {
-        bool log_target_layer = (pos == 1 && l == 0);
         const auto& lw = layers[l];
+        std::vector<float> x_resid1_vec = x_vec; // Residual 1
 
-        // Store residual
-        std::vector<float> x_resid1_vec = x_vec; // Copy for residual connection 1
-        if (log_target_layer) log_vector_summary("TROUBLESHOOTING L0 P1 Input", x_resid1_vec);
-
-        // a) Input RMSNorm (Using C++ Vector version)
+        // RMSNorm 1
         std::vector<float> w_norm1_vec = bf16vec_to_float_vec(lw.input_layernorm); 
-        rmsnorm_vector(x_vec, w_norm1_vec, x_norm_vec1, eps); // Input is x_vec, output x_norm_vec1
-        if (log_target_layer) log_vector_summary("TROUBLESHOOTING L0 P1 Output C++ RMSNorm1", x_norm_vec1);
+        rmsnorm_vector(x_vec, w_norm1_vec, x_norm_vec1, eps); 
 
-        // b) Q, K, V projections (Using C++ Vector MatVec)
+        // Q, K, V projections 
         matvec_bf16_f32_vector(lw.q_proj, x_norm_vec1, q_vec, hs, hs);
         matvec_bf16_f32_vector(lw.k_proj, x_norm_vec1, k_vec, n_kv_heads * head_dim, hs);
         matvec_bf16_f32_vector(lw.v_proj, x_norm_vec1, v_vec, n_kv_heads * head_dim, hs);
-        
-        // Log vectors BEFORE RoPE
-        if (log_target_layer) {
-            log_vector_summary("TROUBLESHOOTING L0 P1 Q Proj Output (C++ Vec, Before RoPE)", q_vec);
-            log_vector_summary("TROUBLESHOOTING L0 P1 K Proj Output (C++ Vec, Before RoPE)", k_vec);
-            log_vector_summary("TROUBLESHOOTING L0 P1 V Proj Output (C++ Vec)", v_vec);
-        }
 
-        // c) RoPE for Q, K (Using C++ Vector version)
+        // RoPE 
         size_t freqs_offset = (pos * head_dim / 2);
         std::vector<std::pair<float, float>> current_freqs_cis(precomputed_freqs_cis_.begin() + freqs_offset, 
                                                                precomputed_freqs_cis_.begin() + freqs_offset + head_dim / 2);
         apply_rope_vector(q_vec, n_heads, head_dim, pos, current_freqs_cis);
         apply_rope_vector(k_vec, n_kv_heads, head_dim, pos, current_freqs_cis);
         
-        if (log_target_layer) {
-            log_vector_summary("TROUBLESHOOTING L0 P1 Q AFTER C++ RoPE", q_vec);
-            log_vector_summary("TROUBLESHOOTING L0 P1 K AFTER C++ RoPE", k_vec);
-        }
-
-        // Write to KV Cache (use RoPE-modified k_vec, original v_vec)
+        // KVCache Update
         float* k_current_ptr = k_vec.data(); 
         float* v_current_ptr = v_vec.data(); 
-            for (int kvh = 0; kvh < n_kv_heads; ++kvh) {
-                size_t current_k_offset = (size_t)kvh * head_dim;
-                size_t current_v_offset = (size_t)kvh * head_dim;
-            size_t write_offset = pos * n_kv_heads * head_dim + kvh * head_dim;
-            if (write_offset + head_dim <= cache->layers[l].k.size()) {
-                std::memcpy(&cache->layers[l].k[write_offset], k_current_ptr + current_k_offset, head_dim * sizeof(float));
-                std::memcpy(&cache->layers[l].v[write_offset], v_current_ptr + current_v_offset, head_dim * sizeof(float));
-                } else {
-                Logger::error("KVCache write out of bounds: write_offset=" + std::to_string(write_offset) + ", cache size=" + std::to_string(cache->layers[l].k.size()));
-            }
-        }
+        for (int kvh = 0; kvh < n_kv_heads; ++kvh) {
+             size_t current_k_offset = (size_t)kvh * head_dim;
+             size_t current_v_offset = (size_t)kvh * head_dim;
+             size_t write_offset = pos * n_kv_heads * head_dim + kvh * head_dim;
+             if (write_offset + head_dim <= cache->layers[l].k.size()) {
+                 std::memcpy(&cache->layers[l].k[write_offset], k_current_ptr + current_k_offset, head_dim * sizeof(float));
+                 std::memcpy(&cache->layers[l].v[write_offset], v_current_ptr + current_v_offset, head_dim * sizeof(float));
+                     } else {
+                 Logger::error("KVCache write out of bounds: layer=" + std::to_string(l) + ", pos=" + std::to_string(pos) + ", kv_head=" + std::to_string(kvh));
+             }
+         }
 
-        // d) Attention (using C++ Scores and Weighted Sum)
-        std::fill(attn_out_vec.begin(), attn_out_vec.end(), 0.0f); // Zero out accumulator vector
+        // Attention 
+        std::fill(attn_out_vec.begin(), attn_out_vec.end(), 0.0f); 
         int current_seq_len = pos + 1;
         float scale = 1.0f / std::sqrt(head_dim);
-        
-            for (int h = 0; h < n_heads; ++h) {
-            // Get Q head slice from RoPE-modified q_vec
+        for (int h = 0; h < n_heads; ++h) {
             std::vector<float> q_head_rope_vec(q_vec.begin() + h * head_dim, q_vec.begin() + (h + 1) * head_dim);
-            
             int kv_head_idx = h / (n_heads / n_kv_heads);
-            
-            // Retrieve K and V from cache
             std::vector<float> k_cache_head_vec(current_seq_len * head_dim); 
             std::vector<float> v_cache_head_vec(current_seq_len * head_dim); 
             for (int j = 0; j < current_seq_len; ++j) {
@@ -703,115 +984,312 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, K
                 if (cache_pos_offset + head_dim <= cache->layers[l].k.size()) {
                     std::memcpy(k_cache_head_vec.data() + j * head_dim, &cache->layers[l].k[cache_pos_offset], head_dim * sizeof(float));
                     std::memcpy(v_cache_head_vec.data() + j * head_dim, &cache->layers[l].v[cache_pos_offset], head_dim * sizeof(float));
-                    } else {
+        } else {
                     std::fill(k_cache_head_vec.begin() + j * head_dim, k_cache_head_vec.begin() + (j + 1) * head_dim, 0.0f);
                     std::fill(v_cache_head_vec.begin() + j * head_dim, v_cache_head_vec.begin() + (j + 1) * head_dim, 0.0f);
                     Logger::error("Attention K/V access out of bounds: cache_pos_offset=" + std::to_string(cache_pos_offset));
                 }
             }
-            
-            // Calculate Scores
             std::vector<float> scores_vec(current_seq_len);
             calculate_attention_scores(q_head_rope_vec, k_cache_head_vec, scores_vec, current_seq_len, head_dim, scale);
-
-            // Apply Softmax
             std::vector<float> probs_vec(current_seq_len);
             softmax_vector(scores_vec, probs_vec);
-
-            // Calculate Weighted Sum
             std::vector<float> head_attn_out_vec(head_dim);
             weighted_sum_probs_v(probs_vec, v_cache_head_vec, head_attn_out_vec, current_seq_len, head_dim);
-            
-            // Accumulate head output into attn_out_vec (Vector addition)
             size_t out_offset = h * head_dim;
             for(int i=0; i<head_dim; ++i) {
                 attn_out_vec[out_offset + i] += head_attn_out_vec[i];
             }
         }
-
-        // e) Output projection (Using C++ Vector MatVec)
         matvec_bf16_f32_vector(lw.o_proj, attn_out_vec, attn_proj_vec, hs, hs);
-
-        // f) First residual connection (Using C++ Vector version)
         #pragma omp parallel for
         for(size_t i=0; i<hs; ++i) {
-            x_vec[i] = x_resid1_vec[i] + attn_proj_vec[i]; // Update x_vec in-place
+            x_vec[i] = x_resid1_vec[i] + attn_proj_vec[i]; 
         }
         
-        if (log_target_layer) {
-            log_vector_summary("TROUBLESHOOTING L0 P1 State BEFORE 1st Residual", x_resid1_vec);
-            log_vector_summary("TROUBLESHOOTING L0 P1 State AFTER 1st C++ Residual", x_vec);
-        }
-
-        // g) MLP block
-        std::vector<float> x_resid2_vec = x_vec; // Copy for residual connection 2
-        if (log_target_layer) log_vector_summary("TROUBLESHOOTING L0 P1 Input to MLP", x_resid2_vec);
-        
-        // Post-attention RMSNorm
+        // --- MLP Block --- 
+        std::vector<float> x_resid2_vec = x_vec; 
         std::vector<float> w_norm2_vec = bf16vec_to_float_vec(lw.post_attention_layernorm);
-        rmsnorm_vector(x_vec, w_norm2_vec, x_norm_vec2, eps); // Input x_vec, output x_norm_vec2
-        log_vec_stats("Input to MLP C++ RMSNorm (L" + std::to_string(l) + " P" + std::to_string(pos) + ")", x_norm_vec2);
-
-        // MLP MatVecs
+        rmsnorm_vector(x_vec, w_norm2_vec, x_norm_vec2, eps);
         matvec_bf16_f32_vector(lw.gate_proj, x_norm_vec2, gate_vec, is, hs);
         matvec_bf16_f32_vector(lw.up_proj, x_norm_vec2, up_vec, is, hs);
-
-        // SiLU
         silu(gate_vec, silu_out_vec);
-
-        // SwiGLU
         #pragma omp parallel for
         for(size_t i = 0; i < is; ++i) {
             swiglu_result_vec[i] = silu_out_vec[i] * up_vec[i];
         }
-        
-        if (log_target_layer) {
-            log_vector_summary("TROUBLESHOOTING L0 P1 Gate Proj Result (C++ Vec)", gate_vec);
-            log_vector_summary("TROUBLESHOOTING L0 P1 Up Proj Result (C++ Vec)", up_vec);
-            log_vector_summary("TROUBLESHOOTING L0 P1 SwiGLU Result (C++ Vec)", swiglu_result_vec);
-        }
-        
-        // Down projection
         matvec_bf16_f32_vector(lw.down_proj, swiglu_result_vec, mlp_out_vec, hs, is);
-        
-        log_vec_stats("MLP Output (C++ Vec) (L" + std::to_string(l) + " P" + std::to_string(pos) + ")", mlp_out_vec);
-        
-        // h) Second residual connection
         #pragma omp parallel for
         for(size_t i=0; i<hs; ++i) {
-            x_vec[i] = x_resid2_vec[i] + mlp_out_vec[i]; // Update x_vec in-place
+            x_vec[i] = x_resid2_vec[i] + mlp_out_vec[i]; 
         }
 
-        if (log_target_layer) { 
-            log_vector_summary("TROUBLESHOOTING L0 P1 State BEFORE 2nd Residual", x_resid2_vec);
-            log_vector_summary("TROUBLESHOOTING L0 P1 State AFTER 2nd C++ Residual", x_vec);
-            Logger::info("--- TROUBLESHOOTING L0 P1 C++ Layer End ---");
-        }
+        // Optional logging for CPU path (can be added similarly to CUDA path if needed)
+        // if (log_target_layer) { ... }
+
     } // End layer loop
 
-    // 3. Final RMSNorm
-    std::vector<float> x_final_norm_input_vec = x_vec; // Copy for logging if needed
+    // --- Final Steps (Outside Layer Loop) ---
     std::vector<float> w_final_norm_vec = bf16vec_to_float_vec(final_norm);
     std::vector<float> x_final_norm_vec(hs);
-    rmsnorm_vector(x_vec, w_final_norm_vec, x_final_norm_vec, eps); // Input x_vec, output x_final_norm_vec
+    rmsnorm_vector(x_vec, w_final_norm_vec, x_final_norm_vec, eps);
     if (log_initial) { 
-        log_vector_summary("TROUBLESHOOTING Input to Final RMSNorm (P0)", x_final_norm_input_vec);
-        log_vector_summary("TROUBLESHOOTING Output of Final C++ RMSNorm (P0)", x_final_norm_vec); 
+        log_vector_summary("TROUBLESHOOTING Output of Final C++ RMSNorm (P0, CPU)", x_final_norm_vec); 
     }
-
-    // 4. Output projection to logits
     std::vector<float> logits(vs); 
-    matvec_bf16_f32_vector(lm_head, x_final_norm_vec, logits, vs, hs); 
-    
+    matvec_bf16_f32_vector(lm_head, x_final_norm_vec, logits, vs, hs);
     if (log_initial) {
-        log_vector_summary("TROUBLESHOOTING Final Logits (P0, C++ MatVec)", logits, 10);
+        log_vector_summary("TROUBLESHOOTING Final Logits (P0, C++ MatVec, CPU Path)", logits, 10);
     }
-
-    if (log_initial) Logger::info("--- TROUBLESHOOTING L0 P0 (C++) END pos=0 ---");
     return logits;
-}
+
+#endif // This should be the main #endif for the function body
+
+} // End of forward function
 
 // --- Get Vocab Size --- 
 int TinyLlamaModel::get_vocab_size() const {
     return config_.vocab_size;
+}
+
+// --- Forward Pass (Device Implementation) --- 
+// Restore the #ifdef HAS_CUDA guard around the entire function definition
+#ifdef HAS_CUDA
+std::vector<float> TinyLlamaModel::forward_device(int token_id, int pos, KVCache* cache, const std::vector<int>* attention_mask) {
+    // Logger::info("[CUDA] forward_device called for token: " + std::to_string(token_id) + " pos: " + std::to_string(pos));
+    int hs = config_.hidden_size;
+    int vs = config_.vocab_size;
+    int n_heads = config_.num_attention_heads;
+    int n_kv_heads = config_.num_key_value_heads;
+    int head_dim = hs / n_heads;
+    int nhl = config_.num_hidden_layers;
+    int is = config_.intermediate_size;
+    float eps = config_.rms_norm_eps;
+    int max_seq_len = config_.max_position_embeddings; // Added for cache size
+
+    // --- Device Memory Allocation --- 
+    float* x_dev = nullptr;
+    float* x_norm_dev = nullptr;
+    float* x_resid1_dev = nullptr;
+    float* x_resid2_dev = nullptr;
+    float* q_dev = nullptr;
+    float* k_dev = nullptr;
+    float* v_dev = nullptr;
+    float* attn_out_dev = nullptr;
+    float* attn_proj_dev = nullptr;
+    float* gate_vec_dev = nullptr;
+    float* up_vec_dev = nullptr;
+    float* swiglu_vec_dev = nullptr;
+    float* mlp_out_dev = nullptr;
+    float* logits_dev = nullptr;
+    float* freqs_dev = nullptr; // For RoPE frequencies
+
+    // Allocate device buffers
+    gpuErrchk(cudaMalloc(&x_dev, hs * sizeof(float)));
+    gpuErrchk(cudaMalloc(&x_norm_dev, hs * sizeof(float)));
+    gpuErrchk(cudaMalloc(&x_resid1_dev, hs * sizeof(float)));
+    gpuErrchk(cudaMalloc(&x_resid2_dev, hs * sizeof(float)));
+    gpuErrchk(cudaMalloc(&q_dev, hs * sizeof(float)));
+    gpuErrchk(cudaMalloc(&k_dev, n_kv_heads * head_dim * sizeof(float)));
+    gpuErrchk(cudaMalloc(&v_dev, n_kv_heads * head_dim * sizeof(float)));
+    gpuErrchk(cudaMalloc(&attn_out_dev, hs * sizeof(float)));
+    gpuErrchk(cudaMalloc(&attn_proj_dev, hs * sizeof(float)));
+    gpuErrchk(cudaMalloc(&gate_vec_dev, is * sizeof(float)));
+    gpuErrchk(cudaMalloc(&up_vec_dev, is * sizeof(float)));
+    gpuErrchk(cudaMalloc(&swiglu_vec_dev, is * sizeof(float)));
+    gpuErrchk(cudaMalloc(&mlp_out_dev, hs * sizeof(float)));
+    gpuErrchk(cudaMalloc(&logits_dev, vs * sizeof(float)));
+    // freqs_dev allocated in loop
+
+    // --- Initial Embedding Lookup & Copy --- 
+    std::vector<float> x_vec = lookup_embedding(token_id);
+    gpuErrchk(cudaMemcpy(x_dev, x_vec.data(), hs * sizeof(float), cudaMemcpyHostToDevice));
+
+    // --- Layer Loop --- 
+    for (int l = 0; l < nhl; ++l) {
+        const auto& lw = layers[l];
+
+        // Residual 1 Prep
+        gpuErrchk(cudaMemcpy(x_resid1_dev, x_dev, hs * sizeof(float), cudaMemcpyDeviceToDevice));
+
+        // RMSNorm 1 (Input: x_dev, Output: x_norm_dev)
+        float* w_norm1_dev = nullptr;
+        std::vector<float> w_norm1_vec = bf16vec_to_float_vec(lw.input_layernorm);
+        gpuErrchk(cudaMalloc(&w_norm1_dev, hs * sizeof(float)));
+        gpuErrchk(cudaMemcpy(w_norm1_dev, w_norm1_vec.data(), hs * sizeof(float), cudaMemcpyHostToDevice));
+        rmsnorm_vector_cuda(x_dev, w_norm1_dev, x_norm_dev, hs, eps);
+        gpuErrchk(cudaFree(w_norm1_dev));
+        gpuErrchk(cudaDeviceSynchronize());
+
+        // Q, K, V projections (Input: x_norm_dev, Outputs: q_dev, k_dev, v_dev)
+        matvec_bf16_f32_cuda(lw.q_proj, x_norm_dev, q_dev, hs, hs);
+        matvec_bf16_f32_cuda(lw.k_proj, x_norm_dev, k_dev, n_kv_heads * head_dim, hs);
+        matvec_bf16_f32_cuda(lw.v_proj, x_norm_dev, v_dev, n_kv_heads * head_dim, hs);
+        gpuErrchk(cudaDeviceSynchronize());
+
+        // RoPE (Applied in-place to q_dev, k_dev)
+        size_t freqs_offset = (pos * head_dim / 2);
+        std::vector<std::pair<float, float>> current_freqs_cis(precomputed_freqs_cis_.begin() + freqs_offset,
+                                                               precomputed_freqs_cis_.begin() + freqs_offset + head_dim / 2);
+        std::vector<float> flat_freqs; // Host vector
+        flat_freqs.reserve(current_freqs_cis.size() * 2);
+        for (const auto& p : current_freqs_cis) {
+            flat_freqs.push_back(p.first);
+            flat_freqs.push_back(p.second);
+        }
+        // Allocate and copy freqs directly to device
+        float* freqs_dev = nullptr;
+        gpuErrchk(cudaMalloc(&freqs_dev, flat_freqs.size() * sizeof(float))); // Allocate freqs_dev
+        gpuErrchk(cudaMemcpy(freqs_dev, flat_freqs.data(), flat_freqs.size() * sizeof(float), cudaMemcpyHostToDevice));
+        
+        // Call device-pointer RoPE version directly
+        rope_cuda(q_dev, n_heads, head_dim, freqs_dev); // Apply to Q
+        rope_cuda(k_dev, n_kv_heads, head_dim, freqs_dev); // Apply to K
+        
+        gpuErrchk(cudaFree(freqs_dev)); // Free freqs_dev for this layer
+        gpuErrchk(cudaDeviceSynchronize());
+
+        // KVCache Update (Directly on Device)
+        // Call the new kernel for each K/V head
+        for (int kvh = 0; kvh < n_kv_heads; ++kvh) {
+            // Calculate pointer to the *start* of the data for this specific head in k_dev/v_dev
+            const float* current_k_head_ptr = k_dev + kvh * head_dim;
+            const float* current_v_head_ptr = v_dev + kvh * head_dim;
+            
+            // Call kernel to update K cache for this head
+            update_kv_cache_cuda(cache->layers[l].k_dev, // Base pointer for layer K cache
+                                 current_k_head_ptr,     // Pointer to current K data for this head
+                                 pos, 
+                                 kvh, 
+                                 cache->allocated_max_seq_len,
+                                 cache->allocated_num_kv_heads,
+                                 cache->allocated_head_dim);
+                                 
+            // Call kernel to update V cache for this head
+            update_kv_cache_cuda(cache->layers[l].v_dev, // Base pointer for layer V cache
+                                 current_v_head_ptr,     // Pointer to current V data for this head
+                                 pos, 
+                                 kvh, 
+                                 cache->allocated_max_seq_len,
+                                 cache->allocated_num_kv_heads,
+                                 cache->allocated_head_dim);
+        }
+        // No need to copy K/V back to host here anymore
+        // delete[] k_current_ptr_host;
+        // delete[] v_current_ptr_host;
+
+        // --- Attention (Reads directly from Device Cache) --- 
+        int current_seq_len = pos + 1;
+        float scale = 1.0f / std::sqrt(head_dim);
+
+        // REMOVE preparation of K_cache_dev / V_cache_dev host/device buffers
+        // float* K_cache_dev = nullptr;
+        // float* V_cache_dev = nullptr;
+        // ... (remove allocation and H->D copy code) ...
+
+        // Call Attention Kernel directly with layer cache base pointers
+        // Input Q: q_dev (current token's Q, shape [hs = n_heads * head_dim])
+        // Input K: cache->layers[l].k_dev (base pointer for layer K cache)
+        // Input V: cache->layers[l].v_dev (base pointer for layer V cache)
+        // Output: attn_out_dev (shape [hs])
+        attention_cuda(q_dev,                      // Q vector for current token
+                       cache->layers[l].k_dev,   // Base K cache pointer for this layer
+                       cache->layers[l].v_dev,   // Base V cache pointer for this layer
+                       attn_out_dev,             // Output attention result
+                       n_heads,                  // Number of Q heads
+                       current_seq_len,          // Current sequence length
+                       head_dim,                 // Head dimension
+                       scale,                    // Scaling factor
+                       cache->allocated_max_seq_len, // Cache max sequence length
+                       cache->allocated_num_kv_heads // Cache K/V head count
+                       /*, stream */);          // Optional stream omitted
+        gpuErrchk(cudaDeviceSynchronize());
+
+        // Output projection (Input: attn_out_dev, Output: attn_proj_dev)
+        matvec_bf16_f32_cuda(lw.o_proj, attn_out_dev, attn_proj_dev, hs, hs);
+        gpuErrchk(cudaDeviceSynchronize());
+
+        // First residual connection (x = x_resid1 + attn_proj)
+        // Using add_vectors_cuda kernel
+        add_vectors_cuda(x_resid1_dev, attn_proj_dev, x_dev, hs);
+        gpuErrchk(cudaDeviceSynchronize());
+
+        // --- MLP Block --- 
+        // Residual 2 Prep
+        gpuErrchk(cudaMemcpy(x_resid2_dev, x_dev, hs * sizeof(float), cudaMemcpyDeviceToDevice));
+
+        // Post-attention RMSNorm (Input: x_dev, Output: x_norm_dev)
+        float* w_norm2_dev = nullptr;
+        std::vector<float> w_norm2_vec = bf16vec_to_float_vec(lw.post_attention_layernorm);
+        gpuErrchk(cudaMalloc(&w_norm2_dev, hs * sizeof(float)));
+        gpuErrchk(cudaMemcpy(w_norm2_dev, w_norm2_vec.data(), hs * sizeof(float), cudaMemcpyHostToDevice));
+        rmsnorm_vector_cuda(x_dev, w_norm2_dev, x_norm_dev, hs, eps);
+        gpuErrchk(cudaFree(w_norm2_dev));
+        gpuErrchk(cudaDeviceSynchronize());
+
+        // MLP MatVecs & SwiGLU 
+        // Gate * Up -> SwiGLU -> Down
+        matvec_bf16_f32_cuda(lw.gate_proj, x_norm_dev, gate_vec_dev, is, hs);
+        matvec_bf16_f32_cuda(lw.up_proj, x_norm_dev, up_vec_dev, is, hs);
+        gpuErrchk(cudaDeviceSynchronize());
+        swiglu_cuda(gate_vec_dev, up_vec_dev, swiglu_vec_dev, is);
+        gpuErrchk(cudaDeviceSynchronize());
+        matvec_bf16_f32_cuda(lw.down_proj, swiglu_vec_dev, mlp_out_dev, hs, is);
+        gpuErrchk(cudaDeviceSynchronize());
+        
+        // Second residual connection (x = x_resid2 + mlp_out)
+        add_vectors_cuda(x_resid2_dev, mlp_out_dev, x_dev, hs);
+        gpuErrchk(cudaDeviceSynchronize());
+
+    } // End layer loop
+
+    // --- Final Steps (Outside Layer Loop) --- 
+    // Final RMSNorm (Input: x_dev, Output: x_norm_dev)
+    float* w_final_norm_dev = nullptr;
+    std::vector<float> w_final_norm_vec = bf16vec_to_float_vec(final_norm);
+    gpuErrchk(cudaMalloc(&w_final_norm_dev, hs * sizeof(float)));
+    gpuErrchk(cudaMemcpy(w_final_norm_dev, w_final_norm_vec.data(), hs * sizeof(float), cudaMemcpyHostToDevice));
+    rmsnorm_vector_cuda(x_dev, w_final_norm_dev, x_norm_dev, hs, eps);
+    gpuErrchk(cudaFree(w_final_norm_dev));
+    gpuErrchk(cudaDeviceSynchronize());
+
+    // Final LM Head Projection (Input: x_norm_dev, Output: logits_dev)
+    matvec_bf16_f32_cuda(lm_head, x_norm_dev, logits_dev, vs, hs);
+    gpuErrchk(cudaDeviceSynchronize());
+
+    // Copy final logits from device to host
+    std::vector<float> logits(vs);
+    gpuErrchk(cudaMemcpy(logits.data(), logits_dev, vs * sizeof(float), cudaMemcpyDeviceToHost));
+
+    // Free all device memory
+    gpuErrchk(cudaFree(x_dev));
+    gpuErrchk(cudaFree(x_resid1_dev));
+    gpuErrchk(cudaFree(x_resid2_dev));
+    gpuErrchk(cudaFree(x_norm_dev));
+    gpuErrchk(cudaFree(q_dev));
+    gpuErrchk(cudaFree(k_dev));
+    gpuErrchk(cudaFree(v_dev));
+    gpuErrchk(cudaFree(attn_out_dev));
+    gpuErrchk(cudaFree(attn_proj_dev));
+    gpuErrchk(cudaFree(gate_vec_dev));
+    gpuErrchk(cudaFree(up_vec_dev));
+    gpuErrchk(cudaFree(swiglu_vec_dev));
+    gpuErrchk(cudaFree(mlp_out_dev));
+    gpuErrchk(cudaFree(logits_dev));
+    // freqs_dev was freed in loop
+
+    return logits;
 } 
+
+#else // If HAS_CUDA is not defined
+
+// Provide a stub implementation for forward_device if CUDA is not available
+std::vector<float> TinyLlamaModel::forward_device(int token_id, int pos, KVCache* cache, const std::vector<int>* attention_mask) {
+    Logger::error("forward_device called but HAS_CUDA is not defined! This function requires CUDA.");
+    // Return an empty vector or a vector of zeros of the expected size (vocab_size)
+    return std::vector<float>(config_.vocab_size, 0.0f);
+}
+
+#endif // End of #ifdef HAS_CUDA block for forward_device
+
+// ... (rest of file, potentially other functions) ... 

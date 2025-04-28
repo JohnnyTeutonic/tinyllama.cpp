@@ -1,52 +1,107 @@
 cmake_minimum_required(VERSION 3.11)
-project(TinyLlamaCpp)
+project(TinyLlamaCpp LANGUAGES CXX CUDA)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# include(FetchContent) // REMOVED FetchContent
+# Include FetchContent module
+include(FetchContent)
 
-# Download and configure libtorch (CPU version) // REMOVED LibTorch section
-# set(LIBTORCH_URL ...) 
-# FetchContent_Declare(
-#   libtorch
-#   URL      ${LIBTORCH_URL}
-# )
-# FetchContent_MakeAvailable(libtorch)
+# --- Fetch cpp-httplib --- 
+FetchContent_Declare(
+  cpp-httplib
+  GIT_REPOSITORY https://github.com/yhirose/cpp-httplib.git
+  GIT_TAG        v0.15.3
+)
+FetchContent_MakeAvailable(cpp-httplib)
+# --------------------------
 
-# Set Torch_DIR for find_package // REMOVED
-# set(Torch_DIR ${libtorch_SOURCE_DIR}/share/cmake/Torch)
-# find_package(Torch REQUIRED) // REMOVED
-
-# Find necessary libraries
+# Find necessary system libraries
 find_package(Threads REQUIRED)
 find_package(nlohmann_json 3.2.0 REQUIRED)
 find_package(OpenMP REQUIRED)
+find_package(OpenSSL)
 
-# Add source files
-add_executable(tinyllama main.cpp model.cpp safetensors_loader.cpp tokenizer.cpp logger.cpp prompt.cpp vocab_loader.cpp)
+# Handle CUDA
+find_package(CUDA)
+set(CUDA_SOURCES cuda_kernels.cu) # Define CUDA source file
+if(CUDA_FOUND)
+    message(STATUS "Found CUDA toolkit version: ${CUDA_VERSION}")
+    set(CMAKE_CUDA_ARCHITECTURES 60 61 70 75 80 86 CACHE STRING "CUDA architectures") 
+    message(STATUS "CUDA Found. Will define HAS_CUDA for tinyllama_core library.")
+    set(CUDA_ENABLED TRUE)
+else()
+    message(WARNING "CUDA Toolkit not found. Building CPU-only version.")
+    set(CUDA_ENABLED FALSE)
+endif()
 
-# Include directories
-target_include_directories(tinyllama PRIVATE
-    ${nlohmann_json_INCLUDE_DIRS}
-    # ${libtorch_SOURCE_DIR}/include  # REMOVED
-    ${CMAKE_CURRENT_SOURCE_DIR}
+# --- Core Library Definition ---
+add_library(tinyllama_core STATIC
+    model.cpp 
+    safetensors_loader.cpp 
+    tokenizer.cpp 
+    logger.cpp 
+    api.cpp # Added API implementation
+    vocab_loader.cpp
+    ${CUDA_SOURCES} # Include CUDA source file here
 )
 
-# Link libraries
-target_link_libraries(tinyllama PRIVATE
+# Set properties for the core library
+target_include_directories(tinyllama_core PUBLIC # Use PUBLIC so executables inherit includes
+    ${nlohmann_json_INCLUDE_DIRS}
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CUDA_INCLUDE_DIRS}
+    ${cpp-httplib_SOURCE_DIR} # Add include directory for httplib
+)
+
+# Link system/other libraries
+target_link_libraries(tinyllama_core PRIVATE # Dependencies needed to BUILD the library
     Threads::Threads
     nlohmann_json::nlohmann_json
     OpenMP::OpenMP_CXX
-    # "${TORCH_LIBRARIES}" // REMOVED
-    # Torch::torch // REMOVED
 )
 
-# Find OpenMP and set compiler flags
-find_package(OpenMP REQUIRED)
+# Conditionally add CUDA definition and link CUDA libs for the library
+if(CUDA_ENABLED)
+    target_compile_definitions(tinyllama_core PRIVATE HAS_CUDA)
+    target_link_libraries(tinyllama_core PRIVATE ${CUDA_LIBRARIES})
+endif()
+
+# --- Original Executable (Now uses the library) ---
+add_executable(tinyllama 
+    main.cpp 
+)
+
+# Link tinyllama executable against the core library
+target_link_libraries(tinyllama PRIVATE tinyllama_core)
+
+# --- New API Example Executable ---
+add_executable(tinyllama_api_example
+    main_api_example.cpp # File exists now
+)
+# Link the example against the core library
+target_link_libraries(tinyllama_api_example PRIVATE tinyllama_core)
+
+# --- New Chat Server Executable ---
+add_executable(tinyllama_server
+    server.cpp
+)
+
+target_link_libraries(tinyllama_server PRIVATE tinyllama_core)
+
+# Link OpenSSL if found (needed by httplib if SSL support is enabled)
+if(OPENSSL_FOUND)
+    message(STATUS "Found OpenSSL, linking ssl and crypto libraries to server.")
+    target_link_libraries(tinyllama_server PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+else()
+    message(WARNING "OpenSSL not found. HTTPS support in server will likely fail to link if enabled via CPPHTTPLIB_OPENSSL_SUPPORT.")
+endif()
+
+# --- Common Settings --- 
+
+# Add OpenMP flags (applies to all targets using CXX)
 if(OpenMP_FOUND)
     message(STATUS "Found OpenMP, enabling parallel execution.")
-    # Add appropriate compiler flags for OpenMP
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${OpenMP_C_FLAGS}")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${OpenMP_EXE_LINKER_FLAGS}")
@@ -54,26 +109,20 @@ else()
     message(WARNING "OpenMP not found. Performance will be suboptimal.")
 endif()
 
-# Add CMAKE_CURRENT_SOURCE_DIR for local headers
-target_include_directories(tinyllama PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-
-# Explicitly add include directory for nlohmann_json
-target_include_directories(tinyllama PRIVATE ${nlohmann_json_INCLUDE_DIRS})
-
-# If nlohmann_json is not found, provide a hint
 if(NOT nlohmann_json_FOUND)
     message(FATAL_ERROR "nlohmann_json not found. You can install it via your package manager or add the single header to your project.")
 endif()
 
-# For Windows: avoid conflicting runtime
+# For Windows: avoid conflicting runtime (Apply to all targets)
 if (MSVC)
-  set_property(TARGET tinyllama PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug$>")
+  # Need to apply to tinyllama_core as well
+  foreach(target tinyllama tinyllama_server tinyllama_core)
+    set_property(TARGET ${target} PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug$>")
+  endforeach()
 endif()
 
 # Set library output directories
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 
-# Print debug info
-# message(STATUS "Libtorch directory: ${libtorch_SOURCE_DIR}") // REMOVED
 message(STATUS "Project source directory: ${CMAKE_CURRENT_SOURCE_DIR}")

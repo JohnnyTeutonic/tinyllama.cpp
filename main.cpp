@@ -9,7 +9,6 @@
 #include "safetensors_loader.h"
 #include "tokenizer.h"
 #include "logger.h"
-#include "prompt.h"
 #include "model.h"
 #include <limits>
 #include <random>
@@ -19,9 +18,6 @@
 #include <numeric>
 #include <iomanip> // Include for std::setw, std::fixed, std::setprecision
 #include "vocab_loader.h"
-
-// TODO: Implement safetensors loader
-// TODO: Implement TinyLlama model and inference
 
 // Utility: Read file into string
 std::string read_file(const std::string& path) {
@@ -101,7 +97,6 @@ int main(int argc, char** argv) {
     std::string tokenizer_path = data_dir + "/tokenizer.json";
     std::string vocab_path = tokenizer_path; // Use tokenizer.json for vocab
     std::string safetensors_path = data_dir + "/model.safetensors";
-    // std::string tokenizer_config_path = data_dir + "/tokenizer_config.json"; // No longer needed
 
     Logger::info("Using data directory: " + data_dir);
     Logger::info("Loading config: " + config_path);
@@ -188,10 +183,7 @@ int main(int argc, char** argv) {
             // Option 1: Use the low-level API as before
             std::vector<std::string> prompt_tokens = tokenizer.tokenize(prompt);
             std::vector<int> prompt_ids = tokenizer.tokens_to_ids(prompt_tokens);
-            
-            // Option 2 (alternative): Use the encode method which can add special tokens if configured
-            // std::vector<int> prompt_ids = tokenizer.encode(prompt, true); // true to add BOS/EOS if configured
-            
+
             Logger::info("Tokenizing prompt...");
 
             Logger::info("Tokenized IDs: Count=" + std::to_string(prompt_ids.size()));
@@ -206,10 +198,10 @@ int main(int argc, char** argv) {
             int max_new_tokens = 30; // Set max generated tokens to 30
             int num_prompt_tokens = prompt_ids.size();
             std::vector<int> generated_ids = prompt_ids;
-            std::vector<int> generated_only_ids;
+            std::vector<int> generated_only_ids; 
             std::vector<float> current_x_vec; // Use std::vector for state
             cache.seq_len = 0; // Reset cache length
-
+            
             Logger::info("Starting token-by-token processing loop with KVCache...");
             std::cout << "Generating tokens..." << std::endl; // Initial message
             
@@ -246,28 +238,43 @@ int main(int argc, char** argv) {
                 
                 // Lookup embedding (returns vector)
                 current_x_vec = model.lookup_embedding(input_token_id);
-                // Convert vector back to tensor immediately for forward pass interface // REMOVED
-                // current_x_tensor = vec_to_tensor(current_x_vec, {static_cast<int64_t>(mcfg.hidden_size)});
                 
                 // Log the vector state
                 log_vector_summary("main loop: current_x after lookup (C++ Vec)", current_x_vec); 
 
-                // 2. Call the Forward Pass (token-by-token)
-                // Pass vector by reference. It will be updated in place.
-                Logger::info("main loop: Calling model.forward for pos=" + std::to_string(pos));
-                std::vector<float> logits = model.forward(current_x_vec, pos, &cache, nullptr); // Pass vector state
-                Logger::info("main loop: Returned from model.forward for pos=" + std::to_string(pos));
+                // --- Select Forward Pass based on CUDA availability ---
+                std::vector<float> logits;
+#ifdef HAS_CUDA
+                // Use CUDA-accelerated forward pass
+                Logger::info("main loop: Calling model.forward_device for pos=" + std::to_string(pos));
+                logits = model.forward_device(input_token_id, pos, &cache, nullptr); // Use device pipeline
+                Logger::info("main loop: Returned from model.forward_device for pos=" + std::to_string(pos));
+#else
+                // Use CPU forward pass
+                // Need the embedding vector for the CPU path
+                std::vector<float> current_x = model.lookup_embedding(input_token_id);
+                Logger::info("main loop: Calling model.forward (CPU) for pos=" + std::to_string(pos));
+                log_vector_summary("main loop: Input embedding to CPU forward", current_x); // Log input
+                logits = model.forward(current_x, pos, &cache, nullptr); // Use original CPU pipeline
+                Logger::info("main loop: Returned from model.forward (CPU) for pos=" + std::to_string(pos));
+#endif
+                // --- End Forward Pass Selection ---
+
+                // Check if logits are empty (could happen if forward fails)
+                if (logits.empty()) {
+#ifdef HAS_CUDA
+                     Logger::error("model.forward_device returned empty logits at pos " + std::to_string(pos));
+#else
+                     Logger::error("model.forward returned empty logits at pos " + std::to_string(pos));
+#endif
+                     break; // Stop generation if forward pass failed
+                }
                 
                 // --- Crucial: Increment cache sequence length *AFTER* forward call for position `pos`
                 cache.seq_len = pos + 1; 
                 Logger::info("main loop: Updated cache.seq_len=" + std::to_string(cache.seq_len));
                 
                 // --- RUNTIME CHECKS --- // Updated for vector state
-                if (logits.empty()) {
-                    Logger::error("model.forward returned empty logits at pos " + std::to_string(pos));
-                    break;
-                }
-                // Check vector state after forward pass
                 if (current_x_vec.size() != mcfg.hidden_size) { // Check vector size
                     Logger::error("current_x_vec size mismatch after forward at pos " + std::to_string(pos) + ". Expected " + std::to_string(mcfg.hidden_size) + ", got " + std::to_string(current_x_vec.size()));
                     break;
@@ -279,7 +286,7 @@ int main(int argc, char** argv) {
                 // 3. Sample Next Token (Only during Generation Phase)
                 if (pos >= num_prompt_tokens - 1) {
                     if (logits.empty()) {
-                        Logger::error("model.forward returned empty logits at pos " + std::to_string(pos));
+                        Logger::error("model.forward_device returned empty logits at pos " + std::to_string(pos));
                         break;
                     }
                     
@@ -310,8 +317,7 @@ int main(int argc, char** argv) {
                         break; 
                     }
                 } else {
-                     // During prompt processing, we don't sample, just process the next prompt token.
-                     // The state `current_x_tensor` is updated in-place by model.forward().
+                     // The state `current_x_tensor` is updated in-place by model.forward_device().
                      Logger::info("Processed prompt token at pos " + std::to_string(pos) + ".");
                 }
                 Logger::info("--- main loop: END pos=" + std::to_string(pos) + " ---");
