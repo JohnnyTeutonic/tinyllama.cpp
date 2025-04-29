@@ -4,6 +4,7 @@
 #include <vector>
 #include <map>
 #include <fstream>
+#include <cstddef> // For std::byte
 #include "gguf_structs.h" // Include the GGUF structure definitions
 
 // --- GGUF Constants ---
@@ -23,7 +24,7 @@ struct GGUFData {
     GGUFHeader header;
     std::map<std::string, GGUFMetadataValue> metadata;
     std::vector<GGUFTensorInfo> tensor_infos;
-    // TODO: Add field for actual tensor data (e.g., vector<std::byte> or similar)
+    std::vector<std::byte> tensor_data; // <<< ADDED TO HOLD RAW TENSOR BYTES
 };
 
 // Loads header, metadata, and tensor info from a GGUF file.

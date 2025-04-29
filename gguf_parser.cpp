@@ -262,22 +262,74 @@ GGUFData load_gguf_meta(const std::string& filename) {
     }
     Logger::info("Finished reading tensor info.");
 
-    // 5. TODO: Read Tensor Data (based on offsets and sizes)
+    // 5. Calculate Padding & Seek to Data Section
+    uint64_t alignment = 32; // Default alignment
+    try {
+        if (result.metadata.count("general.alignment")) {
+            // GGUF spec says alignment is uint32
+            uint32_t align_val = std::get<uint32_t>(result.metadata["general.alignment"]);
+            if (align_val > 0) {
+                alignment = align_val;
+            }
+             Logger::info("Using alignment value from metadata: " + std::to_string(alignment));
+        } else {
+             Logger::info("Metadata key 'general.alignment' not found. Using default alignment: " + std::to_string(alignment));
+        }
+    } catch (const std::bad_variant_access& e) {
+         Logger::warning("Could not read 'general.alignment' metadata as uint32. Using default alignment: " + std::to_string(alignment));
+    } catch (const std::exception& e) {
+         Logger::warning("Error accessing 'general.alignment' metadata: " + std::string(e.what()) + ". Using default alignment: " + std::to_string(alignment));
+    }
 
-    // 6. TODO: Align data section (padding)
-    // uint64_t current_pos = file.tellg();
-    // uint64_t alignment = 32; // Default GGUF alignment
-    // // Get alignment from metadata if present
-    // if (result.metadata.count("general.alignment")) {
-    //     // Extract uint32 alignment value from variant
-    // }
-    // uint64_t padding = (alignment - (current_pos % alignment)) % alignment;
-    // if (padding > 0) {
-    //     std::cout << "  Seeking past " << padding << " padding bytes.\n";
-    //     file.seekg(padding, std::ios::cur);
-    // }
+    uint64_t current_pos = file.tellg();
+    uint64_t padding = (alignment - (current_pos % alignment)) % alignment;
+    if (padding > 0) {
+         Logger::info("Seeking past " + std::to_string(padding) + " padding bytes to reach alignment " + std::to_string(alignment) + ".");
+        file.seekg(padding, std::ios::cur);
+        if (!file) {
+            throw std::runtime_error("GGUF Error: Failed to seek past padding before tensor data.");
+        }
+    } else {
+        Logger::info("Data section is already aligned.");
+    }
+
+    // 6. Read Tensor Data Block
+    uint64_t data_start_pos = file.tellg();
+    file.seekg(0, std::ios::end);
+    uint64_t file_end_pos = file.tellg();
+    file.seekg(data_start_pos, std::ios::beg); // Seek back to start of data
+
+    if (file_end_pos < data_start_pos) {
+         throw std::runtime_error("GGUF Error: File end position is before calculated data start position.");
+    }
+
+    uint64_t data_size = file_end_pos - data_start_pos;
+    Logger::info("Reading tensor data block: " + std::to_string(data_size) + " bytes from offset " + std::to_string(data_start_pos) + ".");
+
+    if (data_size > 0) {
+        // Resize the vector in the result struct
+        try {
+             result.tensor_data.resize(static_cast<size_t>(data_size));
+        } catch (const std::bad_alloc& e) {
+            throw std::runtime_error("Failed to allocate memory for tensor data: " + std::to_string(data_size) + " bytes. " + e.what());
+        }
+
+        // Read the data directly into the vector's buffer
+        file.read(reinterpret_cast<char*>(result.tensor_data.data()), static_cast<std::streamsize>(data_size));
+        if (!file) {
+            // Check if EOF was reached unexpectedly (read less than data_size)
+             if (file.eof()) {
+                 throw std::runtime_error("GGUF Error: Reached EOF prematurely while reading tensor data. Expected " + std::to_string(data_size) + " bytes, read " + std::to_string(file.gcount()) + ".");
+             } else {
+                 throw std::runtime_error("GGUF Error: Failed to read tensor data block from file.");
+             }
+        }
+         Logger::info("Successfully read tensor data block.");
+    } else {
+         Logger::info("Tensor data block size is 0. Nothing to read.");
+    }
 
     file.close();
-    Logger::info("GGUF metadata loaded successfully.");
+    Logger::info("GGUF metadata and data loaded successfully.");
     return result;
 } 
