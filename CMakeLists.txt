@@ -63,7 +63,7 @@ target_link_libraries(tinyllama_core PRIVATE # Dependencies needed to BUILD the 
 
 # Conditionally add CUDA definition and link CUDA libs for the library
 if(CUDA_ENABLED)
-    target_compile_definitions(tinyllama_core PRIVATE HAS_CUDA)
+    target_compile_definitions(tinyllama_core PUBLIC HAS_CUDA)
     target_link_libraries(tinyllama_core PRIVATE ${CUDA_LIBRARIES})
 endif()
 

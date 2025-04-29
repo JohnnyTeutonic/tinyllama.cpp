@@ -90,12 +90,19 @@ struct LayerWeights {
     std::vector<uint16_t> gate_proj; // [intermediate_size, hidden_size]
     std::vector<uint16_t> up_proj;   // [intermediate_size, hidden_size]
     std::vector<uint16_t> down_proj; // [hidden_size, intermediate_size]
+
+#ifdef HAS_CUDA
+    // Device pointers for RMSNorm weights
+    float* input_layernorm_dev = nullptr;
+    float* post_attention_layernorm_dev = nullptr;
+#endif
 };
 
 class TinyLlamaModel {
 public:
     // Construct from config and safetensors loader
     TinyLlamaModel(const ModelConfig& config, const SafeTensorsLoader& loader);
+    ~TinyLlamaModel(); // ADD Destructor declaration
 
     // --- Forward Pass (NOW uses std::vector<float>) --- 
     std::vector<float> forward(std::vector<float>& x_vec, int pos, KVCache* cache = nullptr, const std::vector<int>* attention_mask = nullptr);
@@ -129,6 +136,23 @@ private:
     std::vector<uint16_t> final_norm;   // [hidden_size]
 
     std::vector<LayerWeights> layers; // num_hidden_layers
+
+#ifdef HAS_CUDA
+    // Device pointer for final RMSNorm weights
+    float* final_norm_dev = nullptr;
+    float* all_freqs_cis_dev = nullptr; // NEW: Persistent device buffer for all RoPE freqs
+    // --- START Persistent Device Weights (BF16) ---
+    uint16_t* token_embedding_table_dev_ = nullptr;
+    uint16_t* w_q_dev_ = nullptr;
+    uint16_t* w_k_dev_ = nullptr;
+    uint16_t* w_v_dev_ = nullptr;
+    uint16_t* w_o_dev_ = nullptr;
+    uint16_t* w_gate_dev_ = nullptr;
+    uint16_t* w_up_dev_ = nullptr;
+    uint16_t* w_down_dev_ = nullptr;
+    uint16_t* lm_head_dev_ = nullptr;
+    // --- END Persistent Device Weights ---
+#endif
 
     // Precomputed RoPE cos/sin values
     std::vector<std::pair<float, float>> precomputed_freqs_cis_;

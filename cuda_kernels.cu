@@ -178,52 +178,118 @@ __global__ void matvec_bf16_f32_kernel(const uint16_t* mat_bf16,
     }
 }
 
-// --- MatVec C++ Wrapper (device pointer version) ---
-void matvec_bf16_f32_cuda(const std::vector<uint16_t>& mat_bf16_host,
+// --- MatVec C++ Wrapper (device pointer version - MODIFIED) ---
+void matvec_bf16_f32_cuda(const uint16_t* mat_bf16_dev, // Parameter changed to device pointer
                           const float* vec_f32_dev,
                           float* out_f32_dev,
                           int rows,
                           int cols,
                           cudaStream_t stream) {
-    // Copy weights to device
-    uint16_t* mat_bf16_dev = nullptr;
-    gpuErrchk(cudaMalloc(&mat_bf16_dev, rows * cols * sizeof(uint16_t)));
-    gpuErrchk(cudaMemcpy(mat_bf16_dev, mat_bf16_host.data(), rows * cols * sizeof(uint16_t), cudaMemcpyHostToDevice));
+    // REMOVED: Copy weights to device (now assumes mat_bf16_dev is valid)
+    // uint16_t* mat_bf16_dev = nullptr;
+    // gpuErrchk(cudaMalloc(&mat_bf16_dev, rows * cols * sizeof(uint16_t)));
+    // gpuErrchk(cudaMemcpy(mat_bf16_dev, mat_bf16_host.data(), rows * cols * sizeof(uint16_t), cudaMemcpyHostToDevice));
+
     // Kernel launch config
     const int threads_per_block_x = 256;
     const int threads_per_block_y = 1;
     dim3 threads_per_block(threads_per_block_x, threads_per_block_y);
-    int num_blocks_x = (rows + threads_per_block_y -1) / threads_per_block_y;
+    // Calculate grid size based on rows
+    // Each block handles one row (blockDim.y = 1, threadIdx.y = 0)
+    // So, gridDim.x should be the number of rows 
+    int num_blocks_x = rows; // Simpler: one block per row
     int num_blocks_y = 1;
     dim3 num_blocks(num_blocks_x, num_blocks_y);
-    size_t shared_mem_size = threads_per_block_x * sizeof(double); // <-- Adjusted for double
+    size_t shared_mem_size = threads_per_block_x * sizeof(double); // Adjusted for double
+
     // Launch kernel
     matvec_bf16_f32_kernel<<<num_blocks, threads_per_block, shared_mem_size, stream>>>(
         mat_bf16_dev, vec_f32_dev, out_f32_dev, rows, cols
     );
     gpuErrchk(cudaGetLastError());
+    // REMOVED: Free temporary weights buffer
+    // gpuErrchk(cudaFree(mat_bf16_dev)); 
+}
+
+// --- Corrected Mixed Host/Device matvec overload implementation ---
+// Allocates temp device matrix, copies host matrix, calls device-pointer kernel/wrapper
+void matvec_bf16_f32_cuda(const std::vector<uint16_t>& mat_bf16_host, // HOST Matrix
+                          const float* vec_f32_dev,                 // DEVICE Vector In
+                          float* out_f32_dev,                       // DEVICE Vector Out
+                          int rows,
+                          int cols,
+                          cudaStream_t stream)                     // Added stream
+{
+    if (mat_bf16_host.size() != (size_t)rows * cols) {
+        throw std::runtime_error("matvec_bf16_f32_cuda (mixed): mat size mismatch.");
+    }
+    // Note: Cannot easily check sizes for vec_f32_dev/out_f32_dev without bringing them to host
+    
+    uint16_t* mat_bf16_dev = nullptr; // Need temp device matrix
+    
+    // Allocate temporary device buffer *only* for the matrix
+    gpuErrchk(cudaMallocAsync(&mat_bf16_dev, mat_bf16_host.size() * sizeof(uint16_t), stream));
+    
+    // Copy host matrix data to device
+    gpuErrchk(cudaMemcpyAsync(mat_bf16_dev, mat_bf16_host.data(), mat_bf16_host.size() * sizeof(uint16_t), cudaMemcpyHostToDevice, stream));
+    
+    // Call the *all-device-pointer* version of the wrapper/kernel
+    matvec_bf16_f32_cuda(mat_bf16_dev, vec_f32_dev, out_f32_dev, rows, cols, stream);
+    
+    // Free the temporary device matrix
+    // Need to sync stream before freeing memory allocated on it, if the caller
+    // might destroy the stream before the free completes.
+    // Alternatively, use a caching allocator or let the context handle cleanup.
+    // For simplicity here, we sync then free.
+    gpuErrchk(cudaStreamSynchronize(stream)); 
     gpuErrchk(cudaFree(mat_bf16_dev));
 }
 
-// Host-vector version: allocates/copies, calls device-pointer version, copies back
+// --- START Add Host/Host/Host matvec overload implementation ---
+// Allocates temp device matrix AND vectors, copies data, calls device-pointer version, copies result back
 void matvec_bf16_f32_cuda(const std::vector<uint16_t>& mat_bf16_host,
                           const std::vector<float>& vec_f32_host,
                           std::vector<float>& out_f32_host,
                           int rows,
-                          int cols) {
+                          int cols) 
+{
+    if (mat_bf16_host.size() != (size_t)rows * cols) {
+        throw std::runtime_error("matvec_bf16_f32_cuda (host/host/host): mat size mismatch.");
+    }
+    if (vec_f32_host.size() != (size_t)cols) {
+        throw std::runtime_error("matvec_bf16_f32_cuda (host/host/host): vec size mismatch.");
+    }
     out_f32_host.resize(rows);
+    
+    uint16_t* mat_bf16_dev = nullptr;
     float* vec_f32_dev = nullptr;
     float* out_f32_dev = nullptr;
-    gpuErrchk(cudaMalloc(&vec_f32_dev, cols * sizeof(float)));
-    gpuErrchk(cudaMalloc(&out_f32_dev, rows * sizeof(float)));
-    gpuErrchk(cudaMemcpy(vec_f32_dev, vec_f32_host.data(), cols * sizeof(float), cudaMemcpyHostToDevice));
-    matvec_bf16_f32_cuda(mat_bf16_host, vec_f32_dev, out_f32_dev, rows, cols);
-    gpuErrchk(cudaDeviceSynchronize());
-    gpuErrchk(cudaMemcpy(out_f32_host.data(), out_f32_dev, rows * sizeof(float), cudaMemcpyDeviceToHost));
+    
+    // Allocate temporary device buffers for matrix, input vector, and output vector
+    gpuErrchk(cudaMalloc(&mat_bf16_dev, mat_bf16_host.size() * sizeof(uint16_t)));
+    gpuErrchk(cudaMalloc(&vec_f32_dev, vec_f32_host.size() * sizeof(float)));
+    gpuErrchk(cudaMalloc(&out_f32_dev, out_f32_host.size() * sizeof(float)));
+    
+    // Copy host data to device
+    gpuErrchk(cudaMemcpy(mat_bf16_dev, mat_bf16_host.data(), mat_bf16_host.size() * sizeof(uint16_t), cudaMemcpyHostToDevice));
+    gpuErrchk(cudaMemcpy(vec_f32_dev, vec_f32_host.data(), vec_f32_host.size() * sizeof(float), cudaMemcpyHostToDevice));
+    
+    // Call the *all-device-pointer* version of the wrapper/kernel
+    // Use default stream (0)
+    matvec_bf16_f32_cuda(mat_bf16_dev, vec_f32_dev, out_f32_dev, rows, cols, 0);
+    
+    // Synchronize default stream before copying back result
+    gpuErrchk(cudaDeviceSynchronize()); 
+    
+    // Copy result back to host output vector
+    gpuErrchk(cudaMemcpy(out_f32_host.data(), out_f32_dev, out_f32_host.size() * sizeof(float), cudaMemcpyDeviceToHost));
+    
+    // Free temporary device buffers
+    gpuErrchk(cudaFree(mat_bf16_dev));
     gpuErrchk(cudaFree(vec_f32_dev));
     gpuErrchk(cudaFree(out_f32_dev));
 }
-
+// --- END Add Host/Host/Host matvec overload implementation ---
 
 // <<< SILU KERNEL >>>
 
@@ -465,52 +531,60 @@ void swiglu_cuda(const float* gate_dev, const float* up_dev, float* out_dev, int
     gpuErrchk(cudaGetLastError());
 }
 
-// <<< ROPE KERNEL >>>
-__global__ void rope_kernel(float* x, int num_heads, int head_dim, const float* freqs_cis) {
+// <<< ROPE KERNEL (UPDATED) >>>
+__global__ void rope_kernel(float* x, 
+                            int num_heads, 
+                            int head_dim, 
+                            const float* all_freqs_cis_base, // Use base pointer
+                            int pos) // Added pos
+{
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int total_pairs = num_heads * (head_dim / 2);
     if (idx >= total_pairs) return;
+    
     int head = idx / (head_dim / 2);
-    int pair = idx % (head_dim / 2);
-    int base = head * head_dim + pair;
-    int base2 = head * head_dim + pair + head_dim / 2;
-    float x0 = x[base];
-    float x1 = x[base2];
-    float cos_val = freqs_cis[2 * pair];
-    float sin_val = freqs_cis[2 * pair + 1];
-    x[base]  = x0 * cos_val - x1 * sin_val;
-    x[base2] = x0 * sin_val + x1 * cos_val;
+    int pair_idx_in_head = idx % (head_dim / 2); // Index within the head's pairs (0 to dim/2 - 1)
+    
+    // Calculate the offset into the *full* frequency buffer
+    // Layout: [max_seq_len, head_dim / 2, 2] flattened -> [max_seq_len * head_dim]
+    // Offset for current pos and current pair index:
+    size_t freq_base_offset = (size_t)pos * head_dim + (size_t)pair_idx_in_head * 2;
+    
+    // Indices into the input vector x
+    int base_x0 = head * head_dim + pair_idx_in_head;
+    int base_x1 = head * head_dim + pair_idx_in_head + head_dim / 2;
+    
+    // Fetch values
+    float x0 = x[base_x0];
+    float x1 = x[base_x1];
+    float cos_val = all_freqs_cis_base[freq_base_offset];     // cos value for (pos, pair_idx_in_head)
+    float sin_val = all_freqs_cis_base[freq_base_offset + 1]; // sin value for (pos, pair_idx_in_head)
+    
+    // Apply rotation
+    x[base_x0] = x0 * cos_val - x1 * sin_val;
+    x[base_x1] = x0 * sin_val + x1 * cos_val;
 }
 
-void rope_cuda(std::vector<float>& x, int num_heads, int head_dim, const std::vector<float>& freqs_cis) {
-    if (x.size() != (size_t)(num_heads * head_dim)) {
-        throw std::runtime_error("RoPE CUDA: x size mismatch.");
-    }
-    if (freqs_cis.size() != (size_t)head_dim) {
-        throw std::runtime_error("RoPE CUDA: freqs_cis size mismatch.");
-    }
-    float* x_dev = nullptr;
-    float* freqs_dev = nullptr;
-    gpuErrchk(cudaMalloc(&x_dev, x.size() * sizeof(float)));
-    gpuErrchk(cudaMalloc(&freqs_dev, freqs_cis.size() * sizeof(float)));
-    gpuErrchk(cudaMemcpy(x_dev, x.data(), x.size() * sizeof(float), cudaMemcpyHostToDevice));
-    gpuErrchk(cudaMemcpy(freqs_dev, freqs_cis.data(), freqs_cis.size() * sizeof(float), cudaMemcpyHostToDevice));
+// --- DEVICE-POINTER ROPE WRAPPER (UPDATED) ---
+void rope_cuda(float* x_dev, 
+               int num_heads, 
+               int head_dim, 
+               const float* all_freqs_cis_dev_base, // Changed parameter name
+               int pos, // Added pos
+               cudaStream_t stream)
+{
     int total_pairs = num_heads * (head_dim / 2);
     int threads_per_block = 256;
     int num_blocks = (total_pairs + threads_per_block - 1) / threads_per_block;
-    rope_kernel<<<num_blocks, threads_per_block>>>(x_dev, num_heads, head_dim, freqs_dev);
-    gpuErrchk(cudaGetLastError());
-    gpuErrchk(cudaMemcpy(x.data(), x_dev, x.size() * sizeof(float), cudaMemcpyDeviceToHost));
-    gpuErrchk(cudaFree(x_dev));
-    gpuErrchk(cudaFree(freqs_dev));
-}
-
-// --- DEVICE-POINTER ROPE WRAPPER ---
-void rope_cuda(float* x_dev, int num_heads, int head_dim, const float* freqs_dev, cudaStream_t stream) {
-    int total_pairs = num_heads * (head_dim / 2);
-    int threads_per_block = 256;
-    int num_blocks = (total_pairs + threads_per_block - 1) / threads_per_block;
-    rope_kernel<<<num_blocks, threads_per_block, 0, stream>>>(x_dev, num_heads, head_dim, freqs_dev);
+    
+    // Call the updated kernel
+    rope_kernel<<<num_blocks, threads_per_block, 0, stream>>>(
+        x_dev, 
+        num_heads, 
+        head_dim, 
+        all_freqs_cis_dev_base, // Pass base pointer
+        pos // Pass pos
+    );
     gpuErrchk(cudaGetLastError());
 }
 
@@ -730,6 +804,72 @@ void update_kv_cache_cuda(float* cache_base_ptr, // Base pointer for K or V for 
         head_dim
     );
     gpuErrchk(cudaGetLastError()); // Check for errors after kernel launch
+}
+
+// ============================================================================ 
+// Kernel Implementation: Lookup Embedding (BF16 -> FP32)
+// ============================================================================
+
+__global__ void lookup_embedding_bf16_f32_kernel(const uint16_t* __restrict__ embedding_table,
+                                               float* __restrict__ output_vector,
+                                               int token_id,
+                                               int hidden_size,
+                                               int vocab_size)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    // Calculate base offset for the token's embedding row
+    // Assuming embedding table is tightly packed: [vocab_size, hidden_size]
+    size_t base_offset = (size_t)token_id * hidden_size;
+
+    if (idx < hidden_size && token_id >= 0 && token_id < vocab_size) {
+        // Read BF16 value from the embedding table
+        uint16_t bf16_val = embedding_table[base_offset + idx];
+
+        // Convert BF16 to FP32
+        // Simplest conversion: Shift left by 16 bits
+        unsigned int ui = ((unsigned int)bf16_val) << 16;
+        // Reinterpret the bits as a float
+        output_vector[idx] = *reinterpret_cast<float*>(&ui);
+    }
+}
+
+// Host wrapper for the lookup embedding kernel (MODIFIED)
+void lookup_embedding_bf16_f32_cuda(const uint16_t* embedding_table_dev, // Changed: takes device pointer
+                                    float* output_vector_dev,       // Renamed for clarity
+                                    int token_id,
+                                    int hidden_size,
+                                    int vocab_size, // <-- ADDED BACK
+                                    cudaStream_t stream) // Added stream 
+{
+    // REMOVED: Allocate temporary device memory for the embedding table
+    // uint16_t* embedding_table_dev = nullptr;
+    // size_t table_size_bytes = (size_t)vocab_size * hidden_size * sizeof(uint16_t);
+    // gpuErrchk(cudaMalloc(&embedding_table_dev, table_size_bytes));
+
+    // REMOVED: Copy the host table to the device
+    // gpuErrchk(cudaMemcpy(embedding_table_dev, embedding_table_host.data(), table_size_bytes, cudaMemcpyHostToDevice));
+
+    // --- Launch Kernel --- 
+    dim3 threads_per_block(256);
+    // Need enough blocks to cover the hidden_size dimension
+    dim3 num_blocks((hidden_size + threads_per_block.x - 1) / threads_per_block.x);
+
+    // Pass the actual vocab_size to the kernel now
+    lookup_embedding_bf16_f32_kernel<<<num_blocks, threads_per_block, 0, stream>>>(
+        embedding_table_dev, // Pass the device pointer parameter
+        output_vector_dev,
+        token_id,
+        hidden_size,
+        vocab_size // <-- PASS CORRECT VALUE
+    );
+    gpuErrchk(cudaGetLastError()); // Check for kernel launch errors
+    
+    // REMOVED: Free the temporary device memory for the table
+    // gpuErrchk(cudaFree(embedding_table_dev));
+
+    // No explicit sync needed here, subsequent operations will sync if necessary
+    // gpuErrchk(cudaDeviceSynchronize()); 
 }
 
 #endif // HAS_CUDA
