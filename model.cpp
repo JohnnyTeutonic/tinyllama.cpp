@@ -651,6 +651,29 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& config, const SafeTensorsLoade
         }
     }
     Logger::info("Precomputed RoPE cos/sin frequencies.");
+
+#ifdef HAS_CUDA
+    // Allocate persistent buffer for all RoPE frequencies on device
+    if (!precomputed_freqs_cis_.empty()) { // Check if host vector is populated
+        size_t total_freq_elements = precomputed_freqs_cis_.size() * 2; // 2 floats per pair (cos, sin)
+        gpuErrchk(cudaMalloc(&all_freqs_cis_dev, total_freq_elements * sizeof(float)));
+        Logger::info("Allocated persistent RoPE frequency buffer on GPU: " + 
+                     std::to_string(total_freq_elements * sizeof(float) / 1024.0) + " KB");
+
+        // Flatten host data and copy to device
+        std::vector<float> flat_host_freqs;
+        flat_host_freqs.reserve(total_freq_elements);
+        for (const auto& p : precomputed_freqs_cis_) {
+            flat_host_freqs.push_back(p.first);  // cos
+            flat_host_freqs.push_back(p.second); // sin
+        }
+        gpuErrchk(cudaMemcpy(all_freqs_cis_dev, flat_host_freqs.data(), total_freq_elements * sizeof(float), cudaMemcpyHostToDevice));
+        Logger::info("Copied all precomputed RoPE frequencies to persistent GPU buffer.");
+
+    } else {
+        Logger::info("Host precomputed_freqs_cis_ is empty, skipping GPU RoPE buffer allocation.");
+    }
+#endif
 }
 
 // --- START: TinyLlamaModel Destructor Definition ---
@@ -674,7 +697,12 @@ TinyLlamaModel::~TinyLlamaModel() {
         }
         // NOTE: Add frees here if/when other weights (q_proj_dev etc.) are added later
     }
-     Logger::info("TinyLlamaModel CUDA weight memory freed.");
+    // Free persistent RoPE frequency buffer
+    if (all_freqs_cis_dev) {
+        gpuErrchk(cudaFree(all_freqs_cis_dev));
+        all_freqs_cis_dev = nullptr;
+    }
+    Logger::info("TinyLlamaModel CUDA weight memory freed.");
 #endif
 } 
 // --- END: TinyLlamaModel Destructor Definition ---
@@ -804,8 +832,11 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, K
         }
         gpuErrchk(cudaMalloc(&freqs_dev, flat_freqs.size() * sizeof(float))); // Allocate freqs_dev
         gpuErrchk(cudaMemcpy(freqs_dev, flat_freqs.data(), flat_freqs.size() * sizeof(float), cudaMemcpyHostToDevice));
-        rope_cuda(q_dev, n_heads, head_dim, freqs_dev);
-        rope_cuda(k_dev, n_kv_heads, head_dim, freqs_dev);
+        
+        // Call device-pointer RoPE version directly using persistent buffer and pos
+        rope_cuda(q_dev, n_heads, head_dim, all_freqs_cis_dev, pos); // UPDATED CALL in forward()
+        rope_cuda(k_dev, n_kv_heads, head_dim, all_freqs_cis_dev, pos); // UPDATED CALL in forward()
+        
         gpuErrchk(cudaFree(freqs_dev)); // Free freqs_dev for this layer
         gpuErrchk(cudaDeviceSynchronize());
 
@@ -1183,27 +1214,6 @@ std::vector<float> TinyLlamaModel::forward_device(int token_id, int pos, KVCache
         matvec_bf16_f32_cuda(lw.v_proj, x_norm_dev, v_dev, n_kv_heads * head_dim, hs);
         gpuErrchk(cudaDeviceSynchronize());
 
-        // RoPE (Applied in-place to q_dev, k_dev)
-        size_t freqs_offset = (pos * head_dim / 2);
-        std::vector<std::pair<float, float>> current_freqs_cis(precomputed_freqs_cis_.begin() + freqs_offset,
-                                                               precomputed_freqs_cis_.begin() + freqs_offset + head_dim / 2);
-        std::vector<float> flat_freqs; // Host vector
-        flat_freqs.reserve(current_freqs_cis.size() * 2);
-        for (const auto& p : current_freqs_cis) {
-            flat_freqs.push_back(p.first);
-            flat_freqs.push_back(p.second);
-        }
-        // Allocate and copy freqs directly to device
-        float* freqs_dev = nullptr;
-        gpuErrchk(cudaMalloc(&freqs_dev, flat_freqs.size() * sizeof(float))); // Allocate freqs_dev
-        gpuErrchk(cudaMemcpy(freqs_dev, flat_freqs.data(), flat_freqs.size() * sizeof(float), cudaMemcpyHostToDevice));
-        
-        // Call device-pointer RoPE version directly
-        rope_cuda(q_dev, n_heads, head_dim, freqs_dev); // Apply to Q
-        rope_cuda(k_dev, n_kv_heads, head_dim, freqs_dev); // Apply to K
-        
-        gpuErrchk(cudaFree(freqs_dev)); // Free freqs_dev for this layer
-        gpuErrchk(cudaDeviceSynchronize());
 
         // KVCache Update (Directly on Device)
         // Call the new kernel for each K/V head

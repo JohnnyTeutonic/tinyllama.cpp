@@ -465,52 +465,60 @@ void swiglu_cuda(const float* gate_dev, const float* up_dev, float* out_dev, int
     gpuErrchk(cudaGetLastError());
 }
 
-// <<< ROPE KERNEL >>>
-__global__ void rope_kernel(float* x, int num_heads, int head_dim, const float* freqs_cis) {
+// <<< ROPE KERNEL (UPDATED) >>>
+__global__ void rope_kernel(float* x, 
+                            int num_heads, 
+                            int head_dim, 
+                            const float* all_freqs_cis_base, // Use base pointer
+                            int pos) // Added pos
+{
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int total_pairs = num_heads * (head_dim / 2);
     if (idx >= total_pairs) return;
+    
     int head = idx / (head_dim / 2);
-    int pair = idx % (head_dim / 2);
-    int base = head * head_dim + pair;
-    int base2 = head * head_dim + pair + head_dim / 2;
-    float x0 = x[base];
-    float x1 = x[base2];
-    float cos_val = freqs_cis[2 * pair];
-    float sin_val = freqs_cis[2 * pair + 1];
-    x[base]  = x0 * cos_val - x1 * sin_val;
-    x[base2] = x0 * sin_val + x1 * cos_val;
+    int pair_idx_in_head = idx % (head_dim / 2); // Index within the head's pairs (0 to dim/2 - 1)
+    
+    // Calculate the offset into the *full* frequency buffer
+    // Layout: [max_seq_len, head_dim / 2, 2] flattened -> [max_seq_len * head_dim]
+    // Offset for current pos and current pair index:
+    size_t freq_base_offset = (size_t)pos * head_dim + (size_t)pair_idx_in_head * 2;
+    
+    // Indices into the input vector x
+    int base_x0 = head * head_dim + pair_idx_in_head;
+    int base_x1 = head * head_dim + pair_idx_in_head + head_dim / 2;
+    
+    // Fetch values
+    float x0 = x[base_x0];
+    float x1 = x[base_x1];
+    float cos_val = all_freqs_cis_base[freq_base_offset];     // cos value for (pos, pair_idx_in_head)
+    float sin_val = all_freqs_cis_base[freq_base_offset + 1]; // sin value for (pos, pair_idx_in_head)
+    
+    // Apply rotation
+    x[base_x0] = x0 * cos_val - x1 * sin_val;
+    x[base_x1] = x0 * sin_val + x1 * cos_val;
 }
 
-void rope_cuda(std::vector<float>& x, int num_heads, int head_dim, const std::vector<float>& freqs_cis) {
-    if (x.size() != (size_t)(num_heads * head_dim)) {
-        throw std::runtime_error("RoPE CUDA: x size mismatch.");
-    }
-    if (freqs_cis.size() != (size_t)head_dim) {
-        throw std::runtime_error("RoPE CUDA: freqs_cis size mismatch.");
-    }
-    float* x_dev = nullptr;
-    float* freqs_dev = nullptr;
-    gpuErrchk(cudaMalloc(&x_dev, x.size() * sizeof(float)));
-    gpuErrchk(cudaMalloc(&freqs_dev, freqs_cis.size() * sizeof(float)));
-    gpuErrchk(cudaMemcpy(x_dev, x.data(), x.size() * sizeof(float), cudaMemcpyHostToDevice));
-    gpuErrchk(cudaMemcpy(freqs_dev, freqs_cis.data(), freqs_cis.size() * sizeof(float), cudaMemcpyHostToDevice));
+// --- DEVICE-POINTER ROPE WRAPPER (UPDATED) ---
+void rope_cuda(float* x_dev, 
+               int num_heads, 
+               int head_dim, 
+               const float* all_freqs_cis_dev_base, // Changed parameter name
+               int pos, // Added pos
+               cudaStream_t stream)
+{
     int total_pairs = num_heads * (head_dim / 2);
     int threads_per_block = 256;
     int num_blocks = (total_pairs + threads_per_block - 1) / threads_per_block;
-    rope_kernel<<<num_blocks, threads_per_block>>>(x_dev, num_heads, head_dim, freqs_dev);
-    gpuErrchk(cudaGetLastError());
-    gpuErrchk(cudaMemcpy(x.data(), x_dev, x.size() * sizeof(float), cudaMemcpyDeviceToHost));
-    gpuErrchk(cudaFree(x_dev));
-    gpuErrchk(cudaFree(freqs_dev));
-}
-
-// --- DEVICE-POINTER ROPE WRAPPER ---
-void rope_cuda(float* x_dev, int num_heads, int head_dim, const float* freqs_dev, cudaStream_t stream) {
-    int total_pairs = num_heads * (head_dim / 2);
-    int threads_per_block = 256;
-    int num_blocks = (total_pairs + threads_per_block - 1) / threads_per_block;
-    rope_kernel<<<num_blocks, threads_per_block, 0, stream>>>(x_dev, num_heads, head_dim, freqs_dev);
+    
+    // Call the updated kernel
+    rope_kernel<<<num_blocks, threads_per_block, 0, stream>>>(
+        x_dev, 
+        num_heads, 
+        head_dim, 
+        all_freqs_cis_dev_base, // Pass base pointer
+        pos // Pass pos
+    );
     gpuErrchk(cudaGetLastError());
 }
 

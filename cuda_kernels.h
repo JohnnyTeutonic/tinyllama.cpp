@@ -91,8 +91,13 @@ void softmax_vector_cuda(const std::vector<float>& x_host,
                          std::vector<float>& out_host,
                          int n);
 
-// Device-pointer RoPE wrapper
-void rope_cuda(float* x_dev, int num_heads, int head_dim, const float* freqs_dev, cudaStream_t stream = 0);
+// Device-pointer RoPE wrapper (UPDATED SIGNATURE)
+void rope_cuda(float* x_dev, 
+               int num_heads, 
+               int head_dim, 
+               const float* all_freqs_cis_dev_base, // Changed from freqs_dev
+               int pos, // Added pos parameter
+               cudaStream_t stream = 0);
 
 /**
  * @brief CUDA Attention kernel wrapper (Reads directly from flat K/V Cache)

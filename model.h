@@ -140,6 +140,7 @@ private:
 #ifdef HAS_CUDA
     // Device pointer for final RMSNorm weights
     float* final_norm_dev = nullptr;
+    float* all_freqs_cis_dev = nullptr; // NEW: Persistent device buffer for all RoPE freqs
 #endif
 
     // Precomputed RoPE cos/sin values
