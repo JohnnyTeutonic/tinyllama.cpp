@@ -728,6 +728,34 @@ void add_vectors_cuda(const float* a_dev,
     gpuErrchk(cudaGetLastError()); // Check for errors after kernel launch
 }
 
+// <<< FUSED RESIDUAL ADDITION KERNEL >>>
+// Kernel: result = matvec_out + residual
+__global__ void add_residual_kernel(const float* matvec_out, const float* residual, float* result, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        result[i] = matvec_out[i] + residual[i];
+    }
+}
+
+// --- Fused Residual Addition C++ Wrapper ---
+void add_residual_cuda(const float* matvec_out_dev,
+                       const float* residual_dev,
+                       float* result_dev,
+                       int n,
+                       cudaStream_t stream)
+{
+    const int threads_per_block = 256;
+    const int num_blocks = (n + threads_per_block - 1) / threads_per_block;
+    
+    add_residual_kernel<<<num_blocks, threads_per_block, 0, stream>>>(
+        matvec_out_dev, 
+        residual_dev, 
+        result_dev, 
+        n
+    );
+    gpuErrchk(cudaGetLastError()); // Check for errors after kernel launch
+}
+
 // <<< K/V CACHE UPDATE KERNEL >>>
 
 __global__ void update_kv_cache_kernel(float* cache_base_ptr,

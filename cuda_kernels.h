@@ -150,7 +150,18 @@ void attention_cuda(const float* Q_current_dev,
  * @param n Size of the vectors.
  * @param stream CUDA stream (optional, default 0).
  */
-void add_vectors_cuda(const float* a_dev, const float* b_dev, float* result_dev, int n, cudaStream_t stream = 0);
+void add_vectors_cuda(const float* a_dev, 
+                      const float* b_dev, 
+                      float* result_dev, 
+                      int n, 
+                      cudaStream_t stream = 0); // Default stream
+
+// Fused Residual Addition (result = matvec_out + residual)
+void add_residual_cuda(const float* matvec_out_dev,
+                       const float* residual_dev,
+                       float* result_dev,
+                       int n,
+                       cudaStream_t stream = 0); // Default stream
 
 /**
  * @brief Updates a specific entry in the flat K/V cache on the device.

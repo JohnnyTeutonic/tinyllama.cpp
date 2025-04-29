@@ -1037,9 +1037,8 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, K
         matvec_bf16_f32_cuda(cublas_handle_, lw.o_proj, attn_out_dev, attn_proj_dev, hs, hs); // Pass handle
         gpuErrchk(cudaDeviceSynchronize());
 
-        // First residual connection (x = x_resid1 + attn_proj)
-        // Using add_vectors_cuda kernel
-        add_vectors_cuda(x_resid1_dev, attn_proj_dev, x_dev, hs);
+        // First residual connection (x = x_resid1 + attn_proj) - FUSED KERNEL
+        add_residual_cuda(attn_proj_dev, x_resid1_dev, x_dev, hs);
         gpuErrchk(cudaDeviceSynchronize());
 
         // --- MLP Block --- 
@@ -1077,16 +1076,9 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, K
         matvec_bf16_f32_cuda(cublas_handle_, lw.down_proj, swiglu_vec_dev, mlp_down_dev, hs, is); // Pass handle
         gpuErrchk(cudaDeviceSynchronize());
         
-        // Add residual 2 (Fallback)
-        std::vector<float> mlp_down_host(hs);
-        std::vector<float> x_resid2_host(hs);
-        gpuErrchk(cudaMemcpy(mlp_down_host.data(), mlp_down_dev, hs * sizeof(float), cudaMemcpyDeviceToHost));
-        gpuErrchk(cudaMemcpy(x_resid2_host.data(), x_resid2_dev, hs * sizeof(float), cudaMemcpyDeviceToHost)); // Copy x_resid2_dev content
-        #pragma omp parallel for
-        for(int i=0; i<hs; ++i) {
-            x_resid2_host[i] += mlp_down_host[i];
-        }
-        gpuErrchk(cudaMemcpy(x_dev, x_resid2_host.data(), hs * sizeof(float), cudaMemcpyHostToDevice));
+        // Add residual 2 (FUSED KERNEL)
+        add_residual_cuda(mlp_down_dev, x_resid2_dev, x_dev, hs);
+        gpuErrchk(cudaDeviceSynchronize());
         
         // Free CUDA MLP intermediates
         gpuErrchk(cudaFree(gate_vec_dev));
