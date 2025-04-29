@@ -551,6 +551,14 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& config, const SafeTensorsLoade
         Logger::error("Missing model.norm.weight: " + std::string(e.what()));
     }
 
+#ifdef HAS_CUDA
+    // Allocate and copy final_norm weights to device
+    std::vector<float> final_norm_f32 = bf16vec_to_float_vec(final_norm);
+    gpuErrchk(cudaMalloc(&final_norm_dev, final_norm_f32.size() * sizeof(float)));
+    gpuErrchk(cudaMemcpy(final_norm_dev, final_norm_f32.data(), final_norm_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
+    Logger::info("Copied final_norm weights to GPU.");
+#endif
+
     layers.resize(nhl);
     for (int i = 0; i < nhl; ++i) {
         auto& lw = layers[i];
@@ -565,6 +573,17 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& config, const SafeTensorsLoade
             lw.gate_proj = uint8_vector_to_uint16_vector(loader.get_tensor_bytes(prefix + "mlp.gate_proj.weight"), is * hs);
             lw.up_proj = uint8_vector_to_uint16_vector(loader.get_tensor_bytes(prefix + "mlp.up_proj.weight"), is * hs);
             lw.down_proj = uint8_vector_to_uint16_vector(loader.get_tensor_bytes(prefix + "mlp.down_proj.weight"), hs * is);
+
+#ifdef HAS_CUDA
+            // Allocate and copy layer norm weights to device
+            std::vector<float> input_ln_f32 = bf16vec_to_float_vec(lw.input_layernorm);
+            gpuErrchk(cudaMalloc(&lw.input_layernorm_dev, input_ln_f32.size() * sizeof(float)));
+            gpuErrchk(cudaMemcpy(lw.input_layernorm_dev, input_ln_f32.data(), input_ln_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
+
+            std::vector<float> post_attn_ln_f32 = bf16vec_to_float_vec(lw.post_attention_layernorm);
+            gpuErrchk(cudaMalloc(&lw.post_attention_layernorm_dev, post_attn_ln_f32.size() * sizeof(float)));
+            gpuErrchk(cudaMemcpy(lw.post_attention_layernorm_dev, post_attn_ln_f32.data(), post_attn_ln_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
+#endif
 
             // --- START: Verify o_proj loading for Layer 0 --- 
             if (i == 0) {
@@ -634,6 +653,31 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& config, const SafeTensorsLoade
     Logger::info("Precomputed RoPE cos/sin frequencies.");
 }
 
+// --- START: TinyLlamaModel Destructor Definition ---
+TinyLlamaModel::~TinyLlamaModel() {
+#ifdef HAS_CUDA
+    Logger::info("Freeing TinyLlamaModel CUDA weight memory...");
+    // Free final norm device pointer
+    if (final_norm_dev) {
+        gpuErrchk(cudaFree(final_norm_dev));
+        final_norm_dev = nullptr; // Good practice to null pointers after freeing
+    }
+    // Free layer norm device pointers
+    for (auto& layer : layers) { // Iterate through the layers vector
+        if (layer.input_layernorm_dev) {
+            gpuErrchk(cudaFree(layer.input_layernorm_dev));
+            layer.input_layernorm_dev = nullptr;
+        }
+        if (layer.post_attention_layernorm_dev) {
+            gpuErrchk(cudaFree(layer.post_attention_layernorm_dev));
+            layer.post_attention_layernorm_dev = nullptr;
+        }
+        // NOTE: Add frees here if/when other weights (q_proj_dev etc.) are added later
+    }
+     Logger::info("TinyLlamaModel CUDA weight memory freed.");
+#endif
+} 
+// --- END: TinyLlamaModel Destructor Definition ---
 // Update lookup_embedding to return std::vector<float>
 std::vector<float> TinyLlamaModel::lookup_embedding(int token_id) {
     int hs = config_.hidden_size;
@@ -734,13 +778,13 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, K
         gpuErrchk(cudaMemcpy(x_resid1_dev, x_dev, hs * sizeof(float), cudaMemcpyDeviceToDevice));
 
         // RMSNorm 1 (Input: x_dev, Output: x_norm_dev)
-        std::vector<float> w_norm1_vec = bf16vec_to_float_vec(lw.input_layernorm);
-        float* w_norm1_dev = nullptr;
+        float* w_norm1_dev = nullptr; // Declare device pointer
+        std::vector<float> w_norm1_vec = bf16vec_to_float_vec(lw.input_layernorm); // Keep conversion for now (though unused)
         gpuErrchk(cudaMalloc(&w_norm1_dev, hs * sizeof(float)));
         gpuErrchk(cudaMemcpy(w_norm1_dev, w_norm1_vec.data(), hs * sizeof(float), cudaMemcpyHostToDevice));
-        rmsnorm_vector_cuda(x_dev, w_norm1_dev, x_norm_dev, hs, eps);
+        rmsnorm_vector_cuda(x_dev, lw.input_layernorm_dev, x_norm_dev, hs, eps); 
         gpuErrchk(cudaFree(w_norm1_dev));
-        gpuErrchk(cudaDeviceSynchronize());
+        gpuErrchk(cudaDeviceSynchronize()); 
 
         // Q, K, V projections (Input: x_norm_dev, Outputs: q_dev, k_dev, v_dev)
         matvec_bf16_f32_cuda(lw.q_proj, x_norm_dev, q_dev, hs, hs);
@@ -838,14 +882,13 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, K
         gpuErrchk(cudaMemcpy(x_resid2_dev, x_dev, hs * sizeof(float), cudaMemcpyDeviceToDevice)); 
 
         // Post-attention RMSNorm
+        float* w_norm2_dev = nullptr; // Keep alloc/free for now, just change the source ptr
         std::vector<float> w_norm2_vec = bf16vec_to_float_vec(lw.post_attention_layernorm);
-        float* w_norm2_dev = nullptr;
         gpuErrchk(cudaMalloc(&w_norm2_dev, hs * sizeof(float)));
         gpuErrchk(cudaMemcpy(w_norm2_dev, w_norm2_vec.data(), hs * sizeof(float), cudaMemcpyHostToDevice));
-        // Use x_norm_dev declared at the top of the function
-        rmsnorm_vector_cuda(x_dev, w_norm2_dev, x_norm_dev, hs, eps);
+        rmsnorm_vector_cuda(x_dev, lw.post_attention_layernorm_dev, x_norm_dev, hs, eps); // CHANGED: Use persistent ptr lw.post_attention_layernorm_dev
         gpuErrchk(cudaFree(w_norm2_dev));
-        gpuErrchk(cudaDeviceSynchronize());
+        gpuErrchk(cudaDeviceSynchronize()); // Keep sync for now
 
         // MLP MatVecs & SwiGLU
         // Declare device pointers needed for MLP within this scope
@@ -888,8 +931,8 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, K
 
     // --- Final Steps (Outside Layer Loop) ---
     // Final RMSNorm 
+    float* w_final_norm_dev = nullptr; // Keep alloc/free for now, just change the source ptr
     std::vector<float> w_final_norm_vec = bf16vec_to_float_vec(final_norm);
-    float* w_final_norm_dev = nullptr;
     gpuErrchk(cudaMalloc(&w_final_norm_dev, hs * sizeof(float)));
     gpuErrchk(cudaMemcpy(w_final_norm_dev, w_final_norm_vec.data(), hs * sizeof(float), cudaMemcpyHostToDevice));
     // Use x_norm_dev declared at the top of the function
@@ -1126,13 +1169,13 @@ std::vector<float> TinyLlamaModel::forward_device(int token_id, int pos, KVCache
         gpuErrchk(cudaMemcpy(x_resid1_dev, x_dev, hs * sizeof(float), cudaMemcpyDeviceToDevice));
 
         // RMSNorm 1 (Input: x_dev, Output: x_norm_dev)
-        float* w_norm1_dev = nullptr;
-        std::vector<float> w_norm1_vec = bf16vec_to_float_vec(lw.input_layernorm);
+        float* w_norm1_dev = nullptr; // Declare device pointer
+        std::vector<float> w_norm1_vec = bf16vec_to_float_vec(lw.input_layernorm); // Keep conversion for now (though unused)
         gpuErrchk(cudaMalloc(&w_norm1_dev, hs * sizeof(float)));
         gpuErrchk(cudaMemcpy(w_norm1_dev, w_norm1_vec.data(), hs * sizeof(float), cudaMemcpyHostToDevice));
-        rmsnorm_vector_cuda(x_dev, w_norm1_dev, x_norm_dev, hs, eps);
+        rmsnorm_vector_cuda(x_dev, lw.input_layernorm_dev, x_norm_dev, hs, eps); 
         gpuErrchk(cudaFree(w_norm1_dev));
-        gpuErrchk(cudaDeviceSynchronize());
+        gpuErrchk(cudaDeviceSynchronize()); 
 
         // Q, K, V projections (Input: x_norm_dev, Outputs: q_dev, k_dev, v_dev)
         matvec_bf16_f32_cuda(lw.q_proj, x_norm_dev, q_dev, hs, hs);
@@ -1232,13 +1275,13 @@ std::vector<float> TinyLlamaModel::forward_device(int token_id, int pos, KVCache
         gpuErrchk(cudaMemcpy(x_resid2_dev, x_dev, hs * sizeof(float), cudaMemcpyDeviceToDevice));
 
         // Post-attention RMSNorm (Input: x_dev, Output: x_norm_dev)
-        float* w_norm2_dev = nullptr;
+        float* w_norm2_dev = nullptr; // Keep alloc/free for now, just change the source ptr
         std::vector<float> w_norm2_vec = bf16vec_to_float_vec(lw.post_attention_layernorm);
         gpuErrchk(cudaMalloc(&w_norm2_dev, hs * sizeof(float)));
         gpuErrchk(cudaMemcpy(w_norm2_dev, w_norm2_vec.data(), hs * sizeof(float), cudaMemcpyHostToDevice));
-        rmsnorm_vector_cuda(x_dev, w_norm2_dev, x_norm_dev, hs, eps);
+        rmsnorm_vector_cuda(x_dev, lw.post_attention_layernorm_dev, x_norm_dev, hs, eps); // CHANGED: Use persistent ptr lw.post_attention_layernorm_dev
         gpuErrchk(cudaFree(w_norm2_dev));
-        gpuErrchk(cudaDeviceSynchronize());
+        gpuErrchk(cudaDeviceSynchronize()); // Keep sync for now
 
         // MLP MatVecs & SwiGLU 
         // Gate * Up -> SwiGLU -> Down
@@ -1258,13 +1301,13 @@ std::vector<float> TinyLlamaModel::forward_device(int token_id, int pos, KVCache
 
     // --- Final Steps (Outside Layer Loop) --- 
     // Final RMSNorm (Input: x_dev, Output: x_norm_dev)
-    float* w_final_norm_dev = nullptr;
+    float* w_final_norm_dev = nullptr; // Keep alloc/free for now, just change the source ptr
     std::vector<float> w_final_norm_vec = bf16vec_to_float_vec(final_norm);
     gpuErrchk(cudaMalloc(&w_final_norm_dev, hs * sizeof(float)));
     gpuErrchk(cudaMemcpy(w_final_norm_dev, w_final_norm_vec.data(), hs * sizeof(float), cudaMemcpyHostToDevice));
-    rmsnorm_vector_cuda(x_dev, w_final_norm_dev, x_norm_dev, hs, eps);
+    rmsnorm_vector_cuda(x_dev, final_norm_dev, x_norm_dev, hs, eps); // CHANGED: Use persistent ptr final_norm_dev
     gpuErrchk(cudaFree(w_final_norm_dev));
-    gpuErrchk(cudaDeviceSynchronize());
+    gpuErrchk(cudaDeviceSynchronize()); // Keep sync for now
 
     // Final LM Head Projection (Input: x_norm_dev, Output: logits_dev)
     matvec_bf16_f32_cuda(lm_head, x_norm_dev, logits_dev, vs, hs);
