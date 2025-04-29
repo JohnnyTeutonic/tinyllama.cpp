@@ -156,6 +156,13 @@ void update_kv_cache_cuda(float* cache_base_ptr,
 // --- Moved SwiGLU declaration INSIDE HAS_CUDA --- 
 void swiglu_cuda(const float* gate_dev, const float* up_dev, float* out_dev, int n);
 
+// NEW KERNEL DECLARATION (MODIFIED SIGNATURE)
+void lookup_embedding_bf16_f32_cuda(const std::vector<uint16_t>& embedding_table_host, // Takes host vector
+                                    float* output_vector, 
+                                    int token_id, 
+                                    int hidden_size, 
+                                    int vocab_size);
+
 #endif // HAS_CUDA
 
 #endif // CUDA_KERNELS_H 

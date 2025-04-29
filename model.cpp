@@ -1102,8 +1102,21 @@ std::vector<float> TinyLlamaModel::forward_device(int token_id, int pos, KVCache
     // freqs_dev allocated in loop
 
     // --- Initial Embedding Lookup & Copy --- 
-    std::vector<float> x_vec = lookup_embedding(token_id);
-    gpuErrchk(cudaMemcpy(x_dev, x_vec.data(), hs * sizeof(float), cudaMemcpyHostToDevice));
+    // OLD CPU LOOKUP + H2D COPY:
+    // std::vector<float> x_vec = lookup_embedding(token_id);
+    // gpuErrchk(cudaMemcpy(x_dev, x_vec.data(), hs * sizeof(float), cudaMemcpyHostToDevice));
+    
+    // NEW GPU-SIDE LOOKUP (BF16 -> FP32) using the host vector wrapper
+    lookup_embedding_bf16_f32_cuda(
+        embed_tokens,                       // Source: BF16 embedding table on HOST
+        x_dev,                              // Destination: FP32 state vector on GPU
+        token_id,                           // ID of the token to lookup
+        hs,                                 // hidden_size
+        vs                                  // vocab_size 
+    );
+    // Optional: Synchronize if subsequent operations rely *immediately* on x_dev 
+    // being ready and don't involve CUDA API calls that would implicitly sync.
+    // gpuErrchk(cudaDeviceSynchronize()); 
 
     // --- Layer Loop --- 
     for (int l = 0; l < nhl; ++l) {

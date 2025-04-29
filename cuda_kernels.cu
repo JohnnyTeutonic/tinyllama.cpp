@@ -732,4 +732,67 @@ void update_kv_cache_cuda(float* cache_base_ptr, // Base pointer for K or V for 
     gpuErrchk(cudaGetLastError()); // Check for errors after kernel launch
 }
 
+// ============================================================================ 
+// Kernel Implementation: Lookup Embedding (BF16 -> FP32)
+// ============================================================================
+
+__global__ void lookup_embedding_bf16_f32_kernel(const uint16_t* __restrict__ embedding_table,
+                                               float* __restrict__ output_vector,
+                                               int token_id,
+                                               int hidden_size,
+                                               int vocab_size)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    // Calculate base offset for the token's embedding row
+    // Assuming embedding table is tightly packed: [vocab_size, hidden_size]
+    size_t base_offset = (size_t)token_id * hidden_size;
+
+    if (idx < hidden_size && token_id >= 0 && token_id < vocab_size) {
+        // Read BF16 value from the embedding table
+        uint16_t bf16_val = embedding_table[base_offset + idx];
+
+        // Convert BF16 to FP32
+        // Simplest conversion: Shift left by 16 bits
+        unsigned int ui = ((unsigned int)bf16_val) << 16;
+        // Reinterpret the bits as a float
+        output_vector[idx] = *reinterpret_cast<float*>(&ui);
+    }
+}
+
+// Host wrapper for the lookup embedding kernel (MODIFIED)
+void lookup_embedding_bf16_f32_cuda(const std::vector<uint16_t>& embedding_table_host,
+                                    float* output_vector, // Output is still a device pointer
+                                    int token_id,
+                                    int hidden_size,
+                                    int vocab_size) {
+    // Allocate temporary device memory for the embedding table
+    uint16_t* embedding_table_dev = nullptr;
+    size_t table_size_bytes = (size_t)vocab_size * hidden_size * sizeof(uint16_t);
+    gpuErrchk(cudaMalloc(&embedding_table_dev, table_size_bytes));
+
+    // Copy the host table to the device
+    gpuErrchk(cudaMemcpy(embedding_table_dev, embedding_table_host.data(), table_size_bytes, cudaMemcpyHostToDevice));
+
+    // --- Launch Kernel --- 
+    dim3 threads_per_block(256);
+    // Need enough blocks to cover the hidden_size dimension
+    dim3 num_blocks((hidden_size + threads_per_block.x - 1) / threads_per_block.x);
+
+    lookup_embedding_bf16_f32_kernel<<<num_blocks, threads_per_block>>>(
+        embedding_table_dev, // Pass the device pointer to the kernel
+        output_vector,
+        token_id,
+        hidden_size,
+        vocab_size
+    );
+    gpuErrchk(cudaGetLastError()); // Check for kernel launch errors
+    
+    // Free the temporary device memory for the table
+    gpuErrchk(cudaFree(embedding_table_dev));
+
+    // No explicit sync needed here, subsequent operations will sync if necessary
+    // gpuErrchk(cudaDeviceSynchronize()); 
+}
+
 #endif // HAS_CUDA
