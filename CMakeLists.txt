@@ -24,9 +24,13 @@ find_package(OpenSSL)
 
 # Handle CUDA
 find_package(CUDA)
+# Modern CMake approach to find specific CUDA components
+find_package(CUDAToolkit REQUIRED COMPONENTS cublas) 
+
 set(CUDA_SOURCES cuda_kernels.cu) # Define CUDA source file
 if(CUDA_FOUND)
     message(STATUS "Found CUDA toolkit version: ${CUDA_VERSION}")
+    message(STATUS "Found CUDAToolkit including cuBLAS: ${CUDAToolkit_FOUND}") # Log if found
     set(CMAKE_CUDA_ARCHITECTURES 60 61 70 75 80 86 CACHE STRING "CUDA architectures") 
     message(STATUS "CUDA Found. Will define HAS_CUDA for tinyllama_core library.")
     set(CUDA_ENABLED TRUE)
@@ -64,7 +68,8 @@ target_link_libraries(tinyllama_core PRIVATE # Dependencies needed to BUILD the 
 # Conditionally add CUDA definition and link CUDA libs for the library
 if(CUDA_ENABLED)
     target_compile_definitions(tinyllama_core PUBLIC HAS_CUDA)
-    target_link_libraries(tinyllama_core PRIVATE ${CUDA_LIBRARIES})
+    # Link core CUDA runtime and the cuBLAS library
+    target_link_libraries(tinyllama_core PRIVATE ${CUDA_LIBRARIES} CUDA::cublas)
 endif()
 
 # --- Original Executable (Now uses the library) ---

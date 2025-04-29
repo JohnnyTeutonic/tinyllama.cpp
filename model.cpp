@@ -374,7 +374,20 @@ static void matvec_bf16_f32_vector(const std::vector<uint16_t>& mat_bf16,
 #ifdef HAS_CUDA
     // Logger::info("Using CUDA MatVec (BF16*F32->F32)"); // Optional log
     // Call the CUDA wrapper function
-    matvec_bf16_f32_cuda(mat_bf16, vec_f32, out_f32, rows, cols);
+    // Create a temporary handle for this static function context
+    cublasHandle_t temp_handle;
+    cublasStatus_t create_status = cublasCreate(&temp_handle);
+    if (create_status != CUBLAS_STATUS_SUCCESS) {
+        Logger::error("Temporary cuBLAS handle creation failed in matvec_bf16_f32_vector");
+        throw std::runtime_error("Failed to create temp cuBLAS handle");
+    }
+    matvec_bf16_f32_cuda(temp_handle, mat_bf16, vec_f32, out_f32, rows, cols);
+    // Destroy the temporary handle
+    cublasStatus_t destroy_status = cublasDestroy(temp_handle);
+    if (destroy_status != CUBLAS_STATUS_SUCCESS) {
+         Logger::error("Temporary cuBLAS handle destruction failed in matvec_bf16_f32_vector");
+         // Log but continue
+    }
 #else
     // Logger::info("Using CPU MatVec (BF16*F32->F32, OpenMP+Kahan)"); // Optional log
     // Original OpenMP + Kahan implementation
@@ -551,7 +564,64 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& config, const SafeTensorsLoade
         Logger::error("Missing model.norm.weight: " + std::string(e.what()));
     }
 
+    // --- START: Load Per-Layer Weights ---
+    layers.resize(nhl); // Resize the layers vector first!
+    for (int i = 0; i < nhl; ++i) {
+        Logger::info("Loading weights for layer " + std::to_string(i));
+        std::string prefix = "model.layers." + std::to_string(i) + ".";
+        try {
+            layers[i].q_proj = uint8_vector_to_uint16_vector(loader.get_tensor_bytes(prefix + "self_attn.q_proj.weight"), hs * hs);
+        } catch (const std::exception& e) { Logger::error("Missing " + prefix + "self_attn.q_proj.weight: " + std::string(e.what())); }
+        try {
+            layers[i].k_proj = uint8_vector_to_uint16_vector(loader.get_tensor_bytes(prefix + "self_attn.k_proj.weight"), kv_dim * hs);
+        } catch (const std::exception& e) { Logger::error("Missing " + prefix + "self_attn.k_proj.weight: " + std::string(e.what())); }
+        try {
+            layers[i].v_proj = uint8_vector_to_uint16_vector(loader.get_tensor_bytes(prefix + "self_attn.v_proj.weight"), kv_dim * hs);
+        } catch (const std::exception& e) { Logger::error("Missing " + prefix + "self_attn.v_proj.weight: " + std::string(e.what())); }
+        try {
+            layers[i].o_proj = uint8_vector_to_uint16_vector(loader.get_tensor_bytes(prefix + "self_attn.o_proj.weight"), hs * hs);
+        } catch (const std::exception& e) { Logger::error("Missing " + prefix + "self_attn.o_proj.weight: " + std::string(e.what())); }
+        try {
+            layers[i].gate_proj = uint8_vector_to_uint16_vector(loader.get_tensor_bytes(prefix + "mlp.gate_proj.weight"), is * hs);
+        } catch (const std::exception& e) { Logger::error("Missing " + prefix + "mlp.gate_proj.weight: " + std::string(e.what())); }
+        try {
+            layers[i].up_proj = uint8_vector_to_uint16_vector(loader.get_tensor_bytes(prefix + "mlp.up_proj.weight"), is * hs);
+        } catch (const std::exception& e) { Logger::error("Missing " + prefix + "mlp.up_proj.weight: " + std::string(e.what())); }
+        try {
+            layers[i].down_proj = uint8_vector_to_uint16_vector(loader.get_tensor_bytes(prefix + "mlp.down_proj.weight"), hs * is);
+        } catch (const std::exception& e) { Logger::error("Missing " + prefix + "mlp.down_proj.weight: " + std::string(e.what())); }
+        try {
+            layers[i].input_layernorm = uint8_vector_to_uint16_vector(loader.get_tensor_bytes(prefix + "input_layernorm.weight"), hs);
+        } catch (const std::exception& e) { Logger::error("Missing " + prefix + "input_layernorm.weight: " + std::string(e.what())); }
+        try {
+            layers[i].post_attention_layernorm = uint8_vector_to_uint16_vector(loader.get_tensor_bytes(prefix + "post_attention_layernorm.weight"), hs);
+        } catch (const std::exception& e) { Logger::error("Missing " + prefix + "post_attention_layernorm.weight: " + std::string(e.what())); }
+
 #ifdef HAS_CUDA
+        // Allocate and copy FP32 layer norm weights for this layer to GPU
+        std::vector<float> ln1_f32 = bf16vec_to_float_vec(layers[i].input_layernorm);
+        gpuErrchk(cudaMalloc(&layers[i].input_layernorm_dev, ln1_f32.size() * sizeof(float)));
+        gpuErrchk(cudaMemcpy(layers[i].input_layernorm_dev, ln1_f32.data(), ln1_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
+
+        std::vector<float> ln2_f32 = bf16vec_to_float_vec(layers[i].post_attention_layernorm);
+        gpuErrchk(cudaMalloc(&layers[i].post_attention_layernorm_dev, ln2_f32.size() * sizeof(float)));
+        gpuErrchk(cudaMemcpy(layers[i].post_attention_layernorm_dev, ln2_f32.data(), ln2_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
+#endif
+    }
+    Logger::info("Finished loading all layer weights.");
+    // --- END: Load Per-Layer Weights ---
+
+#ifdef HAS_CUDA
+    // --- START CUBLAS Initialization ---
+    cublasStatus_t cublas_status = cublasCreate(&cublas_handle_);
+    if (cublas_status != CUBLAS_STATUS_SUCCESS) {
+        Logger::error("cuBLAS handle creation failed with error code: " + std::to_string(cublas_status));
+        // Handle error appropriately - maybe throw an exception or set an error state
+        throw std::runtime_error("Failed to initialize cuBLAS");
+    }
+    Logger::info("cuBLAS handle created successfully.");
+    // --- END CUBLAS Initialization ---
+
     // Allocate and copy final_norm weights to device
     std::vector<float> final_norm_f32 = bf16vec_to_float_vec(final_norm);
     gpuErrchk(cudaMalloc(&final_norm_dev, final_norm_f32.size() * sizeof(float)));
@@ -569,80 +639,7 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& config, const SafeTensorsLoade
     gpuErrchk(cudaMemcpy(lm_head_dev_, lm_head.data(), lm_head.size() * sizeof(uint16_t), cudaMemcpyHostToDevice));
     Logger::info("Copied lm_head (bf16) to GPU.");
 
-#endif
-
-    layers.resize(nhl);
-    for (int i = 0; i < nhl; ++i) {
-        auto& lw = layers[i];
-        std::string prefix = "model.layers." + std::to_string(i) + ".";
-        try {
-            lw.input_layernorm = uint8_vector_to_uint16_vector(loader.get_tensor_bytes(prefix + "input_layernorm.weight"), hs);
-            lw.post_attention_layernorm = uint8_vector_to_uint16_vector(loader.get_tensor_bytes(prefix + "post_attention_layernorm.weight"), hs);
-            lw.q_proj = uint8_vector_to_uint16_vector(loader.get_tensor_bytes(prefix + "self_attn.q_proj.weight"), hs * hs);
-            lw.k_proj = uint8_vector_to_uint16_vector(loader.get_tensor_bytes(prefix + "self_attn.k_proj.weight"), kv_dim * hs);
-            lw.v_proj = uint8_vector_to_uint16_vector(loader.get_tensor_bytes(prefix + "self_attn.v_proj.weight"), kv_dim * hs);
-            lw.o_proj = uint8_vector_to_uint16_vector(loader.get_tensor_bytes(prefix + "self_attn.o_proj.weight"), hs * hs);
-            lw.gate_proj = uint8_vector_to_uint16_vector(loader.get_tensor_bytes(prefix + "mlp.gate_proj.weight"), is * hs);
-            lw.up_proj = uint8_vector_to_uint16_vector(loader.get_tensor_bytes(prefix + "mlp.up_proj.weight"), is * hs);
-            lw.down_proj = uint8_vector_to_uint16_vector(loader.get_tensor_bytes(prefix + "mlp.down_proj.weight"), hs * is);
-
-#ifdef HAS_CUDA
-            // Allocate and copy layer norm weights to device
-            std::vector<float> input_ln_f32 = bf16vec_to_float_vec(lw.input_layernorm);
-            gpuErrchk(cudaMalloc(&lw.input_layernorm_dev, input_ln_f32.size() * sizeof(float)));
-            gpuErrchk(cudaMemcpy(lw.input_layernorm_dev, input_ln_f32.data(), input_ln_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
-
-            std::vector<float> post_attn_ln_f32 = bf16vec_to_float_vec(lw.post_attention_layernorm);
-            gpuErrchk(cudaMalloc(&lw.post_attention_layernorm_dev, post_attn_ln_f32.size() * sizeof(float)));
-            gpuErrchk(cudaMemcpy(lw.post_attention_layernorm_dev, post_attn_ln_f32.data(), post_attn_ln_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
-#endif
-
-            // --- START: Verify o_proj loading for Layer 0 --- 
-            if (i == 0) {
-                 size_t expected_o_proj_size = (size_t)hs * hs;
-                 Logger::info("C++ Layer 0 o_proj loaded size: " + std::to_string(lw.o_proj.size()) + " (Expected: " + std::to_string(expected_o_proj_size) + ")");
-                 if (lw.o_proj.size() == expected_o_proj_size) {
-                     std::stringstream oss_oproj;
-                     oss_oproj << "C++ Layer 0 o_proj first 5 (uint16_t): ";
-                     for (int j = 0; j < 5; ++j) oss_oproj << lw.o_proj[j] << " ";
-                     Logger::info(oss_oproj.str());
-                 } else {
-                     Logger::error("C++ Layer 0 o_proj SIZE MISMATCH after loading!");
-                 }
-            }
-            // --- END: Verify o_proj loading --- 
-
-            // Log expected dimensions and loaded size for Layer 0 Q/K proj
-            if (i == 0) {
-                int expected_q_M = hs;
-                int expected_q_N = hs;
-                size_t expected_q_size = (size_t)expected_q_M * expected_q_N;
-                Logger::info("C++ Layer 0 q_proj expected M, N: " + std::to_string(expected_q_M) + ", " + std::to_string(expected_q_N));
-                Logger::info("C++ Layer 0 q_proj loaded size: " + std::to_string(lw.q_proj.size()) + " (Expected: " + std::to_string(expected_q_size) + ")");
-                if (lw.q_proj.size() != expected_q_size) {
-                    Logger::error("C++ Layer 0 q_proj SIZE MISMATCH!");
-                }
-
-                int expected_k_M = kv_dim;
-                int expected_k_N = hs;
-                size_t expected_k_size = (size_t)expected_k_M * expected_k_N;
-                 Logger::info("C++ Layer 0 k_proj expected M, N: " + std::to_string(expected_k_M) + ", " + std::to_string(expected_k_N));
-                 Logger::info("C++ Layer 0 k_proj loaded size: " + std::to_string(lw.k_proj.size()) + " (Expected: " + std::to_string(expected_k_size) + ")");
-                 if (lw.k_proj.size() != expected_k_size) {
-                     Logger::error("C++ Layer 0 k_proj SIZE MISMATCH!");
-                 }
-            }
-
-            // Print first 5 raw uint16_t values of q_proj for this layer (for basic check)
-            std::ostringstream oss;
-            oss << "C++ layer " << i << " q_proj first 5 (uint16_t): ";
-            for (int j = 0; j < 5 && j < lw.q_proj.size(); ++j) oss << lw.q_proj[j] << " ";
-            Logger::info(oss.str());
-        } catch (const std::exception& e) {
-            Logger::error("Missing or malformed weights in layer " + std::to_string(i) + ": " + e.what());
-        }
-    }
-    // Layer Weights (Concatenate on Host first, then copy)
+    // Concatenated Layer Weights (BF16)
     size_t layer_q_size = (size_t)hs * hs;
     size_t layer_k_size = (size_t)kv_dim * hs;
     size_t layer_v_size = (size_t)kv_dim * hs;
@@ -696,6 +693,47 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& config, const SafeTensorsLoade
     // --- END: Allocate and copy persistent BF16 weights ---
     Logger::info("All model weights loaded (as bfloat16/uint16_t).");
 
+    // --- START: Allocate and copy persistent FP32 weights ---
+    // Embedding Table (FP32)
+    std::vector<float> embed_tokens_f32 = bf16vec_to_float_vec(embed_tokens);
+    gpuErrchk(cudaMalloc(&token_embedding_table_f32_dev_, embed_tokens_f32.size() * sizeof(float)));
+    gpuErrchk(cudaMemcpy(token_embedding_table_f32_dev_, embed_tokens_f32.data(), embed_tokens_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
+    Logger::info("Copied token_embedding_table (fp32) to GPU.");
+
+    // LM Head (FP32)
+    std::vector<float> lm_head_f32 = bf16vec_to_float_vec(lm_head);
+    gpuErrchk(cudaMalloc(&lm_head_f32_dev_, lm_head_f32.size() * sizeof(float)));
+    gpuErrchk(cudaMemcpy(lm_head_f32_dev_, lm_head_f32.data(), lm_head_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
+    Logger::info("Copied lm_head (fp32) to GPU.");
+
+    // Concatenated Layer Weights (FP32)
+    std::vector<float> all_q_proj_f32 = bf16vec_to_float_vec(all_q_proj_host);
+    std::vector<float> all_k_proj_f32 = bf16vec_to_float_vec(all_k_proj_host);
+    std::vector<float> all_v_proj_f32 = bf16vec_to_float_vec(all_v_proj_host);
+    std::vector<float> all_o_proj_f32 = bf16vec_to_float_vec(all_o_proj_host);
+    std::vector<float> all_gate_proj_f32 = bf16vec_to_float_vec(all_gate_proj_host);
+    std::vector<float> all_up_proj_f32 = bf16vec_to_float_vec(all_up_proj_host);
+    std::vector<float> all_down_proj_f32 = bf16vec_to_float_vec(all_down_proj_host);
+
+    gpuErrchk(cudaMalloc(&w_q_f32_dev_, all_q_proj_f32.size() * sizeof(float)));
+    gpuErrchk(cudaMemcpy(w_q_f32_dev_, all_q_proj_f32.data(), all_q_proj_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
+    gpuErrchk(cudaMalloc(&w_k_f32_dev_, all_k_proj_f32.size() * sizeof(float)));
+    gpuErrchk(cudaMemcpy(w_k_f32_dev_, all_k_proj_f32.data(), all_k_proj_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
+    gpuErrchk(cudaMalloc(&w_v_f32_dev_, all_v_proj_f32.size() * sizeof(float)));
+    gpuErrchk(cudaMemcpy(w_v_f32_dev_, all_v_proj_f32.data(), all_v_proj_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
+    gpuErrchk(cudaMalloc(&w_o_f32_dev_, all_o_proj_f32.size() * sizeof(float)));
+    gpuErrchk(cudaMemcpy(w_o_f32_dev_, all_o_proj_f32.data(), all_o_proj_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
+    gpuErrchk(cudaMalloc(&w_gate_f32_dev_, all_gate_proj_f32.size() * sizeof(float)));
+    gpuErrchk(cudaMemcpy(w_gate_f32_dev_, all_gate_proj_f32.data(), all_gate_proj_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
+    gpuErrchk(cudaMalloc(&w_up_f32_dev_, all_up_proj_f32.size() * sizeof(float)));
+    gpuErrchk(cudaMemcpy(w_up_f32_dev_, all_up_proj_f32.data(), all_up_proj_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
+    gpuErrchk(cudaMalloc(&w_down_f32_dev_, all_down_proj_f32.size() * sizeof(float)));
+    gpuErrchk(cudaMemcpy(w_down_f32_dev_, all_down_proj_f32.data(), all_down_proj_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
+    Logger::info("Copied all concatenated layer weights (fp32) to GPU.");
+    // --- END: Allocate and copy persistent FP32 weights ---
+
+#endif // <-- CLOSE the main CUDA block here
+
     // Precompute RoPE cos/sin values
     int head_dim = hs / n_heads;
     int max_seq_len = config.max_position_embeddings;
@@ -743,7 +781,19 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& config, const SafeTensorsLoade
 // --- START: TinyLlamaModel Destructor Definition ---
 TinyLlamaModel::~TinyLlamaModel() {
 #ifdef HAS_CUDA
-    Logger::info("Freeing TinyLlamaModel CUDA weight memory...");
+    Logger::info("Freeing TinyLlamaModel CUDA resources...");
+    // --- START CUBLAS Destruction ---
+    if (cublas_handle_) {
+        cublasStatus_t cublas_status = cublasDestroy(cublas_handle_);
+        if (cublas_status != CUBLAS_STATUS_SUCCESS) {
+            Logger::error("cuBLAS handle destruction failed with error code: " + std::to_string(cublas_status));
+            // Log error, but don't throw from destructor
+        }
+        cublas_handle_ = nullptr;
+        Logger::info("cuBLAS handle destroyed.");
+    }
+    // --- END CUBLAS Destruction ---
+
     // Free final norm device pointer
     if (final_norm_dev) {
         gpuErrchk(cudaFree(final_norm_dev));
@@ -803,6 +853,45 @@ TinyLlamaModel::~TinyLlamaModel() {
         w_down_dev_ = nullptr;
     }
     // --- END: Free persistent BF16 weights ---
+
+    // --- START: Free persistent FP32 weights ---
+    if (token_embedding_table_f32_dev_) {
+        gpuErrchk(cudaFree(token_embedding_table_f32_dev_));
+        token_embedding_table_f32_dev_ = nullptr;
+    }
+    if (lm_head_f32_dev_) {
+        gpuErrchk(cudaFree(lm_head_f32_dev_));
+        lm_head_f32_dev_ = nullptr;
+    }
+    if (w_q_f32_dev_) {
+        gpuErrchk(cudaFree(w_q_f32_dev_));
+        w_q_f32_dev_ = nullptr;
+    }
+    if (w_k_f32_dev_) {
+        gpuErrchk(cudaFree(w_k_f32_dev_));
+        w_k_f32_dev_ = nullptr;
+    }
+    if (w_v_f32_dev_) {
+        gpuErrchk(cudaFree(w_v_f32_dev_));
+        w_v_f32_dev_ = nullptr;
+    }
+    if (w_o_f32_dev_) {
+        gpuErrchk(cudaFree(w_o_f32_dev_));
+        w_o_f32_dev_ = nullptr;
+    }
+    if (w_gate_f32_dev_) {
+        gpuErrchk(cudaFree(w_gate_f32_dev_));
+        w_gate_f32_dev_ = nullptr;
+    }
+    if (w_up_f32_dev_) {
+        gpuErrchk(cudaFree(w_up_f32_dev_));
+        w_up_f32_dev_ = nullptr;
+    }
+    if (w_down_f32_dev_) {
+        gpuErrchk(cudaFree(w_down_f32_dev_));
+        w_down_f32_dev_ = nullptr;
+    }
+    // --- END: Free persistent FP32 weights ---
 
     Logger::info("Finished freeing TinyLlamaModel CUDA weight memory.");
 #endif
@@ -917,9 +1006,9 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, K
         gpuErrchk(cudaDeviceSynchronize());
 
         // Q, K, V projections (Input: x_norm_dev, Outputs: q_dev, k_dev, v_dev)
-        matvec_bf16_f32_cuda(lw.q_proj, x_norm_dev, q_dev, hs, hs);
-        matvec_bf16_f32_cuda(lw.k_proj, x_norm_dev, k_dev, n_kv_heads * head_dim, hs);
-        matvec_bf16_f32_cuda(lw.v_proj, x_norm_dev, v_dev, n_kv_heads * head_dim, hs);
+        matvec_bf16_f32_cuda(cublas_handle_, lw.q_proj, x_norm_dev, q_dev, hs, hs); // Pass handle
+        matvec_bf16_f32_cuda(cublas_handle_, lw.k_proj, x_norm_dev, k_dev, n_kv_heads * head_dim, hs); // Pass handle
+        matvec_bf16_f32_cuda(cublas_handle_, lw.v_proj, x_norm_dev, v_dev, n_kv_heads * head_dim, hs); // Pass handle
         gpuErrchk(cudaDeviceSynchronize());
 
         // RoPE (Applied in-place to q_dev, k_dev)
@@ -999,12 +1088,11 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, K
         gpuErrchk(cudaDeviceSynchronize());
 
         // Output projection (Input: attn_out_dev, Output: attn_proj_dev)
-        matvec_bf16_f32_cuda(lw.o_proj, attn_out_dev, attn_proj_dev, hs, hs);
+        matvec_bf16_f32_cuda(cublas_handle_, lw.o_proj, attn_out_dev, attn_proj_dev, hs, hs); // Pass handle
         gpuErrchk(cudaDeviceSynchronize());
 
-        // First residual connection (x = x_resid1 + attn_proj)
-        // Using add_vectors_cuda kernel
-        add_vectors_cuda(x_resid1_dev, attn_proj_dev, x_dev, hs);
+        // First residual connection (x = x_resid1 + attn_proj) - FUSED KERNEL
+        add_residual_cuda(attn_proj_dev, x_resid1_dev, x_dev, hs);
         gpuErrchk(cudaDeviceSynchronize());
 
         // --- MLP Block --- 
@@ -1034,24 +1122,17 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, K
         gpuErrchk(cudaMalloc(&swiglu_vec_dev, is * sizeof(float)));
         gpuErrchk(cudaMalloc(&mlp_down_dev, hs * sizeof(float)));
         // Use x_norm_dev as input
-        matvec_bf16_f32_cuda(lw.gate_proj, x_norm_dev, gate_vec_dev, is, hs);
-        matvec_bf16_f32_cuda(lw.up_proj, x_norm_dev, up_vec_dev, is, hs);
+        matvec_bf16_f32_cuda(cublas_handle_, lw.gate_proj, x_norm_dev, gate_vec_dev, is, hs); // Pass handle
+        matvec_bf16_f32_cuda(cublas_handle_, lw.up_proj, x_norm_dev, up_vec_dev, is, hs); // Pass handle
         gpuErrchk(cudaDeviceSynchronize());
         swiglu_cuda(gate_vec_dev, up_vec_dev, swiglu_vec_dev, is);
         gpuErrchk(cudaDeviceSynchronize());
-        matvec_bf16_f32_cuda(lw.down_proj, swiglu_vec_dev, mlp_down_dev, hs, is);
+        matvec_bf16_f32_cuda(cublas_handle_, lw.down_proj, swiglu_vec_dev, mlp_down_dev, hs, is); // Pass handle
         gpuErrchk(cudaDeviceSynchronize());
         
-        // Add residual 2 (Fallback)
-        std::vector<float> mlp_down_host(hs);
-        std::vector<float> x_resid2_host(hs);
-        gpuErrchk(cudaMemcpy(mlp_down_host.data(), mlp_down_dev, hs * sizeof(float), cudaMemcpyDeviceToHost));
-        gpuErrchk(cudaMemcpy(x_resid2_host.data(), x_resid2_dev, hs * sizeof(float), cudaMemcpyDeviceToHost)); // Copy x_resid2_dev content
-        #pragma omp parallel for
-        for(int i=0; i<hs; ++i) {
-            x_resid2_host[i] += mlp_down_host[i];
-        }
-        gpuErrchk(cudaMemcpy(x_dev, x_resid2_host.data(), hs * sizeof(float), cudaMemcpyHostToDevice));
+        // Add residual 2 (FUSED KERNEL)
+        add_residual_cuda(mlp_down_dev, x_resid2_dev, x_dev, hs);
+        gpuErrchk(cudaDeviceSynchronize());
         
         // Free CUDA MLP intermediates
         gpuErrchk(cudaFree(gate_vec_dev));
@@ -1077,7 +1158,7 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, K
     float* logits_dev = nullptr;
     gpuErrchk(cudaMalloc(&logits_dev, vs * sizeof(float)));
     // Use x_norm_dev as input
-    matvec_bf16_f32_cuda(lm_head, x_norm_dev, logits_dev, vs, hs);
+    matvec_bf16_f32_cuda(cublas_handle_, lm_head, x_norm_dev, logits_dev, vs, hs); // Pass handle
     gpuErrchk(cudaDeviceSynchronize());
 
     // Copy final logits from device to host
@@ -1187,14 +1268,14 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, K
         std::vector<float> x_resid2_vec = x_vec; 
         std::vector<float> w_norm2_vec = bf16vec_to_float_vec(lw.post_attention_layernorm);
         rmsnorm_vector(x_vec, w_norm2_vec, x_norm_vec2, eps);
-        matvec_bf16_f32_vector(lw.gate_proj, x_norm_vec2, gate_vec, is, hs);
-        matvec_bf16_f32_vector(lw.up_proj, x_norm_vec2, up_vec, is, hs);
+        matvec_bf16_f32_vector(cublas_handle_, lw.gate_proj, x_norm_vec2, gate_vec, is); // Pass handle
+        matvec_bf16_f32_vector(cublas_handle_, lw.up_proj, x_norm_vec2, up_vec, is); // Pass handle
         silu(gate_vec, silu_out_vec);
         #pragma omp parallel for
         for(size_t i = 0; i < is; ++i) {
             swiglu_result_vec[i] = silu_out_vec[i] * up_vec[i];
         }
-        matvec_bf16_f32_vector(lw.down_proj, swiglu_result_vec, mlp_out_vec, hs, is);
+        matvec_bf16_f32_vector(cublas_handle_, lw.down_proj, swiglu_result_vec, mlp_out_vec, hs); // Pass handle
         #pragma omp parallel for
         for(size_t i=0; i<hs; ++i) {
             x_vec[i] = x_resid2_vec[i] + mlp_out_vec[i]; 
@@ -1213,7 +1294,7 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, K
         log_vector_summary("TROUBLESHOOTING Output of Final C++ RMSNorm (P0, CPU)", x_final_norm_vec); 
     }
     std::vector<float> logits(vs); 
-    matvec_bf16_f32_vector(lm_head, x_final_norm_vec, logits, vs, hs);
+    matvec_bf16_f32_vector(cublas_handle_, lm_head, x_final_norm_vec, logits, vs); // Pass handle
     if (log_initial) {
         log_vector_summary("TROUBLESHOOTING Final Logits (P0, C++ MatVec, CPU Path)", logits, 10);
     }
@@ -1231,7 +1312,7 @@ int TinyLlamaModel::get_vocab_size() const {
 // --- Forward Pass (Device Implementation) --- 
 // Restore the #ifdef HAS_CUDA guard around the entire function definition
 #ifdef HAS_CUDA
-std::vector<float> TinyLlamaModel::forward_device(int token_id, int pos, KVCache* cache, const std::vector<int>* attention_mask) {
+std::vector<float> TinyLlamaModel::forward_device(int token_id, int pos, KVCache* cache, const std::vector<int>* attention_mask, cudaStream_t stream) {
     // Logger::info("[CUDA] forward_device called for token: " + std::to_string(token_id) + " pos: " + std::to_string(pos));
     int hs = config_.hidden_size;
     int vs = config_.vocab_size;
@@ -1260,56 +1341,43 @@ std::vector<float> TinyLlamaModel::forward_device(int token_id, int pos, KVCache
     float* logits_dev = nullptr;
     float* freqs_dev = nullptr; // For RoPE frequencies
 
-    // Allocate device buffers
-    gpuErrchk(cudaMalloc(&x_dev, hs * sizeof(float)));
-    gpuErrchk(cudaMalloc(&x_norm_dev, hs * sizeof(float)));
-    gpuErrchk(cudaMalloc(&x_resid1_dev, hs * sizeof(float)));
-    gpuErrchk(cudaMalloc(&x_resid2_dev, hs * sizeof(float)));
-    gpuErrchk(cudaMalloc(&q_dev, hs * sizeof(float)));
-    gpuErrchk(cudaMalloc(&k_dev, n_kv_heads * head_dim * sizeof(float)));
-    gpuErrchk(cudaMalloc(&v_dev, n_kv_heads * head_dim * sizeof(float)));
-    gpuErrchk(cudaMalloc(&attn_out_dev, hs * sizeof(float)));
-    gpuErrchk(cudaMalloc(&attn_proj_dev, hs * sizeof(float)));
-    gpuErrchk(cudaMalloc(&gate_vec_dev, is * sizeof(float)));
-    gpuErrchk(cudaMalloc(&up_vec_dev, is * sizeof(float)));
-    gpuErrchk(cudaMalloc(&swiglu_vec_dev, is * sizeof(float)));
-    gpuErrchk(cudaMalloc(&mlp_out_dev, hs * sizeof(float)));
-    gpuErrchk(cudaMalloc(&logits_dev, vs * sizeof(float)));
-    // freqs_dev allocated in loop
+    // --- Set cuBLAS Stream --- 
+    cublasStatus_t stream_status = cublasSetStream(cublas_handle_, stream);
+    if (stream_status != CUBLAS_STATUS_SUCCESS) {
+        Logger::error("cublasSetStream failed in forward_device");
+        // Handle error, maybe throw or return empty vector
+        return {}; 
+    }
+
+    // Allocate device buffers using async allocation on the specified stream
+    gpuErrchk(cudaMallocAsync(&x_dev, hs * sizeof(float), stream));
+    gpuErrchk(cudaMallocAsync(&x_norm_dev, hs * sizeof(float), stream));
+    gpuErrchk(cudaMallocAsync(&x_resid1_dev, hs * sizeof(float), stream));
+    gpuErrchk(cudaMallocAsync(&x_resid2_dev, hs * sizeof(float), stream));
+    gpuErrchk(cudaMallocAsync(&q_dev, hs * sizeof(float), stream));
+    gpuErrchk(cudaMallocAsync(&k_dev, n_kv_heads * head_dim * sizeof(float), stream));
+    gpuErrchk(cudaMallocAsync(&v_dev, n_kv_heads * head_dim * sizeof(float), stream));
+    gpuErrchk(cudaMallocAsync(&attn_out_dev, hs * sizeof(float), stream));
+    // gpuErrchk(cudaMallocAsync(&attn_proj_dev, hs * sizeof(float), stream)); // Use add_residual directly writing to x_dev
+    gpuErrchk(cudaMallocAsync(&gate_vec_dev, is * sizeof(float), stream));
+    gpuErrchk(cudaMallocAsync(&up_vec_dev, is * sizeof(float), stream));
+    gpuErrchk(cudaMallocAsync(&swiglu_vec_dev, is * sizeof(float), stream));
+    // gpuErrchk(cudaMallocAsync(&mlp_out_dev, hs * sizeof(float), stream)); // Use add_residual directly writing to x_dev
+    gpuErrchk(cudaMallocAsync(&logits_dev, vs * sizeof(float), stream));
 
     // --- Initial Embedding Lookup & Copy --- 
-    // REMOVED: OLD CPU LOOKUP + H2D COPY
-    // std::vector<float> x_vec = lookup_embedding(token_id);
-    // gpuErrchk(cudaMemcpy(x_dev, x_vec.data(), hs * sizeof(float), cudaMemcpyHostToDevice));
-    
-    // NEW GPU-SIDE LOOKUP using persistent device table
     lookup_embedding_bf16_f32_cuda(
         token_embedding_table_dev_, // Use persistent device pointer
         x_dev,                      // Destination: FP32 state vector on GPU
         token_id,
         hs,
         vs                          // <-- PASS vocab_size
-        /* stream = 0 default */
+        , stream                    // Pass stream
     );
 
     // --- Layer Loop --- 
     for (int l = 0; l < nhl; ++l) {
-        const auto& lw = layers[l]; // Host weights struct (only used for dimensions/norm pointers now)
-
-        // Residual 1 Prep (Copy x -> x_resid1)
-        gpuErrchk(cudaMemcpy(x_resid1_dev, x_dev, hs * sizeof(float), cudaMemcpyDeviceToDevice));
-
-        // RMSNorm 1 (Input: x_dev, Weight: lw.input_layernorm_dev, Output: x_norm_dev)
-        // REMOVED: Unnecessary H2D copy of norm weights
-        // float* w_norm1_dev = nullptr;
-        // std::vector<float> w_norm1_vec = bf16vec_to_float_vec(lw.input_layernorm); 
-        // gpuErrchk(cudaMalloc(&w_norm1_dev, hs * sizeof(float)));
-        // gpuErrchk(cudaMemcpy(w_norm1_dev, w_norm1_vec.data(), hs * sizeof(float), cudaMemcpyHostToDevice));
-        rmsnorm_vector_cuda(x_dev, lw.input_layernorm_dev, x_norm_dev, hs, eps); // USES PERSISTENT POINTER
-        // gpuErrchk(cudaFree(w_norm1_dev));
-        // gpuErrchk(cudaDeviceSynchronize()); // Remove sync, let CUDA manage dependencies
-
-        // Calculate offsets into concatenated weight buffers for this layer
+        // Layer weights device pointers (calculated offsets into persistent buffers)
         size_t layer_q_size    = (size_t)hs * hs;
         size_t layer_k_size    = (size_t)n_kv_heads * head_dim * hs; // kv_dim * hs
         size_t layer_v_size    = (size_t)n_kv_heads * head_dim * hs; // kv_dim * hs
@@ -1318,117 +1386,139 @@ std::vector<float> TinyLlamaModel::forward_device(int token_id, int pos, KVCache
         size_t layer_up_size   = (size_t)is * hs;
         size_t layer_down_size = (size_t)hs * is;
 
-        size_t q_offset    = (size_t)l * layer_q_size;
-        size_t k_offset    = (size_t)l * layer_k_size;
-        size_t v_offset    = (size_t)l * layer_v_size;
-        size_t o_offset    = (size_t)l * layer_o_size;
-        size_t gate_offset = (size_t)l * layer_gate_size;
-        size_t up_offset   = (size_t)l * layer_up_size;
-        size_t down_offset = (size_t)l * layer_down_size;
+        // BF16 Pointers (Keep for reference? Or remove if not needed)
+        // const uint16_t* lw_q_proj_dev    = w_q_dev_    + (size_t)l * layer_q_size;
+        // const uint16_t* lw_k_proj_dev    = w_k_dev_    + (size_t)l * layer_k_size;
+        // const uint16_t* lw_v_proj_dev    = w_v_dev_    + (size_t)l * layer_v_size;
+        // const uint16_t* lw_o_proj_dev    = w_o_dev_    + (size_t)l * layer_o_size;
+        // const uint16_t* lw_gate_proj_dev = w_gate_dev_ + (size_t)l * layer_gate_size;
+        // const uint16_t* lw_up_proj_dev   = w_up_dev_   + (size_t)l * layer_up_size;
+        // const uint16_t* lw_down_proj_dev = w_down_dev_ + (size_t)l * layer_down_size;
+        
+        // FP32 Pointers
+        const float* lw_q_proj_f32_dev    = w_q_f32_dev_    + (size_t)l * layer_q_size;
+        const float* lw_k_proj_f32_dev    = w_k_f32_dev_    + (size_t)l * layer_k_size;
+        const float* lw_v_proj_f32_dev    = w_v_f32_dev_    + (size_t)l * layer_v_size;
+        const float* lw_o_proj_f32_dev    = w_o_f32_dev_    + (size_t)l * layer_o_size;
+        const float* lw_gate_proj_f32_dev = w_gate_f32_dev_ + (size_t)l * layer_gate_size;
+        const float* lw_up_proj_f32_dev   = w_up_f32_dev_   + (size_t)l * layer_up_size;
+        const float* lw_down_proj_f32_dev = w_down_f32_dev_ + (size_t)l * layer_down_size;
+
+        const float* lw_in_norm_dev   = layers[l].input_layernorm_dev;
+        const float* lw_post_norm_dev = layers[l].post_attention_layernorm_dev;
+
+        // Residual 1 Prep (Copy x -> x_resid1)
+        gpuErrchk(cudaMemcpyAsync(x_resid1_dev, x_dev, hs * sizeof(float), cudaMemcpyDeviceToDevice, stream));
+
+        // RMSNorm 1 (Input: x_dev, Weight: lw_in_norm_dev, Output: x_norm_dev)
+        rmsnorm_vector_cuda(x_dev, lw_in_norm_dev, x_norm_dev, hs, eps, stream); 
 
         // Q, K, V projections (Input: x_norm_dev, Outputs: q_dev, k_dev, v_dev)
-        matvec_bf16_f32_cuda(w_q_dev_ + q_offset, x_norm_dev, q_dev, hs, hs);
-        matvec_bf16_f32_cuda(w_k_dev_ + k_offset, x_norm_dev, k_dev, n_kv_heads * head_dim, hs);
-        matvec_bf16_f32_cuda(w_v_dev_ + v_offset, x_norm_dev, v_dev, n_kv_heads * head_dim, hs);
-        // gpuErrchk(cudaDeviceSynchronize()); // Remove sync
+        matvec_f32_f32_cuda(cublas_handle_, lw_q_proj_f32_dev, x_norm_dev, q_dev, hs, hs, stream); 
+        matvec_f32_f32_cuda(cublas_handle_, lw_k_proj_f32_dev, x_norm_dev, k_dev, n_kv_heads * head_dim, hs, stream); 
+        matvec_f32_f32_cuda(cublas_handle_, lw_v_proj_f32_dev, x_norm_dev, v_dev, n_kv_heads * head_dim, hs, stream); 
 
-        // Apply RoPE (In-place on q_dev, k_dev using persistent freqs)
-        rope_cuda(q_dev, n_heads, head_dim, all_freqs_cis_dev, pos);
-        rope_cuda(k_dev, n_kv_heads, head_dim, all_freqs_cis_dev, pos);
-        // gpuErrchk(cudaDeviceSynchronize()); // Remove sync
+        // Apply RoPE to Q (K/V handled in fused cache update)
+        rope_cuda(q_dev, n_heads, head_dim, all_freqs_cis_dev, pos, stream);
 
-        // KVCache Update (Directly on Device)
+        // KVCache Update (Fused RoPE for K, Separate Update for V)
         for (int kvh = 0; kvh < n_kv_heads; ++kvh) {
             const float* current_k_head_ptr = k_dev + kvh * head_dim;
             const float* current_v_head_ptr = v_dev + kvh * head_dim;
-            update_kv_cache_cuda(cache->layers[l].k_dev, current_k_head_ptr, pos, kvh, max_seq_len, n_kv_heads, head_dim);
-            update_kv_cache_cuda(cache->layers[l].v_dev, current_v_head_ptr, pos, kvh, max_seq_len, n_kv_heads, head_dim);
+            
+            // Call fused kernel for K (Applies RoPE + Updates Cache)
+            rope_and_update_kv_cache_cuda(
+                cache->layers[l].k_dev, // Base K cache pointer
+                current_k_head_ptr,     // Original K data for this head
+                all_freqs_cis_dev,      // Global RoPE frequencies buffer
+                pos, kvh, max_seq_len, n_kv_heads, head_dim, stream);
+                                 
+            // Call original kernel for V (No RoPE needed for V)
+            update_kv_cache_cuda(
+                cache->layers[l].v_dev, // Base V cache pointer
+                current_v_head_ptr,     // Original V data for this head (NO RoPE)
+                pos, kvh, max_seq_len, n_kv_heads, head_dim, stream);
         }
-        // gpuErrchk(cudaDeviceSynchronize()); // Remove sync
 
         // Attention (Input: q_dev, K/V Cache, Output: attn_out_dev)
         float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
         attention_cuda(q_dev, cache->layers[l].k_dev, cache->layers[l].v_dev, attn_out_dev,
-                       n_heads, pos + 1, head_dim, scale, max_seq_len, n_kv_heads);
-        // gpuErrchk(cudaDeviceSynchronize()); // Remove sync
-
+                       n_heads, pos + 1, head_dim, scale, max_seq_len, n_kv_heads, stream);
+        
         // Attention Output Projection (Input: attn_out_dev, Output: attn_proj_dev)
-        matvec_bf16_f32_cuda(w_o_dev_ + o_offset, attn_out_dev, attn_proj_dev, hs, hs);
-        // gpuErrchk(cudaDeviceSynchronize()); // Remove sync
+        // We need a temporary buffer here if we fuse residual add into matvec
+        // For now, use add_residual_cuda separately
+        float* attn_proj_dev = nullptr; // Allocate temporary buffer for o_proj result
+        gpuErrchk(cudaMallocAsync(&attn_proj_dev, hs * sizeof(float), stream));
+        matvec_f32_f32_cuda(cublas_handle_, lw_o_proj_f32_dev, attn_out_dev, attn_proj_dev, hs, hs, stream); 
 
         // Residual 1 Add (Input: x_resid1_dev + attn_proj_dev, Output: x_dev)
-        add_vectors_cuda(x_resid1_dev, attn_proj_dev, x_dev, hs);
-        // gpuErrchk(cudaDeviceSynchronize()); // Remove sync
+        add_residual_cuda(attn_proj_dev, x_resid1_dev, x_dev, hs, stream);
+        gpuErrchk(cudaFreeAsync(attn_proj_dev, stream)); // Free the temporary buffer
 
         // --- MLP Block --- 
         // Residual 2 Prep (Copy x -> x_resid2)
-        gpuErrchk(cudaMemcpy(x_resid2_dev, x_dev, hs * sizeof(float), cudaMemcpyDeviceToDevice));
+        gpuErrchk(cudaMemcpyAsync(x_resid2_dev, x_dev, hs * sizeof(float), cudaMemcpyDeviceToDevice, stream));
 
-        // RMSNorm 2 (Input: x_dev, Weight: lw.post_attention_layernorm_dev, Output: x_norm_dev)
-        // REMOVED: Unnecessary H2D copy of norm weights
-        // float* w_norm2_dev = nullptr;
-        // std::vector<float> w_norm2_vec = bf16vec_to_float_vec(lw.post_attention_layernorm);
-        // gpuErrchk(cudaMalloc(&w_norm2_dev, hs * sizeof(float)));
-        // gpuErrchk(cudaMemcpy(w_norm2_dev, w_norm2_vec.data(), hs * sizeof(float), cudaMemcpyHostToDevice));
-        rmsnorm_vector_cuda(x_dev, lw.post_attention_layernorm_dev, x_norm_dev, hs, eps); // USES PERSISTENT POINTER
-        // gpuErrchk(cudaFree(w_norm2_dev));
-        // gpuErrchk(cudaDeviceSynchronize()); // Remove sync
+        // RMSNorm 2 (Input: x_dev, Weight: lw_post_norm_dev, Output: x_norm_dev)
+        rmsnorm_vector_cuda(x_dev, lw_post_norm_dev, x_norm_dev, hs, eps, stream); 
 
         // MLP Projections (Input: x_norm_dev -> gate/up)
-        matvec_bf16_f32_cuda(w_gate_dev_ + gate_offset, x_norm_dev, gate_vec_dev, is, hs);
-        matvec_bf16_f32_cuda(w_up_dev_ + up_offset, x_norm_dev, up_vec_dev, is, hs);
-        // gpuErrchk(cudaDeviceSynchronize()); // Remove sync
+        matvec_f32_f32_cuda(cublas_handle_, lw_gate_proj_f32_dev, x_norm_dev, gate_vec_dev, is, hs, stream); 
+        matvec_f32_f32_cuda(cublas_handle_, lw_up_proj_f32_dev, x_norm_dev, up_vec_dev, is, hs, stream); 
 
         // SwiGLU (Input: gate_vec_dev, up_vec_dev, Output: swiglu_vec_dev)
-        swiglu_cuda(gate_vec_dev, up_vec_dev, swiglu_vec_dev, is);
-        // gpuErrchk(cudaDeviceSynchronize()); // Remove sync
+        swiglu_cuda(gate_vec_dev, up_vec_dev, swiglu_vec_dev, is, stream);
 
-        // MLP Down Projection (Input: swiglu_vec_dev, Output: mlp_out_dev)
-        matvec_bf16_f32_cuda(w_down_dev_ + down_offset, swiglu_vec_dev, mlp_out_dev, hs, is);
-        // gpuErrchk(cudaDeviceSynchronize()); // Remove sync
-
+        // MLP Down Projection (Input: swiglu_vec_dev, Output: x_resid1_dev - Reuse buffer)
+        // Need temporary buffer for down_proj output before residual add
+        float* mlp_out_dev = nullptr; // Allocate temporary buffer
+        gpuErrchk(cudaMallocAsync(&mlp_out_dev, hs * sizeof(float), stream));
+        matvec_f32_f32_cuda(cublas_handle_, lw_down_proj_f32_dev, swiglu_vec_dev, mlp_out_dev, hs, is, stream); 
+        
         // Residual 2 Add (Input: x_resid2_dev + mlp_out_dev, Output: x_dev)
-        add_vectors_cuda(x_resid2_dev, mlp_out_dev, x_dev, hs);
-        // gpuErrchk(cudaDeviceSynchronize()); // Remove sync
+        add_residual_cuda(mlp_out_dev, x_resid2_dev, x_dev, hs, stream);
+        gpuErrchk(cudaFreeAsync(mlp_out_dev, stream)); // Free the temporary buffer
 
     } // End layer loop
 
-    // --- Final Steps (Outside Layer Loop) ---
+    // --- Final Steps (Outside Layer Loop) --- 
     
     // Final RMSNorm (Input: x_dev, Weight: final_norm_dev, Output: x_norm_dev)
-    // REMOVED: Unnecessary H2D copy of norm weights
-    // float* w_final_norm_dev = nullptr;
-    // std::vector<float> w_final_norm_vec = bf16vec_to_float_vec(final_norm);
-    // gpuErrchk(cudaMalloc(&w_final_norm_dev, hs * sizeof(float)));
-    // gpuErrchk(cudaMemcpy(w_final_norm_dev, w_final_norm_vec.data(), hs * sizeof(float), cudaMemcpyHostToDevice));
-    rmsnorm_vector_cuda(x_dev, final_norm_dev, x_norm_dev, hs, eps); // Use x_norm_dev as output buffer
-    // gpuErrchk(cudaFree(w_final_norm_dev)); 
-    // gpuErrchk(cudaDeviceSynchronize()); // Remove sync
+    rmsnorm_vector_cuda(x_dev, final_norm_dev, x_norm_dev, hs, eps, stream); 
 
     // Final LM Head Projection (Input: x_norm_dev, Output: logits_dev)
-    matvec_bf16_f32_cuda(lm_head_dev_, x_norm_dev, logits_dev, vs, hs); // Use persistent lm_head_dev_
-    // gpuErrchk(cudaDeviceSynchronize()); // Remove sync
+    matvec_f32_f32_cuda(cublas_handle_, lm_head_f32_dev_, x_norm_dev, logits_dev, vs, hs, stream); 
+
+    // --- Synchronize Stream before Copy and Free --- 
+    // Wait for all kernels on the stream to complete before copying back logits
+    gpuErrchk(cudaStreamSynchronize(stream)); 
 
     // --- Copy Logits Device -> Host --- 
     std::vector<float> logits(vs);
+    // Use synchronous copy since we just synchronized the stream
     gpuErrchk(cudaMemcpy(logits.data(), logits_dev, vs * sizeof(float), cudaMemcpyDeviceToHost));
 
     // --- Free Device Memory --- 
-    gpuErrchk(cudaFree(x_dev));
-    gpuErrchk(cudaFree(x_norm_dev));
-    gpuErrchk(cudaFree(x_resid1_dev));
-    gpuErrchk(cudaFree(x_resid2_dev));
-    gpuErrchk(cudaFree(q_dev));
-    gpuErrchk(cudaFree(k_dev));
-    gpuErrchk(cudaFree(v_dev));
-    gpuErrchk(cudaFree(attn_out_dev));
-    gpuErrchk(cudaFree(attn_proj_dev));
-    gpuErrchk(cudaFree(gate_vec_dev));
-    gpuErrchk(cudaFree(up_vec_dev));
-    gpuErrchk(cudaFree(swiglu_vec_dev));
-    gpuErrchk(cudaFree(mlp_out_dev));
-    gpuErrchk(cudaFree(logits_dev));
-    // Don't free freqs_dev, it wasn't allocated here
+    // Use cudaFreeAsync on the same stream for potentially better performance
+    gpuErrchk(cudaFreeAsync(x_dev, stream));
+    gpuErrchk(cudaFreeAsync(x_norm_dev, stream));
+    gpuErrchk(cudaFreeAsync(x_resid1_dev, stream));
+    gpuErrchk(cudaFreeAsync(x_resid2_dev, stream));
+    gpuErrchk(cudaFreeAsync(q_dev, stream));
+    gpuErrchk(cudaFreeAsync(k_dev, stream));
+    gpuErrchk(cudaFreeAsync(v_dev, stream));
+    gpuErrchk(cudaFreeAsync(attn_out_dev, stream));
+    // attn_proj_dev freed above
+    gpuErrchk(cudaFreeAsync(gate_vec_dev, stream));
+    gpuErrchk(cudaFreeAsync(up_vec_dev, stream));
+    gpuErrchk(cudaFreeAsync(swiglu_vec_dev, stream));
+    // mlp_out_dev freed above
+    gpuErrchk(cudaFreeAsync(logits_dev, stream));
+
+    // Optional: Synchronize again to ensure frees are processed if needed before function returns,
+    // although technically not required if caller manages stream synchronization.
+    // gpuErrchk(cudaStreamSynchronize(stream)); 
 
     // Logger::info("[CUDA] forward_device finished.");
     return logits;

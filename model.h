@@ -10,6 +10,7 @@
 #include <cstdint> // Include for uint16_t
 #ifdef HAS_CUDA
 #include <cuda_runtime.h> // Needed for cudaFree, cudaMalloc
+#include <cublas_v2.h>    // <<< INCLUDE CUBLAS >>>
 #include "cuda_kernels.h" // Needed for gpuErrchk
 #endif
 
@@ -108,7 +109,7 @@ public:
     std::vector<float> forward(std::vector<float>& x_vec, int pos, KVCache* cache = nullptr, const std::vector<int>* attention_mask = nullptr);
 
     // New: Device-only forward pass for incremental GPU pipeline
-    std::vector<float> forward_device(int token_id, int pos, KVCache* cache, const std::vector<int>* attention_mask);
+    std::vector<float> forward_device(int token_id, int pos, KVCache* cache, const std::vector<int>* attention_mask = nullptr, cudaStream_t stream = 0);
 
     // Get model config
     const ModelConfig& get_config() const { return config_; }
@@ -152,6 +153,18 @@ private:
     uint16_t* w_down_dev_ = nullptr;
     uint16_t* lm_head_dev_ = nullptr;
     // --- END Persistent Device Weights ---
+    // --- START Persistent Device Weights (FP32) ---
+    float* token_embedding_table_f32_dev_ = nullptr;
+    float* w_q_f32_dev_ = nullptr;
+    float* w_k_f32_dev_ = nullptr;
+    float* w_v_f32_dev_ = nullptr;
+    float* w_o_f32_dev_ = nullptr;
+    float* w_gate_f32_dev_ = nullptr;
+    float* w_up_f32_dev_ = nullptr;
+    float* w_down_f32_dev_ = nullptr;
+    float* lm_head_f32_dev_ = nullptr;
+    // --- END Persistent Device Weights (FP32) ---
+    cublasHandle_t cublas_handle_ = nullptr; // <<< ADD CUBLAS HANDLE >>>
 #endif
 
     // Precomputed RoPE cos/sin values

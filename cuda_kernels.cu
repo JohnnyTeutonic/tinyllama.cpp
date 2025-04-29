@@ -6,6 +6,7 @@
 
 #include <cuda_runtime.h>
 #include <cuda_bf16.h> // For __nv_bfloat16 and conversion functions
+#include <cublas_v2.h> // <<< INCLUDE CUBLAS HERE >>>
 #include <cmath>
 #include <iostream> // For debug prints if needed
 
@@ -39,7 +40,6 @@ __global__ void rmsnorm_sum_squares_kernel(const float* x, float* partial_sums, 
     
     unsigned int tid = threadIdx.x;
     unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
-    unsigned int gridSize = blockDim.x * gridDim.x;
 
     // Load data into shared memory
     sdata[tid] = (i < n) ? x[i] * x[i] : 0.0f;
@@ -134,86 +134,86 @@ void rmsnorm_vector_cuda(const std::vector<float>& x_in_host,
 
 // <<< MATVEC (BF16 * F32 -> F32) KERNELS >>>
 
-// Kernel: Computes out = mat * vec
-// Grid: Typically launch one block per row (or group of rows)
-// Block: Threads cooperate to compute dot product for their assigned row(s)
-__global__ void matvec_bf16_f32_kernel(const uint16_t* mat_bf16,
-                                       const float* vec_f32,
-                                       float* out_f32,
-                                       int rows,
-                                       int cols)
-{
-    int row = blockIdx.x * blockDim.y + threadIdx.y;
-    if (row >= rows) return;
-
-    // Use double for higher precision accumulation in shared memory
-    extern __shared__ double s_dot_product[]; // <-- Changed to double
-    
-    // Each thread calculates a partial sum using double
-    double partial_sum = 0.0; // <-- Changed to double
-    int thread_col_start = threadIdx.x;
-    int stride = blockDim.x;
-
-    for (int c = thread_col_start; c < cols; c += stride) {
-        float mat_val = bf16_to_float32_device(mat_bf16[row * cols + c]);
-        // Cast input vec value to double for multiplication
-        partial_sum += static_cast<double>(mat_val) * static_cast<double>(vec_f32[c]); // <-- Accumulate in double
-    }
-    
-    // Store partial sum in shared memory
-    s_dot_product[threadIdx.x] = partial_sum;
-    __syncthreads();
-
-    // Reduce partial sums within the block (using double)
-    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
-        if (threadIdx.x < s) {
-            s_dot_product[threadIdx.x] += s_dot_product[threadIdx.x + s];
-        }
-        __syncthreads();
-    }
-
-    // Write final result for the row (cast back to float)
-    if (threadIdx.x == 0) {
-        out_f32[row] = static_cast<float>(s_dot_product[0]); // <-- Cast final result back to float
+// Add a dedicated conversion kernel for BF16->FP32
+__global__ void convert_bf16_to_fp32_kernel(const uint16_t* __restrict__ bf16_input,
+                                           float* __restrict__ fp32_output,
+                                           int size) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < size) {
+        // Convert BF16 raw bits to FP32
+        uint16_t bf16_val = bf16_input[i];
+        unsigned int ui = ((unsigned int)bf16_val) << 16;
+        fp32_output[i] = *reinterpret_cast<float*>(&ui);
     }
 }
 
-// --- MatVec C++ Wrapper (device pointer version - MODIFIED) ---
-void matvec_bf16_f32_cuda(const uint16_t* mat_bf16_dev, // Parameter changed to device pointer
+// --- MatVec C++ Wrapper (Device/Device/Device - USING CUBLAS) ---
+void matvec_bf16_f32_cuda(cublasHandle_t handle,       // <<< ADDED HANDLE
+                          const uint16_t* mat_bf16_dev, 
                           const float* vec_f32_dev,
                           float* out_f32_dev,
-                          int rows,
-                          int cols,
-                          cudaStream_t stream) {
-    // REMOVED: Copy weights to device (now assumes mat_bf16_dev is valid)
-    // uint16_t* mat_bf16_dev = nullptr;
-    // gpuErrchk(cudaMalloc(&mat_bf16_dev, rows * cols * sizeof(uint16_t)));
-    // gpuErrchk(cudaMemcpy(mat_bf16_dev, mat_bf16_host.data(), rows * cols * sizeof(uint16_t), cudaMemcpyHostToDevice));
-
-    // Kernel launch config
-    const int threads_per_block_x = 256;
-    const int threads_per_block_y = 1;
-    dim3 threads_per_block(threads_per_block_x, threads_per_block_y);
-    // Calculate grid size based on rows
-    // Each block handles one row (blockDim.y = 1, threadIdx.y = 0)
-    // So, gridDim.x should be the number of rows 
-    int num_blocks_x = rows; // Simpler: one block per row
-    int num_blocks_y = 1;
-    dim3 num_blocks(num_blocks_x, num_blocks_y);
-    size_t shared_mem_size = threads_per_block_x * sizeof(double); // Adjusted for double
-
-    // Launch kernel
-    matvec_bf16_f32_kernel<<<num_blocks, threads_per_block, shared_mem_size, stream>>>(
-        mat_bf16_dev, vec_f32_dev, out_f32_dev, rows, cols
-    );
+                          int rows, // M dimension (output size)
+                          int cols, // K dimension (input size)
+                          cudaStream_t stream) 
+{
+    // SIMPLER APPROACH: Convert BF16->FP32 weights and use regular SGEMM
+    // Allocate temporary FP32 matrix
+    float* mat_fp32_dev = nullptr;
+    size_t mat_size = (size_t)rows * cols;
+    gpuErrchk(cudaMallocAsync(&mat_fp32_dev, mat_size * sizeof(float), stream));
+    
+    // Convert weights from BF16 to FP32
+    int threads_per_block = 256;
+    int num_blocks = (mat_size + threads_per_block - 1) / threads_per_block;
+    convert_bf16_to_fp32_kernel<<<num_blocks, threads_per_block, 0, stream>>>(
+        mat_bf16_dev, mat_fp32_dev, mat_size);
     gpuErrchk(cudaGetLastError());
-    // REMOVED: Free temporary weights buffer
-    // gpuErrchk(cudaFree(mat_bf16_dev)); 
+    
+    // Now we can use the simpler, more reliable cublasSgemm
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+    int M = rows;
+    int N = 1; // Vector treated as matrix with 1 column
+    int K = cols;
+
+    // Set cuBLAS stream
+    cublasStatus_t status = cublasSetStream(handle, stream);
+    if (status != CUBLAS_STATUS_SUCCESS) {
+        Logger::error("cublasSetStream failed");
+        throw std::runtime_error("cublasSetStream failed");
+    }
+
+    // Call regular cublasSgemm (much more reliable than GemmEx)
+    // Experiment with both layouts to see which works
+    // Assuming A is row-major MxK, we'll try transa=T with lda=K
+    status = cublasSgemm(handle, 
+                         CUBLAS_OP_T,     // Transpose A (row-major -> col-major)
+                         CUBLAS_OP_N,     // No transpose B
+                         M,               // Rows of C and op(A)
+                         N,               // Cols of C and op(B) = 1
+                         K,               // Cols of op(A) and rows of op(B)
+                         &alpha,          // Scalar alpha
+                         mat_fp32_dev,    // A matrix (now float)
+                         K,               // Leading dimension of A = K for row-major
+                         vec_f32_dev,     // B matrix (input vector)
+                         K,               // Leading dimension of B = K for Kx1 col-major
+                         &beta,           // Scalar beta 
+                         out_f32_dev,     // C matrix (output vector)
+                         M);              // Leading dimension of C = M for Mx1 col-major
+
+    if (status != CUBLAS_STATUS_SUCCESS) {
+        Logger::error("cublasSgemm failed with status: " + std::to_string(status));
+        throw std::runtime_error("cublasSgemm failed");
+    }
+
+    // Free temporary memory
+    gpuErrchk(cudaFreeAsync(mat_fp32_dev, stream));
 }
 
 // --- Corrected Mixed Host/Device matvec overload implementation ---
 // Allocates temp device matrix, copies host matrix, calls device-pointer kernel/wrapper
-void matvec_bf16_f32_cuda(const std::vector<uint16_t>& mat_bf16_host, // HOST Matrix
+void matvec_bf16_f32_cuda(cublasHandle_t handle, // <<< ADDED HANDLE
+                          const std::vector<uint16_t>& mat_bf16_host, // HOST Matrix
                           const float* vec_f32_dev,                 // DEVICE Vector In
                           float* out_f32_dev,                       // DEVICE Vector Out
                           int rows,
@@ -223,7 +223,6 @@ void matvec_bf16_f32_cuda(const std::vector<uint16_t>& mat_bf16_host, // HOST Ma
     if (mat_bf16_host.size() != (size_t)rows * cols) {
         throw std::runtime_error("matvec_bf16_f32_cuda (mixed): mat size mismatch.");
     }
-    // Note: Cannot easily check sizes for vec_f32_dev/out_f32_dev without bringing them to host
     
     uint16_t* mat_bf16_dev = nullptr; // Need temp device matrix
     
@@ -233,21 +232,19 @@ void matvec_bf16_f32_cuda(const std::vector<uint16_t>& mat_bf16_host, // HOST Ma
     // Copy host matrix data to device
     gpuErrchk(cudaMemcpyAsync(mat_bf16_dev, mat_bf16_host.data(), mat_bf16_host.size() * sizeof(uint16_t), cudaMemcpyHostToDevice, stream));
     
-    // Call the *all-device-pointer* version of the wrapper/kernel
-    matvec_bf16_f32_cuda(mat_bf16_dev, vec_f32_dev, out_f32_dev, rows, cols, stream);
+    // Call the *all-device-pointer* version of the wrapper (which now uses cuBLAS)
+    matvec_bf16_f32_cuda(handle, mat_bf16_dev, vec_f32_dev, out_f32_dev, rows, cols, stream); // <<< PASS HANDLE
     
     // Free the temporary device matrix
-    // Need to sync stream before freeing memory allocated on it, if the caller
-    // might destroy the stream before the free completes.
-    // Alternatively, use a caching allocator or let the context handle cleanup.
-    // For simplicity here, we sync then free.
+    // Sync stream before freeing async alloc/memcpy memory on it.
     gpuErrchk(cudaStreamSynchronize(stream)); 
     gpuErrchk(cudaFree(mat_bf16_dev));
 }
 
 // --- START Add Host/Host/Host matvec overload implementation ---
 // Allocates temp device matrix AND vectors, copies data, calls device-pointer version, copies result back
-void matvec_bf16_f32_cuda(const std::vector<uint16_t>& mat_bf16_host,
+void matvec_bf16_f32_cuda(cublasHandle_t handle, // <<< ADDED HANDLE
+                          const std::vector<uint16_t>& mat_bf16_host,
                           const std::vector<float>& vec_f32_host,
                           std::vector<float>& out_f32_host,
                           int rows,
@@ -265,7 +262,7 @@ void matvec_bf16_f32_cuda(const std::vector<uint16_t>& mat_bf16_host,
     float* vec_f32_dev = nullptr;
     float* out_f32_dev = nullptr;
     
-    // Allocate temporary device buffers for matrix, input vector, and output vector
+    // Allocate temporary device buffers 
     gpuErrchk(cudaMalloc(&mat_bf16_dev, mat_bf16_host.size() * sizeof(uint16_t)));
     gpuErrchk(cudaMalloc(&vec_f32_dev, vec_f32_host.size() * sizeof(float)));
     gpuErrchk(cudaMalloc(&out_f32_dev, out_f32_host.size() * sizeof(float)));
@@ -274,9 +271,9 @@ void matvec_bf16_f32_cuda(const std::vector<uint16_t>& mat_bf16_host,
     gpuErrchk(cudaMemcpy(mat_bf16_dev, mat_bf16_host.data(), mat_bf16_host.size() * sizeof(uint16_t), cudaMemcpyHostToDevice));
     gpuErrchk(cudaMemcpy(vec_f32_dev, vec_f32_host.data(), vec_f32_host.size() * sizeof(float), cudaMemcpyHostToDevice));
     
-    // Call the *all-device-pointer* version of the wrapper/kernel
+    // Call the *all-device-pointer* version of the wrapper (which now uses cuBLAS)
     // Use default stream (0)
-    matvec_bf16_f32_cuda(mat_bf16_dev, vec_f32_dev, out_f32_dev, rows, cols, 0);
+    matvec_bf16_f32_cuda(handle, mat_bf16_dev, vec_f32_dev, out_f32_dev, rows, cols, 0); // <<< PASS HANDLE
     
     // Synchronize default stream before copying back result
     gpuErrchk(cudaDeviceSynchronize()); 
@@ -524,10 +521,10 @@ void swiglu_cuda(const std::vector<float>& gate_host,
 }
 
 // Device-pointer version of SwiGLU
-void swiglu_cuda(const float* gate_dev, const float* up_dev, float* out_dev, int n) {
+void swiglu_cuda(const float* gate_dev, const float* up_dev, float* out_dev, int n, cudaStream_t stream) {
     const int threads_per_block = 256;
     int num_blocks = (n + threads_per_block - 1) / threads_per_block;
-    swiglu_kernel<<<num_blocks, threads_per_block>>>(gate_dev, up_dev, out_dev, n);
+    swiglu_kernel<<<num_blocks, threads_per_block, 0, stream>>>(gate_dev, up_dev, out_dev, n);
     gpuErrchk(cudaGetLastError());
 }
 
@@ -731,6 +728,34 @@ void add_vectors_cuda(const float* a_dev,
     gpuErrchk(cudaGetLastError()); // Check for errors after kernel launch
 }
 
+// <<< FUSED RESIDUAL ADDITION KERNEL >>>
+// Kernel: result = matvec_out + residual
+__global__ void add_residual_kernel(const float* matvec_out, const float* residual, float* result, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        result[i] = matvec_out[i] + residual[i];
+    }
+}
+
+// --- Fused Residual Addition C++ Wrapper ---
+void add_residual_cuda(const float* matvec_out_dev,
+                       const float* residual_dev,
+                       float* result_dev,
+                       int n,
+                       cudaStream_t stream)
+{
+    const int threads_per_block = 256;
+    const int num_blocks = (n + threads_per_block - 1) / threads_per_block;
+    
+    add_residual_kernel<<<num_blocks, threads_per_block, 0, stream>>>(
+        matvec_out_dev, 
+        residual_dev, 
+        result_dev, 
+        n
+    );
+    gpuErrchk(cudaGetLastError()); // Check for errors after kernel launch
+}
+
 // <<< K/V CACHE UPDATE KERNEL >>>
 
 __global__ void update_kv_cache_kernel(float* cache_base_ptr,
@@ -806,6 +831,100 @@ void update_kv_cache_cuda(float* cache_base_ptr, // Base pointer for K or V for 
     gpuErrchk(cudaGetLastError()); // Check for errors after kernel launch
 }
 
+// <<< FUSED RoPE + K/V CACHE UPDATE KERNEL >>>
+__global__ void rope_and_update_kv_cache_kernel(
+    float* cache_base_ptr,          // Base pointer for K or V cache for the layer
+    const float* kv_vector_head,    // Pointer to the *original* K or V data for *this specific head*
+    const float* all_freqs_cis_base,// Base pointer to the global RoPE frequency buffer
+    int pos,                        // Current sequence position
+    int kv_head_idx,                // Index of the current K/V head
+    int max_seq_len,                // Cache dimension: Max sequence length
+    int num_kv_heads,               // Cache dimension: Number of K/V heads
+    int head_dim                    // Cache dimension: Head dimension (must be even)
+) {
+    // Thread index corresponds to element pair index within the head dimension (0 to head_dim/2 - 1)
+    int pair_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int dim_half = head_dim / 2;
+
+    if (pair_idx >= dim_half) return; // Only need threads for half the dimension
+
+    // --- Load Original K/V values ---
+    // Indices into the source kv_vector_head (assumed tightly packed for this head)
+    int idx0 = pair_idx;
+    int idx1 = pair_idx + dim_half;
+    float kv0 = kv_vector_head[idx0];
+    float kv1 = kv_vector_head[idx1];
+
+    // --- Calculate RoPE Frequencies ---
+    // Offset into the *full* frequency buffer [max_seq_len * head_dim] for the current pos and pair index
+    size_t freq_base_offset = (size_t)pos * head_dim + (size_t)pair_idx * 2;
+    float cos_val = all_freqs_cis_base[freq_base_offset];     // cos value for (pos, pair_idx)
+    float sin_val = all_freqs_cis_base[freq_base_offset + 1]; // sin value for (pos, pair_idx)
+
+    // --- Apply RoPE Rotation ---
+    float kv0_rotated = kv0 * cos_val - kv1 * sin_val;
+    float kv1_rotated = kv0 * sin_val + kv1 * cos_val;
+
+    // --- Calculate Cache Write Offset ---
+    // Layout is [max_seq_len, num_kv_heads, head_dim]
+    size_t cache_offset_0 = (size_t)pos * num_kv_heads * head_dim + 
+                            (size_t)kv_head_idx * head_dim + 
+                            idx0; // Offset for the first element of the pair
+    size_t cache_offset_1 = cache_offset_0 + dim_half; // Offset for the second element
+
+    // --- Write RoPE'd values directly to Cache ---
+    // Optional: Add bounds checking for cache_offset against total cache size
+    // size_t total_cache_size = (size_t)max_seq_len * num_kv_heads * head_dim;
+    // if (cache_offset_0 >= total_cache_size || cache_offset_1 >= total_cache_size) return; 
+    
+    cache_base_ptr[cache_offset_0] = kv0_rotated;
+    cache_base_ptr[cache_offset_1] = kv1_rotated;
+}
+
+// --- Fused RoPE + K/V Cache Update C++ Wrapper ---
+void rope_and_update_kv_cache_cuda(
+    float* cache_base_ptr,          // Base K or V cache ptr for the layer
+    const float* kv_vector_head,    // Original K or V data for *this head*
+    const float* all_freqs_cis_base,// Global RoPE frequencies buffer
+    int pos,
+    int kv_head_idx,
+    int max_seq_len, 
+    int num_kv_heads, 
+    int head_dim,
+    cudaStream_t stream
+) {
+    if (head_dim % 2 != 0) {
+        Logger::error("rope_and_update_kv_cache_cuda: head_dim must be even.");
+        // Potentially throw or return error
+        return;
+    }
+     if (pos < 0 || pos >= max_seq_len) {
+        Logger::error("rope_and_update_kv_cache_cuda: pos out of bounds.");
+        return; 
+    }
+    if (kv_head_idx < 0 || kv_head_idx >= num_kv_heads) {
+         Logger::error("rope_and_update_kv_cache_cuda: kv_head_idx out of bounds.");
+         return;
+    }
+
+    // Launch configuration: Need threads for half the head dimension
+    int threads_per_block = 128; // Can tune this
+    int num_blocks = (head_dim / 2 + threads_per_block - 1) / threads_per_block;
+
+    rope_and_update_kv_cache_kernel<<<num_blocks, threads_per_block, 0, stream>>>(
+        cache_base_ptr,
+        kv_vector_head,
+        all_freqs_cis_base,
+        pos,
+        kv_head_idx,
+        max_seq_len,
+        num_kv_heads,
+        head_dim
+    );
+    gpuErrchk(cudaGetLastError()); 
+}
+
+
 // ============================================================================ 
 // Kernel Implementation: Lookup Embedding (BF16 -> FP32)
 // ============================================================================
@@ -870,6 +989,56 @@ void lookup_embedding_bf16_f32_cuda(const uint16_t* embedding_table_dev, // Chan
 
     // No explicit sync needed here, subsequent operations will sync if necessary
     // gpuErrchk(cudaDeviceSynchronize()); 
+}
+
+// --- MatVec FP32/FP32 C++ Wrapper (Device/Device/Device - USING CUBLAS) ---
+void matvec_f32_f32_cuda(cublasHandle_t handle,
+                         const float* mat_f32_dev,
+                         const float* vec_f32_dev,
+                         float* out_f32_dev,
+                         int rows, // M dimension (output size)
+                         int cols, // K dimension (input size)
+                         cudaStream_t stream)
+{
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+    int M = rows;
+    int N = 1; // Vector treated as matrix with 1 column
+    int K = cols;
+
+    // Set cuBLAS stream
+    cublasStatus_t status = cublasSetStream(handle, stream);
+    if (status != CUBLAS_STATUS_SUCCESS) {
+        Logger::error("cublasSetStream failed");
+        throw std::runtime_error("cublasSetStream failed");
+    }
+
+    // Use the same layout as matvec_bf16_f32_cuda: row-major MxK, so transa=T, lda=K
+    status = cublasSgemm(handle,
+                        CUBLAS_OP_T,     // Transpose A (row-major -> col-major)
+                        CUBLAS_OP_N,     // No transpose B
+                        M,               // Rows of C and op(A)
+                        N,               // Cols of C and op(B) = 1
+                        K,               // Cols of op(A) and rows of op(B)
+                        &alpha,          // Scalar alpha
+                        mat_f32_dev,     // A matrix (float)
+                        K,               // Leading dimension of A = K for row-major
+                        vec_f32_dev,     // B matrix (input vector)
+                        K,               // Leading dimension of B = K for Kx1 col-major
+                        &beta,           // Scalar beta
+                        out_f32_dev,     // C matrix (output vector)
+                        M);              // Leading dimension of C = M for Mx1 col-major
+
+    if (status != CUBLAS_STATUS_SUCCESS) {
+        Logger::error("cublasSgemm (FP32) failed with status: " + std::to_string(status));
+        throw std::runtime_error("cublasSgemm (FP32) failed");
+    }
+    // Debug log for first call
+    static bool first_call = true;
+    if (first_call) {
+        std::cerr << "[CUDA] matvec_f32_f32_cuda called (rows=" << rows << ", cols=" << cols << ")\n";
+        first_call = false;
+    }
 }
 
 #endif // HAS_CUDA
