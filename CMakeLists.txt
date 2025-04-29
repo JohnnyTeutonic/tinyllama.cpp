@@ -94,6 +94,16 @@ add_executable(tinyllama_server
 
 target_link_libraries(tinyllama_server PRIVATE tinyllama_core)
 
+# --- New GGUF Loader Executable ---
+add_executable(gguf_loader
+    main_gguf.cpp
+    quantization.cpp # Include quantization source directly for now
+    gguf_parser.cpp
+)
+
+# Link GGUF loader against the core library (inherits CUDA/OpenMP/etc links)
+target_link_libraries(gguf_loader PRIVATE tinyllama_core)
+
 # Link OpenSSL if found (needed by httplib if SSL support is enabled)
 if(OPENSSL_FOUND)
     message(STATUS "Found OpenSSL, linking ssl and crypto libraries to server.")
