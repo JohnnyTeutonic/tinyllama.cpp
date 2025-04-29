@@ -153,6 +153,17 @@ private:
     uint16_t* w_down_dev_ = nullptr;
     uint16_t* lm_head_dev_ = nullptr;
     // --- END Persistent Device Weights ---
+    // --- START Persistent Device Weights (FP32) ---
+    float* token_embedding_table_f32_dev_ = nullptr;
+    float* w_q_f32_dev_ = nullptr;
+    float* w_k_f32_dev_ = nullptr;
+    float* w_v_f32_dev_ = nullptr;
+    float* w_o_f32_dev_ = nullptr;
+    float* w_gate_f32_dev_ = nullptr;
+    float* w_up_f32_dev_ = nullptr;
+    float* w_down_f32_dev_ = nullptr;
+    float* lm_head_f32_dev_ = nullptr;
+    // --- END Persistent Device Weights (FP32) ---
     cublasHandle_t cublas_handle_ = nullptr; // <<< ADD CUBLAS HANDLE >>>
 #endif
 

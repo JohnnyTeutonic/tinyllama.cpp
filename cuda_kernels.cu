@@ -991,4 +991,54 @@ void lookup_embedding_bf16_f32_cuda(const uint16_t* embedding_table_dev, // Chan
     // gpuErrchk(cudaDeviceSynchronize()); 
 }
 
+// --- MatVec FP32/FP32 C++ Wrapper (Device/Device/Device - USING CUBLAS) ---
+void matvec_f32_f32_cuda(cublasHandle_t handle,
+                         const float* mat_f32_dev,
+                         const float* vec_f32_dev,
+                         float* out_f32_dev,
+                         int rows, // M dimension (output size)
+                         int cols, // K dimension (input size)
+                         cudaStream_t stream)
+{
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+    int M = rows;
+    int N = 1; // Vector treated as matrix with 1 column
+    int K = cols;
+
+    // Set cuBLAS stream
+    cublasStatus_t status = cublasSetStream(handle, stream);
+    if (status != CUBLAS_STATUS_SUCCESS) {
+        Logger::error("cublasSetStream failed");
+        throw std::runtime_error("cublasSetStream failed");
+    }
+
+    // Use the same layout as matvec_bf16_f32_cuda: row-major MxK, so transa=T, lda=K
+    status = cublasSgemm(handle,
+                        CUBLAS_OP_T,     // Transpose A (row-major -> col-major)
+                        CUBLAS_OP_N,     // No transpose B
+                        M,               // Rows of C and op(A)
+                        N,               // Cols of C and op(B) = 1
+                        K,               // Cols of op(A) and rows of op(B)
+                        &alpha,          // Scalar alpha
+                        mat_f32_dev,     // A matrix (float)
+                        K,               // Leading dimension of A = K for row-major
+                        vec_f32_dev,     // B matrix (input vector)
+                        K,               // Leading dimension of B = K for Kx1 col-major
+                        &beta,           // Scalar beta
+                        out_f32_dev,     // C matrix (output vector)
+                        M);              // Leading dimension of C = M for Mx1 col-major
+
+    if (status != CUBLAS_STATUS_SUCCESS) {
+        Logger::error("cublasSgemm (FP32) failed with status: " + std::to_string(status));
+        throw std::runtime_error("cublasSgemm (FP32) failed");
+    }
+    // Debug log for first call
+    static bool first_call = true;
+    if (first_call) {
+        std::cerr << "[CUDA] matvec_f32_f32_cuda called (rows=" << rows << ", cols=" << cols << ")\n";
+        first_call = false;
+    }
+}
+
 #endif // HAS_CUDA

@@ -207,6 +207,8 @@ void lookup_embedding_bf16_f32_cuda(const uint16_t* embedding_table_dev,
                                     int vocab_size,
                                     cudaStream_t stream = 0);
 
+void matvec_f32_f32_cuda(cublasHandle_t handle, const float * mat_f32_dev, const float * vec_f32_dev, float * out_f32_dev, int rows, int cols, cudaStream_t stream);
+
 #endif // HAS_CUDA
 
 #endif // CUDA_KERNELS_H 
