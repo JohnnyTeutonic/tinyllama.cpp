@@ -29,6 +29,12 @@ void Logger::error(const std::string& message) {
     log << "[ERROR] " << message << std::endl;
 }
 
+void Logger::warning(const std::string& message) {
+    ensure_log_truncated();
+    std::ofstream log("debugging.log", std::ios::app);
+    log << "[WARNING] " << message << std::endl;
+}
+
 void Logger::log_vector_stats(const std::string& name, const std::vector<float>& v, int n_show) {
     if (v.empty()) {
         info(name + ": (empty)");
