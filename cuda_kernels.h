@@ -6,6 +6,7 @@
 
 #include <vector>
 #include <cstdint> // For uint16_t
+#include <cublas_v2.h>
 
 // --- CUDA Error Checking Utility --- 
 #include <cuda_runtime.h>
@@ -53,7 +54,8 @@ void rmsnorm_vector_cuda(const std::vector<float>& x_in_host,
 /**
  * @brief Host-vector version: Allocates all device buffers internally.
  */
-void matvec_bf16_f32_cuda(const std::vector<uint16_t>& mat_bf16_host,
+void matvec_bf16_f32_cuda(cublasHandle_t handle,
+                          const std::vector<uint16_t>& mat_bf16_host,
                           const std::vector<float>& vec_f32_host, 
                           std::vector<float>& out_f32_host,
                           int rows,
@@ -63,7 +65,8 @@ void matvec_bf16_f32_cuda(const std::vector<uint16_t>& mat_bf16_host,
  * @brief Host-Matrix / Device-Vectors version.
  * Handles temp allocation & copy for the matrix.
  */
-void matvec_bf16_f32_cuda(const std::vector<uint16_t>& mat_bf16_host, // HOST Matrix
+void matvec_bf16_f32_cuda(cublasHandle_t handle,
+                          const std::vector<uint16_t>& mat_bf16_host, // HOST Matrix
                           const float* vec_f32_dev,                 // DEVICE Vector In
                           float* out_f32_dev,                       // DEVICE Vector Out
                           int rows,
@@ -73,7 +76,8 @@ void matvec_bf16_f32_cuda(const std::vector<uint16_t>& mat_bf16_host, // HOST Ma
 /**
  * @brief Device-pointer version: for use with device input/output buffers.
  */
-void matvec_bf16_f32_cuda(const uint16_t* mat_bf16_dev,
+void matvec_bf16_f32_cuda(cublasHandle_t handle,
+                          const uint16_t* mat_bf16_dev,
                           const float* vec_f32_dev,
                           float* out_f32_dev,
                           int rows,

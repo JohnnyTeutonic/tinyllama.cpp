@@ -374,7 +374,20 @@ static void matvec_bf16_f32_vector(const std::vector<uint16_t>& mat_bf16,
 #ifdef HAS_CUDA
     // Logger::info("Using CUDA MatVec (BF16*F32->F32)"); // Optional log
     // Call the CUDA wrapper function
-    matvec_bf16_f32_cuda(mat_bf16, vec_f32, out_f32, rows, cols);
+    // Create a temporary handle for this static function context
+    cublasHandle_t temp_handle;
+    cublasStatus_t create_status = cublasCreate(&temp_handle);
+    if (create_status != CUBLAS_STATUS_SUCCESS) {
+        Logger::error("Temporary cuBLAS handle creation failed in matvec_bf16_f32_vector");
+        throw std::runtime_error("Failed to create temp cuBLAS handle");
+    }
+    matvec_bf16_f32_cuda(temp_handle, mat_bf16, vec_f32, out_f32, rows, cols);
+    // Destroy the temporary handle
+    cublasStatus_t destroy_status = cublasDestroy(temp_handle);
+    if (destroy_status != CUBLAS_STATUS_SUCCESS) {
+         Logger::error("Temporary cuBLAS handle destruction failed in matvec_bf16_f32_vector");
+         // Log but continue
+    }
 #else
     // Logger::info("Using CPU MatVec (BF16*F32->F32, OpenMP+Kahan)"); // Optional log
     // Original OpenMP + Kahan implementation
@@ -552,6 +565,16 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& config, const SafeTensorsLoade
     }
 
 #ifdef HAS_CUDA
+    // --- START CUBLAS Initialization ---
+    cublasStatus_t cublas_status = cublasCreate(&cublas_handle_);
+    if (cublas_status != CUBLAS_STATUS_SUCCESS) {
+        Logger::error("cuBLAS handle creation failed with error code: " + std::to_string(cublas_status));
+        // Handle error appropriately - maybe throw an exception or set an error state
+        throw std::runtime_error("Failed to initialize cuBLAS");
+    }
+    Logger::info("cuBLAS handle created successfully.");
+    // --- END CUBLAS Initialization ---
+
     // Allocate and copy final_norm weights to device
     std::vector<float> final_norm_f32 = bf16vec_to_float_vec(final_norm);
     gpuErrchk(cudaMalloc(&final_norm_dev, final_norm_f32.size() * sizeof(float)));
@@ -743,7 +766,19 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& config, const SafeTensorsLoade
 // --- START: TinyLlamaModel Destructor Definition ---
 TinyLlamaModel::~TinyLlamaModel() {
 #ifdef HAS_CUDA
-    Logger::info("Freeing TinyLlamaModel CUDA weight memory...");
+    Logger::info("Freeing TinyLlamaModel CUDA resources...");
+    // --- START CUBLAS Destruction ---
+    if (cublas_handle_) {
+        cublasStatus_t cublas_status = cublasDestroy(cublas_handle_);
+        if (cublas_status != CUBLAS_STATUS_SUCCESS) {
+            Logger::error("cuBLAS handle destruction failed with error code: " + std::to_string(cublas_status));
+            // Log error, but don't throw from destructor
+        }
+        cublas_handle_ = nullptr;
+        Logger::info("cuBLAS handle destroyed.");
+    }
+    // --- END CUBLAS Destruction ---
+
     // Free final norm device pointer
     if (final_norm_dev) {
         gpuErrchk(cudaFree(final_norm_dev));
@@ -917,9 +952,9 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, K
         gpuErrchk(cudaDeviceSynchronize());
 
         // Q, K, V projections (Input: x_norm_dev, Outputs: q_dev, k_dev, v_dev)
-        matvec_bf16_f32_cuda(lw.q_proj, x_norm_dev, q_dev, hs, hs);
-        matvec_bf16_f32_cuda(lw.k_proj, x_norm_dev, k_dev, n_kv_heads * head_dim, hs);
-        matvec_bf16_f32_cuda(lw.v_proj, x_norm_dev, v_dev, n_kv_heads * head_dim, hs);
+        matvec_bf16_f32_cuda(cublas_handle_, lw.q_proj, x_norm_dev, q_dev, hs, hs); // Pass handle
+        matvec_bf16_f32_cuda(cublas_handle_, lw.k_proj, x_norm_dev, k_dev, n_kv_heads * head_dim, hs); // Pass handle
+        matvec_bf16_f32_cuda(cublas_handle_, lw.v_proj, x_norm_dev, v_dev, n_kv_heads * head_dim, hs); // Pass handle
         gpuErrchk(cudaDeviceSynchronize());
 
         // RoPE (Applied in-place to q_dev, k_dev)
@@ -999,7 +1034,7 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, K
         gpuErrchk(cudaDeviceSynchronize());
 
         // Output projection (Input: attn_out_dev, Output: attn_proj_dev)
-        matvec_bf16_f32_cuda(lw.o_proj, attn_out_dev, attn_proj_dev, hs, hs);
+        matvec_bf16_f32_cuda(cublas_handle_, lw.o_proj, attn_out_dev, attn_proj_dev, hs, hs); // Pass handle
         gpuErrchk(cudaDeviceSynchronize());
 
         // First residual connection (x = x_resid1 + attn_proj)
@@ -1034,12 +1069,12 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, K
         gpuErrchk(cudaMalloc(&swiglu_vec_dev, is * sizeof(float)));
         gpuErrchk(cudaMalloc(&mlp_down_dev, hs * sizeof(float)));
         // Use x_norm_dev as input
-        matvec_bf16_f32_cuda(lw.gate_proj, x_norm_dev, gate_vec_dev, is, hs);
-        matvec_bf16_f32_cuda(lw.up_proj, x_norm_dev, up_vec_dev, is, hs);
+        matvec_bf16_f32_cuda(cublas_handle_, lw.gate_proj, x_norm_dev, gate_vec_dev, is, hs); // Pass handle
+        matvec_bf16_f32_cuda(cublas_handle_, lw.up_proj, x_norm_dev, up_vec_dev, is, hs); // Pass handle
         gpuErrchk(cudaDeviceSynchronize());
         swiglu_cuda(gate_vec_dev, up_vec_dev, swiglu_vec_dev, is);
         gpuErrchk(cudaDeviceSynchronize());
-        matvec_bf16_f32_cuda(lw.down_proj, swiglu_vec_dev, mlp_down_dev, hs, is);
+        matvec_bf16_f32_cuda(cublas_handle_, lw.down_proj, swiglu_vec_dev, mlp_down_dev, hs, is); // Pass handle
         gpuErrchk(cudaDeviceSynchronize());
         
         // Add residual 2 (Fallback)
@@ -1077,7 +1112,7 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, K
     float* logits_dev = nullptr;
     gpuErrchk(cudaMalloc(&logits_dev, vs * sizeof(float)));
     // Use x_norm_dev as input
-    matvec_bf16_f32_cuda(lm_head, x_norm_dev, logits_dev, vs, hs);
+    matvec_bf16_f32_cuda(cublas_handle_, lm_head, x_norm_dev, logits_dev, vs, hs); // Pass handle
     gpuErrchk(cudaDeviceSynchronize());
 
     // Copy final logits from device to host
@@ -1187,14 +1222,14 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, K
         std::vector<float> x_resid2_vec = x_vec; 
         std::vector<float> w_norm2_vec = bf16vec_to_float_vec(lw.post_attention_layernorm);
         rmsnorm_vector(x_vec, w_norm2_vec, x_norm_vec2, eps);
-        matvec_bf16_f32_vector(lw.gate_proj, x_norm_vec2, gate_vec, is, hs);
-        matvec_bf16_f32_vector(lw.up_proj, x_norm_vec2, up_vec, is, hs);
+        matvec_bf16_f32_vector(cublas_handle_, lw.gate_proj, x_norm_vec2, gate_vec, is); // Pass handle
+        matvec_bf16_f32_vector(cublas_handle_, lw.up_proj, x_norm_vec2, up_vec, is); // Pass handle
         silu(gate_vec, silu_out_vec);
         #pragma omp parallel for
         for(size_t i = 0; i < is; ++i) {
             swiglu_result_vec[i] = silu_out_vec[i] * up_vec[i];
         }
-        matvec_bf16_f32_vector(lw.down_proj, swiglu_result_vec, mlp_out_vec, hs, is);
+        matvec_bf16_f32_vector(cublas_handle_, lw.down_proj, swiglu_result_vec, mlp_out_vec, hs); // Pass handle
         #pragma omp parallel for
         for(size_t i=0; i<hs; ++i) {
             x_vec[i] = x_resid2_vec[i] + mlp_out_vec[i]; 
@@ -1213,7 +1248,7 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, K
         log_vector_summary("TROUBLESHOOTING Output of Final C++ RMSNorm (P0, CPU)", x_final_norm_vec); 
     }
     std::vector<float> logits(vs); 
-    matvec_bf16_f32_vector(lm_head, x_final_norm_vec, logits, vs, hs);
+    matvec_bf16_f32_vector(cublas_handle_, lm_head, x_final_norm_vec, logits, vs); // Pass handle
     if (log_initial) {
         log_vector_summary("TROUBLESHOOTING Final Logits (P0, C++ MatVec, CPU Path)", logits, 10);
     }
@@ -1327,9 +1362,9 @@ std::vector<float> TinyLlamaModel::forward_device(int token_id, int pos, KVCache
         size_t down_offset = (size_t)l * layer_down_size;
 
         // Q, K, V projections (Input: x_norm_dev, Outputs: q_dev, k_dev, v_dev)
-        matvec_bf16_f32_cuda(w_q_dev_ + q_offset, x_norm_dev, q_dev, hs, hs);
-        matvec_bf16_f32_cuda(w_k_dev_ + k_offset, x_norm_dev, k_dev, n_kv_heads * head_dim, hs);
-        matvec_bf16_f32_cuda(w_v_dev_ + v_offset, x_norm_dev, v_dev, n_kv_heads * head_dim, hs);
+        matvec_bf16_f32_cuda(cublas_handle_, w_q_dev_ + q_offset, x_norm_dev, q_dev, hs, hs); // Pass handle
+        matvec_bf16_f32_cuda(cublas_handle_, w_k_dev_ + k_offset, x_norm_dev, k_dev, n_kv_heads * head_dim, hs); // Pass handle
+        matvec_bf16_f32_cuda(cublas_handle_, w_v_dev_ + v_offset, x_norm_dev, v_dev, n_kv_heads * head_dim, hs); // Pass handle
         // gpuErrchk(cudaDeviceSynchronize()); // Remove sync
 
         // Apply RoPE (In-place on q_dev, k_dev using persistent freqs)
@@ -1353,7 +1388,7 @@ std::vector<float> TinyLlamaModel::forward_device(int token_id, int pos, KVCache
         // gpuErrchk(cudaDeviceSynchronize()); // Remove sync
 
         // Attention Output Projection (Input: attn_out_dev, Output: attn_proj_dev)
-        matvec_bf16_f32_cuda(w_o_dev_ + o_offset, attn_out_dev, attn_proj_dev, hs, hs);
+        matvec_bf16_f32_cuda(cublas_handle_, w_o_dev_ + o_offset, attn_out_dev, attn_proj_dev, hs, hs); // Pass handle
         // gpuErrchk(cudaDeviceSynchronize()); // Remove sync
 
         // Residual 1 Add (Input: x_resid1_dev + attn_proj_dev, Output: x_dev)
@@ -1375,8 +1410,8 @@ std::vector<float> TinyLlamaModel::forward_device(int token_id, int pos, KVCache
         // gpuErrchk(cudaDeviceSynchronize()); // Remove sync
 
         // MLP Projections (Input: x_norm_dev -> gate/up)
-        matvec_bf16_f32_cuda(w_gate_dev_ + gate_offset, x_norm_dev, gate_vec_dev, is, hs);
-        matvec_bf16_f32_cuda(w_up_dev_ + up_offset, x_norm_dev, up_vec_dev, is, hs);
+        matvec_bf16_f32_cuda(cublas_handle_, w_gate_dev_ + gate_offset, x_norm_dev, gate_vec_dev, is, hs); // Pass handle
+        matvec_bf16_f32_cuda(cublas_handle_, w_up_dev_ + up_offset, x_norm_dev, up_vec_dev, is, hs); // Pass handle
         // gpuErrchk(cudaDeviceSynchronize()); // Remove sync
 
         // SwiGLU (Input: gate_vec_dev, up_vec_dev, Output: swiglu_vec_dev)
@@ -1384,7 +1419,7 @@ std::vector<float> TinyLlamaModel::forward_device(int token_id, int pos, KVCache
         // gpuErrchk(cudaDeviceSynchronize()); // Remove sync
 
         // MLP Down Projection (Input: swiglu_vec_dev, Output: mlp_out_dev)
-        matvec_bf16_f32_cuda(w_down_dev_ + down_offset, swiglu_vec_dev, mlp_out_dev, hs, is);
+        matvec_bf16_f32_cuda(cublas_handle_, w_down_dev_ + down_offset, swiglu_vec_dev, mlp_out_dev, hs, is); // Pass handle
         // gpuErrchk(cudaDeviceSynchronize()); // Remove sync
 
         // Residual 2 Add (Input: x_resid2_dev + mlp_out_dev, Output: x_dev)
@@ -1406,7 +1441,7 @@ std::vector<float> TinyLlamaModel::forward_device(int token_id, int pos, KVCache
     // gpuErrchk(cudaDeviceSynchronize()); // Remove sync
 
     // Final LM Head Projection (Input: x_norm_dev, Output: logits_dev)
-    matvec_bf16_f32_cuda(lm_head_dev_, x_norm_dev, logits_dev, vs, hs); // Use persistent lm_head_dev_
+    matvec_bf16_f32_cuda(cublas_handle_, lm_head_dev_, x_norm_dev, logits_dev, vs, hs); // Use persistent lm_head_dev_ & Pass handle
     // gpuErrchk(cudaDeviceSynchronize()); // Remove sync
 
     // --- Copy Logits Device -> Host --- 

@@ -10,6 +10,7 @@
 #include <cstdint> // Include for uint16_t
 #ifdef HAS_CUDA
 #include <cuda_runtime.h> // Needed for cudaFree, cudaMalloc
+#include <cublas_v2.h>    // <<< INCLUDE CUBLAS >>>
 #include "cuda_kernels.h" // Needed for gpuErrchk
 #endif
 
@@ -152,6 +153,7 @@ private:
     uint16_t* w_down_dev_ = nullptr;
     uint16_t* lm_head_dev_ = nullptr;
     // --- END Persistent Device Weights ---
+    cublasHandle_t cublas_handle_ = nullptr; // <<< ADD CUBLAS HANDLE >>>
 #endif
 
     // Precomputed RoPE cos/sin values
