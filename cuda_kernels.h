@@ -184,8 +184,20 @@ void update_kv_cache_cuda(float* cache_base_ptr,
                             int head_dim,
                             cudaStream_t stream = 0);
 
+// Fused RoPE + K/V Cache Update
+void rope_and_update_kv_cache_cuda(
+    float* cache_base_ptr,          // Base K or V cache ptr for the layer
+    const float* kv_vector_head,    // Original K or V data for *this head*
+    const float* all_freqs_cis_base,// Global RoPE frequencies buffer
+    int pos,
+    int kv_head_idx,
+    int max_seq_len, 
+    int num_kv_heads, 
+    int head_dim,
+    cudaStream_t stream = 0);       // Default stream
+
 // --- Moved SwiGLU declaration INSIDE HAS_CUDA --- 
-void swiglu_cuda(const float* gate_dev, const float* up_dev, float* out_dev, int n);
+void swiglu_cuda(const float* gate_dev, const float* up_dev, float* out_dev, int n, cudaStream_t stream = 0);
 
 // NEW KERNEL DECLARATION (MODIFIED SIGNATURE)
 void lookup_embedding_bf16_f32_cuda(const uint16_t* embedding_table_dev,

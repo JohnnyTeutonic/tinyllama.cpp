@@ -521,10 +521,10 @@ void swiglu_cuda(const std::vector<float>& gate_host,
 }
 
 // Device-pointer version of SwiGLU
-void swiglu_cuda(const float* gate_dev, const float* up_dev, float* out_dev, int n) {
+void swiglu_cuda(const float* gate_dev, const float* up_dev, float* out_dev, int n, cudaStream_t stream) {
     const int threads_per_block = 256;
     int num_blocks = (n + threads_per_block - 1) / threads_per_block;
-    swiglu_kernel<<<num_blocks, threads_per_block>>>(gate_dev, up_dev, out_dev, n);
+    swiglu_kernel<<<num_blocks, threads_per_block, 0, stream>>>(gate_dev, up_dev, out_dev, n);
     gpuErrchk(cudaGetLastError());
 }
 
@@ -830,6 +830,100 @@ void update_kv_cache_cuda(float* cache_base_ptr, // Base pointer for K or V for 
     );
     gpuErrchk(cudaGetLastError()); // Check for errors after kernel launch
 }
+
+// <<< FUSED RoPE + K/V CACHE UPDATE KERNEL >>>
+__global__ void rope_and_update_kv_cache_kernel(
+    float* cache_base_ptr,          // Base pointer for K or V cache for the layer
+    const float* kv_vector_head,    // Pointer to the *original* K or V data for *this specific head*
+    const float* all_freqs_cis_base,// Base pointer to the global RoPE frequency buffer
+    int pos,                        // Current sequence position
+    int kv_head_idx,                // Index of the current K/V head
+    int max_seq_len,                // Cache dimension: Max sequence length
+    int num_kv_heads,               // Cache dimension: Number of K/V heads
+    int head_dim                    // Cache dimension: Head dimension (must be even)
+) {
+    // Thread index corresponds to element pair index within the head dimension (0 to head_dim/2 - 1)
+    int pair_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int dim_half = head_dim / 2;
+
+    if (pair_idx >= dim_half) return; // Only need threads for half the dimension
+
+    // --- Load Original K/V values ---
+    // Indices into the source kv_vector_head (assumed tightly packed for this head)
+    int idx0 = pair_idx;
+    int idx1 = pair_idx + dim_half;
+    float kv0 = kv_vector_head[idx0];
+    float kv1 = kv_vector_head[idx1];
+
+    // --- Calculate RoPE Frequencies ---
+    // Offset into the *full* frequency buffer [max_seq_len * head_dim] for the current pos and pair index
+    size_t freq_base_offset = (size_t)pos * head_dim + (size_t)pair_idx * 2;
+    float cos_val = all_freqs_cis_base[freq_base_offset];     // cos value for (pos, pair_idx)
+    float sin_val = all_freqs_cis_base[freq_base_offset + 1]; // sin value for (pos, pair_idx)
+
+    // --- Apply RoPE Rotation ---
+    float kv0_rotated = kv0 * cos_val - kv1 * sin_val;
+    float kv1_rotated = kv0 * sin_val + kv1 * cos_val;
+
+    // --- Calculate Cache Write Offset ---
+    // Layout is [max_seq_len, num_kv_heads, head_dim]
+    size_t cache_offset_0 = (size_t)pos * num_kv_heads * head_dim + 
+                            (size_t)kv_head_idx * head_dim + 
+                            idx0; // Offset for the first element of the pair
+    size_t cache_offset_1 = cache_offset_0 + dim_half; // Offset for the second element
+
+    // --- Write RoPE'd values directly to Cache ---
+    // Optional: Add bounds checking for cache_offset against total cache size
+    // size_t total_cache_size = (size_t)max_seq_len * num_kv_heads * head_dim;
+    // if (cache_offset_0 >= total_cache_size || cache_offset_1 >= total_cache_size) return; 
+    
+    cache_base_ptr[cache_offset_0] = kv0_rotated;
+    cache_base_ptr[cache_offset_1] = kv1_rotated;
+}
+
+// --- Fused RoPE + K/V Cache Update C++ Wrapper ---
+void rope_and_update_kv_cache_cuda(
+    float* cache_base_ptr,          // Base K or V cache ptr for the layer
+    const float* kv_vector_head,    // Original K or V data for *this head*
+    const float* all_freqs_cis_base,// Global RoPE frequencies buffer
+    int pos,
+    int kv_head_idx,
+    int max_seq_len, 
+    int num_kv_heads, 
+    int head_dim,
+    cudaStream_t stream
+) {
+    if (head_dim % 2 != 0) {
+        Logger::error("rope_and_update_kv_cache_cuda: head_dim must be even.");
+        // Potentially throw or return error
+        return;
+    }
+     if (pos < 0 || pos >= max_seq_len) {
+        Logger::error("rope_and_update_kv_cache_cuda: pos out of bounds.");
+        return; 
+    }
+    if (kv_head_idx < 0 || kv_head_idx >= num_kv_heads) {
+         Logger::error("rope_and_update_kv_cache_cuda: kv_head_idx out of bounds.");
+         return;
+    }
+
+    // Launch configuration: Need threads for half the head dimension
+    int threads_per_block = 128; // Can tune this
+    int num_blocks = (head_dim / 2 + threads_per_block - 1) / threads_per_block;
+
+    rope_and_update_kv_cache_kernel<<<num_blocks, threads_per_block, 0, stream>>>(
+        cache_base_ptr,
+        kv_vector_head,
+        all_freqs_cis_base,
+        pos,
+        kv_head_idx,
+        max_seq_len,
+        num_kv_heads,
+        head_dim
+    );
+    gpuErrchk(cudaGetLastError()); 
+}
+
 
 // ============================================================================ 
 // Kernel Implementation: Lookup Embedding (BF16 -> FP32)
