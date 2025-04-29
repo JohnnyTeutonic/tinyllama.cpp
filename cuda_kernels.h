@@ -51,18 +51,29 @@ void rmsnorm_vector_cuda(const std::vector<float>& x_in_host,
                          float eps);
 
 /**
- * @brief Host-vector version: for use with std::vector<float> input/output.
+ * @brief Host-vector version: Allocates all device buffers internally.
  */
 void matvec_bf16_f32_cuda(const std::vector<uint16_t>& mat_bf16_host,
-                          const std::vector<float>& vec_f32_host,
+                          const std::vector<float>& vec_f32_host, 
                           std::vector<float>& out_f32_host,
                           int rows,
                           int cols);
 
 /**
+ * @brief Host-Matrix / Device-Vectors version.
+ * Handles temp allocation & copy for the matrix.
+ */
+void matvec_bf16_f32_cuda(const std::vector<uint16_t>& mat_bf16_host, // HOST Matrix
+                          const float* vec_f32_dev,                 // DEVICE Vector In
+                          float* out_f32_dev,                       // DEVICE Vector Out
+                          int rows,
+                          int cols,
+                          cudaStream_t stream = 0);                  // Added stream
+
+/**
  * @brief Device-pointer version: for use with device input/output buffers.
  */
-void matvec_bf16_f32_cuda(const std::vector<uint16_t>& mat_bf16_host,
+void matvec_bf16_f32_cuda(const uint16_t* mat_bf16_dev,
                           const float* vec_f32_dev,
                           float* out_f32_dev,
                           int rows,
@@ -162,11 +173,12 @@ void update_kv_cache_cuda(float* cache_base_ptr,
 void swiglu_cuda(const float* gate_dev, const float* up_dev, float* out_dev, int n);
 
 // NEW KERNEL DECLARATION (MODIFIED SIGNATURE)
-void lookup_embedding_bf16_f32_cuda(const std::vector<uint16_t>& embedding_table_host, // Takes host vector
-                                    float* output_vector, 
-                                    int token_id, 
-                                    int hidden_size, 
-                                    int vocab_size);
+void lookup_embedding_bf16_f32_cuda(const uint16_t* embedding_table_dev,
+                                    float* output_vector_dev,
+                                    int token_id,
+                                    int hidden_size,
+                                    int vocab_size,
+                                    cudaStream_t stream = 0);
 
 #endif // HAS_CUDA
 

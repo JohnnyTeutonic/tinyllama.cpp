@@ -141,6 +141,17 @@ private:
     // Device pointer for final RMSNorm weights
     float* final_norm_dev = nullptr;
     float* all_freqs_cis_dev = nullptr; // NEW: Persistent device buffer for all RoPE freqs
+    // --- START Persistent Device Weights (BF16) ---
+    uint16_t* token_embedding_table_dev_ = nullptr;
+    uint16_t* w_q_dev_ = nullptr;
+    uint16_t* w_k_dev_ = nullptr;
+    uint16_t* w_v_dev_ = nullptr;
+    uint16_t* w_o_dev_ = nullptr;
+    uint16_t* w_gate_dev_ = nullptr;
+    uint16_t* w_up_dev_ = nullptr;
+    uint16_t* w_down_dev_ = nullptr;
+    uint16_t* lm_head_dev_ = nullptr;
+    // --- END Persistent Device Weights ---
 #endif
 
     // Precomputed RoPE cos/sin values
