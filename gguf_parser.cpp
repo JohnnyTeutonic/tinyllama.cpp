@@ -272,7 +272,18 @@ GGUFData load_gguf_meta(const std::string& filename) {
     }
     Logger::info("Finished reading tensor info.");
 
-    // 5. Calculate Padding & Seek to Data Section
+    // --- ADDED: Populate the tensor_infos_map ---
+    Logger::info("Populating tensor_infos_map...");
+    for (const auto& tinfo : result.tensor_infos) {
+        if (result.tensor_infos_map.count(tinfo.name)) {
+             Logger::warning("Duplicate tensor name found in GGUF: '" + tinfo.name + "'. Overwriting entry in map.");
+        }
+        result.tensor_infos_map[tinfo.name] = tinfo;
+    }
+    Logger::info("Finished populating tensor_infos_map. Map size: " + std::to_string(result.tensor_infos_map.size()));
+    // --- END: Populate the tensor_infos_map ---
+
+    // Determine data alignment (read from metadata if available, default otherwise)
     uint64_t alignment = 32; // Default alignment
     try {
         if (result.metadata.count("general.alignment")) {

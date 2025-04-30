@@ -1,10 +1,12 @@
 #pragma once
 
+#include <map>
 #include <vector>
 #include <string>
 #include <variant>
 #include <cstdint>
 #include "ggml_types.h" // For GGMLType and GGUFValueType
+#include <map>
 
 // --- START: Add GGUFArray struct ---
 // Represents an array stored in GGUF metadata
@@ -52,4 +54,12 @@ struct GGUFTensorInfo {
     uint64_t offset;             // Offset in bytes from the start of the data section
     size_t num_elements;       // Calculated number of elements
     size_t size_in_bytes;      // Calculated size in bytes
-}; 
+};
+
+struct GGUFData {
+    GGUFHeader header; // ADDED: Store the parsed header info
+    std::vector<uint8_t> tensor_data; // Raw tensor data bytes
+    std::map<std::string, GGUFMetadataValue> metadata;
+    std::vector<GGUFTensorInfo> tensor_infos;
+    std::map<std::string, GGUFTensorInfo> tensor_infos_map; // ADDED: Map for quick tensor lookup by name
+};

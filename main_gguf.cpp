@@ -69,6 +69,47 @@ int main(int argc, char **argv) {
             }
             Logger::info("---------------------");
         }
+
+        // --- START: Test CPU Forward Pass --- 
+        Logger::info("Testing CPU forward pass (model.forward)... ");
+        try {
+            // 1. Get BOS token ID
+            int bos_token_id = config.bos_token_id;
+            Logger::info("Using BOS token ID: " + std::to_string(bos_token_id));
+
+            // 2. Lookup embedding
+            std::vector<float> input_embedding = model.lookup_embedding(bos_token_id);
+            if (input_embedding.empty() || input_embedding.size() != config.hidden_size) {
+                 throw std::runtime_error("Failed to get valid embedding for BOS token.");
+            }
+            log_vector_summary("BOS Embedding (first few)", input_embedding, 10);
+
+            // 3. Initialize KVCache
+            KVCache kv_cache;
+            kv_cache.initialize(config.num_hidden_layers, config.max_position_embeddings, 
+                                config.num_key_value_heads, config.hidden_size / config.num_attention_heads);
+            Logger::info("KVCache initialized.");
+
+            // 4. Call model.forward()
+            int current_pos = 0;
+            std::vector<float> logits = model.forward(input_embedding, current_pos, &kv_cache, nullptr);
+
+            // 5. Log results
+            if (logits.empty() || logits.size() != config.vocab_size) {
+                throw std::runtime_error("model.forward() returned invalid logits. Size: " + std::to_string(logits.size()) + ", Expected: " + std::to_string(config.vocab_size));
+            }
+            Logger::info("model.forward() successful! Logits vector size: " + std::to_string(logits.size()));
+            log_vector_summary("Output Logits (first few)", logits, 10);
+            int argmax_token = argmax(logits);
+            Logger::info("Argmax of logits: " + std::to_string(argmax_token));
+
+        } catch (const std::exception& e) {
+             Logger::error("*** Error during CPU forward pass test ***");
+             Logger::error(e.what());
+             // Don't exit immediately, let the main try block handle it if needed
+        }
+        // --- END: Test CPU Forward Pass --- 
+
     } catch (const std::exception& e) {
         Logger::error(std::string("*** Error loading model ***\n") + e.what());
         return 1;

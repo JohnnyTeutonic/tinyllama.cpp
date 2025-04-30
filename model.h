@@ -38,12 +38,14 @@ ModelConfig parse_model_config_from_gguf(const GGUFData& gguf); // Forward decla
 
 // KVCache for autoregressive inference
 struct KVCacheLayer {
-#ifdef HAS_CUDA
-    float* k_dev = nullptr; // Device pointer for K cache of this layer
-    float* v_dev = nullptr; // Device pointer for V cache of this layer
-#else
+    // --- ALWAYS define host vectors --- 
     std::vector<float> k; // Host vector for K cache (CPU path)
     std::vector<float> v; // Host vector for V cache (CPU path)
+
+#ifdef HAS_CUDA
+    // --- Conditionally define device pointers --- 
+    float* k_dev = nullptr; // Device pointer for K cache of this layer
+    float* v_dev = nullptr; // Device pointer for V cache of this layer
 #endif
 };
 

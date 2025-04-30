@@ -19,13 +19,8 @@ std::string read_gguf_string(std::ifstream& file);
 
 // --- Main Loading Function Declaration ---
 
-// Structure to hold the loaded GGUF data
-struct GGUFData {
-    GGUFHeader header;
-    std::map<std::string, GGUFMetadataValue> metadata;
-    std::vector<GGUFTensorInfo> tensor_infos;
-    std::vector<std::byte> tensor_data; // <<< ADDED TO HOLD RAW TENSOR BYTES
-};
+// Structure to hold the loaded GGUF data - REMOVED Duplicate definition
+// The canonical definition is in gguf_structs.h
 
 // Loads header, metadata, and tensor info from a GGUF file.
 // Tensor data itself is not loaded by this function yet.
