@@ -24,6 +24,9 @@
 #include <numeric> // For std::accumulate
 #include <cassert> // For assert()
 #include <iostream> // Include for std::cout in logging
+#include "gguf_parser.h"
+#include <variant> // Add include for variant index
+#include "quantization.h" // Include for GGML_QK_K
 
 void log_vector_summary(const std::string& name, const std::vector<float>& v, int head_count) {
     if (v.empty()) {
@@ -534,209 +537,320 @@ void apply_rope(torch::Tensor& x, int num_heads, int head_dim, int pos,
 }
 */
 
-// TinyLlamaModel constructor: load all weights from safetensors into uint16_t vectors
-TinyLlamaModel::TinyLlamaModel(const ModelConfig& config, const SafeTensorsLoader& loader)
-    : config_(config)
-{
-    int hs = config.hidden_size;
-    int is = config.intermediate_size;
-    int nhl = config.num_hidden_layers;
-    int vs = config.vocab_size;
-    int n_heads = config.num_attention_heads;
-    int n_kv_heads = config.num_key_value_heads;
+// --- START: Private Helper: Initialize Weights ---
+void TinyLlamaModel::initialize_weights(const SafeTensorsLoader* loader, const GGUFData* gguf) {
+    Logger::info("Initializing model weights...");
+    int hs = config_.hidden_size;
+    int is = config_.intermediate_size;
+    int nhl = config_.num_hidden_layers;
+    int vs = config_.vocab_size;
+    int n_heads = config_.num_attention_heads;
+    int n_kv_heads = config_.num_key_value_heads;
     int kv_dim = (hs / n_heads) * n_kv_heads;
-    Logger::info("K/V projection kv_dim: " + std::to_string(kv_dim));
 
-    // Load weights directly into uint16_t vectors
-    try {
-        embed_tokens = uint8_vector_to_uint16_vector(loader.get_tensor_bytes("model.embed_tokens.weight"), vs * hs);
-    } catch (const std::exception& e) {
-        Logger::error("Missing model.embed_tokens.weight: " + std::string(e.what()));
-    }
-    try {
-        lm_head = uint8_vector_to_uint16_vector(loader.get_tensor_bytes("lm_head.weight"), vs * hs);
-    } catch (const std::exception& e) {
-        Logger::error("Missing lm_head.weight: " + std::string(e.what()));
-    }
-    try {
-        final_norm = uint8_vector_to_uint16_vector(loader.get_tensor_bytes("model.norm.weight"), hs);
-    } catch (const std::exception& e) {
-        Logger::error("Missing model.norm.weight: " + std::string(e.what()));
-    }
+    layers.resize(nhl); // Ensure layers vector is sized
 
-    // --- START: Load Per-Layer Weights ---
-    layers.resize(nhl); // Resize the layers vector first!
-    for (int i = 0; i < nhl; ++i) {
-        Logger::info("Loading weights for layer " + std::to_string(i));
-        std::string prefix = "model.layers." + std::to_string(i) + ".";
+    if (gguf) {
+        Logger::info("Mapping weights from GGUF data...");
+        // Call the friend function directly since gguf is provided
+        map_gguf_weights(*gguf, *this);
+    } else if (loader) {
+        Logger::info("Loading weights from SafeTensors data...");
+        // Load weights directly into appropriate vectors from the loader
+        // NOTE: This currently only loads BF16. Needs extension if safetensors can contain other types.
         try {
-            layers[i].q_proj = uint8_vector_to_uint16_vector(loader.get_tensor_bytes(prefix + "self_attn.q_proj.weight"), hs * hs);
-        } catch (const std::exception& e) { Logger::error("Missing " + prefix + "self_attn.q_proj.weight: " + std::string(e.what())); }
+            embed_tokens = uint8_vector_to_uint16_vector(loader->get_tensor_bytes("model.embed_tokens.weight"), vs * hs);
+        } catch (const std::exception& e) { Logger::error("Missing model.embed_tokens.weight: " + std::string(e.what())); }
         try {
-            layers[i].k_proj = uint8_vector_to_uint16_vector(loader.get_tensor_bytes(prefix + "self_attn.k_proj.weight"), kv_dim * hs);
-        } catch (const std::exception& e) { Logger::error("Missing " + prefix + "self_attn.k_proj.weight: " + std::string(e.what())); }
+            lm_head = uint8_vector_to_uint16_vector(loader->get_tensor_bytes("lm_head.weight"), vs * hs);
+        } catch (const std::exception& e) { Logger::error("Missing lm_head.weight: " + std::string(e.what())); }
         try {
-            layers[i].v_proj = uint8_vector_to_uint16_vector(loader.get_tensor_bytes(prefix + "self_attn.v_proj.weight"), kv_dim * hs);
-        } catch (const std::exception& e) { Logger::error("Missing " + prefix + "self_attn.v_proj.weight: " + std::string(e.what())); }
-        try {
-            layers[i].o_proj = uint8_vector_to_uint16_vector(loader.get_tensor_bytes(prefix + "self_attn.o_proj.weight"), hs * hs);
-        } catch (const std::exception& e) { Logger::error("Missing " + prefix + "self_attn.o_proj.weight: " + std::string(e.what())); }
-        try {
-            layers[i].gate_proj = uint8_vector_to_uint16_vector(loader.get_tensor_bytes(prefix + "mlp.gate_proj.weight"), is * hs);
-        } catch (const std::exception& e) { Logger::error("Missing " + prefix + "mlp.gate_proj.weight: " + std::string(e.what())); }
-        try {
-            layers[i].up_proj = uint8_vector_to_uint16_vector(loader.get_tensor_bytes(prefix + "mlp.up_proj.weight"), is * hs);
-        } catch (const std::exception& e) { Logger::error("Missing " + prefix + "mlp.up_proj.weight: " + std::string(e.what())); }
-        try {
-            layers[i].down_proj = uint8_vector_to_uint16_vector(loader.get_tensor_bytes(prefix + "mlp.down_proj.weight"), hs * is);
-        } catch (const std::exception& e) { Logger::error("Missing " + prefix + "mlp.down_proj.weight: " + std::string(e.what())); }
-        try {
-            layers[i].input_layernorm = uint8_vector_to_uint16_vector(loader.get_tensor_bytes(prefix + "input_layernorm.weight"), hs);
-        } catch (const std::exception& e) { Logger::error("Missing " + prefix + "input_layernorm.weight: " + std::string(e.what())); }
-        try {
-            layers[i].post_attention_layernorm = uint8_vector_to_uint16_vector(loader.get_tensor_bytes(prefix + "post_attention_layernorm.weight"), hs);
-        } catch (const std::exception& e) { Logger::error("Missing " + prefix + "post_attention_layernorm.weight: " + std::string(e.what())); }
+            final_norm = uint8_vector_to_uint16_vector(loader->get_tensor_bytes("model.norm.weight"), hs);
+        } catch (const std::exception& e) { Logger::error("Missing model.norm.weight: " + std::string(e.what())); }
+
+        for (int i = 0; i < nhl; ++i) {
+            Logger::info("Loading SafeTensors weights for layer " + std::to_string(i));
+            std::string prefix = "model.layers." + std::to_string(i) + ".";
+            auto& lw = layers[i]; // Get mutable ref
+            try { lw.q_proj = uint8_vector_to_uint16_vector(loader->get_tensor_bytes(prefix + "self_attn.q_proj.weight"), hs * hs); } 
+            catch (const std::exception& e) { Logger::error("Missing " + prefix + "self_attn.q_proj.weight: " + std::string(e.what())); }
+            try { lw.k_proj = uint8_vector_to_uint16_vector(loader->get_tensor_bytes(prefix + "self_attn.k_proj.weight"), kv_dim * hs); } 
+            catch (const std::exception& e) { Logger::error("Missing " + prefix + "self_attn.k_proj.weight: " + std::string(e.what())); }
+            try { lw.v_proj = uint8_vector_to_uint16_vector(loader->get_tensor_bytes(prefix + "self_attn.v_proj.weight"), kv_dim * hs); } 
+            catch (const std::exception& e) { Logger::error("Missing " + prefix + "self_attn.v_proj.weight: " + std::string(e.what())); }
+            try { lw.o_proj = uint8_vector_to_uint16_vector(loader->get_tensor_bytes(prefix + "self_attn.o_proj.weight"), hs * hs); } 
+            catch (const std::exception& e) { Logger::error("Missing " + prefix + "self_attn.o_proj.weight: " + std::string(e.what())); }
+            try { lw.gate_proj = uint8_vector_to_uint16_vector(loader->get_tensor_bytes(prefix + "mlp.gate_proj.weight"), is * hs); } 
+            catch (const std::exception& e) { Logger::error("Missing " + prefix + "mlp.gate_proj.weight: " + std::string(e.what())); }
+            try { lw.up_proj = uint8_vector_to_uint16_vector(loader->get_tensor_bytes(prefix + "mlp.up_proj.weight"), is * hs); } 
+            catch (const std::exception& e) { Logger::error("Missing " + prefix + "mlp.up_proj.weight: " + std::string(e.what())); }
+            try { lw.down_proj = uint8_vector_to_uint16_vector(loader->get_tensor_bytes(prefix + "mlp.down_proj.weight"), hs * is); } 
+            catch (const std::exception& e) { Logger::error("Missing " + prefix + "mlp.down_proj.weight: " + std::string(e.what())); }
+            try { lw.input_layernorm = uint8_vector_to_uint16_vector(loader->get_tensor_bytes(prefix + "input_layernorm.weight"), hs); } 
+            catch (const std::exception& e) { Logger::error("Missing " + prefix + "input_layernorm.weight: " + std::string(e.what())); }
+            try { lw.post_attention_layernorm = uint8_vector_to_uint16_vector(loader->get_tensor_bytes(prefix + "post_attention_layernorm.weight"), hs); } 
+            catch (const std::exception& e) { Logger::error("Missing " + prefix + "post_attention_layernorm.weight: " + std::string(e.what())); }
+            
+            // If safetensors are BF16, populate the F32 fields too for consistency (or add logic later to handle FP32 safetensors)
+            lw.input_layernorm_f32 = bf16vec_to_float_vec(lw.input_layernorm);
+            lw.post_attention_layernorm_f32 = bf16vec_to_float_vec(lw.post_attention_layernorm);
+            lw.q_proj_f32 = bf16vec_to_float_vec(lw.q_proj);
+            lw.k_proj_f32 = bf16vec_to_float_vec(lw.k_proj);
+            lw.v_proj_f32 = bf16vec_to_float_vec(lw.v_proj);
+            lw.o_proj_f32 = bf16vec_to_float_vec(lw.o_proj);
+            lw.gate_proj_f32 = bf16vec_to_float_vec(lw.gate_proj);
+            lw.up_proj_f32 = bf16vec_to_float_vec(lw.up_proj);
+            lw.down_proj_f32 = bf16vec_to_float_vec(lw.down_proj);
+        }
+         // Populate top-level F32 fields from BF16 safetensors
+        embed_tokens_f32 = bf16vec_to_float_vec(embed_tokens);
+        lm_head_f32 = bf16vec_to_float_vec(lm_head);
+        final_norm_f32 = bf16vec_to_float_vec(final_norm);
+
+    } else {
+        throw std::runtime_error("TinyLlamaModel::initialize_weights called with neither GGUF nor SafeTensors loader.");
+    }
+    Logger::info("Finished initializing model weights.");
+}
+// --- END: Private Helper: Initialize Weights ---
+
+
+// --- START: Private Helper: Initialize GPU Resources & RoPE ---
+void TinyLlamaModel::initialize_gpu_and_rope() {
+    Logger::info("Initializing GPU resources and RoPE...");
+    int hs = config_.hidden_size;
+    int is = config_.intermediate_size;
+    int nhl = config_.num_hidden_layers;
+    int vs = config_.vocab_size;
+    int n_heads = config_.num_attention_heads;
+    int n_kv_heads = config_.num_key_value_heads;
+    
+    // --- START: VALIDATION --- 
+    if (hs <= 0) {
+        throw std::runtime_error("Invalid model configuration: hidden_size must be positive. Check GGUF metadata ('llama.embedding_length').");
+    }
+    if (vs <= 0) {
+        throw std::runtime_error("Invalid model configuration: vocab_size must be positive. Check GGUF metadata ('general.vocab_size').");
+    }
+    if (n_heads <= 0) {
+        throw std::runtime_error("Invalid model configuration: num_attention_heads must be positive. Check GGUF metadata ('llama.head_count').");
+    }
+    if (n_kv_heads <= 0) {
+         throw std::runtime_error("Invalid model configuration: num_key_value_heads must be positive. Check GGUF metadata ('llama.head_count_kv').");
+    }
+    if (hs % n_heads != 0) {
+         throw std::runtime_error("Invalid model configuration: hidden_size must be divisible by num_attention_heads.");
+    }
+    // --- END: VALIDATION --- 
+
+    int kv_dim = (hs / n_heads) * n_kv_heads; // Now safe from division by zero for n_heads
+    int head_dim = hs / n_heads;             // Now safe from division by zero
 
 #ifdef HAS_CUDA
-        // Allocate and copy FP32 layer norm weights for this layer to GPU
-        std::vector<float> ln1_f32 = bf16vec_to_float_vec(layers[i].input_layernorm);
-        gpuErrchk(cudaMalloc(&layers[i].input_layernorm_dev, ln1_f32.size() * sizeof(float)));
-        gpuErrchk(cudaMemcpy(layers[i].input_layernorm_dev, ln1_f32.data(), ln1_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
-
-        std::vector<float> ln2_f32 = bf16vec_to_float_vec(layers[i].post_attention_layernorm);
-        gpuErrchk(cudaMalloc(&layers[i].post_attention_layernorm_dev, ln2_f32.size() * sizeof(float)));
-        gpuErrchk(cudaMemcpy(layers[i].post_attention_layernorm_dev, ln2_f32.data(), ln2_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
-#endif
-    }
-    Logger::info("Finished loading all layer weights.");
-    // --- END: Load Per-Layer Weights ---
-
-#ifdef HAS_CUDA
+    Logger::info("Initializing CUDA resources...");
     // --- START CUBLAS Initialization ---
     cublasStatus_t cublas_status = cublasCreate(&cublas_handle_);
     if (cublas_status != CUBLAS_STATUS_SUCCESS) {
-        Logger::error("cuBLAS handle creation failed with error code: " + std::to_string(cublas_status));
-        // Handle error appropriately - maybe throw an exception or set an error state
+        Logger::error("cuBLAS handle creation failed: " + std::to_string(cublas_status));
         throw std::runtime_error("Failed to initialize cuBLAS");
     }
     Logger::info("cuBLAS handle created successfully.");
     // --- END CUBLAS Initialization ---
 
-    // Allocate and copy final_norm weights to device
-    std::vector<float> final_norm_f32 = bf16vec_to_float_vec(final_norm);
+    // Allocate and copy final_norm weights to device (FP32 version)
+    // Ensure final_norm_f32 is populated before this!
+    if (final_norm_f32.empty() && !final_norm.empty()) { // If F32 is empty but BF16 exists (e.g. from safetensors)
+         final_norm_f32 = bf16vec_to_float_vec(final_norm);
+    }
+    if (!final_norm_f32.empty()) {
     gpuErrchk(cudaMalloc(&final_norm_dev, final_norm_f32.size() * sizeof(float)));
     gpuErrchk(cudaMemcpy(final_norm_dev, final_norm_f32.data(), final_norm_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
-    Logger::info("Copied final_norm weights to GPU.");
+        Logger::info("Copied final_norm weights (FP32) to GPU.");
+    } else {
+         Logger::warning("Final norm weights (FP32) empty, skipping GPU copy.");
+    }
+
+
+    // --- Allocate and copy Layer Norm weights to GPU ---
+    for (int i = 0; i < nhl; ++i) {
+        // Ensure F32 versions are populated
+        if (layers[i].input_layernorm_f32.empty() && !layers[i].input_layernorm.empty()) {
+             layers[i].input_layernorm_f32 = bf16vec_to_float_vec(layers[i].input_layernorm);
+        }
+         if (layers[i].post_attention_layernorm_f32.empty() && !layers[i].post_attention_layernorm.empty()) {
+             layers[i].post_attention_layernorm_f32 = bf16vec_to_float_vec(layers[i].post_attention_layernorm);
+        }
+
+        // Copy input layernorm
+        if (!layers[i].input_layernorm_f32.empty()) {
+            gpuErrchk(cudaMalloc(&layers[i].input_layernorm_dev, layers[i].input_layernorm_f32.size() * sizeof(float)));
+            gpuErrchk(cudaMemcpy(layers[i].input_layernorm_dev, layers[i].input_layernorm_f32.data(), layers[i].input_layernorm_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
+        }
+        // Copy post-attention layernorm
+        if (!layers[i].post_attention_layernorm_f32.empty()) {
+            gpuErrchk(cudaMalloc(&layers[i].post_attention_layernorm_dev, layers[i].post_attention_layernorm_f32.size() * sizeof(float)));
+            gpuErrchk(cudaMemcpy(layers[i].post_attention_layernorm_dev, layers[i].post_attention_layernorm_f32.data(), layers[i].post_attention_layernorm_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
+        }
+    }
+     Logger::info("Copied all layer norm weights (FP32) to GPU.");
+
 
     // --- START: Allocate and copy persistent BF16 weights ---
-    // Embedding Table
-    gpuErrchk(cudaMalloc(&token_embedding_table_dev_, embed_tokens.size() * sizeof(uint16_t)));
-    gpuErrchk(cudaMemcpy(token_embedding_table_dev_, embed_tokens.data(), embed_tokens.size() * sizeof(uint16_t), cudaMemcpyHostToDevice));
-    Logger::info("Copied token_embedding_table (bf16) to GPU.");
-
-    // LM Head
-    gpuErrchk(cudaMalloc(&lm_head_dev_, lm_head.size() * sizeof(uint16_t)));
-    gpuErrchk(cudaMemcpy(lm_head_dev_, lm_head.data(), lm_head.size() * sizeof(uint16_t), cudaMemcpyHostToDevice));
-    Logger::info("Copied lm_head (bf16) to GPU.");
-
-    // Concatenated Layer Weights (BF16)
-    size_t layer_q_size = (size_t)hs * hs;
-    size_t layer_k_size = (size_t)kv_dim * hs;
-    size_t layer_v_size = (size_t)kv_dim * hs;
-    size_t layer_o_size = (size_t)hs * hs;
-    size_t layer_gate_size = (size_t)is * hs;
-    size_t layer_up_size = (size_t)is * hs;
-    size_t layer_down_size = (size_t)hs * is;
-
-    std::vector<uint16_t> all_q_proj_host, all_k_proj_host, all_v_proj_host, all_o_proj_host;
-    std::vector<uint16_t> all_gate_proj_host, all_up_proj_host, all_down_proj_host;
-
-    all_q_proj_host.reserve(nhl * layer_q_size);
-    all_k_proj_host.reserve(nhl * layer_k_size);
-    all_v_proj_host.reserve(nhl * layer_v_size);
-    all_o_proj_host.reserve(nhl * layer_o_size);
-    all_gate_proj_host.reserve(nhl * layer_gate_size);
-    all_up_proj_host.reserve(nhl * layer_up_size);
-    all_down_proj_host.reserve(nhl * layer_down_size);
-
-    for (int i = 0; i < nhl; ++i) {
-        const auto& lw = layers[i];
-        all_q_proj_host.insert(all_q_proj_host.end(), lw.q_proj.begin(), lw.q_proj.end());
-        all_k_proj_host.insert(all_k_proj_host.end(), lw.k_proj.begin(), lw.k_proj.end());
-        all_v_proj_host.insert(all_v_proj_host.end(), lw.v_proj.begin(), lw.v_proj.end());
-        all_o_proj_host.insert(all_o_proj_host.end(), lw.o_proj.begin(), lw.o_proj.end());
-        all_gate_proj_host.insert(all_gate_proj_host.end(), lw.gate_proj.begin(), lw.gate_proj.end());
-        all_up_proj_host.insert(all_up_proj_host.end(), lw.up_proj.begin(), lw.up_proj.end());
-        all_down_proj_host.insert(all_down_proj_host.end(), lw.down_proj.begin(), lw.down_proj.end());
+    // TODO: Add checks if these vectors are populated before copying
+    if (!embed_tokens.empty()) {
+        gpuErrchk(cudaMalloc(&token_embedding_table_dev_, embed_tokens.size() * sizeof(uint16_t)));
+        gpuErrchk(cudaMemcpy(token_embedding_table_dev_, embed_tokens.data(), embed_tokens.size() * sizeof(uint16_t), cudaMemcpyHostToDevice));
+        Logger::info("Copied token_embedding_table (bf16) to GPU.");
     }
-    Logger::info("Concatenated all layer weights on host.");
+     if (!lm_head.empty()) {
+        gpuErrchk(cudaMalloc(&lm_head_dev_, lm_head.size() * sizeof(uint16_t)));
+        gpuErrchk(cudaMemcpy(lm_head_dev_, lm_head.data(), lm_head.size() * sizeof(uint16_t), cudaMemcpyHostToDevice));
+        Logger::info("Copied lm_head (bf16) to GPU.");
+    }
 
-    // Allocate device memory for concatenated weights
-    gpuErrchk(cudaMalloc(&w_q_dev_, all_q_proj_host.size() * sizeof(uint16_t)));
-    gpuErrchk(cudaMalloc(&w_k_dev_, all_k_proj_host.size() * sizeof(uint16_t)));
-    gpuErrchk(cudaMalloc(&w_v_dev_, all_v_proj_host.size() * sizeof(uint16_t)));
-    gpuErrchk(cudaMalloc(&w_o_dev_, all_o_proj_host.size() * sizeof(uint16_t)));
-    gpuErrchk(cudaMalloc(&w_gate_dev_, all_gate_proj_host.size() * sizeof(uint16_t)));
-    gpuErrchk(cudaMalloc(&w_up_dev_, all_up_proj_host.size() * sizeof(uint16_t)));
-    gpuErrchk(cudaMalloc(&w_down_dev_, all_down_proj_host.size() * sizeof(uint16_t)));
-    Logger::info("Allocated GPU memory for concatenated layer weights.");
+    // Concatenate Layer Weights (BF16) - Only if BF16 weights exist
+    bool has_bf16_layer_weights = !layers.empty() && !layers[0].q_proj.empty(); // Check first layer's q_proj
+    if(has_bf16_layer_weights) {
+        size_t layer_q_size = (size_t)hs * hs;
+        size_t layer_k_size = (size_t)kv_dim * hs;
+        size_t layer_v_size = (size_t)kv_dim * hs;
+        size_t layer_o_size = (size_t)hs * hs;
+        size_t layer_gate_size = (size_t)is * hs;
+        size_t layer_up_size = (size_t)is * hs;
+        size_t layer_down_size = (size_t)hs * is;
 
-    // Copy concatenated weights to device
-    gpuErrchk(cudaMemcpy(w_q_dev_, all_q_proj_host.data(), all_q_proj_host.size() * sizeof(uint16_t), cudaMemcpyHostToDevice));
-    gpuErrchk(cudaMemcpy(w_k_dev_, all_k_proj_host.data(), all_k_proj_host.size() * sizeof(uint16_t), cudaMemcpyHostToDevice));
-    gpuErrchk(cudaMemcpy(w_v_dev_, all_v_proj_host.data(), all_v_proj_host.size() * sizeof(uint16_t), cudaMemcpyHostToDevice));
-    gpuErrchk(cudaMemcpy(w_o_dev_, all_o_proj_host.data(), all_o_proj_host.size() * sizeof(uint16_t), cudaMemcpyHostToDevice));
-    gpuErrchk(cudaMemcpy(w_gate_dev_, all_gate_proj_host.data(), all_gate_proj_host.size() * sizeof(uint16_t), cudaMemcpyHostToDevice));
-    gpuErrchk(cudaMemcpy(w_up_dev_, all_up_proj_host.data(), all_up_proj_host.size() * sizeof(uint16_t), cudaMemcpyHostToDevice));
-    gpuErrchk(cudaMemcpy(w_down_dev_, all_down_proj_host.data(), all_down_proj_host.size() * sizeof(uint16_t), cudaMemcpyHostToDevice));
-    Logger::info("Copied concatenated layer weights (bf16) to GPU.");
+        std::vector<uint16_t> all_q_proj_host, all_k_proj_host, all_v_proj_host, all_o_proj_host;
+        std::vector<uint16_t> all_gate_proj_host, all_up_proj_host, all_down_proj_host;
+
+        // Reserve space
+        all_q_proj_host.reserve(nhl * layer_q_size);
+        all_k_proj_host.reserve(nhl * layer_k_size);
+        // ... reserve for others ...
+
+        for (int i = 0; i < nhl; ++i) {
+            const auto& lw = layers[i];
+             if (lw.q_proj.empty()) continue; // Skip if this layer is missing bf16 weights
+            all_q_proj_host.insert(all_q_proj_host.end(), lw.q_proj.begin(), lw.q_proj.end());
+            all_k_proj_host.insert(all_k_proj_host.end(), lw.k_proj.begin(), lw.k_proj.end());
+            all_v_proj_host.insert(all_v_proj_host.end(), lw.v_proj.begin(), lw.v_proj.end());
+            all_o_proj_host.insert(all_o_proj_host.end(), lw.o_proj.begin(), lw.o_proj.end());
+            all_gate_proj_host.insert(all_gate_proj_host.end(), lw.gate_proj.begin(), lw.gate_proj.end());
+            all_up_proj_host.insert(all_up_proj_host.end(), lw.up_proj.begin(), lw.up_proj.end());
+            all_down_proj_host.insert(all_down_proj_host.end(), lw.down_proj.begin(), lw.down_proj.end());
+        }
+        Logger::info("Concatenated BF16 layer weights on host.");
+
+        // Allocate and Copy concatenated BF16 weights
+        if (!all_q_proj_host.empty()) { // Check if concatenation resulted in data
+            gpuErrchk(cudaMalloc(&w_q_dev_, all_q_proj_host.size() * sizeof(uint16_t)));
+            gpuErrchk(cudaMemcpy(w_q_dev_, all_q_proj_host.data(), all_q_proj_host.size() * sizeof(uint16_t), cudaMemcpyHostToDevice));
+            // ... cudaMalloc/cudaMemcpy for k, v, o, gate, up, down ...
+             gpuErrchk(cudaMalloc(&w_k_dev_, all_k_proj_host.size() * sizeof(uint16_t)));
+             gpuErrchk(cudaMemcpy(w_k_dev_, all_k_proj_host.data(), all_k_proj_host.size() * sizeof(uint16_t), cudaMemcpyHostToDevice));
+             gpuErrchk(cudaMalloc(&w_v_dev_, all_v_proj_host.size() * sizeof(uint16_t)));
+             gpuErrchk(cudaMemcpy(w_v_dev_, all_v_proj_host.data(), all_v_proj_host.size() * sizeof(uint16_t), cudaMemcpyHostToDevice));
+             gpuErrchk(cudaMalloc(&w_o_dev_, all_o_proj_host.size() * sizeof(uint16_t)));
+             gpuErrchk(cudaMemcpy(w_o_dev_, all_o_proj_host.data(), all_o_proj_host.size() * sizeof(uint16_t), cudaMemcpyHostToDevice));
+             gpuErrchk(cudaMalloc(&w_gate_dev_, all_gate_proj_host.size() * sizeof(uint16_t)));
+             gpuErrchk(cudaMemcpy(w_gate_dev_, all_gate_proj_host.data(), all_gate_proj_host.size() * sizeof(uint16_t), cudaMemcpyHostToDevice));
+             gpuErrchk(cudaMalloc(&w_up_dev_, all_up_proj_host.size() * sizeof(uint16_t)));
+             gpuErrchk(cudaMemcpy(w_up_dev_, all_up_proj_host.data(), all_up_proj_host.size() * sizeof(uint16_t), cudaMemcpyHostToDevice));
+             gpuErrchk(cudaMalloc(&w_down_dev_, all_down_proj_host.size() * sizeof(uint16_t)));
+             gpuErrchk(cudaMemcpy(w_down_dev_, all_down_proj_host.data(), all_down_proj_host.size() * sizeof(uint16_t), cudaMemcpyHostToDevice));
+            Logger::info("Copied concatenated layer weights (bf16) to GPU.");
+                 } else {
+             Logger::info("No BF16 layer weights found to concatenate/copy to GPU.");
+        }
+    } else {
+         Logger::info("Skipping BF16 layer weight concatenation/copy (no BF16 weights found).");
+    }
     // --- END: Allocate and copy persistent BF16 weights ---
-    Logger::info("All model weights loaded (as bfloat16/uint16_t).");
+
 
     // --- START: Allocate and copy persistent FP32 weights ---
-    // Embedding Table (FP32)
-    std::vector<float> embed_tokens_f32 = bf16vec_to_float_vec(embed_tokens);
-    gpuErrchk(cudaMalloc(&token_embedding_table_f32_dev_, embed_tokens_f32.size() * sizeof(float)));
-    gpuErrchk(cudaMemcpy(token_embedding_table_f32_dev_, embed_tokens_f32.data(), embed_tokens_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
-    Logger::info("Copied token_embedding_table (fp32) to GPU.");
+    // Ensure F32 vectors are populated before copying
+     if (embed_tokens_f32.empty() && !embed_tokens.empty()) { // Convert if needed (e.g., from safetensors)
+        embed_tokens_f32 = bf16vec_to_float_vec(embed_tokens);
+    }
+    if (lm_head_f32.empty() && !lm_head.empty()) {
+         lm_head_f32 = bf16vec_to_float_vec(lm_head);
+    }
+    // TODO: Similar checks/conversions might be needed for layer weights if loaded as BF16
 
-    // LM Head (FP32)
-    std::vector<float> lm_head_f32 = bf16vec_to_float_vec(lm_head);
-    gpuErrchk(cudaMalloc(&lm_head_f32_dev_, lm_head_f32.size() * sizeof(float)));
-    gpuErrchk(cudaMemcpy(lm_head_f32_dev_, lm_head_f32.data(), lm_head_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
-    Logger::info("Copied lm_head (fp32) to GPU.");
+    if (!embed_tokens_f32.empty()) {
+        gpuErrchk(cudaMalloc(&token_embedding_table_f32_dev_, embed_tokens_f32.size() * sizeof(float)));
+        gpuErrchk(cudaMemcpy(token_embedding_table_f32_dev_, embed_tokens_f32.data(), embed_tokens_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
+        Logger::info("Copied token_embedding_table (fp32) to GPU.");
+    }
+     if (!lm_head_f32.empty()) {
+        gpuErrchk(cudaMalloc(&lm_head_f32_dev_, lm_head_f32.size() * sizeof(float)));
+        gpuErrchk(cudaMemcpy(lm_head_f32_dev_, lm_head_f32.data(), lm_head_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
+        Logger::info("Copied lm_head (fp32) to GPU.");
+    }
 
-    // Concatenated Layer Weights (FP32)
-    std::vector<float> all_q_proj_f32 = bf16vec_to_float_vec(all_q_proj_host);
-    std::vector<float> all_k_proj_f32 = bf16vec_to_float_vec(all_k_proj_host);
-    std::vector<float> all_v_proj_f32 = bf16vec_to_float_vec(all_v_proj_host);
-    std::vector<float> all_o_proj_f32 = bf16vec_to_float_vec(all_o_proj_host);
-    std::vector<float> all_gate_proj_f32 = bf16vec_to_float_vec(all_gate_proj_host);
-    std::vector<float> all_up_proj_f32 = bf16vec_to_float_vec(all_up_proj_host);
-    std::vector<float> all_down_proj_f32 = bf16vec_to_float_vec(all_down_proj_host);
+    // Concatenate Layer Weights (FP32) - Only if FP32 weights exist
+     bool has_fp32_layer_weights = !layers.empty() && !layers[0].q_proj_f32.empty(); // Check first layer's q_proj_f32
+     if (has_fp32_layer_weights) {
+        size_t layer_q_size = (size_t)hs * hs;
+        size_t layer_k_size = (size_t)kv_dim * hs;
+        // ... other sizes ...
 
-    gpuErrchk(cudaMalloc(&w_q_f32_dev_, all_q_proj_f32.size() * sizeof(float)));
-    gpuErrchk(cudaMemcpy(w_q_f32_dev_, all_q_proj_f32.data(), all_q_proj_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
-    gpuErrchk(cudaMalloc(&w_k_f32_dev_, all_k_proj_f32.size() * sizeof(float)));
-    gpuErrchk(cudaMemcpy(w_k_f32_dev_, all_k_proj_f32.data(), all_k_proj_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
-    gpuErrchk(cudaMalloc(&w_v_f32_dev_, all_v_proj_f32.size() * sizeof(float)));
-    gpuErrchk(cudaMemcpy(w_v_f32_dev_, all_v_proj_f32.data(), all_v_proj_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
-    gpuErrchk(cudaMalloc(&w_o_f32_dev_, all_o_proj_f32.size() * sizeof(float)));
-    gpuErrchk(cudaMemcpy(w_o_f32_dev_, all_o_proj_f32.data(), all_o_proj_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
-    gpuErrchk(cudaMalloc(&w_gate_f32_dev_, all_gate_proj_f32.size() * sizeof(float)));
-    gpuErrchk(cudaMemcpy(w_gate_f32_dev_, all_gate_proj_f32.data(), all_gate_proj_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
-    gpuErrchk(cudaMalloc(&w_up_f32_dev_, all_up_proj_f32.size() * sizeof(float)));
-    gpuErrchk(cudaMemcpy(w_up_f32_dev_, all_up_proj_f32.data(), all_up_proj_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
-    gpuErrchk(cudaMalloc(&w_down_f32_dev_, all_down_proj_f32.size() * sizeof(float)));
-    gpuErrchk(cudaMemcpy(w_down_f32_dev_, all_down_proj_f32.data(), all_down_proj_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
-    Logger::info("Copied all concatenated layer weights (fp32) to GPU.");
+        std::vector<float> all_q_proj_f32, all_k_proj_f32, all_v_proj_f32, all_o_proj_f32;
+        std::vector<float> all_gate_proj_f32, all_up_proj_f32, all_down_proj_f32;
+
+        // Reserve space
+        all_q_proj_f32.reserve(nhl * layer_q_size);
+        // ... reserve for others ...
+
+        for (int i = 0; i < nhl; ++i) {
+            const auto& lw = layers[i];
+             if (lw.q_proj_f32.empty()) continue; // Skip if this layer is missing f32 weights
+            all_q_proj_f32.insert(all_q_proj_f32.end(), lw.q_proj_f32.begin(), lw.q_proj_f32.end());
+            all_k_proj_f32.insert(all_k_proj_f32.end(), lw.k_proj_f32.begin(), lw.k_proj_f32.end());
+            all_v_proj_f32.insert(all_v_proj_f32.end(), lw.v_proj_f32.begin(), lw.v_proj_f32.end());
+            all_o_proj_f32.insert(all_o_proj_f32.end(), lw.o_proj_f32.begin(), lw.o_proj_f32.end());
+            all_gate_proj_f32.insert(all_gate_proj_f32.end(), lw.gate_proj_f32.begin(), lw.gate_proj_f32.end());
+            all_up_proj_f32.insert(all_up_proj_f32.end(), lw.up_proj_f32.begin(), lw.up_proj_f32.end());
+            all_down_proj_f32.insert(all_down_proj_f32.end(), lw.down_proj_f32.begin(), lw.down_proj_f32.end());
+        }
+        Logger::info("Concatenated FP32 layer weights on host.");
+
+        // Allocate and Copy concatenated FP32 weights
+         if (!all_q_proj_f32.empty()) {
+            gpuErrchk(cudaMalloc(&w_q_f32_dev_, all_q_proj_f32.size() * sizeof(float)));
+            gpuErrchk(cudaMemcpy(w_q_f32_dev_, all_q_proj_f32.data(), all_q_proj_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
+            // ... cudaMalloc/cudaMemcpy for k, v, o, gate, up, down ...
+             gpuErrchk(cudaMalloc(&w_k_f32_dev_, all_k_proj_f32.size() * sizeof(float)));
+             gpuErrchk(cudaMemcpy(w_k_f32_dev_, all_k_proj_f32.data(), all_k_proj_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
+             gpuErrchk(cudaMalloc(&w_v_f32_dev_, all_v_proj_f32.size() * sizeof(float)));
+             gpuErrchk(cudaMemcpy(w_v_f32_dev_, all_v_proj_f32.data(), all_v_proj_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
+             gpuErrchk(cudaMalloc(&w_o_f32_dev_, all_o_proj_f32.size() * sizeof(float)));
+             gpuErrchk(cudaMemcpy(w_o_f32_dev_, all_o_proj_f32.data(), all_o_proj_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
+             gpuErrchk(cudaMalloc(&w_gate_f32_dev_, all_gate_proj_f32.size() * sizeof(float)));
+             gpuErrchk(cudaMemcpy(w_gate_f32_dev_, all_gate_proj_f32.data(), all_gate_proj_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
+             gpuErrchk(cudaMalloc(&w_up_f32_dev_, all_up_proj_f32.size() * sizeof(float)));
+             gpuErrchk(cudaMemcpy(w_up_f32_dev_, all_up_proj_f32.data(), all_up_proj_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
+             gpuErrchk(cudaMalloc(&w_down_f32_dev_, all_down_proj_f32.size() * sizeof(float)));
+             gpuErrchk(cudaMemcpy(w_down_f32_dev_, all_down_proj_f32.data(), all_down_proj_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
+            Logger::info("Copied all concatenated layer weights (fp32) to GPU.");
+        } else {
+             Logger::info("No FP32 layer weights found to concatenate/copy to GPU.");
+        }
+    } else {
+         Logger::info("Skipping FP32 layer weight concatenation/copy (no FP32 weights found).");
+    }
     // --- END: Allocate and copy persistent FP32 weights ---
 
-#endif // <-- CLOSE the main CUDA block here
+    // --- TODO: Allocate and copy persistent Q4_K / Q6_K weights ---
+    // Add similar logic here if needed for quantized types on GPU
 
-    // Precompute RoPE cos/sin values
-    int head_dim = hs / n_heads;
-    int max_seq_len = config.max_position_embeddings;
+    Logger::info("Finished initializing CUDA weights.");
+#endif // HAS_CUDA
+
+
+    // --- Precompute RoPE cos/sin values (CPU part) ---
+    Logger::info("Precomputing RoPE frequencies...");
+    int max_seq_len = config_.max_position_embeddings; // Use config_ member
     precomputed_freqs_cis_.resize((max_seq_len * head_dim) / 2);
     float theta = config_.rope_theta;
     for (int pos = 0; pos < max_seq_len; ++pos) {
@@ -746,36 +860,46 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& config, const SafeTensorsLoade
             float cos_val = std::cos(angle);
             float sin_val = std::sin(angle);
             precomputed_freqs_cis_[(pos * head_dim / 2) + (i / 2)] = {cos_val, sin_val};
-            // Log first few values for pos=1
-            if (pos == 1 && (i/2) < 5) { // Log first 5 pairs for pos=1
-                 Logger::info("C++ RoPE Precompute (Pos=1, FreqDim=" + std::to_string(i/2) + "): cos=" + std::to_string(cos_val) + " sin=" + std::to_string(sin_val));
             }
         }
-    }
-    Logger::info("Precomputed RoPE cos/sin frequencies.");
+    Logger::info("Finished precomputing RoPE cos/sin frequencies.");
 
 #ifdef HAS_CUDA
-    // Allocate persistent buffer for all RoPE frequencies on device
-    if (!precomputed_freqs_cis_.empty()) { // Check if host vector is populated
-        size_t total_freq_elements = precomputed_freqs_cis_.size() * 2; // 2 floats per pair (cos, sin)
+    // --- Allocate and copy RoPE frequencies to GPU ---
+    if (!precomputed_freqs_cis_.empty()) {
+        size_t total_freq_elements = precomputed_freqs_cis_.size() * 2;
         gpuErrchk(cudaMalloc(&all_freqs_cis_dev, total_freq_elements * sizeof(float)));
         Logger::info("Allocated persistent RoPE frequency buffer on GPU: " + 
                      std::to_string(total_freq_elements * sizeof(float) / 1024.0) + " KB");
 
-        // Flatten host data and copy to device
         std::vector<float> flat_host_freqs;
         flat_host_freqs.reserve(total_freq_elements);
         for (const auto& p : precomputed_freqs_cis_) {
-            flat_host_freqs.push_back(p.first);  // cos
-            flat_host_freqs.push_back(p.second); // sin
+            flat_host_freqs.push_back(p.first);
+            flat_host_freqs.push_back(p.second);
         }
         gpuErrchk(cudaMemcpy(all_freqs_cis_dev, flat_host_freqs.data(), total_freq_elements * sizeof(float), cudaMemcpyHostToDevice));
         Logger::info("Copied all precomputed RoPE frequencies to persistent GPU buffer.");
 
     } else {
-        Logger::info("Host precomputed_freqs_cis_ is empty, skipping GPU RoPE buffer allocation.");
+        Logger::warning("Host precomputed_freqs_cis_ is empty, skipping GPU RoPE buffer allocation.");
     }
-#endif
+    Logger::info("Finished initializing CUDA RoPE frequencies.");
+#endif // HAS_CUDA
+
+    Logger::info("Finished initializing GPU resources and RoPE.");
+}
+// --- END: Private Helper: Initialize GPU Resources & RoPE ---
+
+
+// TinyLlamaModel constructor: from config and safetensors loader
+TinyLlamaModel::TinyLlamaModel(const ModelConfig& config, const SafeTensorsLoader& loader)
+    : config_(config) // Initialize config
+{
+    Logger::info("Constructing TinyLlamaModel from SafeTensorsLoader.");
+    initialize_weights(&loader, nullptr); // Load weights from loader
+    initialize_gpu_and_rope();            // Initialize GPU resources and RoPE
+    Logger::info("TinyLlamaModel construction from SafeTensorsLoader complete.");
 }
 
 // --- START: TinyLlamaModel Destructor Definition ---
@@ -897,6 +1021,7 @@ TinyLlamaModel::~TinyLlamaModel() {
 #endif
 } 
 // --- END: TinyLlamaModel Destructor Definition ---
+
 // Update lookup_embedding to return std::vector<float>
 std::vector<float> TinyLlamaModel::lookup_embedding(int token_id) {
     int hs = config_.hidden_size;
@@ -1529,3 +1654,530 @@ std::vector<float> TinyLlamaModel::forward_device(int token_id, int pos, KVCache
 // --- Helper function definitions (e.g., parse_model_config, etc.) ---
 
 // ... Rest of the file (parse_model_config, etc.)
+
+// Map GGUF weights into the model's vectors (BF16 only)
+void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
+    Logger::info("Mapping GGUF weights to model fields...");
+    int nhl = model.get_config().num_hidden_layers;
+    int hs = model.get_config().hidden_size;
+    int is = model.get_config().intermediate_size;
+    int vs = model.get_config().vocab_size;
+    int n_heads = model.get_config().num_attention_heads;
+    int n_kv_heads = model.get_config().num_key_value_heads;
+    int kv_dim = (hs / n_heads) * n_kv_heads;
+
+    // --- START: Log total tensor data size --- 
+    size_t total_data_size = gguf.tensor_data.size();
+    Logger::info("map_gguf_weights: Total tensor data size available: " + std::to_string(total_data_size) + " bytes.");
+    // --- END: Log total tensor data size --- 
+
+    // Helper lambdas for assignment
+    auto assign_vec_bf16 = [&](std::vector<uint16_t>& vec, const GGUFTensorInfo& tinfo) {
+        size_t n_elem = tinfo.num_elements;
+        const uint16_t* src = reinterpret_cast<const uint16_t*>(gguf.tensor_data.data() + tinfo.offset);
+        vec.assign(src, src + n_elem); // This one is fine (BF16 is not blocked)
+    };
+    auto assign_vec_f32 = [&](std::vector<float>& vec, const GGUFTensorInfo& tinfo) {
+        size_t n_elem = tinfo.num_elements;
+        const float* src = reinterpret_cast<const float*>(gguf.tensor_data.data() + tinfo.offset);
+        vec.assign(src, src + n_elem); // This one is fine (F32 is not blocked)
+    };
+    auto assign_vec_q4k = [&](std::vector<block_q4_K>& vec, const GGUFTensorInfo& tinfo) {
+        if (tinfo.num_elements == 0) { vec.clear(); return; } // Handle empty tensor
+        if (GGML_QK_K == 0) throw std::runtime_error("GGML_QK_K is zero!"); // Avoid division by zero
+        if (tinfo.num_elements % GGML_QK_K != 0) {
+             throw std::runtime_error("Tensor '" + tinfo.name + "' num_elements (" + std::to_string(tinfo.num_elements)
+                                           + ") not divisible by GGML_QK_K (" + std::to_string(GGML_QK_K) + ") for Q4_K assignment.");
+        }
+        size_t num_blocks = tinfo.num_elements / GGML_QK_K; // Calculate number of blocks
+        const block_q4_K* src = reinterpret_cast<const block_q4_K*>(gguf.tensor_data.data() + tinfo.offset);
+        // Check source pointer validity (optional extra check)
+        uintptr_t src_end_addr = reinterpret_cast<uintptr_t>(src) + num_blocks * sizeof(block_q4_K);
+        if (src_end_addr > reinterpret_cast<uintptr_t>(gguf.tensor_data.data()) + gguf.tensor_data.size()) {
+             throw std::out_of_range("Calculated source range for Q4_K tensor '" + tinfo.name + "' exceeds data buffer.");
+        }
+        vec.assign(src, src + num_blocks); // Use num_blocks for assignment
+    };
+    auto assign_vec_q6k = [&](std::vector<block_q6_K>& vec, const GGUFTensorInfo& tinfo) {
+        if (tinfo.num_elements == 0) { vec.clear(); return; } // Handle empty tensor
+        if (GGML_QK_K == 0) throw std::runtime_error("GGML_QK_K is zero!"); // Avoid division by zero
+        if (tinfo.num_elements % GGML_QK_K != 0) {
+             throw std::runtime_error("Tensor '" + tinfo.name + "' num_elements (" + std::to_string(tinfo.num_elements)
+                                           + ") not divisible by GGML_QK_K (" + std::to_string(GGML_QK_K) + ") for Q6_K assignment.");
+        }
+        size_t num_blocks = tinfo.num_elements / GGML_QK_K; // Calculate number of blocks
+        const block_q6_K* src = reinterpret_cast<const block_q6_K*>(gguf.tensor_data.data() + tinfo.offset);
+        // Check source pointer validity (optional extra check)
+        uintptr_t src_end_addr = reinterpret_cast<uintptr_t>(src) + num_blocks * sizeof(block_q6_K);
+        if (src_end_addr > reinterpret_cast<uintptr_t>(gguf.tensor_data.data()) + gguf.tensor_data.size()) {
+             throw std::out_of_range("Calculated source range for Q6_K tensor '" + tinfo.name + "' exceeds data buffer.");
+        }
+        vec.assign(src, src + num_blocks); // Use num_blocks for assignment
+    };
+
+    for (const auto& tinfo : gguf.tensor_infos) {
+        const std::string& name = tinfo.name;
+
+        // --- START: Detailed Tensor Logging --- 
+        std::stringstream ss_log;
+        ss_log << "Attempting to map tensor: '" << name << "'"
+               << ", Type: " << static_cast<int>(tinfo.type) // Log raw enum value
+               // << ", TypeName: " << ggml_type_name(tinfo.type) // Requires ggml_type_name in scope
+               << ", Offset: " << tinfo.offset
+               << ", NumElem: " << tinfo.num_elements
+               << ", SizeBytes: " << tinfo.size_in_bytes;
+        uintptr_t src_addr = reinterpret_cast<uintptr_t>(gguf.tensor_data.data()) + tinfo.offset;
+        uintptr_t src_end_addr = src_addr + tinfo.size_in_bytes;
+        uintptr_t data_start_addr = reinterpret_cast<uintptr_t>(gguf.tensor_data.data());
+        uintptr_t data_end_addr = data_start_addr + total_data_size;
+        ss_log << ", SrcAddr: " << src_addr
+               << ", ReadEndAddr: " << src_end_addr
+               << ", DataBuffer: [" << data_start_addr << " - " << data_end_addr << "]";
+        bool within_bounds = (src_addr >= data_start_addr) && (src_end_addr <= data_end_addr);
+        ss_log << ", InBounds: " << (within_bounds ? "YES" : "NO - CRASH LIKELY!");
+        Logger::info(ss_log.str());
+        if (!within_bounds && tinfo.size_in_bytes > 0) { // Check size > 0 to avoid false alarm on empty tensors
+             Logger::error("Tensor '" + name + "' read range [" + std::to_string(tinfo.offset) + ", " 
+                         + std::to_string(tinfo.offset + tinfo.size_in_bytes) + ") potentially out of bounds for data size " + std::to_string(total_data_size));
+             // Consider throwing an error here if you want to stop immediately on bounds issues
+             // throw std::runtime_error("Tensor mapping out of bounds!");
+        }
+        // --- END: Detailed Tensor Logging --- 
+
+        // Top-level weights
+        if (name == "model.embed_tokens.weight" || name == "token_embd.weight") {
+            if (tinfo.type == GGMLType::GGML_TYPE_F32) { // Use .type and correct enum name
+                assign_vec_f32(model.embed_tokens_f32, tinfo);
+                Logger::info("Mapped GGUF tensor '" + name + "' (FP32) to model.embed_tokens_f32");
+            } else if (tinfo.type == GGMLType::GGML_TYPE_Q4_K) { // Use .type and correct enum name
+                assign_vec_q4k(model.embed_tokens_q4k, tinfo);
+                Logger::info("Mapped GGUF tensor '" + name + "' (Q4_K) to model.embed_tokens_q4k");
+            } else if (tinfo.type == GGMLType::GGML_TYPE_Q6_K) { // Use .type and correct enum name
+                assign_vec_q6k(model.embed_tokens_q6k, tinfo);
+                Logger::info("Mapped GGUF tensor '" + name + "' (Q6_K) to model.embed_tokens_q6k");
+            } else {
+                assign_vec_bf16(model.embed_tokens, tinfo);
+                Logger::info("Mapped GGUF tensor '" + name + "' (BF16/Other) to model.embed_tokens"); // Adjusted log
+            }
+            Logger::info("-> Successfully assigned '" + name + "'"); // Add success log
+            continue;
+        }
+        if (name == "lm_head.weight" || name == "output.weight") {
+            if (tinfo.type == GGMLType::GGML_TYPE_F32) { // Use .type and correct enum name
+                assign_vec_f32(model.lm_head_f32, tinfo);
+                Logger::info("Mapped GGUF tensor '" + name + "' (FP32) to model.lm_head_f32");
+            } else if (tinfo.type == GGMLType::GGML_TYPE_Q4_K) { // Use .type and correct enum name
+                assign_vec_q4k(model.lm_head_q4k, tinfo);
+                Logger::info("Mapped GGUF tensor '" + name + "' (Q4_K) to model.lm_head_q4k");
+            } else if (tinfo.type == GGMLType::GGML_TYPE_Q6_K) { // Use .type and correct enum name
+                assign_vec_q6k(model.lm_head_q6k, tinfo);
+                Logger::info("Mapped GGUF tensor '" + name + "' (Q6_K) to model.lm_head_q6k");
+            } else {
+                assign_vec_bf16(model.lm_head, tinfo);
+                Logger::info("Mapped GGUF tensor '" + name + "' (BF16/Other) to model.lm_head"); // Adjusted log
+            }
+            Logger::info("-> Successfully assigned '" + name + "'"); // Add success log
+            continue;
+        }
+        if (name == "model.norm.weight" || name == "norm.weight" || name == "output_norm.weight") {
+            if (tinfo.type == GGMLType::GGML_TYPE_F32) { // Use .type and correct enum name
+                assign_vec_f32(model.final_norm_f32, tinfo);
+                Logger::info("Mapped GGUF tensor '" + name + "' (FP32) to model.final_norm_f32");
+            } else {
+                assign_vec_bf16(model.final_norm, tinfo);
+                Logger::info("Mapped GGUF tensor '" + name + "' (BF16/Other) to model.final_norm"); // Adjusted log
+            }
+            Logger::info("-> Successfully assigned '" + name + "'"); // Add success log
+            continue;
+        }
+        // Per-layer weights - Handle alternative prefixes 'blk.' or 'model.layers.'
+        int layer_idx = -1;
+        size_t suffix_start_pos = std::string::npos;
+
+        if (name.rfind("model.layers.", 0) == 0) { // Check for "model.layers." prefix
+            size_t idx_start = 13;
+            size_t idx_end = name.find('.', idx_start);
+            if (idx_end != std::string::npos) {
+                try {
+                    layer_idx = std::stoi(name.substr(idx_start, idx_end - idx_start));
+                    suffix_start_pos = idx_end + 1;
+                } catch (const std::exception& e) {
+                    Logger::warning("Could not parse layer index from GGUF tensor name: " + name);
+                }
+            }
+        } else if (name.rfind("blk.", 0) == 0) { // Check for "blk." prefix
+            size_t idx_start = 4; // Length of "blk."
+            size_t idx_end = name.find('.', idx_start);
+            if (idx_end != std::string::npos) {
+                 try {
+                    layer_idx = std::stoi(name.substr(idx_start, idx_end - idx_start));
+                    suffix_start_pos = idx_end + 1;
+                } catch (const std::exception& e) {
+                     Logger::warning("Could not parse layer index from GGUF tensor name: " + name);
+                }
+            }
+        }
+
+        if (layer_idx != -1 && suffix_start_pos != std::string::npos && layer_idx >= 0 && layer_idx < nhl) {
+            // --- START: Log Layer Index Check ---
+            if (layer_idx >= model.get_layers().size()) { // Check bounds BEFORE access
+                 Logger::fatal("FATAL: Calculated layer index " + std::to_string(layer_idx) + " is out of bounds for model layers vector size " + std::to_string(model.get_layers().size()) + " for tensor '" + name + "'");
+                 // Throw or exit needed here if fatal doesn't exit
+                 throw std::out_of_range("Layer index out of bounds in map_gguf_weights");
+            }
+            // --- END: Log Layer Index Check ---
+            std::string suffix = name.substr(suffix_start_pos);
+            auto& lw = model.get_layers()[layer_idx];
+
+            // Map known fields based on suffix (the suffix logic remains the same)
+            // Q_PROJ
+            if (suffix == "self_attn.q_proj.weight" || suffix == "attn.wq.weight") { // Added alternative suffix
+                if (tinfo.type == GGMLType::GGML_TYPE_F32) { // Use .type and correct enum name
+                    assign_vec_f32(lw.q_proj_f32, tinfo);
+                    Logger::info("Mapped GGUF tensor '" + name + "' (FP32) to layers[" + std::to_string(layer_idx) + "].q_proj_f32");
+                } else if (tinfo.type == GGMLType::GGML_TYPE_Q4_K) { // Use .type and correct enum name
+                    assign_vec_q4k(lw.q_proj_q4k, tinfo);
+                    Logger::info("Mapped GGUF tensor '" + name + "' (Q4_K) to layers[" + std::to_string(layer_idx) + "].q_proj_q4k");
+                } else if (tinfo.type == GGMLType::GGML_TYPE_Q6_K) { // Use .type and correct enum name
+                    assign_vec_q6k(lw.q_proj_q6k, tinfo);
+                    Logger::info("Mapped GGUF tensor '" + name + "' (Q6_K) to layers[" + std::to_string(layer_idx) + "].q_proj_q6k");
+                } else {
+                    assign_vec_bf16(lw.q_proj, tinfo); // REMOVED const_cast
+                    Logger::info("Mapped GGUF tensor '" + name + "' (BF16/Other) to layers[" + std::to_string(layer_idx) + "].q_proj");
+                }
+                Logger::info("-> Successfully assigned '" + name + "' to layer " + std::to_string(layer_idx)); // Add success log
+                continue;
+            }
+            // K_PROJ
+            if (suffix == "self_attn.k_proj.weight" || suffix == "attn.wk.weight") { // Added alternative suffix
+                if (tinfo.type == GGMLType::GGML_TYPE_F32) { // Use .type and correct enum name
+                    assign_vec_f32(lw.k_proj_f32, tinfo);
+                    Logger::info("Mapped GGUF tensor '" + name + "' (FP32) to layers[" + std::to_string(layer_idx) + "].k_proj_f32");
+                } else if (tinfo.type == GGMLType::GGML_TYPE_Q4_K) { // Use .type and correct enum name
+                    assign_vec_q4k(lw.k_proj_q4k, tinfo);
+                    Logger::info("Mapped GGUF tensor '" + name + "' (Q4_K) to layers[" + std::to_string(layer_idx) + "].k_proj_q4k");
+                } else if (tinfo.type == GGMLType::GGML_TYPE_Q6_K) { // Use .type and correct enum name
+                    assign_vec_q6k(lw.k_proj_q6k, tinfo);
+                    Logger::info("Mapped GGUF tensor '" + name + "' (Q6_K) to layers[" + std::to_string(layer_idx) + "].k_proj_q6k");
+                } else {
+                    assign_vec_bf16(lw.k_proj, tinfo); // REMOVED const_cast
+                    Logger::info("Mapped GGUF tensor '" + name + "' (BF16/Other) to layers[" + std::to_string(layer_idx) + "].k_proj");
+                }
+                Logger::info("-> Successfully assigned '" + name + "' to layer " + std::to_string(layer_idx)); // Add success log
+                continue;
+            }
+            // V_PROJ
+            if (suffix == "self_attn.v_proj.weight" || suffix == "attn.wv.weight") { // Added alternative suffix
+                if (tinfo.type == GGMLType::GGML_TYPE_F32) { // Use .type and correct enum name
+                    assign_vec_f32(lw.v_proj_f32, tinfo);
+                    Logger::info("Mapped GGUF tensor '" + name + "' (FP32) to layers[" + std::to_string(layer_idx) + "].v_proj_f32");
+                } else if (tinfo.type == GGMLType::GGML_TYPE_Q4_K) { // Use .type and correct enum name
+                    assign_vec_q4k(lw.v_proj_q4k, tinfo);
+                    Logger::info("Mapped GGUF tensor '" + name + "' (Q4_K) to layers[" + std::to_string(layer_idx) + "].v_proj_q4k");
+                } else if (tinfo.type == GGMLType::GGML_TYPE_Q6_K) { // Use .type and correct enum name
+                    assign_vec_q6k(lw.v_proj_q6k, tinfo);
+                    Logger::info("Mapped GGUF tensor '" + name + "' (Q6_K) to layers[" + std::to_string(layer_idx) + "].v_proj_q6k");
+                } else {
+                    assign_vec_bf16(lw.v_proj, tinfo); // REMOVED const_cast
+                    Logger::info("Mapped GGUF tensor '" + name + "' (BF16/Other) to layers[" + std::to_string(layer_idx) + "].v_proj");
+                }
+                Logger::info("-> Successfully assigned '" + name + "' to layer " + std::to_string(layer_idx)); // Add success log
+                continue;
+            }
+            // O_PROJ
+            if (suffix == "self_attn.o_proj.weight" || suffix == "attn.wo.weight") { // Added alternative suffix
+                if (tinfo.type == GGMLType::GGML_TYPE_F32) { // Use .type and correct enum name
+                    assign_vec_f32(lw.o_proj_f32, tinfo);
+                    Logger::info("Mapped GGUF tensor '" + name + "' (FP32) to layers[" + std::to_string(layer_idx) + "].o_proj_f32");
+                } else if (tinfo.type == GGMLType::GGML_TYPE_Q4_K) { // Use .type and correct enum name
+                    assign_vec_q4k(lw.o_proj_q4k, tinfo);
+                    Logger::info("Mapped GGUF tensor '" + name + "' (Q4_K) to layers[" + std::to_string(layer_idx) + "].o_proj_q4k");
+                } else if (tinfo.type == GGMLType::GGML_TYPE_Q6_K) { // Use .type and correct enum name
+                    assign_vec_q6k(lw.o_proj_q6k, tinfo);
+                    Logger::info("Mapped GGUF tensor '" + name + "' (Q6_K) to layers[" + std::to_string(layer_idx) + "].o_proj_q6k");
+                } else {
+                    assign_vec_bf16(lw.o_proj, tinfo); // REMOVED const_cast
+                    Logger::info("Mapped GGUF tensor '" + name + "' (BF16/Other) to layers[" + std::to_string(layer_idx) + "].o_proj");
+                }
+                Logger::info("-> Successfully assigned '" + name + "' to layer " + std::to_string(layer_idx)); // Add success log
+                continue;
+            }
+            // GATE_PROJ
+            if (suffix == "mlp.gate_proj.weight" || suffix == "ffn.w1.weight") { // Added alternative suffix
+                if (tinfo.type == GGMLType::GGML_TYPE_F32) { // Use .type and correct enum name
+                    assign_vec_f32(lw.gate_proj_f32, tinfo);
+                    Logger::info("Mapped GGUF tensor '" + name + "' (FP32) to layers[" + std::to_string(layer_idx) + "].gate_proj_f32");
+                } else if (tinfo.type == GGMLType::GGML_TYPE_Q4_K) { // Use .type and correct enum name
+                    assign_vec_q4k(lw.gate_proj_q4k, tinfo);
+                    Logger::info("Mapped GGUF tensor '" + name + "' (Q4_K) to layers[" + std::to_string(layer_idx) + "].gate_proj_q4k");
+                } else if (tinfo.type == GGMLType::GGML_TYPE_Q6_K) { // Use .type and correct enum name
+                    assign_vec_q6k(lw.gate_proj_q6k, tinfo);
+                    Logger::info("Mapped GGUF tensor '" + name + "' (Q6_K) to layers[" + std::to_string(layer_idx) + "].gate_proj_q6k");
+                } else {
+                    assign_vec_bf16(lw.gate_proj, tinfo); // REMOVED const_cast
+                    Logger::info("Mapped GGUF tensor '" + name + "' (BF16/Other) to layers[" + std::to_string(layer_idx) + "].gate_proj");
+                }
+                Logger::info("-> Successfully assigned '" + name + "' to layer " + std::to_string(layer_idx)); // Add success log
+                continue;
+            }
+            // UP_PROJ
+            if (suffix == "mlp.up_proj.weight" || suffix == "ffn.w3.weight") { // Added alternative suffix
+                if (tinfo.type == GGMLType::GGML_TYPE_F32) { // Use .type and correct enum name
+                    assign_vec_f32(lw.up_proj_f32, tinfo);
+                    Logger::info("Mapped GGUF tensor '" + name + "' (FP32) to layers[" + std::to_string(layer_idx) + "].up_proj_f32");
+                } else if (tinfo.type == GGMLType::GGML_TYPE_Q4_K) { // Use .type and correct enum name
+                    assign_vec_q4k(lw.up_proj_q4k, tinfo);
+                    Logger::info("Mapped GGUF tensor '" + name + "' (Q4_K) to layers[" + std::to_string(layer_idx) + "].up_proj_q4k");
+                } else if (tinfo.type == GGMLType::GGML_TYPE_Q6_K) { // Use .type and correct enum name
+                    assign_vec_q6k(lw.up_proj_q6k, tinfo);
+                    Logger::info("Mapped GGUF tensor '" + name + "' (Q6_K) to layers[" + std::to_string(layer_idx) + "].up_proj_q6k");
+                } else {
+                    assign_vec_bf16(lw.up_proj, tinfo); // REMOVED const_cast
+                    Logger::info("Mapped GGUF tensor '" + name + "' (BF16/Other) to layers[" + std::to_string(layer_idx) + "].up_proj");
+                }
+                Logger::info("-> Successfully assigned '" + name + "' to layer " + std::to_string(layer_idx)); // Add success log
+                continue;
+            }
+            // DOWN_PROJ
+            if (suffix == "mlp.down_proj.weight" || suffix == "ffn.w2.weight") { // Added alternative suffix
+                if (tinfo.type == GGMLType::GGML_TYPE_F32) { // Use .type and correct enum name
+                    assign_vec_f32(lw.down_proj_f32, tinfo);
+                    Logger::info("Mapped GGUF tensor '" + name + "' (FP32) to layers[" + std::to_string(layer_idx) + "].down_proj_f32");
+                } else if (tinfo.type == GGMLType::GGML_TYPE_Q4_K) { // Use .type and correct enum name
+                    assign_vec_q4k(lw.down_proj_q4k, tinfo);
+                    Logger::info("Mapped GGUF tensor '" + name + "' (Q4_K) to layers[" + std::to_string(layer_idx) + "].down_proj_q4k");
+                } else if (tinfo.type == GGMLType::GGML_TYPE_Q6_K) { // Use .type and correct enum name
+                    assign_vec_q6k(lw.down_proj_q6k, tinfo);
+                    Logger::info("Mapped GGUF tensor '" + name + "' (Q6_K) to layers[" + std::to_string(layer_idx) + "].down_proj_q6k");
+                } else {
+                    assign_vec_bf16(lw.down_proj, tinfo); // REMOVED const_cast
+                    Logger::info("Mapped GGUF tensor '" + name + "' (BF16/Other) to layers[" + std::to_string(layer_idx) + "].down_proj");
+                }
+                Logger::info("-> Successfully assigned '" + name + "' to layer " + std::to_string(layer_idx)); // Add success log
+                continue;
+            }
+            // LAYER NORM (ATTN)
+            if (suffix == "input_layernorm.weight" || suffix == "attn_norm.weight") { // Added alternative suffix
+                if (tinfo.type == GGMLType::GGML_TYPE_F32) { // Use .type and correct enum name
+                    assign_vec_f32(lw.input_layernorm_f32, tinfo);
+                    Logger::info("Mapped GGUF tensor '" + name + "' (FP32) to layers[" + std::to_string(layer_idx) + "].input_layernorm_f32");
+                } else {
+                    assign_vec_bf16(lw.input_layernorm, tinfo); // REMOVED const_cast
+                    Logger::info("Mapped GGUF tensor '" + name + "' (BF16/Other) to layers[" + std::to_string(layer_idx) + "].input_layernorm");
+                }
+                Logger::info("-> Successfully assigned '" + name + "' to layer " + std::to_string(layer_idx)); // Add success log
+                continue;
+            }
+            // LAYER NORM (FFN)
+            if (suffix == "post_attention_layernorm.weight" || suffix == "ffn_norm.weight") { // Added alternative suffix
+                if (tinfo.type == GGMLType::GGML_TYPE_F32) { // Use .type and correct enum name
+                    assign_vec_f32(lw.post_attention_layernorm_f32, tinfo);
+                    Logger::info("Mapped GGUF tensor '" + name + "' (FP32) to layers[" + std::to_string(layer_idx) + "].post_attention_layernorm_f32");
+                } else {
+                    assign_vec_bf16(lw.post_attention_layernorm, tinfo); // REMOVED const_cast
+                    Logger::info("Mapped GGUF tensor '" + name + "' (BF16/Other) to layers[" + std::to_string(layer_idx) + "].post_attention_layernorm");
+                }
+                Logger::info("-> Successfully assigned '" + name + "' to layer " + std::to_string(layer_idx)); // Add success log
+                continue;
+            }
+        }
+        Logger::warning("Unmapped GGUF tensor: '" + name + "' with type: " + std::to_string(static_cast<int>(tinfo.type))); // Added type logging
+    }
+    Logger::info("Finished mapping GGUF weights.");
+}
+
+TinyLlamaModel::TinyLlamaModel(const ModelConfig& config, const std::string& weights_path)
+    : config_(config) // Initialize with provided config initially
+{
+    Logger::info("Constructing TinyLlamaModel from path: " + weights_path);
+    bool is_gguf = false;
+    // Check extension first
+    if (weights_path.size() >= 5 && weights_path.substr(weights_path.size() - 5) == ".gguf") {
+        is_gguf = true;
+    } else {
+        // Check file magic
+        std::ifstream file(weights_path, std::ios::binary);
+        if (file.is_open()) {
+            uint32_t magic = 0;
+            file.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+            if (magic == GGUF_MAGIC) {
+                is_gguf = true;
+            }
+        }
+    }
+
+    if (is_gguf) {
+        Logger::info("Detected GGUF file. Loading metadata and mapping weights...");
+        gguf_data_ = std::make_unique<GGUFData>(load_gguf_meta(weights_path));
+        config_ = parse_model_config_from_gguf(*gguf_data_); // OVERWRITE config_ with GGUF metadata
+        // Note: layers vector is resized inside initialize_weights
+        initialize_weights(nullptr, gguf_data_.get()); // Map weights from GGUF data
+        Logger::info("GGUF weights mapped.");
+        initialize_gpu_and_rope(); // Initialize GPU resources and RoPE
+    } else {
+        Logger::info("Detected non-GGUF file. Loading with SafeTensors loader...");
+        SafeTensorsLoader loader(weights_path);
+        // config_ remains as initially provided
+        initialize_weights(&loader, nullptr); // Load weights from safetensors
+        Logger::info("SafeTensors weights loaded.");
+        // REMOVED: *this = TinyLlamaModel(config, loader);
+        initialize_gpu_and_rope(); // Initialize GPU resources and RoPE
+    }
+
+    // Initialize GPU resources and RoPE after weights are loaded/mapped - REMOVED FROM HERE
+    // initialize_gpu_and_rope(); 
+
+    Logger::info("TinyLlamaModel construction from path complete.");
+}
+
+ModelConfig parse_model_config_from_gguf(const GGUFData& gguf) {
+    // --- START: Log all available metadata keys --- 
+    Logger::info("--- GGUF Metadata Keys Found ---");
+    if (gguf.metadata.empty()) {
+        Logger::info("(No metadata keys found in GGUF data)");
+    } else {
+        std::stringstream keys_ss;
+        bool first_key = true;
+        for (const auto& pair : gguf.metadata) {
+            if (!first_key) keys_ss << ", ";
+            keys_ss << "'" << pair.first << "'";
+            first_key = false;
+        }
+        Logger::info(keys_ss.str());
+    }
+    Logger::info("---------------------------------");
+    // --- END: Log all available metadata keys ---
+
+    ModelConfig cfg;
+    // Helper lambda to extract a value from metadata
+    auto get = [&](const std::string& key, auto default_val) -> decltype(default_val) {
+        using T = decltype(default_val);
+        auto it = gguf.metadata.find(key);
+
+        // Special handling for general.file_type (often stored as uint32 enum)
+        if constexpr (std::is_same_v<T, std::string>) {
+            if (key == "general.file_type") {
+                if (it != gguf.metadata.end()) {
+                    if (std::holds_alternative<std::string>(it->second)) {
+                        return std::get<std::string>(it->second); // Already a string, return it
+                    } else if (std::holds_alternative<uint32_t>(it->second)) {
+                        // It's a uint32_t, try to map it to a string based on GGMLType
+                        uint32_t type_enum = std::get<uint32_t>(it->second);
+                        switch (static_cast<GGMLType>(type_enum)) {
+                            case GGML_TYPE_F32:  return std::string("float32");
+                            case GGML_TYPE_F16:  return std::string("float16");
+                            case GGML_TYPE_Q4_0: return std::string("q4_0");
+                            case GGML_TYPE_Q4_1: return std::string("q4_1");
+                            case GGML_TYPE_Q5_0: return std::string("q5_0");
+                            case GGML_TYPE_Q5_1: return std::string("q5_1");
+                            case GGML_TYPE_Q8_0: return std::string("q8_0");
+                            case GGML_TYPE_Q8_1: return std::string("q8_1");
+                            case GGML_TYPE_Q2_K: return std::string("q2_k");
+                            case GGML_TYPE_Q3_K: return std::string("q3_k");
+                            case GGML_TYPE_Q4_K: return std::string("q4_k");
+                            case GGML_TYPE_Q5_K: return std::string("q5_k");
+                            case GGML_TYPE_Q6_K: return std::string("q6_k");
+                            case GGML_TYPE_Q8_K: return std::string("q8_k");
+                            case GGML_TYPE_I8:   return std::string("int8");
+                            case GGML_TYPE_I16:  return std::string("int16");
+                            case GGML_TYPE_I32:  return std::string("int32");
+                            // Add BF16 mapping if needed (not standard GGMLType enum)
+                            // case SOME_BF16_ENUM_VALUE: return std::string("bfloat16");
+                            default:
+                                Logger::warning("GGUF metadata key 'general.file_type' had unknown uint32 value: " + std::to_string(type_enum) + ". Using default.");
+                                break; // Fall through to return default_val
+                        }
+                    } else {
+                         Logger::warning("GGUF metadata key 'general.file_type' had unexpected type index: " + std::to_string(it->second.index()) + ". Using default.");
+                    }
+                } else {
+                     Logger::warning("GGUF metadata missing key: 'general.file_type'. Using default.");
+                }
+                 // If we reach here, either key was missing, type was wrong, or uint32 mapping failed
+                 return default_val; // Return default string
+            }
+        } // End of special handling for general.file_type
+
+        // --- START: Debug log for specific key type --- // REMOVED OLD DEBUG LOG
+        // --- END: Debug log for specific key type ---
+
+        if (it == gguf.metadata.end()) {
+            // Adjust logging based on type T
+            if constexpr (std::is_same_v<T, std::string>) {
+                 Logger::warning("GGUF metadata missing key: '" + key + "', using default: "" + default_val + """);
+            } else {
+                 Logger::warning("GGUF metadata missing key: '" + key + "', using default: " + std::to_string(default_val));
+            }
+            return default_val;
+        }
+
+        try {
+            if constexpr (std::is_same_v<T, int>) {
+                if (std::holds_alternative<int32_t>(it->second)) return (int)std::get<int32_t>(it->second);
+                if (std::holds_alternative<uint32_t>(it->second)) return (int)std::get<uint32_t>(it->second);
+                if (std::holds_alternative<int64_t>(it->second)) return (int)std::get<int64_t>(it->second);
+                if (std::holds_alternative<uint64_t>(it->second)) return (int)std::get<uint64_t>(it->second);
+            } else if constexpr (std::is_same_v<T, float>) {
+                if (std::holds_alternative<float>(it->second)) return std::get<float>(it->second);
+                if (std::holds_alternative<double>(it->second)) return (float)std::get<double>(it->second);
+            } else if constexpr (std::is_same_v<T, std::string>) {
+                if (std::holds_alternative<std::string>(it->second)) return std::get<std::string>(it->second);
+            }
+        } catch (const std::exception& e) {
+            Logger::warning("GGUF metadata key '" + key + "' type mismatch: " + e.what());
+        }
+        // Adjust logging based on type T
+        if constexpr (std::is_same_v<T, std::string>) {
+            Logger::warning("GGUF metadata key '" + key + "' has unexpected type or error, using default: \"" + default_val + "\"");
+        } else {
+            Logger::warning("GGUF metadata key '" + key + "' has unexpected type or error, using default: " + std::to_string(default_val));
+        }
+        return default_val;
+    };
+
+    // Map GGUF keys to ModelConfig fields - USE CORRECTED KEYS
+    cfg.hidden_size = get("llama.embedding_length", 0);
+    cfg.intermediate_size = get("llama.feed_forward_length", 0);
+    cfg.num_attention_heads = get("llama.attention.head_count", 0); // Corrected key
+    cfg.num_key_value_heads = get("llama.attention.head_count_kv", 0); // Corrected key
+    cfg.num_hidden_layers = get("llama.block_count", 0);
+    // cfg.vocab_size = get("general.vocab_size", 0); // OLD, INCORRECT WAY
+
+    // --- START: Get vocab size from tokenizer.ggml.vocab array ---
+    int determined_vocab_size = 0; // Default to 0 if not found/invalid
+    auto vocab_it = gguf.metadata.find("tokenizer.ggml.tokens"); // CORRECTED KEY HERE
+    if (vocab_it != gguf.metadata.end()) {
+        const auto& metadata_value = vocab_it->second;
+        if (std::holds_alternative<GGUFArray>(metadata_value)) {
+            const GGUFArray& vocab_array = std::get<GGUFArray>(metadata_value);
+            // We expect an array of strings
+            if (vocab_array.type == GGUFValueType::STRING) {
+                 determined_vocab_size = static_cast<int>(vocab_array.len);
+                 Logger::info("Determined vocab_size from 'tokenizer.ggml.tokens' array: " + std::to_string(determined_vocab_size)); // CORRECTED KEY IN LOG
+            } else {
+                 Logger::fatal("GGUF metadata key 'tokenizer.ggml.tokens' is an array, but not of strings (type=" + std::to_string(static_cast<int>(vocab_array.type)) + "). Cannot determine vocab size."); // CORRECTED KEY IN LOG
+            }
+        } else {
+             Logger::fatal("GGUF metadata key 'tokenizer.ggml.tokens' exists but is not an array (type index=" + std::to_string(metadata_value.index()) + "). Cannot determine vocab size."); // CORRECTED KEY IN LOG
+        }
+    } else {
+         Logger::fatal("GGUF metadata key 'tokenizer.ggml.tokens' not found. Cannot determine vocab size."); // CORRECTED KEY IN LOG
+         // Maybe try the old key as a last resort? Or just fail hard? For now, fail hard.
+         // int fallback_vocab_size = get("general.vocab_size", 0);
+         // if (fallback_vocab_size > 0) {
+         //     Logger::warning("Falling back to 'general.vocab_size': " + std::to_string(fallback_vocab_size));
+         //     determined_vocab_size = fallback_vocab_size;
+         // }
+    }
+    cfg.vocab_size = determined_vocab_size;
+    // --- END: Get vocab size from tokenizer.ggml.vocab array ---
+
+    cfg.max_position_embeddings = get("llama.context_length", 0);
+    cfg.rms_norm_eps = get("llama.attention.layer_norm_rms_epsilon", 1e-5f); // Corrected key
+    cfg.rope_theta = get("llama.rope.freq_base", 10000.0f); // Corrected key
+    cfg.hidden_act = get("llama.activation_function", std::string("silu")); // Still missing - uses default
+    cfg.torch_dtype = get("general.file_type", std::string("bfloat16")); // *** This call now uses the updated get lambda ***
+    cfg.bos_token_id = get("tokenizer.ggml.bos_token_id", 1); // Corrected key
+    cfg.eos_token_id = get("tokenizer.ggml.eos_token_id", 2); // Corrected key
+    return cfg;
+}

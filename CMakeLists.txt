@@ -47,6 +47,8 @@ add_library(tinyllama_core STATIC
     logger.cpp 
     api.cpp # Added API implementation
     vocab_loader.cpp
+    gguf_parser.cpp
+    quantization.cpp # ADDED QUANTIZATION SOURCE
     ${CUDA_SOURCES} # Include CUDA source file here
 )
 
@@ -97,8 +99,7 @@ target_link_libraries(tinyllama_server PRIVATE tinyllama_core)
 # --- New GGUF Loader Executable ---
 add_executable(gguf_loader
     main_gguf.cpp
-    quantization.cpp # Include quantization source directly for now
-    gguf_parser.cpp
+    gguf_parser.cpp # Keep parser source if main_gguf uses it directly? (Can likely remove too)
 )
 
 # Link GGUF loader against the core library (inherits CUDA/OpenMP/etc links)

@@ -56,7 +56,7 @@ void rmsnorm_vector_cuda(const std::vector<float>& x_in_host,
  */
 void matvec_bf16_f32_cuda(cublasHandle_t handle,
                           const std::vector<uint16_t>& mat_bf16_host,
-                          const std::vector<float>& vec_f32_host, 
+                          const std::vector<float>& vec_f32_host,
                           std::vector<float>& out_f32_host,
                           int rows,
                           int cols);
@@ -202,8 +202,8 @@ void swiglu_cuda(const float* gate_dev, const float* up_dev, float* out_dev, int
 // NEW KERNEL DECLARATION (MODIFIED SIGNATURE)
 void lookup_embedding_bf16_f32_cuda(const uint16_t* embedding_table_dev,
                                     float* output_vector_dev,
-                                    int token_id,
-                                    int hidden_size,
+                                    int token_id, 
+                                    int hidden_size, 
                                     int vocab_size,
                                     cudaStream_t stream = 0);
 

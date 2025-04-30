@@ -6,6 +6,19 @@
 #include <cstdint>
 #include "ggml_types.h" // For GGMLType and GGUFValueType
 
+// --- START: Add GGUFArray struct ---
+// Represents an array stored in GGUF metadata
+struct GGUFArray {
+    GGUFValueType type; // Type of elements in the array
+    uint64_t len;       // Number of elements
+    // We might store the actual data elsewhere or load on demand.
+    // For now, let's assume the parser gives us len and type.
+    // The actual data might be stored in a generic vector<uint8_t>
+    // or parsed into a specific vector type if needed later.
+    // std::vector<GGUFMetadataValue> data; // Example if data were stored directly
+};
+// --- END: Add GGUFArray struct ---
+
 struct GGUFHeader {
     uint32_t magic;
     uint32_t version;
@@ -27,7 +40,8 @@ using GGUFMetadataValue = std::variant<
     std::string,
     uint64_t,
     int64_t,
-    double
+    double,
+    GGUFArray // Add the GGUFArray type to the variant
     // TODO: std::vector<GGUFMetadataValue> // For arrays 
 >;
 

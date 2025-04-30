@@ -13,6 +13,8 @@
 #include <cublas_v2.h>    // <<< INCLUDE CUBLAS >>>
 #include "cuda_kernels.h" // Needed for gpuErrchk
 #endif
+#include "quantization.h" // For block_q4_K, block_q6_K
+#include <memory>
 
 struct ModelConfig {
     int hidden_size;
@@ -29,6 +31,10 @@ struct ModelConfig {
     int bos_token_id;
     int eos_token_id;
 };
+
+struct GGUFData; // Forward declaration
+struct ModelConfig; // Forward declaration needed for the parse function
+ModelConfig parse_model_config_from_gguf(const GGUFData& gguf); // Forward declaration
 
 // KVCache for autoregressive inference
 struct KVCacheLayer {
@@ -92,6 +98,16 @@ struct LayerWeights {
     std::vector<uint16_t> up_proj;   // [intermediate_size, hidden_size]
     std::vector<uint16_t> down_proj; // [hidden_size, intermediate_size]
 
+    // --- ADDED: FP32 and Quantized fields ---
+    std::vector<float> input_layernorm_f32;
+    std::vector<float> post_attention_layernorm_f32;
+    std::vector<float> q_proj_f32, k_proj_f32, v_proj_f32, o_proj_f32;
+    std::vector<float> gate_proj_f32, up_proj_f32, down_proj_f32;
+    std::vector<block_q4_K> q_proj_q4k, k_proj_q4k, v_proj_q4k, o_proj_q4k;
+    std::vector<block_q4_K> gate_proj_q4k, up_proj_q4k, down_proj_q4k;
+    std::vector<block_q6_K> q_proj_q6k, k_proj_q6k, v_proj_q6k, o_proj_q6k;
+    std::vector<block_q6_K> gate_proj_q6k, up_proj_q6k, down_proj_q6k;
+
 #ifdef HAS_CUDA
     // Device pointers for RMSNorm weights
     float* input_layernorm_dev = nullptr;
@@ -103,6 +119,8 @@ class TinyLlamaModel {
 public:
     // Construct from config and safetensors loader
     TinyLlamaModel(const ModelConfig& config, const SafeTensorsLoader& loader);
+    // New: Construct from config and weights file path (auto-detect GGUF or safetensors)
+    TinyLlamaModel(const ModelConfig& config, const std::string& weights_path);
     ~TinyLlamaModel(); // ADD Destructor declaration
 
     // --- Forward Pass (NOW uses std::vector<float>) --- 
@@ -121,12 +139,16 @@ public:
     const std::vector<uint16_t>& get_embed_tokens() const { return embed_tokens; }
 
     // Getter for layers (for debugging)
-    const std::vector<LayerWeights>& get_layers() const { return layers; }
+    std::vector<LayerWeights>& get_layers() { return layers; } // Return mutable reference
 
     // Lookup embedding for a token (returns std::vector<float>)
     std::vector<float> lookup_embedding(int token_id);
 
     int get_vocab_size() const;
+
+    const GGUFData* get_gguf_data() const { return gguf_data_ ? gguf_data_.get() : nullptr; }
+
+    friend void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model); // Declare friend
 
 private:
     ModelConfig config_;
@@ -135,6 +157,11 @@ private:
     std::vector<uint16_t> embed_tokens; // [vocab_size, hidden_size]
     std::vector<uint16_t> lm_head;      // [vocab_size, hidden_size]
     std::vector<uint16_t> final_norm;   // [hidden_size]
+
+    // --- ADDED: FP32 and Quantized fields ---
+    std::vector<float> embed_tokens_f32, lm_head_f32, final_norm_f32;
+    std::vector<block_q4_K> embed_tokens_q4k, lm_head_q4k, final_norm_q4k;
+    std::vector<block_q6_K> embed_tokens_q6k, lm_head_q6k, final_norm_q6k;
 
     std::vector<LayerWeights> layers; // num_hidden_layers
 
@@ -170,14 +197,21 @@ private:
     // Precomputed RoPE cos/sin values
     std::vector<std::pair<float, float>> precomputed_freqs_cis_;
 
-    std::vector<float> forward_from_qkv_host(
-        const std::vector<float>& x_resid1_vec, // Input embedding for residual 1
+    // Internal helper for attention calculation (if still needed)
+    /*std::vector<float> forward_from_qkv_host(
+        const std::vector<float>& x_resid1_vec, 
         std::vector<float>& q_vec,
         std::vector<float>& k_vec,
         std::vector<float>& v_vec,
         int pos,
         KVCache* cache,
-        const std::vector<int>* attention_mask);
+        const std::vector<int>* attention_mask);*/ // Commented out if unused
+
+    std::unique_ptr<GGUFData> gguf_data_; // Only set if loaded from GGUF
+
+    // --- ADDED: Private Helper Declarations ---
+    void initialize_weights(const SafeTensorsLoader* loader, const GGUFData* gguf);
+    void initialize_gpu_and_rope();
 };
 
 // Utility: parse ModelConfig from nlohmann::json

@@ -276,7 +276,7 @@ void matvec_bf16_f32_cuda(cublasHandle_t handle, // <<< ADDED HANDLE
     matvec_bf16_f32_cuda(handle, mat_bf16_dev, vec_f32_dev, out_f32_dev, rows, cols, 0); // <<< PASS HANDLE
     
     // Synchronize default stream before copying back result
-    gpuErrchk(cudaDeviceSynchronize()); 
+    gpuErrchk(cudaDeviceSynchronize());
     
     // Copy result back to host output vector
     gpuErrchk(cudaMemcpy(out_f32_host.data(), out_f32_dev, out_f32_host.size() * sizeof(float), cudaMemcpyDeviceToHost));

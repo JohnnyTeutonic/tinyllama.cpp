@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <numeric>
 #include <cmath>
+#include <iostream>
+#include <cstdlib>
 
 namespace {
     // Ensures log file is truncated only once per run
@@ -33,6 +35,20 @@ void Logger::warning(const std::string& message) {
     ensure_log_truncated();
     std::ofstream log("debugging.log", std::ios::app);
     log << "[WARNING] " << message << std::endl;
+}
+
+void Logger::fatal(const std::string& message) {
+    ensure_log_truncated(); // Ensure log file is ready
+    // Log to file first
+    std::ofstream log("debugging.log", std::ios::app);
+    log << "[FATAL] " << message << std::endl;
+    log.close(); // Close the file stream before terminating
+
+    // Also print to standard error
+    std::cerr << "[FATAL] " << message << std::endl;
+
+    // Terminate the program
+    std::exit(EXIT_FAILURE);
 }
 
 void Logger::log_vector_stats(const std::string& name, const std::vector<float>& v, int n_show) {

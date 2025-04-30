@@ -133,8 +133,18 @@ GGUFData load_gguf_meta(const std::string& filename) {
                      GGUFValueType array_type_enum; uint64_t count;
                      read_raw(file, array_type_enum); read_raw(file, count);
 
+                     // --- START: Store GGUFArray metadata ---
+                     GGUFArray array_obj;
+                     array_obj.type = array_type_enum;
+                     array_obj.len = count;
+                     result.metadata[key] = array_obj; // Store the array info!
+                     Logger::info("Stored ARRAY metadata for key '" + key + "' (Type: "
+                                  + std::to_string(static_cast<uint32_t>(array_type_enum)) + ", Count: " + std::to_string(count) + ")");
+                     // --- END: Store GGUFArray metadata ---
+
+                     // --- START: Skip array data in file (Existing Logic) ---
                      if (array_type_enum == GGUFValueType::STRING) {
-                         Logger::info("Skipping STRING array ('" + key + "') with " + std::to_string(count) + " elements...");
+                         Logger::info("Skipping STRING array data ('" + key + "') with " + std::to_string(count) + " elements...");
                          for(uint64_t arr_i = 0; arr_i < count; ++arr_i) {
                              try {
                                 std::string discarded_str = read_gguf_string(file); // Read and discard
