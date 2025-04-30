@@ -4,6 +4,10 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <utility> // For std::pair
+// --- ADDED GGUF INCLUDES ---
+#include "gguf_structs.h" // Need GGUFData definition
+#include "logger.h"       // For logging
 
 /**
  * A simple tokenizer class that doesn't rely on OpenNMT or any external libraries.
@@ -18,6 +22,10 @@ public:
      * @param vocab_path Path to the JSON file containing token vocabulary
      */
     Tokenizer(const std::string& model_path, const std::string& vocab_path);
+    
+    // --- ADDED: Constructor from GGUF Data ---
+    explicit Tokenizer(const GGUFData& gguf_data);
+    // --- END: Added Constructor ---
     
     /**
      * Tokenize text into token strings
@@ -48,8 +56,16 @@ public:
     std::string detokenize(const std::vector<std::string>& tokens) const;
     
     // Encode/decode methods with option to add special tokens
-    std::vector<int> encode(const std::string& text, bool add_special_tokens = true) const;
+    std::vector<int> encode(const std::string& text, 
+                            bool add_special_tokens = true, 
+                            bool use_regex_pretokenize = false) const;
     std::string decode(const std::vector<int>& ids, bool skip_special_tokens = true) const;
+    
+    // --- ADDED: Declaration for apply_chat_template ---
+    std::string apply_chat_template(const std::string& user_prompt) const;
+    
+    // --- ADDED: Vocab Size Accessor ---
+    int vocab_size() const;
     
     // Special token accessors
     int bos_token_id() const { return bos_token_id_; }
@@ -60,7 +76,7 @@ public:
 private:
     // Tokenization implementations
     std::vector<std::string> space_tokenize(const std::string& text) const;
-    std::vector<std::string> bpe_tokenize(const std::string& text) const;
+    std::vector<std::string> bpe_tokenize(const std::string& text, bool use_regex_pretokenize = true) const;
     std::vector<std::string> sentencepiece_tokenize(const std::string& text) const;
     
     // Loading functions

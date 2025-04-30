@@ -103,133 +103,183 @@ std::vector<std::string> Tokenizer::space_tokenize(const std::string& text) cons
 }
 
 // BPE tokenization 
-std::vector<std::string> Tokenizer::bpe_tokenize(const std::string& text) const {
-    std::vector<std::string> all_tokens;
+std::vector<std::string> Tokenizer::bpe_tokenize(const std::string& text, bool use_regex_pretokenize) const {
+    // This function now assumes that the necessary members (token_to_id_, id_to_token_, bpe_merges_)
+    // have been initialized correctly by either the file-based constructor or the GGUF-based constructor.
+    // The GGUF constructor specifically loads merges with concatenated keys and rank as value.
+
+    std::vector<std::string> final_tokens;
     
-    // Check if we're using a TinyLlama-style tokenizer
+    // Heuristic to detect if space prefix (Ġ or  ) is used in the loaded vocab
     bool using_space_prefix = false;
-    for (const auto& token : id_to_token_) {
-        if (!token.empty() && token[0] == '\xC4' && token.size() > 1 && token[1] == '\xA0') {
-            // UTF-8 representation of Ġ (U+0120)
-            using_space_prefix = true;
-            break;
-        }
-        // TinyLlama uses a special unicode character '▁' (U+2581)
-        if (!token.empty() && token[0] == '\xE2' && token.size() > 2 && token[1] == '\x96' && token[2] == '\x81') {
-            // UTF-8 representation of ▁ (U+2581)
-            using_space_prefix = true;
-            break;
-        }
+    const std::string gpt2_space_prefix = "\xC4\xA0"; // Ġ (U+0120)
+    const std::string tinyllama_space_prefix = "\xE2\x96\x81"; //   (U+2581)
+    std::string detected_space_prefix = ""; // Store which prefix we found
+
+    for (const auto& pair : token_to_id_) { // Iterate through the loaded vocab map
+         const std::string& token = pair.first;
+         if (!token.empty()) {
+            if (token.size() >= gpt2_space_prefix.size() && token.substr(0, gpt2_space_prefix.size()) == gpt2_space_prefix) {
+                 using_space_prefix = true;
+                 detected_space_prefix = gpt2_space_prefix;
+                 break;
+            } 
+             if (token.size() >= tinyllama_space_prefix.size() && token.substr(0, tinyllama_space_prefix.size()) == tinyllama_space_prefix) {
+                 using_space_prefix = true;
+                 detected_space_prefix = tinyllama_space_prefix;
+                 break;
+             }
+         }
     }
-    
-    // Add a leading space if needed
+    if (using_space_prefix) {
+         Logger::info("bpe_tokenize detected space prefix: '" + detected_space_prefix + "'");
+    } else {
+        Logger::info("bpe_tokenize did not detect standard space prefix.");
+    }
+
+    // Preprocess text: Add leading space if using prefix and text doesn't start with space
     std::string processed_text = text;
-    if (using_space_prefix && !text.empty() && text[0] != ' ') {
-        processed_text = " " + text;
+    if (using_space_prefix && !processed_text.empty() && processed_text[0] != ' ') {
+        processed_text = " " + processed_text;
+        // Logger::info("Added leading space for prefix handling.");
     }
-    
-    // Split the text by whitespace to get words
+
     std::vector<std::string> words;
-    std::string current_word;
-    bool in_whitespace = true;
-    
-    for (size_t i = 0; i < processed_text.size(); ++i) {
-        char c = processed_text[i];
-        if (std::isspace(static_cast<unsigned char>(c))) {
-            if (!in_whitespace) {
-                // End of a word
+
+    // --- MODIFIED: Conditional Pre-tokenization --- 
+    if (use_regex_pretokenize) {
+        Logger::info("Using REGEX pre-tokenization...");
+        // --- Use Regex for Pre-tokenization --- 
+        // Pre-tokenize using regex to split words, punctuation, numbers, etc.
+        // This regex is similar to the one used in sentencepiece and llama.cpp
+        // It aims to capture: 
+        // - optional leading spaces + common contractions ('s, 't, 're, 've, 'm, 'll, 'd)
+        // - optional leading spaces + sequences of letters (\p{L}+)
+        // - optional leading spaces + sequences of numbers (\p{N}+)
+        // - sequences of non-letter, non-number, non-space characters (likely punctuation)
+        // - whitespace sequences (\s+)
+        // --- FIXED REGEX: Use standard ECMA syntax, replace \p{L} with [a-zA-Z] and \p{N} with \d --- 
+        std::regex pre_regex("(\\s*('s|'t|'re|'ve|'m|'ll|'d)|\\s*[a-zA-Z]+|\\s*\\d+|[^\\sA-Za-z\\d]+|\\s+)");
+        auto words_begin = std::sregex_iterator(processed_text.begin(), processed_text.end(), pre_regex);
+        auto words_end = std::sregex_iterator();
+
+        for (std::sregex_iterator i = words_begin; i != words_end; ++i) {
+            std::smatch match = *i;
+            std::string word = match.str();
+            if (!word.empty()) { 
+                bool is_whitespace = std::all_of(word.begin(), word.end(), ::isspace);
+                if (is_whitespace && !using_space_prefix) {
+                    continue; 
+                }
+                words.push_back(word);
+            }
+        }
+        Logger::info("Pre-tokenized (regex) into " + std::to_string(words.size()) + " pieces.");
+        // --- END: Regex Pre-tokenization ---
+    } else {
+        Logger::info("Using WHITESPACE pre-tokenization...");
+        // --- Use Original Whitespace Split --- 
+        std::string current_word;
+        for (char c : processed_text) {
+            if (std::isspace(static_cast<unsigned char>(c))) {
                 if (!current_word.empty()) {
                     words.push_back(current_word);
                     current_word.clear();
                 }
-                in_whitespace = true;
-            }
-            // Add the whitespace to the current word if we're keeping track of it
-            if (using_space_prefix && in_whitespace) {
-                // We mark the beginning of a new word after whitespace
-                if (!current_word.empty()) {
-                    words.push_back(current_word);
+                if (using_space_prefix) {
+                    words.push_back(" ");
                 }
-                current_word = " ";
-                in_whitespace = false;
+            } else {
+                current_word += c;
             }
-    } else {
-            current_word.push_back(c);
-            in_whitespace = false;
         }
+        if (!current_word.empty()) {
+            words.push_back(current_word);
+        }
+        Logger::info("Pre-tokenized (whitespace) into " + std::to_string(words.size()) + " pieces.");
+         // --- END: Original Whitespace Split ---
     }
-    
-    // Add the last word if there is one
-    if (!current_word.empty()) {
-        words.push_back(current_word);
-    }
-    
+     // --- END: Conditional Pre-tokenization --- 
+
     // Process each word with BPE
-    for (auto& word : words) {
-        // Special handling for TinyLlama-style prefix
-        if (using_space_prefix && word.size() > 0 && word[0] == ' ') {
-            // Replace the space at the beginning with the special token
-            if (word.size() == 1) {
-                // This is just a space - use the UTF-8 sequence for ▁ (U+2581)
-                word = "\xE2\x96\x81";
-            } else {
-                word = "\xE2\x96\x81" + word.substr(1);
-            }
+    for (const auto& word_piece : words) { // Iterate over regex-split pieces
+        if (word_piece.empty()) continue;
+
+        std::string current_segment = word_piece; // Use the piece directly
+        // Apply space prefix if needed
+        // Note: The regex might capture leading spaces, adjust prefix logic if needed.
+        // Let's refine prefix handling here based on regex output.
+        if (using_space_prefix) {
+            if (!current_segment.empty() && current_segment[0] == ' ') {
+                // Replace the leading space(s) captured by regex with the prefix
+                size_t first_non_space = current_segment.find_first_not_of(' ');
+                if (first_non_space == std::string::npos) { // All spaces
+                    // Decide how to handle pure space tokens with prefix. 
+                    // Maybe map multiple spaces to a single prefix?
+                    current_segment = detected_space_prefix;
+                } else {
+                     current_segment = detected_space_prefix + current_segment.substr(first_non_space);
+                }
+            } 
+             // What if the segment doesn't start with space but should logically have a prefix?
+             // This is tricky with regex pre-tokenization. The initial space addition 
+             // before regex might be better, but let's try this first.
         }
-        
-        // Split word into individual UTF-8 characters
-        std::vector<std::string> chars;
-        for (size_t i = 0; i < word.size(); ) {
-            // Get unicode code point and advance i accordingly
+        // Logger::info("Processing segment: '" + current_segment + "'");
+
+        // Split word into initial pieces (UTF-8 characters)
+        std::vector<std::string> pieces;
+        for (size_t i = 0; i < current_segment.size(); ) {
             int bytes = 1;
-            if ((word[i] & 0xE0) == 0xC0) bytes = 2;  // 2-byte sequence
-            else if ((word[i] & 0xF0) == 0xE0) bytes = 3;  // 3-byte sequence
-            else if ((word[i] & 0xF8) == 0xF0) bytes = 4;  // 4-byte sequence
+            unsigned char c = static_cast<unsigned char>(current_segment[i]);
+            if ((c & 0xF8) == 0xF0) bytes = 4;
+            else if ((c & 0xF0) == 0xE0) bytes = 3;
+            else if ((c & 0xE0) == 0xC0) bytes = 2;
             
-            // Get the character
-            if (i + bytes <= word.size()) {
-                chars.push_back(word.substr(i, bytes));
-            } else {
-                // Handle truncated UTF-8 sequence
-                chars.push_back(word.substr(i));
+            if (i + bytes > current_segment.size()) { // Handle potential trailing broken char
+                 bytes = current_segment.size() - i;
             }
+            pieces.push_back(current_segment.substr(i, bytes));
             i += bytes;
         }
-        
-        if (chars.empty()) continue;
-        
-        // Apply BPE merges
-        bool changes = true;
-        while (changes && chars.size() > 1) {
-            changes = false;
-            int best_score = std::numeric_limits<int>::max();
-            int best_i = -1;
-            
-            for (size_t i = 0; i < chars.size() - 1; ++i) {
-                std::string pair = chars[i] + chars[i + 1];
-                auto it = bpe_merges_.find(pair);
-                if (it != bpe_merges_.end() && it->second < best_score) {
-                    best_score = it->second;
-                    best_i = i;
+        // Logger::info("Initial pieces: " + std::to_string(pieces.size()));
+
+        if (pieces.empty()) continue;
+
+        // Apply BPE merges iteratively
+        while (pieces.size() > 1) {
+            int best_rank = std::numeric_limits<int>::max();
+            int best_idx = -1;
+
+            for (size_t i = 0; i < pieces.size() - 1; ++i) {
+                std::string merge_key = pieces[i] + pieces[i+1];
+                auto it = bpe_merges_.find(merge_key);
+                if (it != bpe_merges_.end()) {
+                    int current_rank = it->second;
+                    if (current_rank < best_rank) {
+                        best_rank = current_rank;
+                        best_idx = static_cast<int>(i);
+                    }
                 }
             }
-            
-            if (best_i >= 0) {
-                std::string merged = chars[best_i] + chars[best_i + 1];
-                chars[best_i] = merged;
-                chars.erase(chars.begin() + best_i + 1);
-                changes = true;
+
+            if (best_idx != -1) {
+                 // Perform the merge
+                 // Logger::info("Merging '" + pieces[best_idx] + "' and '" + pieces[best_idx + 1] + "' with rank " + std::to_string(best_rank));
+                 pieces[best_idx] += pieces[best_idx + 1];
+                 pieces.erase(pieces.begin() + best_idx + 1);
+            } else {
+                break; // No more merges found for this word
             }
         }
-        
-        // Collect the final tokens
-        all_tokens.insert(all_tokens.end(), chars.begin(), chars.end());
+        // Add the final pieces for this word to the result
+        final_tokens.insert(final_tokens.end(), pieces.begin(), pieces.end());
     }
-    
-    return all_tokens;
+    // Logger::info("Final token count: " + std::to_string(final_tokens.size()));
+    return final_tokens;
 }
 
-// SentencePiece tokenization (placeholder)
+// SentencePiece tokenization (placeholder - NOT USED FOR GGUF LLAMA)
 std::vector<std::string> Tokenizer::sentencepiece_tokenize(const std::string& text) const {
     // Fallback to space tokenization until SentencePiece implementation is complete
     Logger::info("SentencePiece tokenization not fully implemented - falling back to space tokenization");
@@ -357,40 +407,86 @@ std::vector<std::string> Tokenizer::ids_to_tokens(const std::vector<int>& ids) c
     return tokens;
 }
 
-// Encode text to token IDs
-std::vector<int> Tokenizer::encode(const std::string& text, bool add_special_tokens) const {
-    std::vector<std::string> tokens = tokenize(text);
+// Encode text to token IDs (using BPE for Llama GGUF)
+std::vector<int> Tokenizer::encode(const std::string& text, 
+                                 bool add_special_tokens, 
+                                 bool use_regex_pretokenize /* = false */) const // SET DEFAULT TO FALSE (in comment for definition)
+{
+    // Logger::info("Tokenizer::encode called. Text: '" + text + "', add_special: " + 
+    //              (add_special_tokens ? "true" : "false") + ", use_regex: " + (use_regex_pretokenize ? "true" : "false"));
+    // For GGUF Llama, we assume BPE is the method.
+    std::vector<std::string> tokens = bpe_tokenize(text, use_regex_pretokenize); // Call the adapted BPE tokenizer
+    // Logger::info("Tokenized into " + std::to_string(tokens.size()) + " string pieces.");
     
-    if (add_special_tokens) {
-        if (bos_token_id_ >= 0) {
-            tokens.insert(tokens.begin(), bos_token_);
-        }
-        if (eos_token_id_ >= 0) {
-            tokens.push_back(eos_token_);
-        }
+    // Convert string tokens to IDs
+    std::vector<int> ids = tokens_to_ids(tokens);
+    // Logger::info("Converted to " + std::to_string(ids.size()) + " IDs (before special tokens).");
+
+    // Prepend BOS if requested and available
+    if (add_special_tokens && bos_token_id_ >= 0) {
+        ids.insert(ids.begin(), bos_token_id_);
+        // Logger::info("Prepended BOS token ID: " + std::to_string(bos_token_id_));
     }
-    
-    return tokens_to_ids(tokens);
+    // NOTE: EOS is typically added *after* generation, not during prompt encoding.
+    return ids;
 }
 
 // Decode token IDs to text
 std::string Tokenizer::decode(const std::vector<int>& ids, bool skip_special_tokens) const {
-    std::vector<std::string> tokens = ids_to_tokens(ids);
-    
-    if (skip_special_tokens) {
-        // Remove special tokens
-        std::unordered_set<std::string> special_tokens = {bos_token_, eos_token_, pad_token_, unk_token_};
-        
-        tokens.erase(
-            std::remove_if(tokens.begin(), tokens.end(), 
-                [&special_tokens](const std::string& token) {
-                    return special_tokens.find(token) != special_tokens.end();
-                }),
-            tokens.end()
-        );
+    // Logger::warning("GGUFTokenizer::decode NYI"); // Old warning
+    // This implementation should mostly work if id_to_token_ is loaded correctly.
+    std::stringstream ss;
+    bool first_token = true; // To handle potential leading space prefixes
+    for (int id : ids) {
+        if (id >= 0 && static_cast<size_t>(id) < id_to_token_.size()) {
+             std::string token = id_to_token_[id];
+             if (skip_special_tokens) {
+                  if (id == bos_token_id_ || id == eos_token_id_ || 
+                     id == pad_token_id_ || id == unk_token_id_) {
+                      continue; // Skip special tokens
+                  }
+             }
+             // --- Basic Space Prefix Handling during Decode ---
+             // Check for prefixes like ' ' (U+2581) or 'Ġ' (U+0120)
+             const std::string gpt2_space_prefix = "\xC4\xA0"; 
+             const std::string tinyllama_space_prefix = "\xE2\x96\x81";
+             if (!token.empty()) {
+                 if ((token.size() >= gpt2_space_prefix.size() && token.substr(0, gpt2_space_prefix.size()) == gpt2_space_prefix)) {
+                    if (!first_token) ss << " "; // Add space only if not the first token
+                    ss << token.substr(gpt2_space_prefix.size());
+                 } else if ((token.size() >= tinyllama_space_prefix.size() && token.substr(0, tinyllama_space_prefix.size()) == tinyllama_space_prefix)) {
+                     if (!first_token) ss << " "; // Add space only if not the first token
+                     ss << token.substr(tinyllama_space_prefix.size());
+                 } else {
+                     ss << token; // Append token directly if no prefix
+                 }
+             } // else: skip empty tokens?
+             first_token = false; // Not the first token anymore
+        } else {
+            ss << "[INVALID_ID:" << id << "]";
+            first_token = false;
+        }
     }
-    
-    return detokenize(tokens);
+    return ss.str(); 
+}
+
+// Apply Chat Template (Basic Implementation)
+std::string Tokenizer::apply_chat_template(const std::string& user_prompt) const {
+     // TODO: Implement proper Jinja-like template processing based on chat_template_ member
+     // For now, implement a very basic Llama-style template assuming user role only
+      Logger::info("Applying BASIC chat template (Llama user/assistant style). GGUF template ignored for now.");
+
+     // Get EOS token string, default to "" if not found/valid
+     std::string eos_str = "";
+     if (eos_token_id_ >= 0 && static_cast<size_t>(eos_token_id_) < id_to_token_.size()) {
+          eos_str = id_to_token_[eos_token_id_];
+     }
+
+     // Basic template: <|user|>\nPROMPT + EOS<|assistant|>\n
+     std::string formatted = "<|user|>\n" + user_prompt + eos_str + "\n<|assistant|>\n";
+     // Note: BOS is typically added by the `encode` method itself based on the flag.
+     
+     return formatted;
 }
 
 // Load vocabulary from JSON file
@@ -627,3 +723,125 @@ void Tokenizer::load_sentencepiece_model(const std::string& model_path) {
     Logger::info("SentencePiece model loading not implemented yet");
     sentencepiece_model_loaded_ = false;
 }
+
+// --- START: NEW Tokenizer Constructor from GGUF Data ---
+Tokenizer::Tokenizer(const GGUFData& gguf_data) {
+    Logger::info("Initializing Tokenizer from GGUFData...");
+
+    // Check for necessary data
+    if (gguf_data.tokenizer_tokens.empty()) {
+        throw std::runtime_error("Tokenizer Error: GGUF data missing tokenizer.ggml.tokens.");
+    }
+
+    // 1. Copy Vocabulary and Scores (assuming they exist)
+    id_to_token_ = gguf_data.tokenizer_tokens;
+    // scores_ = gguf_data.tokenizer_scores; // Not used by this BPE implementation directly
+    // token_types_ = gguf_data.tokenizer_token_types; // Not used by this BPE implementation directly
+    Logger::info("Loaded " + std::to_string(id_to_token_.size()) + " tokens from GGUF.");
+
+    // 2. Build token_to_id map
+    token_to_id_.clear();
+    for (size_t i = 0; i < id_to_token_.size(); ++i) {
+        token_to_id_[id_to_token_[i]] = static_cast<int>(i);
+    }
+    Logger::info("Built token_to_id map.");
+
+    // 3. Load Special Token IDs from Metadata
+     auto get_meta_int = [&](const std::string& key, int default_val) -> int {
+        auto it = gguf_data.metadata.find(key);
+        if (it != gguf_data.metadata.end()) {
+            try {
+                 return std::visit([&](const auto& val) -> int {
+                    using T = std::decay_t<decltype(val)>;
+                     if constexpr (std::is_integral_v<T> && !std::is_same_v<T, bool>) {
+                         // --- FIXED RANGE CHECK --- 
+                         // Check if the unsigned value exceeds the maximum positive value of int.
+                         // Any value <= INT_MAX is safe to cast to int (including 0 and positive values).
+                         // Negative values are impossible for unsigned types being read here (e.g., uint32_t).
+                         if (val <= static_cast<typename std::make_unsigned<T>::type>(std::numeric_limits<int>::max())) {
+                            return static_cast<int>(val);
+                         } else {
+                             Logger::warning("Metadata integer value for key '" + key + "' ('" + std::to_string(val) + "') exceeds INT_MAX. Using default.");
+                         }
+                         // --- END FIXED RANGE CHECK ---
+                     } else {
+                         Logger::warning("Metadata value for key '" + key + "' is not an integer type. Using default.");
+                     }
+                     return default_val;
+                 }, it->second);
+            } catch (const std::bad_variant_access& e) {
+                Logger::error("Bad variant access for key '" + key + "': " + e.what() + ". Using default.");
+            } catch (...) {
+                Logger::error("Unknown error accessing metadata key '" + key + "'. Using default.");
+            }
+        }
+        // Logger::info("Metadata key '" + key + "' not found. Using default: " + std::to_string(default_val));
+        return default_val;
+    };
+
+    bos_token_id_ = get_meta_int("tokenizer.ggml.bos_token_id", -1);
+    eos_token_id_ = get_meta_int("tokenizer.ggml.eos_token_id", -1);
+    unk_token_id_ = get_meta_int("tokenizer.ggml.unknown_token_id", -1);
+    pad_token_id_ = get_meta_int("tokenizer.ggml.padding_token_id", -1);
+
+    // Set string representations if IDs are valid
+    unk_token_ = (unk_token_id_ >= 0 && unk_token_id_ < id_to_token_.size()) ? id_to_token_[unk_token_id_] : "<unk>";
+    bos_token_ = (bos_token_id_ >= 0 && bos_token_id_ < id_to_token_.size()) ? id_to_token_[bos_token_id_] : "<s>";
+    eos_token_ = (eos_token_id_ >= 0 && eos_token_id_ < id_to_token_.size()) ? id_to_token_[eos_token_id_] : "</s>";
+    pad_token_ = (pad_token_id_ >= 0 && pad_token_id_ < id_to_token_.size()) ? id_to_token_[pad_token_id_] : "<pad>";
+
+    Logger::info("Special token IDs: BOS=" + std::to_string(bos_token_id_) + " ('" + bos_token_ + "')" +
+                 ", EOS=" + std::to_string(eos_token_id_) + " ('" + eos_token_ + "')" +
+                 ", UNK=" + std::to_string(unk_token_id_) + " ('" + unk_token_ + "')" +
+                 ", PAD=" + std::to_string(pad_token_id_) + " ('" + pad_token_ + "')");
+
+    // 4. Load Model Type
+    std::string model_type = "unknown";
+    auto it_model = gguf_data.metadata.find("tokenizer.ggml.model");
+    if (it_model != gguf_data.metadata.end() && std::holds_alternative<std::string>(it_model->second)) {
+        model_type = std::get<std::string>(it_model->second);
+    }
+    Logger::info("Tokenizer model type from GGUF: " + model_type);
+
+    // 5. Process Merges (Only for BPE-based models like llama)
+    bpe_merges_.clear();
+    if (model_type == "llama") {
+        Logger::info("Processing BPE merges from GGUF...");
+        const auto& merges_vec = gguf_data.tokenizer_merges;
+        if (merges_vec.empty()) {
+            Logger::warning("Tokenizer: LLaMA model type specified but no merges found in GGUF (tokenizer.ggml.merges).");
+        } else {
+            bpe_merges_.clear(); // Ensure map is clear before loading
+            int merge_rank = 0;
+            for (const std::string& merge_str : merges_vec) {
+                size_t space_pos = merge_str.find(' ');
+                if (space_pos == std::string::npos) {
+                    Logger::warning("Invalid merge format: '" + merge_str + "'. Skipping.");
+                    continue;
+                }
+                std::string token1_str = merge_str.substr(0, space_pos);
+                std::string token2_str = merge_str.substr(space_pos + 1);
+                
+                // --- FIXED: Use concatenated string as key, rank as value ---
+                std::string merge_key = token1_str + token2_str;
+                bpe_merges_[merge_key] = merge_rank++;
+            }
+             Logger::info("Processed " + std::to_string(bpe_merges_.size()) + " BPE merges from GGUF.");
+        }
+    } else {
+         Logger::warning("GGUF Tokenizer model type '" + model_type + "' not explicitly handled for merges (assuming no BPE).");
+    }
+
+    // Mark SentencePiece as not loaded since we are using GGUF BPE
+    sentencepiece_model_loaded_ = false;
+
+    Logger::info("Tokenizer initialization from GGUFData complete.");
+}
+// --- END: NEW Tokenizer Constructor from GGUF Data ---
+
+// --- ADDED: GGUF Vocab Size Implementation ---
+int Tokenizer::vocab_size() const {
+    return id_to_token_.size();
+}
+
+// --- END: GGUF Vocab Size Implementation ---

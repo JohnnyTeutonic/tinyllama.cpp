@@ -133,53 +133,79 @@ GGUFData load_gguf_meta(const std::string& filename) {
                      GGUFValueType array_type_enum; uint64_t count;
                      read_raw(file, array_type_enum); read_raw(file, count);
 
-                     // --- START: Store GGUFArray metadata ---
-                     GGUFArray array_obj;
-                     array_obj.type = array_type_enum;
-                     array_obj.len = count;
-                     result.metadata[key] = array_obj; // Store the array info!
-                     Logger::info("Stored ARRAY metadata for key '" + key + "' (Type: "
-                                  + std::to_string(static_cast<uint32_t>(array_type_enum)) + ", Count: " + std::to_string(count) + ")");
-                     // --- END: Store GGUFArray metadata ---
+                     // Store GGUFArray metadata (type and count) regardless of loading content
+                     GGUFArray array_obj; array_obj.type = array_type_enum; array_obj.len = count;
+                     result.metadata[key] = array_obj;
+                     // Logger::info("Found ARRAY metadata for key '" + key + "' (Type: "
+                     //              + std::to_string(static_cast<uint32_t>(array_type_enum)) + ", Count: " + std::to_string(count) + ")");
 
-                     // --- START: Skip array data in file (Existing Logic) ---
-                     if (array_type_enum == GGUFValueType::STRING) {
-                         Logger::info("Skipping STRING array data ('" + key + "') with " + std::to_string(count) + " elements...");
-                         for(uint64_t arr_i = 0; arr_i < count; ++arr_i) {
-                             try {
-                                std::string discarded_str = read_gguf_string(file); // Read and discard
-                             } catch (const std::exception& e) {
-                                // Log error but re-throw to signal failure
-                                Logger::error("Error skipping string element " + std::to_string(arr_i) + " for key '" + key + "': " + e.what());
-                                throw;
-                             }
-                         }
-                     } else {
-                        size_t element_size = gguf_value_type_size(array_type_enum);
-                        if (element_size == 0) {
-                             throw std::runtime_error("Cannot skip array for key '" + key + "' with unsupported or variable-sized element type: " + std::to_string(static_cast<uint32_t>(array_type_enum)));
+                     // --- START: Load Specific Tokenizer Arrays --- 
+                     bool skipped_data = false;
+                     if (key == "tokenizer.ggml.tokens" && array_type_enum == GGUFValueType::STRING) {
+                        Logger::info("Loading STRING array data ('" + key + "') with " + std::to_string(count) + " elements...");
+                        result.tokenizer_tokens.reserve(static_cast<size_t>(count));
+                        for(uint64_t arr_i = 0; arr_i < count; ++arr_i) {
+                            result.tokenizer_tokens.push_back(read_gguf_string(file));
                         }
-
-                        if (count > 0 && element_size > std::numeric_limits<uint64_t>::max() / count) {
-                             throw std::overflow_error("Array size overflow calculating skip amount for key '" + key + "'");
+                        Logger::info("Loaded tokenizer_tokens. Size: " + std::to_string(result.tokenizer_tokens.size()));
+                     }
+                     else if (key == "tokenizer.ggml.scores" && array_type_enum == GGUFValueType::FLOAT32) {
+                        Logger::info("Loading FLOAT32 array data ('" + key + "') with " + std::to_string(count) + " elements...");
+                        result.tokenizer_scores.resize(static_cast<size_t>(count));
+                        file.read(reinterpret_cast<char*>(result.tokenizer_scores.data()), static_cast<std::streamsize>(count * sizeof(float)));
+                        if (!file) { throw std::runtime_error("GGUF Error: Failed to read scores array data."); }
+                        Logger::info("Loaded tokenizer_scores. Size: " + std::to_string(result.tokenizer_scores.size()));
+                     }
+                     else if (key == "tokenizer.ggml.token_type" && array_type_enum == GGUFValueType::UINT32) {
+                        Logger::info("Loading UINT32 array data ('" + key + "') with " + std::to_string(count) + " elements...");
+                        result.tokenizer_token_types.resize(static_cast<size_t>(count));
+                        file.read(reinterpret_cast<char*>(result.tokenizer_token_types.data()), static_cast<std::streamsize>(count * sizeof(uint32_t)));
+                        if (!file) { throw std::runtime_error("GGUF Error: Failed to read token_type array data."); }
+                        Logger::info("Loaded tokenizer_token_types. Size: " + std::to_string(result.tokenizer_token_types.size()));
+                     }
+                     else if (key == "tokenizer.ggml.merges" && array_type_enum == GGUFValueType::STRING) {
+                        Logger::info("Loading STRING array data ('" + key + "') with " + std::to_string(count) + " elements...");
+                        result.tokenizer_merges.reserve(static_cast<size_t>(count));
+                        for(uint64_t arr_i = 0; arr_i < count; ++arr_i) {
+                            result.tokenizer_merges.push_back(read_gguf_string(file));
                         }
-                        uint64_t total_size_to_skip = count * element_size;
+                        Logger::info("Loaded tokenizer_merges. Size: " + std::to_string(result.tokenizer_merges.size()));
+                     }
+                     // --- END: Load Specific Tokenizer Arrays --- 
+                     else { 
+                        // --- START: Skip OTHER array data (Existing Logic) --- 
+                        skipped_data = true; 
+                        Logger::info("Skipping unhandled/non-tokenizer ARRAY data for key '" + key + "' (Type: "
+                                    + std::to_string(static_cast<uint32_t>(array_type_enum)) + ", Count: " + std::to_string(count) + ")");
 
-                        {
-                            std::stringstream ss_skip;
-                            ss_skip << "Skipping fixed-size array ('" << key << "') Type: " << static_cast<uint32_t>(array_type_enum)
-                                  << ", Count: " << count << ", Element Size: " << element_size << ", Total Bytes: " << total_size_to_skip << "...";
-                             Logger::info(ss_skip.str());
-                        }
-
-                        if (total_size_to_skip > 0) {
-                            file.seekg(static_cast<std::streamoff>(total_size_to_skip), std::ios::cur);
-                            if (!file) {
-                                throw std::runtime_error("GGUF Error: Failed to seek past array data for key '" + key + "'");
+                        if (array_type_enum == GGUFValueType::STRING) {
+                            for(uint64_t arr_i = 0; arr_i < count; ++arr_i) {
+                               try {
+                                  std::string discarded_str = read_gguf_string(file); // Read and discard
+                               } catch (const std::exception& e) {
+                                  // Log error but re-throw to signal failure
+                                  Logger::error("Error skipping string element " + std::to_string(arr_i) + " for key '" + key + "': " + e.what());
+                                  throw;
+                               }
                             }
                         } else {
-                             Logger::info("Skipping 0 bytes (empty array for key '" + key + "').");
+                           size_t element_size = gguf_value_type_size(array_type_enum);
+                           if (element_size == 0) {
+                                throw std::runtime_error("Cannot skip array for key '" + key + "' with unsupported or variable-sized element type: " + std::to_string(static_cast<uint32_t>(array_type_enum)));
+                           }
+
+                           if (count > 0 && element_size > std::numeric_limits<uint64_t>::max() / count) {
+                                throw std::overflow_error("Array size overflow calculating skip amount for key '" + key + "'");
+                           }
+                           uint64_t total_size_to_skip = count * element_size;
+                           if (total_size_to_skip > 0) {
+                               file.seekg(static_cast<std::streamoff>(total_size_to_skip), std::ios::cur);
+                               if (!file) {
+                                   throw std::runtime_error("GGUF Error: Failed to seek past array data for key '" + key + "'");
+                               }
+                           } // else: skipping 0 bytes is fine
                         }
+                        // --- END: Skip OTHER array data ---
                      }
                     break;
                 }
@@ -326,6 +352,10 @@ GGUFData load_gguf_meta(const std::string& filename) {
 
     uint64_t data_size = file_end_pos - data_start_pos;
     Logger::info("Reading tensor data block: " + std::to_string(data_size) + " bytes from offset " + std::to_string(data_start_pos) + ".");
+
+    // --- ADDED: Log calculated data size --- 
+    Logger::info("Calculated tensor data block size: " + std::to_string(data_size) + " bytes.");
+    // --- END: Added Log ---
 
     if (data_size > 0) {
         // Resize the vector in the result struct

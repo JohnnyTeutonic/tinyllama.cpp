@@ -78,10 +78,13 @@ size_t ggml_type_block_size(GGMLType type); // Returns number of elements per bl
 // Added log_details flag for specific debugging
 void dequantize_q2_k(const void* q_data, float* f_data, int num_weights_in_block, bool log_details_for_this_block = false);
 
-// Placeholder/Main dequantizer for Q4_K (Might call q4_k_m or other variations)
-// Matching the implementation signature which uses 'num_weights_in_block'
-// Added log_details flag for specific debugging
-void dequantize_q4_k_m(const void* q_data, float* f_data, int num_weights_in_block, bool log_details_for_this_block = false);
+// Dequantize Q4_K data - Modified to match llama.cpp logic
+void dequantize_q4_k_m(
+    const void* qblock_void,
+    float* output, // Output buffer for GGML_QK_K floats
+    int num_weights_in_block, // Should always be GGML_QK_K for full blocks
+    bool log_details_for_this_block = false // RE-ADD Flag with default
+);
 
 // Dequantize Q6_K data
 // Matching the implementation signature

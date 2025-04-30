@@ -168,262 +168,140 @@ namespace { // Keep anonymous namespace for potentially internal-only helpers in
 
 }
 
-// Helper function to extract packed scale and min indices for Q4_K blocks
-// Adapted directly from llama.cpp ggml-quants.c logic
-static inline void get_q4_k_scale_min_indices(
-    int j, // Outer loop index (0-7)
-    const uint8_t* scales_ptr, // Pointer to the 12-byte scales field
-    const uint8_t* qs_ptr,     // Pointer to the 128-byte qs field
-    uint8_t& scale_idx1, uint8_t& min_idx1, // Output for first sub-block (j*2)
-    uint8_t& scale_idx2, uint8_t& min_idx2  // Output for second sub-block (j*2+1)
+// --- START: Correct helper based on ggml-quants.c function ---
+static inline void get_scale_min_k4_ref(
+    int j, // Sub-block index (0-15)
+    const uint8_t* scales, // Pointer to the 12-byte scales field
+    const uint8_t* qs,     // Pointer to the 128-byte qs field (base pointer)
+    uint8_t* s,            // Output scale index (6-bit)
+    uint8_t* m             // Output min index (6-bit)
 ) {
-    // Indices for first sub-block (j*2)
-    if (j < 4) { // Sub-blocks 0, 2, 4, 6
-        scale_idx1 = scales_ptr[j] & 63;
-        min_idx1 = (scales_ptr[j + 8] & 0xF) | ((scales_ptr[j + 4] >> 6) << 4);
-    } else { // Sub-blocks 8, 10, 12, 14
-        scale_idx1 = (scales_ptr[j] & 0xF) | ((qs_ptr[j - 4] >> 6) << 4);
-        min_idx1 = (scales_ptr[j] >> 4) | ((qs_ptr[j] >> 6) << 4); // Simplified from llama.cpp
-    }
-
-    // Indices for second sub-block (j*2+1)
-    if (j < 4) { // Sub-blocks 1, 3, 5, 7
-        scale_idx2 = scales_ptr[j + 4] & 63;
-        min_idx2 = (scales_ptr[j + 8] >> 4) | ((scales_ptr[j] >> 6) << 4);
-    } else { // Sub-blocks 9, 11, 13, 15
-        scale_idx2 = (scales_ptr[j + 4] & 0xF) | ((qs_ptr[j] >> 6) << 4); // Simplified from llama.cpp
-        min_idx2 = (scales_ptr[j + 4] >> 4) | ((qs_ptr[j + 4] >> 6) << 4); // Simplified from llama.cpp
+    int is = j / 2; // scales byte index (0-7)
+    if (j % 2 == 0) { // Even sub-blocks (0, 2, ..., 14)
+        *s = scales[is] & 0x0F;                       // Scale: Lower nibble of scales[0..7]
+        uint8_t m_hi = (scales[is + 8] >> 0) & 0x03;   // Min high bits: Lower 2 bits of scales[8..15]
+        *m = m_hi | ((qs[j / 4] & 0x0F) << 2);         // Min low bits: Lower nibble of qs[0..7]
+    } else { // Odd sub-blocks (1, 3, ..., 15)
+        *s = (scales[is] >> 4) & 0x0F;                // Scale: Upper nibble of scales[0..7]
+        uint8_t m_hi = (scales[is + 8] >> 4) & 0x03;   // Min high bits: Upper 2 bits of scales[8..15]
+        *m = m_hi | ((qs[j / 4 + 8] >> 4) << 2);       // Min low bits: Upper nibble of qs[8..15]
     }
 }
+// --- END: Correct helper ---
 
-// Dequantize Q4_K data - Modified to match llama.cpp logic
+// Dequantize Q4_K data - Rewritten to match llama.cpp loop structure
 void dequantize_q4_k_m(
     const void* qblock_void,
     float* output, // Output buffer for GGML_QK_K floats
     int num_weights_in_block, // Should always be GGML_QK_K for full blocks
-    bool log_details_for_this_block // Logging flag
+    bool log_details_for_this_block // Flag for enabling detailed logs
 ) {
     if (num_weights_in_block != GGML_QK_K) {
-        // Early exit or throw? For now, matching llama.cpp which doesn't seem to handle partial blocks here.
-        // Let the caller (QuantizedTensor::dequantize_block) handle partial blocks if needed.
         std::cout << "Warning: dequantize_q4_k_m called with num_weights != GGML_QK_K (" << num_weights_in_block << ")" << std::endl;
-        // Potentially zero out the buffer? Or just return?
-        // For safety, let's zero it out if the size is wrong.
         std::memset(output, 0, num_weights_in_block * sizeof(float));
         return;
-        // throw std::invalid_argument("dequantize_q4_k_m currently only supports full block size " + std::to_string(GGML_QK_K));
     }
 
     const block_q4_K* qblock = static_cast<const block_q4_K*>(qblock_void);
-
-    const float d_raw = fp16_to_fp32(qblock->d);
-    const float dmin_raw = fp16_to_fp32(qblock->dmin);
-
-    // Check for NaN AND Inf and replace with 0.0f
-    const float d_super = (!std::isfinite(d_raw)) ? 0.0f : d_raw;
-    const float min_super = (!std::isfinite(dmin_raw)) ? 0.0f : dmin_raw;
-
     const uint8_t* scales_ptr = qblock->scales;
     const uint8_t* qs_ptr = qblock->qs;
 
-    if (log_details_for_this_block) {
-         std::cout << "[DEQUANT Q4_K Block Details]" << std::endl;
-         std::cout << "  Super-Block Scale (d_super): " << d_super 
-                   << " (raw d: 0x" << std::hex << qblock->d << std::dec << ")" << std::endl;
-         std::cout << "  Super-Block Min (min_super): " << min_super 
-                   << " (raw dmin: 0x" << std::hex << qblock->dmin << std::dec << ")" << std::endl;
-         // Log first few bytes of scales and qs for reference
-         std::cout << "  Scales (first 4):";
-         for(int k=0; k<4; ++k) std::cout << " 0x" << std::hex << (int)scales_ptr[k] << std::dec;
-         std::cout << std::endl;
-         std::cout << "  QS (first 8):";
-         for(int k=0; k<8; ++k) std::cout << " 0x" << std::hex << (int)qs_ptr[k] << std::dec;
-         std::cout << std::endl;
-    }
+    // Convert d and dmin, clamp if necessary
+    const float d_raw = fp16_to_fp32(qblock->d);
+    const float dmin_raw = fp16_to_fp32(qblock->dmin);
+    float d_super = d_raw;
+    float min_super = dmin_raw;
+    constexpr float CLAMP_LIMIT = 100.0f; 
+    if (!std::isfinite(d_super) || std::abs(d_super) > CLAMP_LIMIT) d_super = 0.0f;
+    if (!std::isfinite(min_super) || std::abs(min_super) > CLAMP_LIMIT) min_super = 0.0f;
 
-    // Process 2 sub-blocks (16 values each) at a time, 8 times
-    for (int j = 0; j < GGML_QK_K / 32; ++j) { // j = 0..7
-        uint8_t scale_idx1, min_idx1, scale_idx2, min_idx2;
-        get_q4_k_scale_min_indices(j, scales_ptr, qs_ptr, scale_idx1, min_idx1, scale_idx2, min_idx2);
+    // Process 16 sub-blocks
+    for (int j = 0; j < GGML_QK_K / 16; ++j) { // j = 0..15 (sub-block index)
+        uint8_t scale_idx, min_idx;
+        get_scale_min_k4_ref(j, scales_ptr, qs_ptr, &scale_idx, &min_idx);
 
-        // Use the static const arrays directly
-        const float scale1 = d_super * K_SCALE_VALUES[scale_idx1];
-        const float min1 = min_super * K_MIN_VALUES[min_idx1];
-        const float scale2 = d_super * K_SCALE_VALUES[scale_idx2];
-        const float min2 = min_super * K_MIN_VALUES[min_idx2];
+        // Calculate scale and min for this sub-block
+        const float scale = d_super * K_SCALE_VALUES[scale_idx];
+        const float minv = min_super * K_MIN_VALUES[min_idx];
 
-        if (log_details_for_this_block && j < 2) { // Log details for first few sub-block pairs
-            std::cout << "  Sub-block Pair j=" << j << ":" << std::endl;
-            std::cout << "    Sub-block " << (j*2) << ": sc_idx=" << (int)scale_idx1 << ", mn_idx=" << (int)min_idx1 << " => d1=" << scale1 << ", m1=" << min1 << std::endl;
-            std::cout << "    Sub-block " << (j*2+1) << ": sc_idx=" << (int)scale_idx2 << ", mn_idx=" << (int)min_idx2 << " => d2=" << scale2 << ", m2=" << min2 << std::endl;
+        // Pointer to the 8 bytes of quantized values for this sub-block
+        const uint8_t* qs_sub_block = qs_ptr + j * 8;
+        // Pointer to the 16 floats in the output buffer for this sub-block
+        float* output_sub_block = output + j * 16;
+
+        // Dequantize the 16 values for this sub-block
+        for (int l = 0; l < 8; ++l) { // Process 8 bytes
+            uint8_t packed_qs = qs_sub_block[l];
+            uint8_t nibble_low = packed_qs & 0x0F;
+            uint8_t nibble_high = packed_qs >> 4;
+
+            output_sub_block[l]     = scale * static_cast<float>(nibble_low) + minv;
+            output_sub_block[l + 8] = scale * static_cast<float>(nibble_high) + minv;
         }
-
-        // Dequantize 16 values for the first sub-block (using d1, m1)
-        for (int l = 0; l < 8; ++l) {
-            uint8_t packed_qs = qs_ptr[l];
-            output[l]     = scale1 * static_cast<float>(packed_qs & 0x0F) - min1;
-            output[l + 8] = scale1 * static_cast<float>(packed_qs >> 4)   - min1; // Corrected: use second nibble
-        }
-
-        // Dequantize 16 values for the second sub-block (using d2, m2)
-        for (int l = 0; l < 8; ++l) {
-            uint8_t packed_qs = qs_ptr[l + 8]; // Read from the second half of the 16 bytes
-            output[l + 16] = scale2 * static_cast<float>(packed_qs & 0x0F) - min2;
-            output[l + 24] = scale2 * static_cast<float>(packed_qs >> 4)   - min2; // Corrected: use second nibble
-        }
-
-        // Advance pointers for the next pair of sub-blocks
-        output += 32; // Output buffer moves by 32 floats
-        qs_ptr += 16; // Quant buffer moves by 16 bytes
     }
 }
 
 // --- Dequantization for Q6_K ---
 void dequantize_q6_k(
     const void* qblock_void,
-    float* output,
-    int num_weights_in_block
+    float* output, // Changed name to match llama.cpp style
+    int num_weights_in_block // Still useful for assert
 ) {
-    // --- Detailed Logging Setup ---
-    static std::atomic<bool> problem_logged_globally = false;
-    // --- End Logging Setup ---
-
     if (num_weights_in_block != GGML_QK_K) {
         throw std::invalid_argument("dequantize_q6_k currently only supports block size " + std::to_string(GGML_QK_K));
     }
 
-    const block_q6_K* qblock = static_cast<const block_q6_K*>(qblock_void);
+    const block_q6_K* x = static_cast<const block_q6_K*>(qblock_void); // Use x like llama.cpp
+    float* y = output; // Use y like llama.cpp
 
-    // --- Original Logic with FP16 conversion and !isfinite checks ---
-    const uint16_t d_raw_u16 = qblock->d;
-    const float d_raw = fp16_to_fp32(d_raw_u16);
-    const float d = (!std::isfinite(d_raw)) ? 0.0f : d_raw;
-
-    // <<< START NEW DIAGNOSTIC LOGGING >>>
-    bool log_this_call = false; // Flag to log details for this specific block if needed
-    if (d != d_raw || std::abs(d) < 1e-9f) {
-        static std::atomic<bool> problematic_d_logged = false;
-        if (!problematic_d_logged.exchange(true)) {
-            // Use full namespace
-            std::cout << "[Q6K DEQUANT DIAGNOSTIC] Problematic super-scale 'd' encountered!"
-                  << " Raw d_u16: 0x" << std::hex << d_raw_u16 << std::dec
-                  << ", Converted d_raw: " << d_raw
-                  << ", Final d (after isfinite): " << d << std::endl;
-        }
-        log_this_call = true;
+    const float d = fp16_to_fp32(x->d); // Get super scale
+    if (!std::isfinite(d)) {
+         // Handle non-finite super scale - zero out the block
+         std::memset(y, 0, GGML_QK_K * sizeof(float));
+         // Optionally log a warning
+         // std::cout << "[Q6K DEQUANT WARNING] Non-finite super-scale 'd' encountered. Outputting zeros." << std::endl;
+         return;
     }
-    // <<< END NEW DIAGNOSTIC LOGGING >>>
 
-    const uint8_t* ql = qblock->ql;
-    const uint8_t* qh = qblock->qh;
-    const int8_t* scales = qblock->scales;
+    const uint8_t * ql = x->ql;
+    const uint8_t * qh = x->qh;
+    const int8_t  * sc = x->scales;
 
-    int weight_index = 0;
+    // Loop structure matching llama.cpp
+    for (int n = 0; n < GGML_QK_K; n += 128) { // Process in two chunks of 128
+        for (int l = 0; l < 32; ++l) { // Process 32 bytes of qh -> 128 weights
+            int is = l / 16; // Scale index base (0 or 1)
+            
+            // Reconstruct the four 6-bit values (-32 to 31)
+            const int8_t q1 = (int8_t)((ql[l +  0] & 0xF) | (((qh[l] >> 0) & 3) << 4)) - 32;
+            const int8_t q2 = (int8_t)((ql[l + 32] & 0xF) | (((qh[l] >> 2) & 3) << 4)) - 32;
+            const int8_t q3 = (int8_t)((ql[l +  0]  >> 4) | (((qh[l] >> 4) & 3) << 4)) - 32;
+            const int8_t q4 = (int8_t)((ql[l + 32]  >> 4) | (((qh[l] >> 6) & 3) << 4)) - 32;
 
-    for (int block_idx = 0; block_idx < GGML_QK_K / 16; ++block_idx) {
-        const int8_t raw_sub_scale = scales[block_idx];
-        float current_scale = d * static_cast<float>(raw_sub_scale);
+            // Get the correct scales for each group
+            // Apply isfinite check to individual scales for safety
+            float scale1_raw = d * static_cast<float>(sc[is + 0]);
+            float scale2_raw = d * static_cast<float>(sc[is + 2]);
+            float scale3_raw = d * static_cast<float>(sc[is + 4]);
+            float scale4_raw = d * static_cast<float>(sc[is + 6]);
 
-        // <<< START NEW DIAGNOSTIC LOGGING >>>
-        bool current_scale_problem = false;
-        if (!std::isfinite(current_scale)) {
-            current_scale_problem = true;
+            float scale1 = std::isfinite(scale1_raw) ? scale1_raw : 0.0f;
+            float scale2 = std::isfinite(scale2_raw) ? scale2_raw : 0.0f;
+            float scale3 = std::isfinite(scale3_raw) ? scale3_raw : 0.0f;
+            float scale4 = std::isfinite(scale4_raw) ? scale4_raw : 0.0f;
+            
+            // Dequantize and store
+            y[l +  0] = scale1 * static_cast<float>(q1);
+            y[l + 32] = scale2 * static_cast<float>(q2);
+            y[l + 64] = scale3 * static_cast<float>(q3);
+            y[l + 96] = scale4 * static_cast<float>(q4);
         }
-        if (log_this_call || current_scale_problem) {
-            static std::atomic<int> subscale_warnings_logged = 0;
-             if (subscale_warnings_logged < 10) {
-                // Use full namespace
-                std::cout << "[Q6K DEQUANT DIAGNOSTIC] Sub-block " << block_idx
-                      << ": d = " << d
-                      << ", raw_sub_scale = " << static_cast<int>(raw_sub_scale)
-                      << ", Calculated current_scale = " << current_scale;
-                if (current_scale_problem) {
-                    // Use full namespace
-                    std::cout << " <<< NON-FINITE! >>>";
-                }
-                // Use full namespace
-                std::cout << std::endl;
-                subscale_warnings_logged++;
-             }
-        }
-        if (current_scale_problem) {
-             current_scale = 0.0f;
-        }
-        // <<< END NEW DIAGNOSTIC LOGGING >>>
-
-        const uint8_t * ql_ptr = ql + block_idx * 8;
-        const uint8_t * qh_ptr = qh + block_idx * 4;
-
-        int debug_target_idx = 204;
-        int debug_block_idx = debug_target_idx / 16;
-        int debug_i_within = debug_target_idx % 16;
-        int debug_i = debug_i_within / 4;
-        int debug_which_weight = debug_i_within % 4;
-
-        for (int i = 0; i < 4; ++i) {
-            uint8_t qh_byte = qh_ptr[i];
-            uint8_t ql_byte0 = ql_ptr[i * 2 + 0];
-            uint8_t ql_byte1 = ql_ptr[i * 2 + 1];
-
-            bool is_target_block = (block_idx == debug_block_idx);
-            bool is_target_i = (i == debug_i);
-
-            // Weight 0:
-            uint8_t q_low0  = (ql_byte0 >> 0) & 0x0F;
-            uint8_t q_high0 = (qh_byte  >> 0) & 0x03;
-            int8_t qval0    = static_cast<int8_t>((q_high0 << 4) | q_low0) - 32;
-            float final_value0 = current_scale * static_cast<float>(qval0);
-            if (!std::isfinite(final_value0)) {
-                 // Use full namespace
-                 if (!problem_logged_globally.exchange(true)) { std::cout << "<<<!!! NON-FINITE VALUE DETECTED (W0) @ idx " << weight_index << " !!!>>>" << std::endl; }
-                final_value0 = 0.0f;
-            }
-            output[weight_index++] = final_value0;
-
-            // Weight 1:
-            uint8_t q_low1  = (ql_byte0 >> 4) & 0x0F;
-            uint8_t q_high1 = (qh_byte  >> 2) & 0x03;
-            int8_t qval1    = static_cast<int8_t>((q_high1 << 4) | q_low1) - 32;
-            float final_value1 = current_scale * static_cast<float>(qval1);
-             if (!std::isfinite(final_value1)) {
-                 // Use full namespace
-                 if (!problem_logged_globally.exchange(true)) { std::cout << "<<<!!! NON-FINITE VALUE DETECTED (W1) @ idx " << weight_index << " !!!>>>" << std::endl; }
-                final_value1 = 0.0f;
-            }
-            output[weight_index++] = final_value1;
-             if (is_target_block && is_target_i && debug_which_weight == 1) {
-                 // Use full namespace
-                std::cout << "    DEQUANT DEBUG (idx 204, W1): q_low=" << (int)q_low1 << ", q_high=" << (int)q_high1 << ", qval=" << (int)qval1 << ", final=" << final_value1 << std::endl;
-            }
-
-            // Weight 2:
-            uint8_t q_low2  = (ql_byte1 >> 0) & 0x0F;
-            uint8_t q_high2 = (qh_byte  >> 4) & 0x03;
-            int8_t qval2    = static_cast<int8_t>((q_high2 << 4) | q_low2) - 32;
-            float final_value2 = current_scale * static_cast<float>(qval2);
-             if (!std::isfinite(final_value2)) {
-                 if (!problem_logged_globally.exchange(true)) { std::cout << "<<<!!! NON-FINITE VALUE DETECTED (W2) @ idx " << weight_index << " !!!>>>" << std::endl; }
-                final_value2 = 0.0f;
-            }
-            output[weight_index++] = final_value2;
-             if (is_target_block && is_target_i && debug_which_weight == 2) {
-                std::cout << "    DEQUANT DEBUG (idx 204, W2): q_low=" << (int)q_low2 << ", q_high=" << (int)q_high2 << ", qval=" << (int)qval2 << ", final=" << final_value2 << std::endl;
-            }
-
-            // Weight 3:
-            uint8_t q_low3  = (ql_byte1 >> 4) & 0x0F;
-            uint8_t q_high3 = (qh_byte  >> 6) & 0x03;
-            int8_t qval3    = static_cast<int8_t>((q_high3 << 4) | q_low3) - 32;
-            float final_value3 = current_scale * static_cast<float>(qval3);
-             if (!std::isfinite(final_value3)) {
-                 // Use full namespace
-                 if (!problem_logged_globally.exchange(true)) { std::cout << "<<<!!! NON-FINITE VALUE DETECTED (W3) @ idx " << weight_index << " !!!>>>" << std::endl; }
-                final_value3 = 0.0f;
-            }
-             output[weight_index++] = final_value3;
-        }
+        // Advance pointers for the next 128-element chunk
+        y  += 128;
+        ql += 64;
+        qh += 32;
+        sc += 8;
     }
-    assert(weight_index == GGML_QK_K);
 }
 
 // --- Handling for I8 (Integer 8-bit) ---
@@ -518,25 +396,13 @@ void quantize_q4_k_m(
 void dequantize_q2_k(
     const void* qblock_void,
     float* output, // Output buffer for GGML_QK_K floats
-    int num_weights_in_block, // Should always be GGML_QK_K
-    bool log_details_for_this_block // Flag for enabling detailed logs for this specific block
+    int num_weights_in_block // Should always be GGML_QK_K
 ) {
-    // Use the passed-in flag instead
-    bool log_this_block = log_details_for_this_block;
-    if (log_this_block) {
-        std::cout << "--- Dequantizing Q2_K block with DETAILED LOGGING enabled --- " << std::endl;
-    }
-
     if (num_weights_in_block != GGML_QK_K) {
         throw std::invalid_argument("dequantize_q2_k currently only supports block size " + std::to_string(GGML_QK_K));
     }
 
     const block_q2_K* qblock = static_cast<const block_q2_K*>(qblock_void);
-
-    if (log_this_block) {
-        std::cout << "  Raw d_u16: 0x" << std::hex << qblock->d
-                     << ", Raw dmin_u16: 0x" << qblock->dmin << std::dec << std::endl;
-    }
 
     const float d_float_raw = fp16_to_fp32(qblock->d);
     const float dmin_float_raw = fp16_to_fp32(qblock->dmin);
@@ -549,23 +415,12 @@ void dequantize_q2_k(
     const float d_float_clamped = std::min(std::max(d_float, -1000.0f), 1000.0f);
     const float dmin_float_clamped = std::min(std::max(dmin_float, -1000.0f), 1000.0f);
 
-    if (log_this_block) {
-        std::cout << "  Converted d_f32: " << d_float_raw << (d_float != d_float_raw ? " -> 0.0f" : "")
-                    << (d_float != d_float_clamped ? " -> " + std::to_string(d_float_clamped) + " [CLAMPED]" : "")
-                    << ", Converted dmin_f32: " << dmin_float_raw << (dmin_float != dmin_float_raw ? " -> 0.0f" : "")
-                    << (dmin_float != dmin_float_clamped ? " -> " + std::to_string(dmin_float_clamped) + " [CLAMPED]" : "")
-                    << std::endl;
-    }
-
     const uint8_t* scales_ptr = qblock->scales; // 16 bytes, each contains two 4-bit scales
     const uint8_t* qs_ptr = qblock->qs;    // 64 bytes, each contains four 2-bit weights
     int weight_index = 0;
     float dequantized_scales[16]; // To store the dequantized 4-bit scales
 
     // Step 1: Dequantize the 4-bit scales
-    if (log_this_block) {
-        std::cout << "  Step 1: Dequantizing 16 x 4-bit scales..." << std::endl;
-    }
     for (int i = 0; i < 8; ++i) { // Process 8 bytes = 16 scales
         uint8_t packed_scales = scales_ptr[i];
         uint8_t scale_low = packed_scales & 0x0F;
@@ -579,22 +434,9 @@ void dequantize_q2_k(
         // Clamp the scales to reasonable values 
         dequantized_scales[i * 2 + 0] = std::min(std::max(dequantized_scales[i * 2 + 0], -1000.0f), 1000.0f);
         dequantized_scales[i * 2 + 1] = std::min(std::max(dequantized_scales[i * 2 + 1], -1000.0f), 1000.0f);
-
-        if (log_this_block && i < 2) { // Log first 4 dequantized scales
-            std::cout << "    Scale Byte " << i << ": 0x" << std::hex << static_cast<int>(packed_scales) << std::dec << std::endl;
-            std::cout << "      Scale[" << (i * 2 + 0) << "]: q_low=" << static_cast<int>(scale_low) 
-                       << ", result = " << d_float_clamped << " * " << static_cast<float>(scale_low) 
-                       << " = " << dequantized_scales[i * 2 + 0] << std::endl;
-            std::cout << "      Scale[" << (i * 2 + 1) << "]: q_high=" << static_cast<int>(scale_high) 
-                       << ", result = " << d_float_clamped << " * " << static_cast<float>(scale_high) 
-                       << " = " << dequantized_scales[i * 2 + 1] << std::endl;
-        }
     }
 
     // Step 2: Dequantize the 2-bit weights using the dequantized scales and global dmin
-    if (log_this_block) {
-        std::cout << "  Step 2: Dequantizing 256 x 2-bit weights using dequantized scales and dmin..." << std::endl;
-    }
     weight_index = 0;
     for (int j = 0; j < GGML_QK_K / 16; ++j) { // j = 0..15 (sub-block index)
         // Get the dequantized scale for this sub-block
@@ -626,33 +468,12 @@ void dequantize_q2_k(
             val2 = std::min(std::max(val2, -1000.0f), 1000.0f);
             val3 = std::min(std::max(val3, -1000.0f), 1000.0f);
 
-            // Log the first few dequantized values if requested
-            if (log_this_block && weight_index < 16) {
-                std::cout << "    Weight[" << weight_index << "]: q=" << static_cast<int>(q0) 
-                           << ", result = " << sub_block_scale << " * " << static_cast<float>(q0) << " + " << dmin_float_clamped 
-                           << " = " << val0 << std::endl;
-            }
             output[weight_index++] = val0;
             
-            if (log_this_block && weight_index < 16) {
-                 std::cout << "    Weight[" << weight_index << "]: q=" << static_cast<int>(q1) 
-                            << ", result = " << sub_block_scale << " * " << static_cast<float>(q1) << " + " << dmin_float_clamped 
-                            << " = " << val1 << std::endl;
-            }
             output[weight_index++] = val1;
             
-            if (log_this_block && weight_index < 16) {
-                 std::cout << "    Weight[" << weight_index << "]: q=" << static_cast<int>(q2) 
-                            << ", result = " << sub_block_scale << " * " << static_cast<float>(q2) << " + " << dmin_float_clamped 
-                            << " = " << val2 << std::endl;
-            }
             output[weight_index++] = val2;
             
-            if (log_this_block && weight_index < 16) {
-                 std::cout << "    Weight[" << weight_index << "]: q=" << static_cast<int>(q3) 
-                            << ", result = " << sub_block_scale << " * " << static_cast<float>(q3) << " + " << dmin_float_clamped 
-                            << " = " << val3 << std::endl;
-            }
             output[weight_index++] = val3;
         }
     }
@@ -661,13 +482,6 @@ void dequantize_q2_k(
 
 // Placeholder implementation for Q3_K dequantization
 void dequantize_q3_k(const void* qblock_void, float* output, int num_weights_in_block) {
-    // Initialize an optional logging flag - set to true to enable detailed logging
-    static bool first_q3k_block = true;
-    bool log_this_block = first_q3k_block;
-    if (log_this_block) {
-        first_q3k_block = false; // Only log the first block
-    }
-    
     if (num_weights_in_block != GGML_QK_K) {
         throw std::invalid_argument("dequantize_q3_k currently only supports block size " + std::to_string(GGML_QK_K));
     }
@@ -681,14 +495,6 @@ void dequantize_q3_k(const void* qblock_void, float* output, int num_weights_in_
     // Check for NaN AND Inf and replace with 0.0f
     const float d_float = (!std::isfinite(d_float_raw)) ? 0.0f : d_float_raw;
     const float dmin_float = (!std::isfinite(dmin_float_raw)) ? 0.0f : dmin_float_raw;
-
-    if (log_this_block) {
-        std::cout << "--- Dequantizing Q3_K block ---" << std::endl;
-        std::cout << "  Raw d_u16: 0x" << std::hex << qblock->d
-                     << ", Raw dmin_u16: 0x" << qblock->dmin << std::dec << std::endl;
-        std::cout << "  Converted d_f32: " << d_float_raw << (d_float != d_float_raw ? " -> 0.0f" : "")
-                     << ", Converted dmin_f32: " << dmin_float_raw << (dmin_float != dmin_float_raw ? " -> 0.0f" : "") << std::endl;
-    }
 
     const uint8_t* hmask_ptr = qblock->hmask;
     const uint8_t* qs_ptr = qblock->qs;
@@ -723,29 +529,6 @@ void dequantize_q3_k(const void* qblock_void, float* output, int num_weights_in_
         const float final_sub_block_min = dmin_float; // The global dmin acts as the base minimum offset.
         // --- End Correct Q3_K Scale Extraction ---
 
-        // Log sub-block scale/min if requested
-        if (log_this_block) {
-            std::cout << "  Sub-block " << j << ": scale_idx=" << (int)scale_idx 
-                        // << ", min_idx=" << (int)min_idx_bounded // No separate min_idx for Q3_K
-                        << ", final_scale=" << final_sub_block_scale 
-                        << ", final_min(global_dmin)=" << final_sub_block_min; // Explicitly show it's global dmin
-            if (std::isnan(final_sub_block_scale) || std::isinf(final_sub_block_scale) ||
-                std::isnan(final_sub_block_min) || std::isinf(final_sub_block_min)) {
-                std::cout << " <<< NaN/Inf DETECTED in scale/min! >>>";
-            }
-            std::cout << std::endl;
-        }
-
-        // Check for invalid scaling values
-        if (std::isnan(final_sub_block_scale) || std::isinf(final_sub_block_scale) ||
-            std::isnan(final_sub_block_min) || std::isinf(final_sub_block_min)) {
-            // Handle invalid scaling values by zeroing out the affected weights
-            for (int i = 0; i < 16; ++i) {
-                output[weight_index++] = 0.0f;
-            }
-            continue;  // Skip to the next sub-block
-        }
-
         // Process the 16 values for this sub-block
         // Q3_K uses 2 bits in the qs array and 1 bit in the hmask array
         for (int i = 0; i < 4; ++i) { // Process 4 bytes from qs
@@ -772,20 +555,8 @@ void dequantize_q3_k(const void* qblock_void, float* output, int num_weights_in_
                 // Ensure the output is finite
                 if (!std::isfinite(val)) {
                     val = 0.0f;  // Replace NaN/Inf with zero
-                    if (log_this_block) {
-                        std::cout << "    WARNING: Non-finite value detected at index " << weight_index << std::endl;
-                    }
                 }
                 
-                // <<< ADDED DEBUG LOG >>>
-                if (log_this_block && weight_index < 10) { // Log first few writes
-                    std::cout << "    DEBUG: Writing val=" << val << " to output[" << weight_index << "]" << std::endl;
-                } else if (log_this_block && weight_index >= GGML_QK_K - 10) { // Log last few writes
-                     std::cout << "    DEBUG: Writing val=" << val << " to output[" << weight_index << "]" << std::endl;
-                }
-                // <<< END ADDED DEBUG LOG >>>
-                
-                // Write to output
                 output[weight_index++] = val;
             }
         }

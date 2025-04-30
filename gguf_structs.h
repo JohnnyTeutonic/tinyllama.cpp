@@ -4,6 +4,7 @@
 #include <vector>
 #include <string>
 #include <variant>
+#include <vector>
 #include <cstdint>
 #include "ggml_types.h" // For GGMLType and GGUFValueType
 #include <map>
@@ -58,8 +59,18 @@ struct GGUFTensorInfo {
 
 struct GGUFData {
     GGUFHeader header; // ADDED: Store the parsed header info
-    std::vector<uint8_t> tensor_data; // Raw tensor data bytes
     std::map<std::string, GGUFMetadataValue> metadata;
     std::vector<GGUFTensorInfo> tensor_infos;
     std::map<std::string, GGUFTensorInfo> tensor_infos_map; // ADDED: Map for quick tensor lookup by name
+
+    // --- ADDED: Tokenizer Data ---
+    std::vector<std::string> tokenizer_tokens;
+    std::vector<float>       tokenizer_scores; // Assuming scores are float
+    std::vector<uint32_t>    tokenizer_token_types; // Assuming types are uint32
+    std::vector<std::string> tokenizer_merges;
+    // --- END: Tokenizer Data ---
+
+    // Store tensor data aligned
+    std::vector<uint8_t> tensor_data; // Raw tensor data bytes, potentially aligned
+    uint64_t data_alignment = 32; // Store alignment used for tensor_data
 };
