@@ -111,8 +111,6 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // --- REMOVED tokenizer_config.json loading --- 
-
     // 2. Load tokenizer (using mlc-ai/tokenizers-cpp wrapper)
     std::unique_ptr<Tokenizer> tokenizer_ptr;
     try {

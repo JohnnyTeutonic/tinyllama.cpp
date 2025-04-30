@@ -103,38 +103,31 @@ std::vector<std::string> Tokenizer::space_tokenize(const std::string& text) cons
 }
 
 // BPE tokenization 
-std::vector<std::string> Tokenizer::bpe_tokenize(const std::string& text, bool use_regex_pretokenize) const {
-    // This function now assumes that the necessary members (token_to_id_, id_to_token_, bpe_merges_)
-    // have been initialized correctly by either the file-based constructor or the GGUF-based constructor.
-    // The GGUF constructor specifically loads merges with concatenated keys and rank as value.
-
-    std::vector<std::string> final_tokens;
+std::vector<std::string> Tokenizer::bpe_tokenize(const std::string& text) const {
+    std::vector<std::string> all_tokens;
     
     // Heuristic to detect if space prefix (Ġ or  ) is used in the loaded vocab
     bool using_space_prefix = false;
     const std::string gpt2_space_prefix = "\xC4\xA0"; // Ġ (U+0120)
     const std::string tinyllama_space_prefix = "\xE2\x96\x81"; //   (U+2581)
-    std::string detected_space_prefix = ""; // Store which prefix we found
-
-    for (const auto& pair : token_to_id_) { // Iterate through the loaded vocab map
-         const std::string& token = pair.first;
+    
+    // --- Use id_to_token_ like .bak --- 
+    for (const auto& token : id_to_token_) { // Iterate through the loaded vocab vector
          if (!token.empty()) {
             if (token.size() >= gpt2_space_prefix.size() && token.substr(0, gpt2_space_prefix.size()) == gpt2_space_prefix) {
                  using_space_prefix = true;
-                 detected_space_prefix = gpt2_space_prefix;
                  break;
             } 
              if (token.size() >= tinyllama_space_prefix.size() && token.substr(0, tinyllama_space_prefix.size()) == tinyllama_space_prefix) {
                  using_space_prefix = true;
-                 detected_space_prefix = tinyllama_space_prefix;
                  break;
              }
          }
     }
     if (using_space_prefix) {
-         Logger::info("bpe_tokenize detected space prefix: '" + detected_space_prefix + "'");
+         // Logger::info("bpe_tokenize detected space prefix"); // Simplified log
     } else {
-        Logger::info("bpe_tokenize did not detect standard space prefix.");
+        // Logger::info("bpe_tokenize did not detect standard space prefix.");
     }
 
     // Preprocess text: Add leading space if using prefix and text doesn't start with space
@@ -144,115 +137,95 @@ std::vector<std::string> Tokenizer::bpe_tokenize(const std::string& text, bool u
         // Logger::info("Added leading space for prefix handling.");
     }
 
+    // --- START: Reverted Pre-tokenization logic from .bak --- 
     std::vector<std::string> words;
-
-    // --- MODIFIED: Conditional Pre-tokenization --- 
-    if (use_regex_pretokenize) {
-        Logger::info("Using REGEX pre-tokenization...");
-        // --- Use Regex for Pre-tokenization --- 
-        // Pre-tokenize using regex to split words, punctuation, numbers, etc.
-        // This regex is similar to the one used in sentencepiece and llama.cpp
-        // It aims to capture: 
-        // - optional leading spaces + common contractions ('s, 't, 're, 've, 'm, 'll, 'd)
-        // - optional leading spaces + sequences of letters (\p{L}+)
-        // - optional leading spaces + sequences of numbers (\p{N}+)
-        // - sequences of non-letter, non-number, non-space characters (likely punctuation)
-        // - whitespace sequences (\s+)
-        // --- FIXED REGEX: Use standard ECMA syntax, replace \p{L} with [a-zA-Z] and \p{N} with \d --- 
-        std::regex pre_regex("(\\s*('s|'t|'re|'ve|'m|'ll|'d)|\\s*[a-zA-Z]+|\\s*\\d+|[^\\sA-Za-z\\d]+|\\s+)");
-        auto words_begin = std::sregex_iterator(processed_text.begin(), processed_text.end(), pre_regex);
-        auto words_end = std::sregex_iterator();
-
-        for (std::sregex_iterator i = words_begin; i != words_end; ++i) {
-            std::smatch match = *i;
-            std::string word = match.str();
-            if (!word.empty()) { 
-                bool is_whitespace = std::all_of(word.begin(), word.end(), ::isspace);
-                if (is_whitespace && !using_space_prefix) {
-                    continue; 
-                }
-                words.push_back(word);
-            }
-        }
-        Logger::info("Pre-tokenized (regex) into " + std::to_string(words.size()) + " pieces.");
-        // --- END: Regex Pre-tokenization ---
-    } else {
-        Logger::info("Using WHITESPACE pre-tokenization...");
-        // --- Use Original Whitespace Split --- 
-        std::string current_word;
-        for (char c : processed_text) {
-            if (std::isspace(static_cast<unsigned char>(c))) {
+    std::string current_word;
+    bool in_whitespace = true;
+    
+    for (size_t i = 0; i < processed_text.size(); ++i) {
+        char c = processed_text[i];
+        if (std::isspace(static_cast<unsigned char>(c))) {
+            if (!in_whitespace) {
+                // End of a word
                 if (!current_word.empty()) {
                     words.push_back(current_word);
                     current_word.clear();
                 }
-                if (using_space_prefix) {
-                    words.push_back(" ");
-                }
-            } else {
-                current_word += c;
+                in_whitespace = true;
             }
+            // Add the whitespace to the current word if we're keeping track of it
+            if (using_space_prefix && in_whitespace) {
+                // We mark the beginning of a new word after whitespace
+                if (!current_word.empty()) {
+                    words.push_back(current_word);
+                }
+                current_word = " "; // Start new word with space marker
+                in_whitespace = false;
+            }
+        } else {
+            // If switching from whitespace to non-whitespace, and using prefix, start word with space marker
+            if (in_whitespace && using_space_prefix) {
+                 if (!current_word.empty()) { // If there was already a space marker
+                     words.push_back(current_word); // Add previous space marker word
+                 } 
+                 current_word = " "; // Start new word with space marker
+            }
+            current_word.push_back(c);
+            in_whitespace = false;
         }
-        if (!current_word.empty()) {
-            words.push_back(current_word);
-        }
-        Logger::info("Pre-tokenized (whitespace) into " + std::to_string(words.size()) + " pieces.");
-         // --- END: Original Whitespace Split ---
     }
-     // --- END: Conditional Pre-tokenization --- 
+    // Add the last word if there is one
+    if (!current_word.empty()) {
+        words.push_back(current_word);
+    }
+     // --- END: Reverted Pre-tokenization logic from .bak --- 
 
     // Process each word with BPE
-    for (const auto& word_piece : words) { // Iterate over regex-split pieces
-        if (word_piece.empty()) continue;
-
-        std::string current_segment = word_piece; // Use the piece directly
+    for (auto& word : words) { // Use 'word' like in .bak
+        // Special handling for TinyLlama-style prefix
+        if (using_space_prefix && word.size() > 0 && word[0] == ' ') {
+            // Replace the space at the beginning with the special token
+            if (word.size() == 1) {
+                // This is just a space - use the UTF-8 sequence for   (U+2581)
+                word = "\xE2\x96\x81"; 
+            } else {
+                word = "\xE2\x96\x81" + word.substr(1); // Or use detected_space_prefix if needed
+            }
+        } // Removed the extra prefix handling for regex output
+        
         // Apply space prefix if needed
         // Note: The regex might capture leading spaces, adjust prefix logic if needed.
         // Let's refine prefix handling here based on regex output.
-        if (using_space_prefix) {
-            if (!current_segment.empty() && current_segment[0] == ' ') {
-                // Replace the leading space(s) captured by regex with the prefix
-                size_t first_non_space = current_segment.find_first_not_of(' ');
-                if (first_non_space == std::string::npos) { // All spaces
-                    // Decide how to handle pure space tokens with prefix. 
-                    // Maybe map multiple spaces to a single prefix?
-                    current_segment = detected_space_prefix;
-                } else {
-                     current_segment = detected_space_prefix + current_segment.substr(first_non_space);
-                }
-            } 
-             // What if the segment doesn't start with space but should logically have a prefix?
-             // This is tricky with regex pre-tokenization. The initial space addition 
-             // before regex might be better, but let's try this first.
-        }
         // Logger::info("Processing segment: '" + current_segment + "'");
 
         // Split word into initial pieces (UTF-8 characters)
-        std::vector<std::string> pieces;
-        for (size_t i = 0; i < current_segment.size(); ) {
+        std::vector<std::string> chars; // Use 'chars' like .bak
+        for (size_t i = 0; i < word.size(); ) {
             int bytes = 1;
-            unsigned char c = static_cast<unsigned char>(current_segment[i]);
+            unsigned char c = static_cast<unsigned char>(word[i]);
             if ((c & 0xF8) == 0xF0) bytes = 4;
             else if ((c & 0xF0) == 0xE0) bytes = 3;
             else if ((c & 0xE0) == 0xC0) bytes = 2;
             
-            if (i + bytes > current_segment.size()) { // Handle potential trailing broken char
-                 bytes = current_segment.size() - i;
+            if (i + bytes > word.size()) { // Handle potential trailing broken char
+                 bytes = word.size() - i;
             }
-            pieces.push_back(current_segment.substr(i, bytes));
+            chars.push_back(word.substr(i, bytes));
             i += bytes;
         }
         // Logger::info("Initial pieces: " + std::to_string(pieces.size()));
 
-        if (pieces.empty()) continue;
+        if (chars.empty()) continue;
 
         // Apply BPE merges iteratively
-        while (pieces.size() > 1) {
+        bool changes = true;
+        while (changes && chars.size() > 1) { // Match .bak loop condition
+            changes = false; // Match .bak logic
             int best_rank = std::numeric_limits<int>::max();
             int best_idx = -1;
 
-            for (size_t i = 0; i < pieces.size() - 1; ++i) {
-                std::string merge_key = pieces[i] + pieces[i+1];
+            for (size_t i = 0; i < chars.size() - 1; ++i) {
+                std::string merge_key = chars[i] + chars[i+1];
                 auto it = bpe_merges_.find(merge_key);
                 if (it != bpe_merges_.end()) {
                     int current_rank = it->second;
@@ -265,18 +238,20 @@ std::vector<std::string> Tokenizer::bpe_tokenize(const std::string& text, bool u
 
             if (best_idx != -1) {
                  // Perform the merge
-                 // Logger::info("Merging '" + pieces[best_idx] + "' and '" + pieces[best_idx + 1] + "' with rank " + std::to_string(best_rank));
-                 pieces[best_idx] += pieces[best_idx + 1];
-                 pieces.erase(pieces.begin() + best_idx + 1);
+                 // Logger::info("Merging '" + chars[best_idx] + "' and '" + chars[best_idx + 1] + "' with rank " + std::to_string(best_rank));
+                 std::string merged = chars[best_idx] + chars[best_idx + 1]; // Match .bak
+                 chars[best_idx] = merged;
+                 chars.erase(chars.begin() + best_idx + 1);
+                 changes = true; // Match .bak
             } else {
-                break; // No more merges found for this word
+                // break; // .bak doesn't explicitly break here, relies on changes flag
             }
         }
         // Add the final pieces for this word to the result
-        final_tokens.insert(final_tokens.end(), pieces.begin(), pieces.end());
+        all_tokens.insert(all_tokens.end(), chars.begin(), chars.end());
     }
     // Logger::info("Final token count: " + std::to_string(final_tokens.size()));
-    return final_tokens;
+    return all_tokens;
 }
 
 // SentencePiece tokenization (placeholder - NOT USED FOR GGUF LLAMA)
@@ -415,7 +390,7 @@ std::vector<int> Tokenizer::encode(const std::string& text,
     // Logger::info("Tokenizer::encode called. Text: '" + text + "', add_special: " + 
     //              (add_special_tokens ? "true" : "false") + ", use_regex: " + (use_regex_pretokenize ? "true" : "false"));
     // For GGUF Llama, we assume BPE is the method.
-    std::vector<std::string> tokens = bpe_tokenize(text, use_regex_pretokenize); // Call the adapted BPE tokenizer
+    std::vector<std::string> tokens = bpe_tokenize(text); // Call the reverted BPE tokenizer (no flag)
     // Logger::info("Tokenized into " + std::to_string(tokens.size()) + " string pieces.");
     
     // Convert string tokens to IDs

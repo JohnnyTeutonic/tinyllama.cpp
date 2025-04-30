@@ -76,7 +76,7 @@ public:
 private:
     // Tokenization implementations
     std::vector<std::string> space_tokenize(const std::string& text) const;
-    std::vector<std::string> bpe_tokenize(const std::string& text, bool use_regex_pretokenize = true) const;
+    std::vector<std::string> bpe_tokenize(const std::string& text) const;
     std::vector<std::string> sentencepiece_tokenize(const std::string& text) const;
     
     // Loading functions
