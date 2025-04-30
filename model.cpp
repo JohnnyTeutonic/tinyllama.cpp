@@ -2076,7 +2076,7 @@ void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
 
             // Map known fields based on suffix (the suffix logic remains the same)
             // Q_PROJ
-            if (suffix == "self_attn.q_proj.weight" || suffix == "attn.wq.weight") { // Added alternative suffix
+            if (suffix == "self_attn.q_proj.weight" || suffix == "attn.wq.weight" || suffix == "attn_q.weight") { 
                 if (tinfo.type == GGMLType::GGML_TYPE_F32) { // Use .type and correct enum name
                     assign_vec_f32(lw.q_proj_f32, tinfo);
                     Logger::info("Mapped GGUF tensor '" + name + "' (FP32) to layers[" + std::to_string(layer_idx) + "].q_proj_f32");
@@ -2094,7 +2094,7 @@ void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
                 continue;
             }
             // K_PROJ
-            if (suffix == "self_attn.k_proj.weight" || suffix == "attn.wk.weight") { // Added alternative suffix
+            if (suffix == "self_attn.k_proj.weight" || suffix == "attn.wk.weight" || suffix == "attn_k.weight") { 
                 if (tinfo.type == GGMLType::GGML_TYPE_F32) { // Use .type and correct enum name
                     assign_vec_f32(lw.k_proj_f32, tinfo);
                     Logger::info("Mapped GGUF tensor '" + name + "' (FP32) to layers[" + std::to_string(layer_idx) + "].k_proj_f32");
@@ -2112,7 +2112,7 @@ void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
                 continue;
             }
             // V_PROJ
-            if (suffix == "self_attn.v_proj.weight" || suffix == "attn.wv.weight") { // Added alternative suffix
+            if (suffix == "self_attn.v_proj.weight" || suffix == "attn.wv.weight" || suffix == "attn_v.weight") { 
                 if (tinfo.type == GGMLType::GGML_TYPE_F32) { // Use .type and correct enum name
                     assign_vec_f32(lw.v_proj_f32, tinfo);
                     Logger::info("Mapped GGUF tensor '" + name + "' (FP32) to layers[" + std::to_string(layer_idx) + "].v_proj_f32");
@@ -2130,7 +2130,7 @@ void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
                 continue;
             }
             // O_PROJ
-            if (suffix == "self_attn.o_proj.weight" || suffix == "attn.wo.weight") { // Added alternative suffix
+            if (suffix == "self_attn.o_proj.weight" || suffix == "attn.wo.weight" || suffix == "attn_output.weight") { 
                 if (tinfo.type == GGMLType::GGML_TYPE_F32) { // Use .type and correct enum name
                     assign_vec_f32(lw.o_proj_f32, tinfo);
                     Logger::info("Mapped GGUF tensor '" + name + "' (FP32) to layers[" + std::to_string(layer_idx) + "].o_proj_f32");
@@ -2148,7 +2148,7 @@ void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
                 continue;
             }
             // GATE_PROJ
-            if (suffix == "mlp.gate_proj.weight" || suffix == "ffn.w1.weight") { // Added alternative suffix
+            if (suffix == "mlp.gate_proj.weight" || suffix == "ffn.w1.weight" || suffix == "ffn_gate.weight") { 
                 if (tinfo.type == GGMLType::GGML_TYPE_F32) { // Use .type and correct enum name
                     assign_vec_f32(lw.gate_proj_f32, tinfo);
                     Logger::info("Mapped GGUF tensor '" + name + "' (FP32) to layers[" + std::to_string(layer_idx) + "].gate_proj_f32");
@@ -2166,7 +2166,7 @@ void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
                 continue;
             }
             // UP_PROJ
-            if (suffix == "mlp.up_proj.weight" || suffix == "ffn.w3.weight") { // Added alternative suffix
+            if (suffix == "mlp.up_proj.weight" || suffix == "ffn.w3.weight" || suffix == "ffn_up.weight") { 
                 if (tinfo.type == GGMLType::GGML_TYPE_F32) { // Use .type and correct enum name
                     assign_vec_f32(lw.up_proj_f32, tinfo);
                     Logger::info("Mapped GGUF tensor '" + name + "' (FP32) to layers[" + std::to_string(layer_idx) + "].up_proj_f32");
@@ -2184,7 +2184,7 @@ void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
                 continue;
             }
             // DOWN_PROJ
-            if (suffix == "mlp.down_proj.weight" || suffix == "ffn.w2.weight") { // Added alternative suffix
+            if (suffix == "mlp.down_proj.weight" || suffix == "ffn.w2.weight" || suffix == "ffn_down.weight") { 
                 if (tinfo.type == GGMLType::GGML_TYPE_F32) { // Use .type and correct enum name
                     assign_vec_f32(lw.down_proj_f32, tinfo);
                     Logger::info("Mapped GGUF tensor '" + name + "' (FP32) to layers[" + std::to_string(layer_idx) + "].down_proj_f32");
@@ -2202,7 +2202,7 @@ void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
                 continue;
             }
             // LAYER NORM (ATTN)
-            if (suffix == "input_layernorm.weight" || suffix == "attn_norm.weight") { // Added alternative suffix
+            if (suffix == "input_layernorm.weight" || suffix == "attn_norm.weight") { 
                 if (tinfo.type == GGMLType::GGML_TYPE_F32) { // Use .type and correct enum name
                     assign_vec_f32(lw.input_layernorm_f32, tinfo);
                     Logger::info("Mapped GGUF tensor '" + name + "' (FP32) to layers[" + std::to_string(layer_idx) + "].input_layernorm_f32");
@@ -2214,7 +2214,7 @@ void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
                 continue;
             }
             // LAYER NORM (FFN)
-            if (suffix == "post_attention_layernorm.weight" || suffix == "ffn_norm.weight") { // Added alternative suffix
+            if (suffix == "post_attention_layernorm.weight" || suffix == "ffn_norm.weight") { 
                 if (tinfo.type == GGMLType::GGML_TYPE_F32) { // Use .type and correct enum name
                     assign_vec_f32(lw.post_attention_layernorm_f32, tinfo);
                     Logger::info("Mapped GGUF tensor '" + name + "' (FP32) to layers[" + std::to_string(layer_idx) + "].post_attention_layernorm_f32");
