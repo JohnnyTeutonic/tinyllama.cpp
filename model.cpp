@@ -1697,24 +1697,28 @@ std::vector<float> TinyLlamaModel::forward_device(int token_id, int pos, KVCache
         const float* lw_post_norm_dev = layers[l].post_attention_layernorm_dev;
 
         // Residual 1 Prep (Copy x -> x_resid1)
-        gpuErrchk(cudaMemcpy(x_resid1_dev, x_dev, hs * sizeof(float), cudaMemcpyDeviceToDevice));
+        // --- MODIFIED: Use async copy on the specified stream --- 
+        gpuErrchk(cudaMemcpyAsync(x_resid1_dev, x_dev, hs * sizeof(float), cudaMemcpyDeviceToDevice, stream));
+        // --- END MODIFICATION ---
 
         // --- FIX: Use persistent norm weights --- 
         rmsnorm_vector_cuda(x_dev, layers[l].input_layernorm_dev, x_norm_dev, hs, eps, stream); // Use persistent device pointer
-        gpuErrchk(cudaDeviceSynchronize()); // Add sync like .back
+        // gpuErrchk(cudaDeviceSynchronize()); // REMOVED UNNECESSARY SYNC
 
         // --- Revert QKV Projections to BF16 ---
-        matvec_bf16_f32_cuda(cublas_handle_, lw_q_proj_dev, x_norm_dev, q_dev, hs, hs); 
-        matvec_bf16_f32_cuda(cublas_handle_, lw_k_proj_dev, x_norm_dev, k_dev, n_kv_heads * head_dim, hs); 
-        matvec_bf16_f32_cuda(cublas_handle_, lw_v_proj_dev, x_norm_dev, v_dev, n_kv_heads * head_dim, hs); 
-        gpuErrchk(cudaDeviceSynchronize()); // Add sync like .back
+        // Note: matvec_bf16_f32_cuda already uses the stream internally
+        matvec_bf16_f32_cuda(cublas_handle_, lw_q_proj_dev, x_norm_dev, q_dev, hs, hs, stream); 
+        matvec_bf16_f32_cuda(cublas_handle_, lw_k_proj_dev, x_norm_dev, k_dev, n_kv_heads * head_dim, hs, stream); 
+        matvec_bf16_f32_cuda(cublas_handle_, lw_v_proj_dev, x_norm_dev, v_dev, n_kv_heads * head_dim, hs, stream); 
+        // gpuErrchk(cudaDeviceSynchronize()); // REMOVED UNNECESSARY SYNC
   
         // --- FIX: Use persistent RoPE frequencies --- 
         rope_cuda(q_dev, n_heads, head_dim, all_freqs_cis_dev, pos, stream); // Use persistent buffer + pos
         rope_cuda(k_dev, n_kv_heads, head_dim, all_freqs_cis_dev, pos, stream); // Use persistent buffer + pos
-        gpuErrchk(cudaDeviceSynchronize()); // Add sync like .back
+        // gpuErrchk(cudaDeviceSynchronize()); // REMOVED UNNECESSARY SYNC
   
         // --- Revert KVCache Update to separate updates ---
+        // Assuming update_kv_cache_cuda uses the stream internally (check definition)
         for (int kvh = 0; kvh < n_kv_heads; ++kvh) {
             const float* current_k_head_ptr = k_dev + kvh * head_dim;
             const float* current_v_head_ptr = v_dev + kvh * head_dim;
@@ -1725,7 +1729,8 @@ std::vector<float> TinyLlamaModel::forward_device(int token_id, int pos, KVCache
                 pos, kvh, 
                 cache->allocated_max_seq_len, // Use parameters stored in cache obj
                 cache->allocated_num_kv_heads,
-                cache->allocated_head_dim);
+                cache->allocated_head_dim,
+                stream); // Pass stream 
                                  
             update_kv_cache_cuda(
                 cache->layers[l].v_dev,
@@ -1733,58 +1738,57 @@ std::vector<float> TinyLlamaModel::forward_device(int token_id, int pos, KVCache
                 pos, kvh, 
                 cache->allocated_max_seq_len, // Use parameters stored in cache obj
                 cache->allocated_num_kv_heads,
-                cache->allocated_head_dim);
+                cache->allocated_head_dim,
+                stream); // Pass stream
         }
-        // No sync needed here based on .back
+        // No sync needed here based on .back // REMOVED UNNECESSARY SYNC (implicit)
 
         // Attention (Input: q_dev, K/V Cache, Output: attn_out_dev)
         float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
          attention_cuda(q_dev, cache->layers[l].k_dev, cache->layers[l].v_dev, attn_out_dev,
                         n_heads, pos + 1, head_dim, scale, 
                         cache->allocated_max_seq_len, // Use cache parameters
-                        cache->allocated_num_kv_heads // Use cache parameters
-                        /*, stream */); // Remove stream arg like .back
-        gpuErrchk(cudaDeviceSynchronize()); // Add sync like .back
+                        cache->allocated_num_kv_heads, // Use cache parameters
+                        stream); // Pass stream
+        // gpuErrchk(cudaDeviceSynchronize()); // REMOVED UNNECESSARY SYNC
          
         // --- Revert Attention Output Projection to BF16 ---
         // Use attn_proj_dev allocated outside loop
-        matvec_bf16_f32_cuda(cublas_handle_, lw_o_proj_dev, attn_out_dev, attn_proj_dev, hs, hs); 
-        gpuErrchk(cudaDeviceSynchronize()); // Add sync like .back
+        matvec_bf16_f32_cuda(cublas_handle_, lw_o_proj_dev, attn_out_dev, attn_proj_dev, hs, hs, stream); // Pass stream
+        // gpuErrchk(cudaDeviceSynchronize()); // REMOVED UNNECESSARY SYNC
 
         // Residual 1 Add (Input: x_resid1_dev + attn_proj_dev, Output: x_dev)
-        // --- MODIFIED: Added stream argument --- 
         add_residual_cuda(attn_proj_dev, x_resid1_dev, x_dev, hs, stream);
-        // --- END MODIFICATION --- 
-        gpuErrchk(cudaDeviceSynchronize()); // Add sync like .back
+        // gpuErrchk(cudaDeviceSynchronize()); // REMOVED UNNECESSARY SYNC
         // Don't free attn_proj_dev here, it's allocated outside
 
         // --- MLP Block --- 
         // Residual 2 Prep (Copy x -> x_resid2)
-        gpuErrchk(cudaMemcpy(x_resid2_dev, x_dev, hs * sizeof(float), cudaMemcpyDeviceToDevice));
+        // --- MODIFIED: Use async copy on the specified stream --- 
+        gpuErrchk(cudaMemcpyAsync(x_resid2_dev, x_dev, hs * sizeof(float), cudaMemcpyDeviceToDevice, stream));
+        // --- END MODIFICATION ---
 
         // --- FIX: Use persistent norm weights --- 
         rmsnorm_vector_cuda(x_dev, layers[l].post_attention_layernorm_dev, x_norm_dev, hs, eps, stream); // Use persistent device pointer
-        gpuErrchk(cudaDeviceSynchronize()); // Add sync like .back
+        // gpuErrchk(cudaDeviceSynchronize()); // REMOVED UNNECESSARY SYNC
   
         // --- Revert MLP Projections to BF16 ---
-        matvec_bf16_f32_cuda(cublas_handle_, lw_gate_proj_dev, x_norm_dev, gate_vec_dev, is, hs);
-        matvec_bf16_f32_cuda(cublas_handle_, lw_up_proj_dev, x_norm_dev, up_vec_dev, is, hs);
-        gpuErrchk(cudaDeviceSynchronize()); // Add sync like .back
+        matvec_bf16_f32_cuda(cublas_handle_, lw_gate_proj_dev, x_norm_dev, gate_vec_dev, is, hs, stream); // Pass stream
+        matvec_bf16_f32_cuda(cublas_handle_, lw_up_proj_dev, x_norm_dev, up_vec_dev, is, hs, stream);    // Pass stream
+        // gpuErrchk(cudaDeviceSynchronize()); // REMOVED UNNECESSARY SYNC
 
         // SwiGLU (Input: gate_vec_dev, up_vec_dev, Output: swiglu_vec_dev)
-        swiglu_cuda(gate_vec_dev, up_vec_dev, swiglu_vec_dev, is);
-        gpuErrchk(cudaDeviceSynchronize()); // Add sync like .back
+        swiglu_cuda(gate_vec_dev, up_vec_dev, swiglu_vec_dev, is, stream); // Pass stream
+        // gpuErrchk(cudaDeviceSynchronize()); // REMOVED UNNECESSARY SYNC
 
         // --- Revert MLP Down Projection to BF16 ---
         // Use mlp_down_dev allocated outside loop
-        matvec_bf16_f32_cuda(cublas_handle_, lw_down_proj_dev, swiglu_vec_dev, mlp_down_dev, hs, is);
-        gpuErrchk(cudaDeviceSynchronize()); // Add sync like .back
+        matvec_bf16_f32_cuda(cublas_handle_, lw_down_proj_dev, swiglu_vec_dev, mlp_down_dev, hs, is, stream); // Pass stream
+        // gpuErrchk(cudaDeviceSynchronize()); // REMOVED UNNECESSARY SYNC
          
         // Residual 2 Add (Input: x_resid2_dev + mlp_down_dev, Output: x_dev)
-        // --- MODIFIED: Added stream argument --- 
         add_residual_cuda(mlp_down_dev, x_resid2_dev, x_dev, hs, stream);
-        // --- END MODIFICATION ---
-        gpuErrchk(cudaDeviceSynchronize()); // Add sync like .back
+        // gpuErrchk(cudaDeviceSynchronize()); // REMOVED UNNECESSARY SYNC
         // Don't free mlp_down_dev here
 
     } // End layer loop
@@ -1793,24 +1797,29 @@ std::vector<float> TinyLlamaModel::forward_device(int token_id, int pos, KVCache
      
     // --- FIX: Use persistent final norm weights --- 
     rmsnorm_vector_cuda(x_dev, final_norm_dev, x_norm_dev, hs, eps, stream); // Use persistent device pointer
-    gpuErrchk(cudaDeviceSynchronize()); // Add sync like .back
+    // gpuErrchk(cudaDeviceSynchronize()); // REMOVED UNNECESSARY SYNC
 
     // --- Revert Final LM Head Projection to BF16 ---
-    matvec_bf16_f32_cuda(cublas_handle_, lm_head_dev_, x_norm_dev, logits_dev, vs, hs); // Use BF16 lm_head_dev_
-    gpuErrchk(cudaDeviceSynchronize()); // Add sync like .back
+    matvec_bf16_f32_cuda(cublas_handle_, lm_head_dev_, x_norm_dev, logits_dev, vs, hs, stream); // Use BF16 lm_head_dev_ and pass stream
+    // gpuErrchk(cudaDeviceSynchronize()); // REMOVED UNNECESSARY SYNC
 
     // --- Synchronize Stream before Copy and Free --- 
-    // Wait for all kernels on the stream to complete before copying back logits
-    // gpuErrchk(cudaStreamSynchronize(stream)); // Not present in .back, rely on sync copies/frees
+    // Wait for all kernels *on this stream* to complete before copying back logits
+    // This is necessary because the following memcpy is synchronous by default
+    // and needs the GPU result to be ready.
+    gpuErrchk(cudaStreamSynchronize(stream)); 
  
     // --- Copy Logits Device -> Host --- 
     std::vector<float> logits(vs);
-    // Use synchronous copy since we just synchronized the stream
+    // Use synchronous copy. Requires stream sync before this.
      gpuErrchk(cudaMemcpy(logits.data(), logits_dev, vs * sizeof(float), cudaMemcpyDeviceToHost));
  
-     // --- Free Device Memory --- 
-    // Use sync cudaFree for buffers allocated outside loop
-    gpuErrchk(cudaFree(x_dev)); // Use sync free now
+    // --- Free Device Memory --- 
+    // Freeing memory allocated with cudaMallocAsync SHOULD use cudaFreeAsync,
+    // but requires stream synchronization before the buffer can be safely reused 
+    // or the stream destroyed. Using synchronous cudaFree is simpler here as 
+    // we already synced the stream for the DtoH copy.
+    gpuErrchk(cudaFree(x_dev)); 
     gpuErrchk(cudaFree(x_norm_dev));
     gpuErrchk(cudaFree(x_resid1_dev));
     gpuErrchk(cudaFree(x_resid2_dev));
@@ -1818,16 +1827,16 @@ std::vector<float> TinyLlamaModel::forward_device(int token_id, int pos, KVCache
     gpuErrchk(cudaFree(k_dev));
     gpuErrchk(cudaFree(v_dev));
     gpuErrchk(cudaFree(attn_out_dev));
-    gpuErrchk(cudaFree(attn_proj_dev)); // Free buffer allocated outside
+    gpuErrchk(cudaFree(attn_proj_dev)); 
     gpuErrchk(cudaFree(gate_vec_dev));
     gpuErrchk(cudaFree(up_vec_dev));
     gpuErrchk(cudaFree(swiglu_vec_dev));
-    gpuErrchk(cudaFree(mlp_down_dev)); // Free buffer allocated outside
+    gpuErrchk(cudaFree(mlp_down_dev)); 
     gpuErrchk(cudaFree(logits_dev));
  
     // Optional: Synchronize again to ensure frees are processed if needed before function returns,
     // although technically not required if caller manages stream synchronization.
-    // gpuErrchk(cudaStreamSynchronize(stream)); 
+    // gpuErrchk(cudaDeviceSynchronize()); // Sync already happened before DtoH copy
 
     // Logger::info("[CUDA] forward_device finished.");
     return logits;
