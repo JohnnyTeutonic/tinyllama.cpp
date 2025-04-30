@@ -194,6 +194,49 @@ private:
     float* lm_head_f32_dev_ = nullptr;
     // --- END Persistent Device Weights (FP32) ---
     cublasHandle_t cublas_handle_ = nullptr; // <<< ADD CUBLAS HANDLE >>>
+    
+    // --- START: REMOVE DUPLICATE DECLARATIONS ---
+    /*
+    // GPU device pointers for persistent weights (BF16)
+    uint16_t* token_embedding_table_dev_ = nullptr;
+    uint16_t* lm_head_dev_ = nullptr;
+    uint16_t* w_q_dev_ = nullptr;
+    // ... (other BF16 weights)
+    uint16_t* w_down_dev_ = nullptr;
+
+    // GPU device pointers for persistent weights (FP32)
+    float* token_embedding_table_f32_dev_ = nullptr;
+    float* lm_head_f32_dev_ = nullptr;
+    float* w_q_f32_dev_ = nullptr;
+    // ... (other FP32 weights)
+    float* w_down_f32_dev_ = nullptr;
+
+    // GPU device pointers for layer norm weights
+    // (Managed within LayerWeights struct for layers, plus final_norm_dev)
+    float* final_norm_dev = nullptr;
+    // NOTE: Layer norm weights are stored in LayerWeights::*_dev
+
+    // GPU device pointer for RoPE frequencies
+    float* all_freqs_cis_dev = nullptr;
+    */
+    // --- END: REMOVE DUPLICATE DECLARATIONS ---
+
+    // --- START: Added Persistent Workspace Buffers ---
+    float* x_dev_ = nullptr;           // Input/State vector
+    float* x_norm_dev_ = nullptr;      // Output of RMSNorm
+    float* x_resid1_dev_ = nullptr;    // Residual connection 1 (before attention)
+    float* x_resid2_dev_ = nullptr;    // Residual connection 2 (before MLP)
+    float* q_dev_ = nullptr;           // Q projection output
+    float* k_dev_ = nullptr;           // K projection output (current token)
+    float* v_dev_ = nullptr;           // V projection output (current token)
+    float* attn_out_dev_ = nullptr;    // Attention output (weighted sum of V)
+    float* attn_proj_dev_ = nullptr;   // Attention projection (O proj)
+    float* gate_vec_dev_ = nullptr;    // MLP gate projection
+    float* up_vec_dev_ = nullptr;      // MLP up projection
+    float* swiglu_vec_dev_ = nullptr;  // Output of SwiGLU
+    float* mlp_down_dev_ = nullptr;    // MLP down projection
+    float* logits_dev_ = nullptr;      // Final logits output
+    // --- END: Added Persistent Workspace Buffers ---
 #endif
 
     // Precomputed RoPE cos/sin values

@@ -1000,6 +1000,32 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
     Logger::info("Finished initializing CUDA RoPE frequencies.");
 #endif // HAS_CUDA
 
+    // --- START: Allocate Persistent Workspace Buffers ---
+#ifdef HAS_CUDA
+    Logger::info("Allocating persistent GPU workspace buffers...");
+    size_t hs_bytes = (size_t)hs * sizeof(float);
+    size_t is_bytes = (size_t)is * sizeof(float);
+    size_t vs_bytes = (size_t)vs * sizeof(float);
+    size_t kv_head_bytes = (size_t)n_kv_heads * head_dim * sizeof(float); // Size for K or V for current token
+
+    gpuErrchk(cudaMalloc(&x_dev_, hs_bytes));
+    gpuErrchk(cudaMalloc(&x_norm_dev_, hs_bytes));
+    gpuErrchk(cudaMalloc(&x_resid1_dev_, hs_bytes));
+    gpuErrchk(cudaMalloc(&x_resid2_dev_, hs_bytes));
+    gpuErrchk(cudaMalloc(&q_dev_, hs_bytes));
+    gpuErrchk(cudaMalloc(&k_dev_, kv_head_bytes)); // Only need space for current token K
+    gpuErrchk(cudaMalloc(&v_dev_, kv_head_bytes)); // Only need space for current token V
+    gpuErrchk(cudaMalloc(&attn_out_dev_, hs_bytes));
+    gpuErrchk(cudaMalloc(&attn_proj_dev_, hs_bytes));
+    gpuErrchk(cudaMalloc(&gate_vec_dev_, is_bytes));
+    gpuErrchk(cudaMalloc(&up_vec_dev_, is_bytes));
+    gpuErrchk(cudaMalloc(&swiglu_vec_dev_, is_bytes));
+    gpuErrchk(cudaMalloc(&mlp_down_dev_, hs_bytes));
+    gpuErrchk(cudaMalloc(&logits_dev_, vs_bytes));
+    Logger::info("Finished allocating persistent GPU workspace buffers.");
+#endif
+    // --- END: Allocate Persistent Workspace Buffers ---
+
     Logger::info("Finished initializing GPU resources and RoPE.");
 }
 // --- END: Private Helper: Initialize GPU Resources & RoPE ---
@@ -1060,7 +1086,7 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& config, const std::string& wei
     Logger::info("TinyLlamaModel construction from path complete.");
 }
 
-// --- START: TinyLlamaModel Destructor Definition ---
+// --- START: TinyLlamaModel Destructor Definition --- 
 TinyLlamaModel::~TinyLlamaModel() {
 #ifdef HAS_CUDA
     Logger::info("Freeing TinyLlamaModel CUDA resources...");
@@ -1174,6 +1200,26 @@ TinyLlamaModel::~TinyLlamaModel() {
         w_down_f32_dev_ = nullptr;
     }
     // --- END: Free persistent FP32 weights ---
+
+    // --- START: Free Persistent Workspace Buffers ---
+    // Add null checks before freeing, just in case allocation failed
+    if (x_dev_) { gpuErrchk(cudaFree(x_dev_)); x_dev_ = nullptr; }
+    if (x_norm_dev_) { gpuErrchk(cudaFree(x_norm_dev_)); x_norm_dev_ = nullptr; }
+    if (x_resid1_dev_) { gpuErrchk(cudaFree(x_resid1_dev_)); x_resid1_dev_ = nullptr; }
+    if (x_resid2_dev_) { gpuErrchk(cudaFree(x_resid2_dev_)); x_resid2_dev_ = nullptr; }
+    if (q_dev_) { gpuErrchk(cudaFree(q_dev_)); q_dev_ = nullptr; }
+    if (k_dev_) { gpuErrchk(cudaFree(k_dev_)); k_dev_ = nullptr; }
+    if (v_dev_) { gpuErrchk(cudaFree(v_dev_)); v_dev_ = nullptr; }
+    if (attn_out_dev_) { gpuErrchk(cudaFree(attn_out_dev_)); attn_out_dev_ = nullptr; }
+    if (attn_proj_dev_) { gpuErrchk(cudaFree(attn_proj_dev_)); attn_proj_dev_ = nullptr; }
+    if (gate_vec_dev_) { gpuErrchk(cudaFree(gate_vec_dev_)); gate_vec_dev_ = nullptr; }
+    if (up_vec_dev_) { gpuErrchk(cudaFree(up_vec_dev_)); up_vec_dev_ = nullptr; }
+    if (swiglu_vec_dev_) { gpuErrchk(cudaFree(swiglu_vec_dev_)); swiglu_vec_dev_ = nullptr; }
+    if (mlp_down_dev_) { gpuErrchk(cudaFree(mlp_down_dev_)); mlp_down_dev_ = nullptr; }
+    if (logits_dev_) { gpuErrchk(cudaFree(logits_dev_)); logits_dev_ = nullptr; }
+    Logger::info("Freed persistent GPU workspace buffers.");
+    // --- END: Free Persistent Workspace Buffers ---
+
 
     Logger::info("Finished freeing TinyLlamaModel CUDA weight memory.");
 #endif
@@ -1591,7 +1637,8 @@ std::vector<float> TinyLlamaModel::forward_device(int token_id, int pos, KVCache
     float eps = config_.rms_norm_eps;
     int max_seq_len = config_.max_position_embeddings; // Added for cache size
 
-    // --- Device Memory Allocation ---
+    // --- START: REMOVE Local Device Memory Allocation & Pointers ---
+    /*
     float* x_dev = nullptr;
     float* x_norm_dev = nullptr;
     float* x_resid1_dev = nullptr;
@@ -1604,9 +1651,11 @@ std::vector<float> TinyLlamaModel::forward_device(int token_id, int pos, KVCache
     float* gate_vec_dev = nullptr;
     float* up_vec_dev = nullptr;
     float* swiglu_vec_dev = nullptr;
-    float* mlp_down_dev = nullptr; // Match .back name
+    float* mlp_down_dev = nullptr;
     float* logits_dev = nullptr;
     float* freqs_dev = nullptr; // For RoPE frequencies
+    */
+    // --- END: REMOVE Local Device Memory Allocation & Pointers ---
 
     // --- Set cuBLAS Stream ---
     cublasStatus_t stream_status = cublasSetStream(cublas_handle_, stream);
@@ -1616,6 +1665,8 @@ std::vector<float> TinyLlamaModel::forward_device(int token_id, int pos, KVCache
         return {};
     }
 
+    // --- START: REMOVE Local Device Memory Allocation ---
+    /*
     // Allocate device buffers using async allocation on the specified stream
     gpuErrchk(cudaMallocAsync(&x_dev, hs * sizeof(float), stream));
     gpuErrchk(cudaMallocAsync(&x_norm_dev, hs * sizeof(float), stream));
@@ -1631,49 +1682,31 @@ std::vector<float> TinyLlamaModel::forward_device(int token_id, int pos, KVCache
     gpuErrchk(cudaMallocAsync(&swiglu_vec_dev, is * sizeof(float), stream));
     gpuErrchk(cudaMallocAsync(&mlp_down_dev, hs * sizeof(float), stream)); // Allocate outside loop like .back
     gpuErrchk(cudaMallocAsync(&logits_dev, vs * sizeof(float), stream));
+    */
+    // --- END: REMOVE Local Device Memory Allocation ---
 
-    // --- Initial Embedding: Use CUDA kernel --- START MODIFICATION ---
-    // Determine which embedding table to use (prioritize FP32 if available on GPU)
+    // --- Initial Embedding: Use CUDA kernel and persistent buffer ---
     const void* embed_table_dev_ptr = nullptr;
     bool is_bf16_embedding = false;
     if (token_embedding_table_f32_dev_) {
         embed_table_dev_ptr = token_embedding_table_f32_dev_;
         is_bf16_embedding = false;
-        // Logger::info("Using FP32 embedding table on GPU."); // Optional Log
     } else if (token_embedding_table_dev_) {
         embed_table_dev_ptr = token_embedding_table_dev_;
         is_bf16_embedding = true;
-        // Logger::info("Using BF16 embedding table on GPU."); // Optional Log
     } else {
         Logger::error("No embedding table found on GPU (FP32 or BF16) in forward_device.");
-        // Handle error: Free allocated memory and return empty vector
-        gpuErrchk(cudaFreeAsync(x_dev, stream)); // Free using async with the stream
-        gpuErrchk(cudaFreeAsync(x_norm_dev, stream));
-        gpuErrchk(cudaFreeAsync(x_resid1_dev, stream));
-        gpuErrchk(cudaFreeAsync(x_resid2_dev, stream));
-        gpuErrchk(cudaFreeAsync(q_dev, stream));
-        gpuErrchk(cudaFreeAsync(k_dev, stream));
-        gpuErrchk(cudaFreeAsync(v_dev, stream));
-        gpuErrchk(cudaFreeAsync(attn_out_dev, stream));
-        gpuErrchk(cudaFreeAsync(attn_proj_dev, stream));
-        gpuErrchk(cudaFreeAsync(gate_vec_dev, stream));
-        gpuErrchk(cudaFreeAsync(up_vec_dev, stream));
-        gpuErrchk(cudaFreeAsync(swiglu_vec_dev, stream));
-        gpuErrchk(cudaFreeAsync(mlp_down_dev, stream));
-        gpuErrchk(cudaFreeAsync(logits_dev, stream));
-        gpuErrchk(cudaStreamSynchronize(stream)); // Wait for frees to complete
-        return {}; // Return empty vector on error
+        return {}; // Return empty vector on error (no memory to free here now)
     }
 
-    // Launch the kernel to perform embedding lookup directly into x_dev
-    lookup_embedding_cuda(embed_table_dev_ptr, x_dev, token_id, hs, vs, is_bf16_embedding, stream);
-    // REMOVED: std::vector<float> x_vec = lookup_embedding(token_id); // Perform lookup on host first
-    // REMOVED: gpuErrchk(cudaMemcpyAsync(x_dev, x_vec.data(), hs * sizeof(float), cudaMemcpyHostToDevice, stream)); // Use async copy
-    // --- Initial Embedding: Use CUDA kernel --- END MODIFICATION ---
+    // Launch the kernel to perform embedding lookup directly into persistent x_dev_
+    lookup_embedding_cuda(embed_table_dev_ptr, x_dev_, token_id, hs, vs, is_bf16_embedding, stream);
+    // --- Initial Embedding END ---
 
 
-    // --- Layer Loop ---
+    // --- Layer Loop --- 
     for (int l = 0; l < nhl; ++l) {
+        // Use persistent member buffers (x_dev_, x_norm_dev_, q_dev_, etc.)
         const auto& lw = layers[l]; // Need layer weights reference
         // Layer weights device pointers (calculated offsets into persistent buffers)
         size_t layer_q_size    = (size_t)hs * hs;
@@ -1684,169 +1717,188 @@ std::vector<float> TinyLlamaModel::forward_device(int token_id, int pos, KVCache
         size_t layer_up_size   = (size_t)is * hs;
         size_t layer_down_size = (size_t)hs * is;
 
-        // --- Revert to BF16 weight pointers ---
-        const uint16_t* lw_q_proj_dev    = w_q_dev_    + (size_t)l * layer_q_size;
-        const uint16_t* lw_k_proj_dev    = w_k_dev_    + (size_t)l * layer_k_size;
-        const uint16_t* lw_v_proj_dev    = w_v_dev_    + (size_t)l * layer_v_size;
-        const uint16_t* lw_o_proj_dev    = w_o_dev_    + (size_t)l * layer_o_size;
-        const uint16_t* lw_gate_proj_dev = w_gate_dev_ + (size_t)l * layer_gate_size;
-        const uint16_t* lw_up_proj_dev   = w_up_dev_   + (size_t)l * layer_up_size;
-        const uint16_t* lw_down_proj_dev = w_down_dev_ + (size_t)l * layer_down_size;
+        // --- MODIFIED: Define pointers for BOTH BF16 and FP32 persistent weights ---
+        // BF16 pointers (used only as fallback or if FP32 doesn't exist)
+        const uint16_t* lw_q_proj_bf16_dev    = w_q_dev_    ? w_q_dev_    + (size_t)l * layer_q_size : nullptr;
+        const uint16_t* lw_k_proj_bf16_dev    = w_k_dev_    ? w_k_dev_    + (size_t)l * layer_k_size : nullptr;
+        const uint16_t* lw_v_proj_bf16_dev    = w_v_dev_    ? w_v_dev_    + (size_t)l * layer_v_size : nullptr;
+        const uint16_t* lw_o_proj_bf16_dev    = w_o_dev_    ? w_o_dev_    + (size_t)l * layer_o_size : nullptr;
+        const uint16_t* lw_gate_proj_bf16_dev = w_gate_dev_ ? w_gate_dev_ + (size_t)l * layer_gate_size : nullptr;
+        const uint16_t* lw_up_proj_bf16_dev   = w_up_dev_   ? w_up_dev_   + (size_t)l * layer_up_size : nullptr;
+        const uint16_t* lw_down_proj_bf16_dev = w_down_dev_ ? w_down_dev_ + (size_t)l * layer_down_size : nullptr;
+        // FP32 pointers (preferred)
+        const float* lw_q_proj_f32_dev    = w_q_f32_dev_    ? w_q_f32_dev_    + (size_t)l * layer_q_size : nullptr;
+        const float* lw_k_proj_f32_dev    = w_k_f32_dev_    ? w_k_f32_dev_    + (size_t)l * layer_k_size : nullptr;
+        const float* lw_v_proj_f32_dev    = w_v_f32_dev_    ? w_v_f32_dev_    + (size_t)l * layer_v_size : nullptr;
+        const float* lw_o_proj_f32_dev    = w_o_f32_dev_    ? w_o_f32_dev_    + (size_t)l * layer_o_size : nullptr;
+        const float* lw_gate_proj_f32_dev = w_gate_f32_dev_ ? w_gate_f32_dev_ + (size_t)l * layer_gate_size : nullptr;
+        const float* lw_up_proj_f32_dev   = w_up_f32_dev_   ? w_up_f32_dev_   + (size_t)l * layer_up_size : nullptr;
+        const float* lw_down_proj_f32_dev = w_down_f32_dev_ ? w_down_f32_dev_ + (size_t)l * layer_down_size : nullptr;
+        // --- END MODIFICATION ---
+
 
         const float* lw_in_norm_dev   = layers[l].input_layernorm_dev;
         const float* lw_post_norm_dev = layers[l].post_attention_layernorm_dev;
 
         // Residual 1 Prep (Copy x -> x_resid1)
-        // --- MODIFIED: Use async copy on the specified stream --- 
-        gpuErrchk(cudaMemcpyAsync(x_resid1_dev, x_dev, hs * sizeof(float), cudaMemcpyDeviceToDevice, stream));
+        gpuErrchk(cudaMemcpyAsync(x_resid1_dev_, x_dev_, hs * sizeof(float), cudaMemcpyDeviceToDevice, stream));
+
+        // RMSNorm
+        rmsnorm_vector_cuda(x_dev_, layers[l].input_layernorm_dev, x_norm_dev_, hs, eps, stream);
+
+        // QKV Projections
+        // --- MODIFIED: Call matvec_f32_f32_cuda and pass FP32 weights ---
+        // Prioritize using FP32 weights if they exist
+        if (lw_q_proj_f32_dev && lw_k_proj_f32_dev && lw_v_proj_f32_dev) {
+            // Use the function that expects FP32 weights (we'll rename it next)
+            matvec_f32_f32_cuda(cublas_handle_, lw_q_proj_f32_dev, x_norm_dev_, q_dev_, hs, hs, stream);
+            matvec_f32_f32_cuda(cublas_handle_, lw_k_proj_f32_dev, x_norm_dev_, k_dev_, n_kv_heads * head_dim, hs, stream);
+            matvec_f32_f32_cuda(cublas_handle_, lw_v_proj_f32_dev, x_norm_dev_, v_dev_, n_kv_heads * head_dim, hs, stream);
+        } else if (lw_q_proj_bf16_dev && lw_k_proj_bf16_dev && lw_v_proj_bf16_dev) { // Fallback to BF16 (if needed, though inefficient)
+             Logger::warning("Layer " + std::to_string(l) + ": Using BF16 matvec path (less efficient) for QKV.");
+             // Keep the old call (which does conversion internally) - RENAME LATER IF NEEDED
+             matvec_bf16_f32_cuda(cublas_handle_, lw_q_proj_bf16_dev, x_norm_dev_, q_dev_, hs, hs, stream);
+             matvec_bf16_f32_cuda(cublas_handle_, lw_k_proj_bf16_dev, x_norm_dev_, k_dev_, n_kv_heads * head_dim, hs, stream);
+             matvec_bf16_f32_cuda(cublas_handle_, lw_v_proj_bf16_dev, x_norm_dev_, v_dev_, n_kv_heads * head_dim, hs, stream);
+        } else {
+             Logger::error("Layer " + std::to_string(l) + ": No valid QKV projection weights found on GPU (FP32 or BF16).");
+             return {}; // Or handle error appropriately
+        }
         // --- END MODIFICATION ---
-
-        // --- FIX: Use persistent norm weights --- 
-        rmsnorm_vector_cuda(x_dev, layers[l].input_layernorm_dev, x_norm_dev, hs, eps, stream); // Use persistent device pointer
-        // gpuErrchk(cudaDeviceSynchronize()); // REMOVED UNNECESSARY SYNC
-
-        // --- Revert QKV Projections to BF16 ---
-        // Note: matvec_bf16_f32_cuda already uses the stream internally
-        matvec_bf16_f32_cuda(cublas_handle_, lw_q_proj_dev, x_norm_dev, q_dev, hs, hs, stream); 
-        matvec_bf16_f32_cuda(cublas_handle_, lw_k_proj_dev, x_norm_dev, k_dev, n_kv_heads * head_dim, hs, stream); 
-        matvec_bf16_f32_cuda(cublas_handle_, lw_v_proj_dev, x_norm_dev, v_dev, n_kv_heads * head_dim, hs, stream); 
-        // gpuErrchk(cudaDeviceSynchronize()); // REMOVED UNNECESSARY SYNC
   
-        // --- FIX: Use persistent RoPE frequencies --- 
-        rope_cuda(q_dev, n_heads, head_dim, all_freqs_cis_dev, pos, stream); // Use persistent buffer + pos
-        rope_cuda(k_dev, n_kv_heads, head_dim, all_freqs_cis_dev, pos, stream); // Use persistent buffer + pos
-        // gpuErrchk(cudaDeviceSynchronize()); // REMOVED UNNECESSARY SYNC
-  
-        // --- Revert KVCache Update to separate updates ---
-        // Assuming update_kv_cache_cuda uses the stream internally (check definition)
+        // RoPE
+        rope_cuda(q_dev_, n_heads, head_dim, all_freqs_cis_dev, pos, stream);
+        rope_cuda(k_dev_, n_kv_heads, head_dim, all_freqs_cis_dev, pos, stream);
+
+        // KVCache Update
         for (int kvh = 0; kvh < n_kv_heads; ++kvh) {
-            const float* current_k_head_ptr = k_dev + kvh * head_dim;
-            const float* current_v_head_ptr = v_dev + kvh * head_dim;
-            
+            const float* current_k_head_ptr = k_dev_ + kvh * head_dim;
+            const float* current_v_head_ptr = v_dev_ + kvh * head_dim;
+
             update_kv_cache_cuda(
                 cache->layers[l].k_dev,
                 current_k_head_ptr,
-                pos, kvh, 
-                cache->allocated_max_seq_len, // Use parameters stored in cache obj
+                pos, kvh,
+                cache->allocated_max_seq_len,
                 cache->allocated_num_kv_heads,
                 cache->allocated_head_dim,
-                stream); // Pass stream 
-                                 
+                stream);
+
             update_kv_cache_cuda(
                 cache->layers[l].v_dev,
                 current_v_head_ptr,
-                pos, kvh, 
-                cache->allocated_max_seq_len, // Use parameters stored in cache obj
+                pos, kvh,
+                cache->allocated_max_seq_len,
                 cache->allocated_num_kv_heads,
                 cache->allocated_head_dim,
-                stream); // Pass stream
+                stream);
         }
-        // No sync needed here based on .back // REMOVED UNNECESSARY SYNC (implicit)
 
-        // Attention (Input: q_dev, K/V Cache, Output: attn_out_dev)
+        // Attention
         float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
-         attention_cuda(q_dev, cache->layers[l].k_dev, cache->layers[l].v_dev, attn_out_dev,
-                        n_heads, pos + 1, head_dim, scale, 
-                        cache->allocated_max_seq_len, // Use cache parameters
-                        cache->allocated_num_kv_heads, // Use cache parameters
-                        stream); // Pass stream
-        // gpuErrchk(cudaDeviceSynchronize()); // REMOVED UNNECESSARY SYNC
-         
-        // --- Revert Attention Output Projection to BF16 ---
-        // Use attn_proj_dev allocated outside loop
-        matvec_bf16_f32_cuda(cublas_handle_, lw_o_proj_dev, attn_out_dev, attn_proj_dev, hs, hs, stream); // Pass stream
-        // gpuErrchk(cudaDeviceSynchronize()); // REMOVED UNNECESSARY SYNC
+         attention_cuda(q_dev_, cache->layers[l].k_dev, cache->layers[l].v_dev, attn_out_dev_,
+                        n_heads, pos + 1, head_dim, scale,
+                        cache->allocated_max_seq_len,
+                        cache->allocated_num_kv_heads,
+                        stream);
 
-        // Residual 1 Add (Input: x_resid1_dev + attn_proj_dev, Output: x_dev)
-        add_residual_cuda(attn_proj_dev, x_resid1_dev, x_dev, hs, stream);
-        // gpuErrchk(cudaDeviceSynchronize()); // REMOVED UNNECESSARY SYNC
-        // Don't free attn_proj_dev here, it's allocated outside
-
-        // --- MLP Block --- 
-        // Residual 2 Prep (Copy x -> x_resid2)
-        // --- MODIFIED: Use async copy on the specified stream --- 
-        gpuErrchk(cudaMemcpyAsync(x_resid2_dev, x_dev, hs * sizeof(float), cudaMemcpyDeviceToDevice, stream));
+        // Attention Output Projection
+        // --- MODIFIED: Call matvec_f32_f32_cuda and pass FP32 weights ---
+        if (lw_o_proj_f32_dev) {
+             matvec_f32_f32_cuda(cublas_handle_, lw_o_proj_f32_dev, attn_out_dev_, attn_proj_dev_, hs, hs, stream);
+        } else if (lw_o_proj_bf16_dev) {
+             Logger::warning("Layer " + std::to_string(l) + ": Using BF16 matvec path (less efficient) for O-Proj.");
+             matvec_bf16_f32_cuda(cublas_handle_, lw_o_proj_bf16_dev, attn_out_dev_, attn_proj_dev_, hs, hs, stream);
+        } else {
+             Logger::error("Layer " + std::to_string(l) + ": No valid O projection weights found on GPU (FP32 or BF16).");
+             return {};
+        }
         // --- END MODIFICATION ---
 
-        // --- FIX: Use persistent norm weights --- 
-        rmsnorm_vector_cuda(x_dev, layers[l].post_attention_layernorm_dev, x_norm_dev, hs, eps, stream); // Use persistent device pointer
-        // gpuErrchk(cudaDeviceSynchronize()); // REMOVED UNNECESSARY SYNC
-  
-        // --- Revert MLP Projections to BF16 ---
-        matvec_bf16_f32_cuda(cublas_handle_, lw_gate_proj_dev, x_norm_dev, gate_vec_dev, is, hs, stream); // Pass stream
-        matvec_bf16_f32_cuda(cublas_handle_, lw_up_proj_dev, x_norm_dev, up_vec_dev, is, hs, stream);    // Pass stream
-        // gpuErrchk(cudaDeviceSynchronize()); // REMOVED UNNECESSARY SYNC
+        // Residual 1 Add
+        add_residual_cuda(attn_proj_dev_, x_resid1_dev_, x_dev_, hs, stream);
 
-        // SwiGLU (Input: gate_vec_dev, up_vec_dev, Output: swiglu_vec_dev)
-        swiglu_cuda(gate_vec_dev, up_vec_dev, swiglu_vec_dev, is, stream); // Pass stream
-        // gpuErrchk(cudaDeviceSynchronize()); // REMOVED UNNECESSARY SYNC
+        // --- MLP Block --- 
+        // Residual 2 Prep
+        gpuErrchk(cudaMemcpyAsync(x_resid2_dev_, x_dev_, hs * sizeof(float), cudaMemcpyDeviceToDevice, stream));
 
-        // --- Revert MLP Down Projection to BF16 ---
-        // Use mlp_down_dev allocated outside loop
-        matvec_bf16_f32_cuda(cublas_handle_, lw_down_proj_dev, swiglu_vec_dev, mlp_down_dev, hs, is, stream); // Pass stream
-        // gpuErrchk(cudaDeviceSynchronize()); // REMOVED UNNECESSARY SYNC
-         
-        // Residual 2 Add (Input: x_resid2_dev + mlp_down_dev, Output: x_dev)
-        add_residual_cuda(mlp_down_dev, x_resid2_dev, x_dev, hs, stream);
-        // gpuErrchk(cudaDeviceSynchronize()); // REMOVED UNNECESSARY SYNC
-        // Don't free mlp_down_dev here
+        // Post-attention RMSNorm
+        rmsnorm_vector_cuda(x_dev_, layers[l].post_attention_layernorm_dev, x_norm_dev_, hs, eps, stream);
+
+        // MLP Projections
+        // --- MODIFIED: Call matvec_f32_f32_cuda and pass FP32 weights ---
+        if (lw_gate_proj_f32_dev && lw_up_proj_f32_dev) {
+             matvec_f32_f32_cuda(cublas_handle_, lw_gate_proj_f32_dev, x_norm_dev_, gate_vec_dev_, is, hs, stream);
+             matvec_f32_f32_cuda(cublas_handle_, lw_up_proj_f32_dev, x_norm_dev_, up_vec_dev_, is, hs, stream);
+        } else if (lw_gate_proj_bf16_dev && lw_up_proj_bf16_dev) {
+             Logger::warning("Layer " + std::to_string(l) + ": Using BF16 matvec path (less efficient) for Gate/Up Proj.");
+             matvec_bf16_f32_cuda(cublas_handle_, lw_gate_proj_bf16_dev, x_norm_dev_, gate_vec_dev_, is, hs, stream);
+             matvec_bf16_f32_cuda(cublas_handle_, lw_up_proj_bf16_dev, x_norm_dev_, up_vec_dev_, is, hs, stream);
+        } else {
+             Logger::error("Layer " + std::to_string(l) + ": No valid Gate/Up projection weights found on GPU (FP32 or BF16).");
+             return {};
+        }
+        // --- END MODIFICATION ---
+
+        // SwiGLU
+        swiglu_cuda(gate_vec_dev_, up_vec_dev_, swiglu_vec_dev_, is, stream);
+
+        // MLP Down Projection
+        // --- MODIFIED: Call matvec_f32_f32_cuda and pass FP32 weights ---
+        if (lw_down_proj_f32_dev) {
+             matvec_f32_f32_cuda(cublas_handle_, lw_down_proj_f32_dev, swiglu_vec_dev_, mlp_down_dev_, hs, is, stream);
+        } else if (lw_down_proj_bf16_dev) {
+             Logger::warning("Layer " + std::to_string(l) + ": Using BF16 matvec path (less efficient) for Down Proj.");
+             matvec_bf16_f32_cuda(cublas_handle_, lw_down_proj_bf16_dev, swiglu_vec_dev_, mlp_down_dev_, hs, is, stream);
+        } else {
+             Logger::error("Layer " + std::to_string(l) + ": No valid Down projection weights found on GPU (FP32 or BF16).");
+             return {};
+        }
+        // --- END MODIFICATION ---
+
+        // Residual 2 Add
+        add_residual_cuda(mlp_down_dev_, x_resid2_dev_, x_dev_, hs, stream);
 
     } // End layer loop
 
-    // --- Final Steps (Outside Layer Loop) --- 
-     
-    // --- FIX: Use persistent final norm weights --- 
-    rmsnorm_vector_cuda(x_dev, final_norm_dev, x_norm_dev, hs, eps, stream); // Use persistent device pointer
-    // gpuErrchk(cudaDeviceSynchronize()); // REMOVED UNNECESSARY SYNC
+    // --- Final Steps (Outside Layer Loop) ---
 
-    // --- Revert Final LM Head Projection to BF16 ---
-    matvec_bf16_f32_cuda(cublas_handle_, lm_head_dev_, x_norm_dev, logits_dev, vs, hs, stream); // Use BF16 lm_head_dev_ and pass stream
-    // gpuErrchk(cudaDeviceSynchronize()); // REMOVED UNNECESSARY SYNC
+    // Final RMSNorm
+    rmsnorm_vector_cuda(x_dev_, final_norm_dev, x_norm_dev_, hs, eps, stream);
 
-    // --- Synchronize Stream before Copy and Free --- 
-    // Wait for all kernels *on this stream* to complete before copying back logits
-    // This is necessary because the following memcpy is synchronous by default
-    // and needs the GPU result to be ready.
-    gpuErrchk(cudaStreamSynchronize(stream)); 
- 
-    // --- Copy Logits Device -> Host --- 
+    // Final LM Head Projection
+    // --- MODIFIED: Call matvec_f32_f32_cuda and pass FP32 weights ---
+    if (lm_head_f32_dev_) {
+         matvec_f32_f32_cuda(cublas_handle_, lm_head_f32_dev_, x_norm_dev_, logits_dev_, vs, hs, stream);
+    } else if (lm_head_dev_) {
+         Logger::warning("Using BF16 matvec path (less efficient) for LM Head.");
+         matvec_bf16_f32_cuda(cublas_handle_, lm_head_dev_, x_norm_dev_, logits_dev_, vs, hs, stream);
+    } else {
+         Logger::error("No valid LM head weights found on GPU (FP32 or BF16).");
+         return {};
+    }
+    // --- END MODIFICATION ---
+
+    // Synchronize Stream before Copy
+    gpuErrchk(cudaStreamSynchronize(stream));
+
+    // Copy Logits Device -> Host
     std::vector<float> logits(vs);
-    // Use synchronous copy. Requires stream sync before this.
-     gpuErrchk(cudaMemcpy(logits.data(), logits_dev, vs * sizeof(float), cudaMemcpyDeviceToHost));
- 
-    // --- Free Device Memory --- 
-    // Freeing memory allocated with cudaMallocAsync SHOULD use cudaFreeAsync,
-    // but requires stream synchronization before the buffer can be safely reused 
-    // or the stream destroyed. Using synchronous cudaFree is simpler here as 
-    // we already synced the stream for the DtoH copy.
-    gpuErrchk(cudaFree(x_dev)); 
-    gpuErrchk(cudaFree(x_norm_dev));
-    gpuErrchk(cudaFree(x_resid1_dev));
-    gpuErrchk(cudaFree(x_resid2_dev));
-    gpuErrchk(cudaFree(q_dev));
-    gpuErrchk(cudaFree(k_dev));
-    gpuErrchk(cudaFree(v_dev));
-    gpuErrchk(cudaFree(attn_out_dev));
-    gpuErrchk(cudaFree(attn_proj_dev)); 
-    gpuErrchk(cudaFree(gate_vec_dev));
-    gpuErrchk(cudaFree(up_vec_dev));
-    gpuErrchk(cudaFree(swiglu_vec_dev));
-    gpuErrchk(cudaFree(mlp_down_dev)); 
-    gpuErrchk(cudaFree(logits_dev));
- 
-    // Optional: Synchronize again to ensure frees are processed if needed before function returns,
-    // although technically not required if caller manages stream synchronization.
-    // gpuErrchk(cudaDeviceSynchronize()); // Sync already happened before DtoH copy
+     gpuErrchk(cudaMemcpy(logits.data(), logits_dev_, vs * sizeof(float), cudaMemcpyDeviceToHost));
 
-    // Logger::info("[CUDA] forward_device finished.");
+    // --- START: REMOVE Local Device Memory Free --- 
+    /*
+    gpuErrchk(cudaFree(x_dev));
+// ... rest of frees ...
+    gpuErrchk(cudaFree(logits_dev));
+    */
+    // --- END: REMOVE Local Device Memory Free ---
+
     return logits;
 
 } // End forward_device
 #endif // HAS_CUDA (End of forward_device function definition)
 
-// --- Helper function definitions (e.g., parse_model_config, etc.) ---
-
-// ... Rest of the file (parse_model_config, etc.)
 
 // Map GGUF weights into the model's vectors (BF16 only)
 void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
@@ -1943,49 +1995,6 @@ void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
                 assign_vec_f32(model.embed_tokens_f32, tinfo);
                 Logger::info("Mapped GGUF tensor '" + name + "' (FP32) to model.embed_tokens_f32");
             } else if (tinfo.type == GGMLType::GGML_TYPE_Q4_K) { // Use .type and correct enum name
-                // --- ADD DETAILED LOGGING FOR Q4_K EMBEDDING MAPPING ---
-                size_t num_blocks = 0;
-                uintptr_t src_addr = 0;
-                uintptr_t src_end_addr_calc = 0;
-                uintptr_t data_start_addr = reinterpret_cast<uintptr_t>(gguf.tensor_data.data());
-                uintptr_t data_end_addr = data_start_addr + gguf.tensor_data.size();
-                const block_q4_K* first_block_ptr = nullptr;
-                uint16_t raw_d = 0, raw_dmin = 0;
-                float converted_d = NAN, converted_dmin = NAN;
-
-                try {
-                    if (GGML_QK_K != 0 && tinfo.num_elements % GGML_QK_K == 0) {
-                        num_blocks = tinfo.num_elements / GGML_QK_K;
-                        src_addr = reinterpret_cast<uintptr_t>(gguf.tensor_data.data()) + tinfo.offset;
-                        src_end_addr_calc = src_addr + num_blocks * sizeof(block_q4_K);
-                        if (num_blocks > 0 && src_addr >= data_start_addr && (src_addr + sizeof(block_q4_K)) <= data_end_addr) {
-                             first_block_ptr = reinterpret_cast<const block_q4_K*>(src_addr);
-                             raw_d = first_block_ptr->d;
-                             raw_dmin = first_block_ptr->dmin;
-                             converted_d = fp16_to_fp32(raw_d);
-                             converted_dmin = fp16_to_fp32(raw_dmin);
-                        }
-                    }
-                    std::stringstream log_map;
-                    log_map << "[MAP GGUF Q4_K EMBEDDING]: Tensor='" << tinfo.name << "', Offset=" << tinfo.offset
-                           << ", NumElem=" << tinfo.num_elements << ", NumBlocks=" << num_blocks
-                           << ", SizeBytes=" << tinfo.size_in_bytes << ", CalcSize=" << (num_blocks * sizeof(block_q4_K)) << "\n"
-                           << "    DataBuffer: [" << data_start_addr << " - " << data_end_addr << "] (Size: " << gguf.tensor_data.size() << ")\n"
-                           << "    SrcPtrAddr: " << src_addr << " (RelOffset: " << (src_addr - data_start_addr) << ")\n"
-                           << "    CalcEndPtr: " << src_end_addr_calc << "\n"
-                           << "    ReadRangeOK: " << (src_addr >= data_start_addr && src_end_addr_calc <= data_end_addr ? "YES" : "NO!") << "\n";
-                    if (first_block_ptr) {
-                         log_map << "    First Block @ " << reinterpret_cast<uintptr_t>(first_block_ptr) << ":\n"
-                                << "      Raw d=0x" << std::hex << raw_d << std::dec << " -> fp32=" << converted_d << "\n"
-                                << "      Raw dmin=0x" << std::hex << raw_dmin << std::dec << " -> fp32=" << converted_dmin;
-                    } else {
-                         log_map << "    First Block: Could not read (invalid ptr or num_blocks=0).";
-                    }
-                    Logger::info(log_map.str());
-                } catch (const std::exception& log_ex) {
-                     Logger::error("Exception during Q4_K embedding mapping log generation: " + std::string(log_ex.what()));
-                }
-                // --- END LOGGING ---
                 assign_vec_q4k(model.embed_tokens_q4k, tinfo);
                 Logger::info("Mapped GGUF tensor '" + name + "' (Q4_K) to model.embed_tokens_q4k");
             } else if (tinfo.type == GGMLType::GGML_TYPE_Q6_K) { // Use .type and correct enum name
@@ -2067,39 +2076,75 @@ void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
 
             // Map known fields based on suffix (the suffix logic remains the same)
             // Q_PROJ
-            if (suffix == "attn_q.weight" || suffix == "self_attn.q_proj.weight" || suffix == "attn.wq.weight") { 
-                if (tinfo.type == GGMLType::GGML_TYPE_Q6_K) { assign_vec_q6k(lw.q_proj_q6k, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (Q6_K) to layers[" + std::to_string(layer_idx) + "].q_proj_q6k"); }
-                else if (tinfo.type == GGMLType::GGML_TYPE_Q4_K) { assign_vec_q4k(lw.q_proj_q4k, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (Q4_K) to layers[" + std::to_string(layer_idx) + "].q_proj_q4k"); }
-                else if (tinfo.type == GGMLType::GGML_TYPE_F32) { assign_vec_f32(lw.q_proj_f32, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (FP32) to layers[" + std::to_string(layer_idx) + "].q_proj_f32"); }
-                else { assign_vec_bf16(lw.q_proj, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (BF16/Other) to layers[" + std::to_string(layer_idx) + "].q_proj"); }
-                 Logger::info("-> Successfully assigned '" + name + "' to layer " + std::to_string(layer_idx) + " (Q)"); 
+            if (suffix == "self_attn.q_proj.weight" || suffix == "attn.wq.weight") { // Added alternative suffix
+                if (tinfo.type == GGMLType::GGML_TYPE_F32) { // Use .type and correct enum name
+                    assign_vec_f32(lw.q_proj_f32, tinfo);
+                    Logger::info("Mapped GGUF tensor '" + name + "' (FP32) to layers[" + std::to_string(layer_idx) + "].q_proj_f32");
+                } else if (tinfo.type == GGMLType::GGML_TYPE_Q4_K) { // Use .type and correct enum name
+                    assign_vec_q4k(lw.q_proj_q4k, tinfo);
+                    Logger::info("Mapped GGUF tensor '" + name + "' (Q4_K) to layers[" + std::to_string(layer_idx) + "].q_proj_q4k");
+                } else if (tinfo.type == GGMLType::GGML_TYPE_Q6_K) { // Use .type and correct enum name
+                    assign_vec_q6k(lw.q_proj_q6k, tinfo);
+                    Logger::info("Mapped GGUF tensor '" + name + "' (Q6_K) to layers[" + std::to_string(layer_idx) + "].q_proj_q6k");
+                } else {
+                    assign_vec_bf16(lw.q_proj, tinfo); // REMOVED const_cast
+                    Logger::info("Mapped GGUF tensor '" + name + "' (BF16/Other) to layers[" + std::to_string(layer_idx) + "].q_proj");
+                }
+                Logger::info("-> Successfully assigned '" + name + "' to layer " + std::to_string(layer_idx)); // Add success log
                 continue;
             }
             // K_PROJ
-            if (suffix == "attn_k.weight" || suffix == "self_attn.k_proj.weight" || suffix == "attn.wk.weight") { 
-                if (tinfo.type == GGMLType::GGML_TYPE_Q6_K) { assign_vec_q6k(lw.k_proj_q6k, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (Q6_K) to layers[" + std::to_string(layer_idx) + "].k_proj_q6k"); }
-                else if (tinfo.type == GGMLType::GGML_TYPE_Q4_K) { assign_vec_q4k(lw.k_proj_q4k, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (Q4_K) to layers[" + std::to_string(layer_idx) + "].k_proj_q4k"); }
-                else if (tinfo.type == GGMLType::GGML_TYPE_F32) { assign_vec_f32(lw.k_proj_f32, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (FP32) to layers[" + std::to_string(layer_idx) + "].k_proj_f32"); }
-                else { assign_vec_bf16(lw.k_proj, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (BF16/Other) to layers[" + std::to_string(layer_idx) + "].k_proj"); }
-                 Logger::info("-> Successfully assigned '" + name + "' to layer " + std::to_string(layer_idx) + " (K)");
+            if (suffix == "self_attn.k_proj.weight" || suffix == "attn.wk.weight") { // Added alternative suffix
+                if (tinfo.type == GGMLType::GGML_TYPE_F32) { // Use .type and correct enum name
+                    assign_vec_f32(lw.k_proj_f32, tinfo);
+                    Logger::info("Mapped GGUF tensor '" + name + "' (FP32) to layers[" + std::to_string(layer_idx) + "].k_proj_f32");
+                } else if (tinfo.type == GGMLType::GGML_TYPE_Q4_K) { // Use .type and correct enum name
+                    assign_vec_q4k(lw.k_proj_q4k, tinfo);
+                    Logger::info("Mapped GGUF tensor '" + name + "' (Q4_K) to layers[" + std::to_string(layer_idx) + "].k_proj_q4k");
+                } else if (tinfo.type == GGMLType::GGML_TYPE_Q6_K) { // Use .type and correct enum name
+                    assign_vec_q6k(lw.k_proj_q6k, tinfo);
+                    Logger::info("Mapped GGUF tensor '" + name + "' (Q6_K) to layers[" + std::to_string(layer_idx) + "].k_proj_q6k");
+                } else {
+                    assign_vec_bf16(lw.k_proj, tinfo); // REMOVED const_cast
+                    Logger::info("Mapped GGUF tensor '" + name + "' (BF16/Other) to layers[" + std::to_string(layer_idx) + "].k_proj");
+                }
+                Logger::info("-> Successfully assigned '" + name + "' to layer " + std::to_string(layer_idx)); // Add success log
                 continue;
             }
             // V_PROJ
-            if (suffix == "attn_v.weight" || suffix == "self_attn.v_proj.weight" || suffix == "attn.wv.weight") { 
-                if (tinfo.type == GGMLType::GGML_TYPE_Q6_K) { assign_vec_q6k(lw.v_proj_q6k, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (Q6_K) to layers[" + std::to_string(layer_idx) + "].v_proj_q6k"); }
-                else if (tinfo.type == GGMLType::GGML_TYPE_Q4_K) { assign_vec_q4k(lw.v_proj_q4k, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (Q4_K) to layers[" + std::to_string(layer_idx) + "].v_proj_q4k"); }
-                else if (tinfo.type == GGMLType::GGML_TYPE_F32) { assign_vec_f32(lw.v_proj_f32, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (FP32) to layers[" + std::to_string(layer_idx) + "].v_proj_f32"); }
-                else { assign_vec_bf16(lw.v_proj, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (BF16/Other) to layers[" + std::to_string(layer_idx) + "].v_proj"); }
-                 Logger::info("-> Successfully assigned '" + name + "' to layer " + std::to_string(layer_idx) + " (V)");
+            if (suffix == "self_attn.v_proj.weight" || suffix == "attn.wv.weight") { // Added alternative suffix
+                if (tinfo.type == GGMLType::GGML_TYPE_F32) { // Use .type and correct enum name
+                    assign_vec_f32(lw.v_proj_f32, tinfo);
+                    Logger::info("Mapped GGUF tensor '" + name + "' (FP32) to layers[" + std::to_string(layer_idx) + "].v_proj_f32");
+                } else if (tinfo.type == GGMLType::GGML_TYPE_Q4_K) { // Use .type and correct enum name
+                    assign_vec_q4k(lw.v_proj_q4k, tinfo);
+                    Logger::info("Mapped GGUF tensor '" + name + "' (Q4_K) to layers[" + std::to_string(layer_idx) + "].v_proj_q4k");
+                } else if (tinfo.type == GGMLType::GGML_TYPE_Q6_K) { // Use .type and correct enum name
+                    assign_vec_q6k(lw.v_proj_q6k, tinfo);
+                    Logger::info("Mapped GGUF tensor '" + name + "' (Q6_K) to layers[" + std::to_string(layer_idx) + "].v_proj_q6k");
+                } else {
+                    assign_vec_bf16(lw.v_proj, tinfo); // REMOVED const_cast
+                    Logger::info("Mapped GGUF tensor '" + name + "' (BF16/Other) to layers[" + std::to_string(layer_idx) + "].v_proj");
+                }
+                Logger::info("-> Successfully assigned '" + name + "' to layer " + std::to_string(layer_idx)); // Add success log
                 continue;
             }
             // O_PROJ
-            if (suffix == "attn_output.weight" || suffix == "self_attn.o_proj.weight" || suffix == "attn.wo.weight") { 
-                if (tinfo.type == GGMLType::GGML_TYPE_Q6_K) { assign_vec_q6k(lw.o_proj_q6k, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (Q6_K) to layers[" + std::to_string(layer_idx) + "].o_proj_q6k"); }
-                else if (tinfo.type == GGMLType::GGML_TYPE_Q4_K) { assign_vec_q4k(lw.o_proj_q4k, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (Q4_K) to layers[" + std::to_string(layer_idx) + "].o_proj_q4k"); }
-                else if (tinfo.type == GGMLType::GGML_TYPE_F32) { assign_vec_f32(lw.o_proj_f32, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (FP32) to layers[" + std::to_string(layer_idx) + "].o_proj_f32"); }
-                else { assign_vec_bf16(lw.o_proj, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (BF16/Other) to layers[" + std::to_string(layer_idx) + "].o_proj"); }
-                 Logger::info("-> Successfully assigned '" + name + "' to layer " + std::to_string(layer_idx) + " (O)");
+            if (suffix == "self_attn.o_proj.weight" || suffix == "attn.wo.weight") { // Added alternative suffix
+                if (tinfo.type == GGMLType::GGML_TYPE_F32) { // Use .type and correct enum name
+                    assign_vec_f32(lw.o_proj_f32, tinfo);
+                    Logger::info("Mapped GGUF tensor '" + name + "' (FP32) to layers[" + std::to_string(layer_idx) + "].o_proj_f32");
+                } else if (tinfo.type == GGMLType::GGML_TYPE_Q4_K) { // Use .type and correct enum name
+                    assign_vec_q4k(lw.o_proj_q4k, tinfo);
+                    Logger::info("Mapped GGUF tensor '" + name + "' (Q4_K) to layers[" + std::to_string(layer_idx) + "].o_proj_q4k");
+                } else if (tinfo.type == GGMLType::GGML_TYPE_Q6_K) { // Use .type and correct enum name
+                    assign_vec_q6k(lw.o_proj_q6k, tinfo);
+                    Logger::info("Mapped GGUF tensor '" + name + "' (Q6_K) to layers[" + std::to_string(layer_idx) + "].o_proj_q6k");
+                } else {
+                    assign_vec_bf16(lw.o_proj, tinfo); // REMOVED const_cast
+                    Logger::info("Mapped GGUF tensor '" + name + "' (BF16/Other) to layers[" + std::to_string(layer_idx) + "].o_proj");
+                }
+                Logger::info("-> Successfully assigned '" + name + "' to layer " + std::to_string(layer_idx)); // Add success log
                 continue;
             }
             // GATE_PROJ
@@ -2139,7 +2184,7 @@ void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
                 continue;
             }
             // DOWN_PROJ
-            if (suffix == "mlp.down_proj.weight" || suffix == "ffn.w2.weight" || suffix == "ffn_down.weight") { // Added ffn_down.weight
+            if (suffix == "mlp.down_proj.weight" || suffix == "ffn.w2.weight") { // Added alternative suffix
                 if (tinfo.type == GGMLType::GGML_TYPE_F32) { // Use .type and correct enum name
                     assign_vec_f32(lw.down_proj_f32, tinfo);
                     Logger::info("Mapped GGUF tensor '" + name + "' (FP32) to layers[" + std::to_string(layer_idx) + "].down_proj_f32");
@@ -2180,30 +2225,10 @@ void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
                 Logger::info("-> Successfully assigned '" + name + "' to layer " + std::to_string(layer_idx)); // Add success log
                 continue;
             }
-            // --- FFN WEIGHTS --- 
-            if (suffix == "ffn_gate.weight" || suffix == "mlp.gate_proj.weight" || suffix == "ffn.w1.weight") { 
-                if (tinfo.type == GGMLType::GGML_TYPE_Q6_K) { assign_vec_q6k(lw.gate_proj_q6k, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (Q6_K) to layers[" + std::to_string(layer_idx) + "].gate_proj_q6k"); }
-                else if (tinfo.type == GGMLType::GGML_TYPE_Q4_K) { assign_vec_q4k(lw.gate_proj_q4k, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (Q4_K) to layers[" + std::to_string(layer_idx) + "].gate_proj_q4k"); }
-                else if (tinfo.type == GGMLType::GGML_TYPE_F32) { assign_vec_f32(lw.gate_proj_f32, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (FP32) to layers[" + std::to_string(layer_idx) + "].gate_proj_f32"); }
-                else { assign_vec_bf16(lw.gate_proj, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (BF16/Other) to layers[" + std::to_string(layer_idx) + "].gate_proj"); }
-                 Logger::info("-> Successfully assigned '" + name + "' to layer " + std::to_string(layer_idx) + " (Gate)"); 
-                continue;
-            }
-            if (suffix == "ffn_up.weight" || suffix == "mlp.up_proj.weight" || suffix == "ffn.w3.weight") { 
-                if (tinfo.type == GGMLType::GGML_TYPE_Q6_K) { assign_vec_q6k(lw.up_proj_q6k, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (Q6_K) to layers[" + std::to_string(layer_idx) + "].up_proj_q6k"); }
-                else if (tinfo.type == GGMLType::GGML_TYPE_Q4_K) { assign_vec_q4k(lw.up_proj_q4k, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (Q4_K) to layers[" + std::to_string(layer_idx) + "].up_proj_q4k"); }
-                else if (tinfo.type == GGMLType::GGML_TYPE_F32) { assign_vec_f32(lw.up_proj_f32, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (FP32) to layers[" + std::to_string(layer_idx) + "].up_proj_f32"); }
-                else { assign_vec_bf16(lw.up_proj, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (BF16/Other) to layers[" + std::to_string(layer_idx) + "].up_proj"); }
-                 Logger::info("-> Successfully assigned '" + name + "' to layer " + std::to_string(layer_idx) + " (Up)"); 
-                continue;
-            }
-            if (suffix == "ffn_down.weight" || suffix == "mlp.down_proj.weight" || suffix == "ffn.w2.weight") { 
-                if (tinfo.type == GGMLType::GGML_TYPE_Q6_K) { assign_vec_q6k(lw.down_proj_q6k, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (Q6_K) to layers[" + std::to_string(layer_idx) + "].down_proj_q6k"); }
         }
         Logger::warning("Unmapped GGUF tensor: '" + name + "' with type: " + std::to_string(static_cast<int>(tinfo.type))); // Added type logging
     }
     Logger::info("Finished mapping GGUF weights.");
-}
 }
 
 // --- START: Definition for parse_model_config_from_gguf ---
