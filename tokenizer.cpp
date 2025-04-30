@@ -106,7 +106,7 @@ std::vector<std::string> Tokenizer::space_tokenize(const std::string& text) cons
 std::vector<std::string> Tokenizer::bpe_tokenize(const std::string& text) const {
     std::vector<std::string> all_tokens;
     
-    // Heuristic to detect if space prefix (Ġ or  ) is used in the loaded vocab
+    // Heuristic to detect if space prefix (Ġ or   ) is used in the loaded vocab
     bool using_space_prefix = false;
     const std::string gpt2_space_prefix = "\xC4\xA0"; // Ġ (U+0120)
     const std::string tinyllama_space_prefix = "\xE2\x96\x81"; //   (U+2581)

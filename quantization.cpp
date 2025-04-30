@@ -191,10 +191,10 @@ static inline void get_scale_min_k4_ref(
 
 // Dequantize Q4_K data - Rewritten to match llama.cpp loop structure
 void dequantize_q4_k_m(
-    const void* qblock_void,
+    const block_q4_K* qblock,
     float* output, // Output buffer for GGML_QK_K floats
     int num_weights_in_block, // Should always be GGML_QK_K for full blocks
-    bool log_details_for_this_block // Flag for enabling detailed logs
+    bool log_this_block // Flag for enabling detailed logs
 ) {
     if (num_weights_in_block != GGML_QK_K) {
         std::cout << "Warning: dequantize_q4_k_m called with num_weights != GGML_QK_K (" << num_weights_in_block << ")" << std::endl;
@@ -202,7 +202,6 @@ void dequantize_q4_k_m(
         return;
     }
 
-    const block_q4_K* qblock = static_cast<const block_q4_K*>(qblock_void);
     const uint8_t* scales_ptr = qblock->scales;
     const uint8_t* qs_ptr = qblock->qs;
 
@@ -214,6 +213,22 @@ void dequantize_q4_k_m(
     constexpr float CLAMP_LIMIT = 100.0f; 
     if (!std::isfinite(d_super) || std::abs(d_super) > CLAMP_LIMIT) d_super = 0.0f;
     if (!std::isfinite(min_super) || std::abs(min_super) > CLAMP_LIMIT) min_super = 0.0f;
+
+    // --- ADDED: Logging ---
+    static std::atomic<int> log_count_q4 = 0;
+    if (log_this_block && log_count_q4 < 5) { // Log first 5 blocks only
+        log_count_q4++;
+        std::cout << "[DEBUG] Dequant Q4_K Block #" << log_count_q4.load() << ":" << std::endl;
+        std::cout << "  Super Scale (d): " << d_super << " (raw FP16: 0x" << std::hex << qblock->d << std::dec << ")" << std::endl;
+        std::cout << "  Super Min (dmin): " << min_super << " (raw FP16: 0x" << std::hex << qblock->dmin << std::dec << ")" << std::endl;
+        std::cout << "  Scales (12 bytes): ";
+        for(int i=0; i<12; ++i) std::cout << std::hex << (int)scales_ptr[i] << " ";
+        std::cout << std::dec << std::endl;
+        std::cout << "  QS (first 16/128 bytes): ";
+        for(int i=0; i<16; ++i) std::cout << std::hex << (int)qs_ptr[i] << " ";
+        std::cout << std::dec << "..." << std::endl;
+    }
+    // --- END ADDED: Logging ---
 
     // Process 16 sub-blocks
     for (int j = 0; j < GGML_QK_K / 16; ++j) { // j = 0..15 (sub-block index)
@@ -239,69 +254,84 @@ void dequantize_q4_k_m(
             output_sub_block[l + 8] = scale * static_cast<float>(nibble_high) + minv;
         }
     }
+
+    // --- ADDED: Logging Output ---
+    if (log_this_block && log_count_q4 <= 5) {
+        std::cout << "  Output FP32 (first 16/256): ";
+        for(int i=0; i<16; ++i) std::cout << output[i] << " ";
+        std::cout << "..." << std::endl;
+    }
+    // --- END ADDED: Logging ---
 }
 
 // --- Dequantization for Q6_K ---
 void dequantize_q6_k(
-    const void* qblock_void,
+    const block_q6_K* qblock,
     float* output, // Changed name to match llama.cpp style
-    int num_weights_in_block // Still useful for assert
+    int num_weights_in_block, // Still useful for assert
+    bool log_this_block // ADDED: Log flag
 ) {
     if (num_weights_in_block != GGML_QK_K) {
-        throw std::invalid_argument("dequantize_q6_k currently only supports block size " + std::to_string(GGML_QK_K));
-    }
-
-    const block_q6_K* x = static_cast<const block_q6_K*>(qblock_void); // Use x like llama.cpp
-    float* y = output; // Use y like llama.cpp
-
-    const float d = fp16_to_fp32(x->d); // Get super scale
-    if (!std::isfinite(d)) {
-         // Handle non-finite super scale - zero out the block
-         std::memset(y, 0, GGML_QK_K * sizeof(float));
-         // Optionally log a warning
-         // std::cout << "[Q6K DEQUANT WARNING] Non-finite super-scale 'd' encountered. Outputting zeros." << std::endl;
+         std::cout << "Warning: dequantize_q6_k called with num_weights != GGML_QK_K (" << num_weights_in_block << ")" << std::endl;
+         std::memset(output, 0, num_weights_in_block * sizeof(float));
          return;
     }
 
-    const uint8_t * ql = x->ql;
-    const uint8_t * qh = x->qh;
-    const int8_t  * sc = x->scales;
+    const float d = fp16_to_fp32(qblock->d); // Super scale
 
-    // Loop structure matching llama.cpp
-    for (int n = 0; n < GGML_QK_K; n += 128) { // Process in two chunks of 128
-        for (int l = 0; l < 32; ++l) { // Process 32 bytes of qh -> 128 weights
-            int is = l / 16; // Scale index base (0 or 1)
-            
-            // Reconstruct the four 6-bit values (-32 to 31)
-            const int8_t q1 = (int8_t)((ql[l +  0] & 0xF) | (((qh[l] >> 0) & 3) << 4)) - 32;
-            const int8_t q2 = (int8_t)((ql[l + 32] & 0xF) | (((qh[l] >> 2) & 3) << 4)) - 32;
-            const int8_t q3 = (int8_t)((ql[l +  0]  >> 4) | (((qh[l] >> 4) & 3) << 4)) - 32;
-            const int8_t q4 = (int8_t)((ql[l + 32]  >> 4) | (((qh[l] >> 6) & 3) << 4)) - 32;
+    const uint8_t* __restrict ql = qblock->ql;
+    const uint8_t* __restrict qh = qblock->qh;
+    const int8_t* __restrict scales = qblock->scales; // 16 x int8 scales
 
-            // Get the correct scales for each group
-            // Apply isfinite check to individual scales for safety
-            float scale1_raw = d * static_cast<float>(sc[is + 0]);
-            float scale2_raw = d * static_cast<float>(sc[is + 2]);
-            float scale3_raw = d * static_cast<float>(sc[is + 4]);
-            float scale4_raw = d * static_cast<float>(sc[is + 6]);
-
-            float scale1 = std::isfinite(scale1_raw) ? scale1_raw : 0.0f;
-            float scale2 = std::isfinite(scale2_raw) ? scale2_raw : 0.0f;
-            float scale3 = std::isfinite(scale3_raw) ? scale3_raw : 0.0f;
-            float scale4 = std::isfinite(scale4_raw) ? scale4_raw : 0.0f;
-            
-            // Dequantize and store
-            y[l +  0] = scale1 * static_cast<float>(q1);
-            y[l + 32] = scale2 * static_cast<float>(q2);
-            y[l + 64] = scale3 * static_cast<float>(q3);
-            y[l + 96] = scale4 * static_cast<float>(q4);
-        }
-        // Advance pointers for the next 128-element chunk
-        y  += 128;
-        ql += 64;
-        qh += 32;
-        sc += 8;
+    // --- ADDED: Logging ---
+    static std::atomic<int> log_count_q6 = 0;
+    if (log_this_block && log_count_q6 < 5) { // Log first 5 blocks only
+        log_count_q6++;
+        std::cout << "[DEBUG] Dequant Q6_K Block #" << log_count_q6.load() << ":" << std::endl;
+        std::cout << "  Super Scale (d): " << d << " (raw FP16: 0x" << std::hex << qblock->d << std::dec << ")" << std::endl;
+        std::cout << "  Scales (16 bytes, int8): ";
+        for(int i=0; i<16; ++i) std::cout << (int)scales[i] << " ";
+        std::cout << std::endl;
+        std::cout << "  QL (first 16/128 bytes): ";
+        for(int i=0; i<16; ++i) std::cout << std::hex << (int)ql[i] << " ";
+        std::cout << std::dec << "..." << std::endl;
+         std::cout << "  QH (first 16/64 bytes): ";
+        for(int i=0; i<16; ++i) std::cout << std::hex << (int)qh[i] << " ";
+        std::cout << std::dec << "..." << std::endl;
     }
+    // --- END ADDED: Logging ---
+
+
+    // Process 16 sub-blocks (16 values each)
+    for (int i = 0; i < GGML_QK_K / 16; ++i) { // i = 0..15 (sub-block index)
+        const float scale = static_cast<float>(scales[i]); // Get the int8 scale for this sub-block
+        float* __restrict y = output + i * 16;          // Output pointer for this sub-block
+
+        // Dequantize 16 values for this sub-block
+        for (int l = 0; l < 16; ++l) {
+            // Lower 4 bits from ql
+            uint8_t q_low = ql[i * 16 + l] & 0x0F;
+
+            // Higher 2 bits from qh (packed - 4 sets of 2 bits per byte)
+            int byte_idx_qh = l / 4;        // Which byte in qh (0..3 for this sub-block)
+            int shift_qh = (l % 4) * 2;   // Which 2 bits (0, 2, 4, 6)
+            uint8_t q_high = (qh[i * 4 + byte_idx_qh] >> shift_qh) & 0x03;
+
+            // Combine to form 6-bit quantized value
+            int quantized_val = q_low | (q_high << 4);
+
+            // Dequantize: need to subtract 32 to center around 0
+            float val = d * scale * (static_cast<float>(quantized_val) - 32.0f);
+            y[l] = val;
+        }
+    }
+    // --- ADDED: Logging Output ---
+    if (log_this_block && log_count_q6 <= 5) {
+        std::cout << "  Output FP32 (first 16/256): ";
+        for(int i=0; i<16; ++i) std::cout << output[i] << " ";
+        std::cout << "..." << std::endl;
+    }
+    // --- END ADDED: Logging ---
 }
 
 // --- Handling for I8 (Integer 8-bit) ---

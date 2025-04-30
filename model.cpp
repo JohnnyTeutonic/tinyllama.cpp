@@ -37,13 +37,15 @@
 static void matvec_q6k_f32_vector_cpu(const std::vector<block_q6_K>& mat_q6k,
                                   const std::vector<float>& vec_f32,
                                   std::vector<float>& out_f32,
-                                  int rows, int cols);
+                                  int rows, int cols,
+                                  bool log_first_block = false);
 
 // Forward declaration for Q4K matvec helper
 static void matvec_q4k_f32_vector_cpu(const std::vector<block_q4_K>& mat_q4k,
                                   const std::vector<float>& vec_f32,
                                   std::vector<float>& out_f32,
-                                  int rows, int cols);
+                                  int rows, int cols,
+                                  bool log_first_block = false);
 
 // Forward declaration for float32_to_bfloat16 helper
 inline uint16_t float32_to_bfloat16(float val);
@@ -67,10 +69,12 @@ inline uint16_t float32_to_bfloat16(float val) {
 // --- START: Implementation for matvec_q6k_f32_vector_cpu ---
 // Perform matrix-vector multiplication: out = mat * vec
 // mat: Q6_K format (vector of blocks), vec: FP32, out: FP32
+// MODIFIED: Added log_first_block parameter
 static void matvec_q6k_f32_vector_cpu(const std::vector<block_q6_K>& mat_q6k,
                                   const std::vector<float>& vec_f32,
                                   std::vector<float>& out_f32,
-                                  int rows, int cols) {
+                                  int rows, int cols,
+                                  bool log_first_block) { // REMOVED: Default = false
     if (cols % GGML_QK_K != 0) {
         throw std::runtime_error("matvec_q6k_f32_vector_cpu: cols (" + std::to_string(cols) + ") must be divisible by GGML_QK_K (" + std::to_string(GGML_QK_K) + ")");
     }
@@ -96,7 +100,10 @@ static void matvec_q6k_f32_vector_cpu(const std::vector<block_q6_K>& mat_q6k,
         for (size_t block_col_idx = 0; block_col_idx < num_blocks_per_row; ++block_col_idx) {
             // Dequantize the current block
             const block_q6_K* qblock = &mat_q6k[block_row_offset + block_col_idx];
-            dequantize_q6_k(qblock, dequantized_block, GGML_QK_K); // Dequantize into the thread-local buffer (FIXED: Added GGML_QK_K)
+            // --- MODIFIED: Enable logging for the very first block (row 0, col 0) if requested --- 
+            bool enable_dequant_log = log_first_block && (r == 0 && block_col_idx == 0);
+            dequantize_q6_k(qblock, dequantized_block, GGML_QK_K, enable_dequant_log);
+            // --- END MODIFICATION ---
 
             // Calculate dot product for this block
             size_t vec_offset = block_col_idx * GGML_QK_K;
@@ -117,10 +124,12 @@ static void matvec_q6k_f32_vector_cpu(const std::vector<block_q6_K>& mat_q6k,
 // --- START: Implementation for matvec_q4k_f32_vector_cpu ---
 // Perform matrix-vector multiplication: out = mat * vec
 // mat: Q4_K format (vector of blocks), vec: FP32, out: FP32
+// MODIFIED: Added log_first_block parameter
 static void matvec_q4k_f32_vector_cpu(const std::vector<block_q4_K>& mat_q4k,
                                   const std::vector<float>& vec_f32,
                                   std::vector<float>& out_f32,
-                                  int rows, int cols) {
+                                  int rows, int cols,
+                                  bool log_first_block) { // REMOVED: Default = false
     if (cols % GGML_QK_K != 0) {
         throw std::runtime_error("matvec_q4k_f32_vector_cpu: cols (" + std::to_string(cols) + ") must be divisible by GGML_QK_K (" + std::to_string(GGML_QK_K) + ")");
     }
@@ -146,9 +155,9 @@ static void matvec_q4k_f32_vector_cpu(const std::vector<block_q4_K>& mat_q4k,
         for (size_t block_col_idx = 0; block_col_idx < num_blocks_per_row; ++block_col_idx) {
             // Dequantize the current block
             const block_q4_K* qblock = &mat_q4k[block_row_offset + block_col_idx];
-            // --- MODIFIED: Enable logging for the first block --- 
-            // bool enable_dequant_log = (block_col_idx == 0); // REMOVED
-            dequantize_q4_k_m(qblock, dequantized_block, GGML_QK_K); // Dequantize // REMOVED Log Flag arg
+            // --- MODIFIED: Enable logging for the very first block (row 0, col 0) if requested --- 
+            bool enable_dequant_log = log_first_block && (r == 0 && block_col_idx == 0);
+            dequantize_q4_k_m(qblock, dequantized_block, GGML_QK_K, enable_dequant_log);
             // --- END MODIFICATION ---
 
             // Calculate dot product for this block
@@ -1261,7 +1270,12 @@ std::vector<float> TinyLlamaModel::lookup_embedding(int token_id) {
         throw std::runtime_error("Q6_K embedding lookup NYI");
     } else if (!embed_tokens_q4k.empty()) {
         // --- START: Implement Q4_K Lookup --- 
-        Logger::info("Using Q4_K embedding table for token: " + std::to_string(token_id));
+        // --- ADDED: Logging around Q4_K embedding --- 
+        bool log_initial = (token_id < 5); // Log first few tokens
+        if (log_initial) {
+             Logger::info("[CPU_EMBED] Using Q4_K embedding table for token: " + std::to_string(token_id));
+        }
+        // --- END: Logging --- 
         if (hs % GGML_QK_K != 0) {
             throw std::runtime_error("Hidden size (" + std::to_string(hs) + ") must be divisible by GGML_QK_K (" + std::to_string(GGML_QK_K) + ") for Q4_K embedding lookup.");
         }
@@ -1279,8 +1293,8 @@ std::vector<float> TinyLlamaModel::lookup_embedding(int token_id) {
         for (size_t block_idx = 0; block_idx < num_blocks_per_row; ++block_idx) {
             const block_q4_K* qblock = &embed_tokens_q4k[start_block_index + block_idx];
             // --- MODIFIED: Enable logging for the first block --- 
-            bool enable_dequant_log = (block_idx == 0); 
-            dequantize_q4_k_m(qblock, dequantized_block, GGML_QK_K, enable_dequant_log); // Dequantize // ADDED Log Flag arg back
+            bool enable_dequant_log = (block_idx == 0 && log_initial); 
+            dequantize_q4_k_m(qblock, dequantized_block, GGML_QK_K, enable_dequant_log);
             // --- END MODIFICATION ---
             
             // Copy dequantized floats into the output vector
@@ -1288,12 +1302,13 @@ std::vector<float> TinyLlamaModel::lookup_embedding(int token_id) {
             if (output_offset + GGML_QK_K > embedding_vec.size()) {
                  throw std::runtime_error("Internal error: Output offset exceeds embedding vector size during Q4_K dequantization.");
             }
-            // --- REMOVED Logging around memcpy ---
-            // if (enable_dequant_log) { ... log BEFORE ... }
             std::memcpy(&embedding_vec[output_offset], dequantized_block, GGML_QK_K * sizeof(float));
-            // if (enable_dequant_log) { ... log AFTER ... }
-            // --- END REMOVED ---
         }
+        // --- ADDED: Logging after Q4_K embedding --- 
+        if (log_initial) {
+            log_vector_summary("[CPU_EMBED] Output Embedding (Token " + std::to_string(token_id) + ")", embedding_vec);
+        }
+        // --- END: Logging ---
         // --- END: Implement Q4_K Lookup --- 
     } else {
         Logger::error("No valid embedding table found (F32, BF16, Q6K, Q4K) for token: " + std::to_string(token_id));
@@ -1306,7 +1321,8 @@ std::vector<float> TinyLlamaModel::lookup_embedding(int token_id) {
 
 // --- Forward Pass (CPU Implementation Only) --- 
 // Renamed helper calls to use _cpu suffix
-std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, KVCache* cache, const std::vector<int>* attention_mask) {
+std::vector<float> TinyLlamaModel::forward(std::vector<float>& input, int n_tokens, KVCache* kv_cache, const std::vector<int>* input_ids) {
+    bool log_initial = true; // Set to false to disable initial layer logging
     // Config dimensions
     int hs = config_.hidden_size;
     int is = config_.intermediate_size;
@@ -1319,17 +1335,22 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, K
     float eps = config_.rms_norm_eps;
 
     // --- Basic Input Validation ---
-    bool log_initial = (pos == 0);
-    if (pos >= max_seq_len) {
+    bool log_this_step = (n_tokens < 2); // Log first few positions
+    if (log_this_step) {
+        Logger::info("[CPU_FWD] forward called. n_tokens=" + std::to_string(n_tokens));
+        log_vector_summary("[CPU_FWD] Input input (n_tokens=" + std::to_string(n_tokens) + ")", input);
+    }
+
+    if (n_tokens >= max_seq_len) {
         Logger::error("Position index exceeds max_position_embeddings");
         return std::vector<float>(vs, 0.0f); 
     }
-    if (!cache) {
+    if (!kv_cache) {
         Logger::error("KVCache is required for token-by-token forward pass");
         return std::vector<float>(vs, 0.0f);
     }
-    if (x_vec.size() != hs) {
-        Logger::error("Input vector x_vec has incorrect size. Expected " + std::to_string(hs) + ", got " + std::to_string(x_vec.size()));
+    if (input.size() != hs) {
+        Logger::error("Input vector input has incorrect size. Expected " + std::to_string(hs) + ", got " + std::to_string(input.size()));
         return std::vector<float>(vs, 0.0f);
     }
 
@@ -1352,25 +1373,36 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, K
 
     // --- Layer Loop (CPU Path) ---
     for (int l = 0; l < nhl; ++l) {
-        // --- REMOVED Layer 0 Logging ---
-        // if (l == 0 && log_initial) { ... }
+        bool log_this_layer = log_this_step && (l == 0); // Log only first layer of first few steps
+        if (log_this_layer) {
+            Logger::info("[CPU_FWD] ------ START Layer " + std::to_string(l) + " (pos=" + std::to_string(n_tokens) + ") ------");
+        }
 
         const auto& lw = layers[l];
-        std::vector<float> x_resid1_vec = x_vec; // Residual 1
+        std::vector<float> x_resid1_vec = input; // Residual 1
 
         // RMSNorm 1
         // Use F32 norm weights if available, otherwise convert BF16
         const std::vector<float>& w_norm1_vec = lw.input_layernorm_f32.empty() ? bf16vec_to_float_vec(lw.input_layernorm) : lw.input_layernorm_f32;
-        rmsnorm_vector_cpu(x_vec, w_norm1_vec, x_norm_vec1, eps);
+        rmsnorm_vector_cpu(input, w_norm1_vec, x_norm_vec1, eps);
+        if (log_this_layer) log_vector_summary("[CPU_FWD L" + std::to_string(l) + "] RMSNorm1 Out (x_norm_vec1)", x_norm_vec1);
 
         // Q, K, V projections - Use correct type based on loaded weights
+        bool log_matvec_dequant = log_this_layer; // Log dequant for first block if logging this layer
         // Q
         if (!lw.q_proj_q6k.empty()) {
-            matvec_q6k_f32_vector_cpu(lw.q_proj_q6k, x_norm_vec1, q_vec, hs, hs);
+            if (log_this_layer) Logger::info("[CPU_FWD L" + std::to_string(l) + "] MatVec: Q_Proj (Q6_K)");
+            if (log_this_layer) log_vector_summary("  Input (x_norm_vec1)", x_norm_vec1);
+            matvec_q6k_f32_vector_cpu(lw.q_proj_q6k, x_norm_vec1, q_vec, hs, hs, log_matvec_dequant);
+            if (log_this_layer) log_vector_summary("  Output (q_vec)", q_vec);
         } else if (!lw.q_proj_q4k.empty()) {
-            matvec_q4k_f32_vector_cpu(lw.q_proj_q4k, x_norm_vec1, q_vec, hs, hs);
+             if (log_this_layer) Logger::info("[CPU_FWD L" + std::to_string(l) + "] MatVec: Q_Proj (Q4_K)");
+             if (log_this_layer) log_vector_summary("  Input (x_norm_vec1)", x_norm_vec1);
+             matvec_q4k_f32_vector_cpu(lw.q_proj_q4k, x_norm_vec1, q_vec, hs, hs, log_matvec_dequant);
+             if (log_this_layer) log_vector_summary("  Output (q_vec)", q_vec);
         } else if (!lw.q_proj_f32.empty()) {
              // TODO: Implement F32 matvec if needed, for now convert F32->BF16 ON THE FLY (INEFFICIENT)
+             if (log_this_layer) Logger::warning("[CPU_FWD L" + std::to_string(l) + "] MatVec: Q_Proj (F32->BF16 - Inefficient)");
              std::vector<uint16_t> temp_bf16(lw.q_proj_f32.size()); for(size_t i=0; i<lw.q_proj_f32.size(); ++i) temp_bf16[i] = float32_to_bfloat16(lw.q_proj_f32[i]);
              matvec_bf16_f32_vector_cpu(temp_bf16, x_norm_vec1, q_vec, hs, hs);
         } else if (!lw.q_proj.empty()) { // Fallback BF16
@@ -1393,26 +1425,36 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, K
             throw std::runtime_error("Layer " + std::to_string(l) + ": No valid K projection weights found!");
         }
         // V
+        // +++ START V-PROJ LOGGING +++
+        if (log_this_layer) {
+            log_vector_summary("  [V-Proj L0] Input (x_norm_vec1)", x_norm_vec1);
+        }
+        // +++ END V-PROJ LOGGING +++
         if (!lw.v_proj_q6k.empty()) {
-             matvec_q6k_f32_vector_cpu(lw.v_proj_q6k, x_norm_vec1, v_vec, n_kv_heads * head_dim, hs);
+             matvec_q6k_f32_vector_cpu(lw.v_proj_q6k, x_norm_vec1, v_vec, n_kv_heads * head_dim, hs, log_matvec_dequant); // Pass log flag
         } else if (!lw.v_proj_q4k.empty()) {
-             matvec_q4k_f32_vector_cpu(lw.v_proj_q4k, x_norm_vec1, v_vec, n_kv_heads * head_dim, hs);
+             matvec_q4k_f32_vector_cpu(lw.v_proj_q4k, x_norm_vec1, v_vec, n_kv_heads * head_dim, hs, log_matvec_dequant); // Pass log flag
         } else if (!lw.v_proj_f32.empty()) {
              // TODO: Implement F32 matvec if needed, for now convert F32->BF16 ON THE FLY (INEFFICIENT)
              std::vector<uint16_t> temp_bf16(lw.v_proj_f32.size()); for(size_t i=0; i<lw.v_proj_f32.size(); ++i) temp_bf16[i] = float32_to_bfloat16(lw.v_proj_f32[i]);
-             matvec_bf16_f32_vector_cpu(temp_bf16, x_norm_vec1, v_vec, n_kv_heads * head_dim, hs);
+             matvec_bf16_f32_vector_cpu(temp_bf16, x_norm_vec1, v_vec, n_kv_heads * head_dim, hs); // No log flag here yet
         } else if (!lw.v_proj.empty()) { // Fallback BF16
-             matvec_bf16_f32_vector_cpu(lw.v_proj, x_norm_vec1, v_vec, n_kv_heads * head_dim, hs);
+             matvec_bf16_f32_vector_cpu(lw.v_proj, x_norm_vec1, v_vec, n_kv_heads * head_dim, hs); // No log flag here yet
         } else {
             throw std::runtime_error("Layer " + std::to_string(l) + ": No valid V projection weights found!");
         }
+        // +++ START V-PROJ LOGGING +++
+        if (log_this_layer) {
+            log_vector_summary("  [V-Proj L0] Output (v_vec)", v_vec);
+        }
+        // +++ END V-PROJ LOGGING +++
 
         // RoPE 
-        size_t freqs_offset = (pos * head_dim / 2);
+        size_t freqs_offset = (n_tokens * head_dim / 2);
         std::vector<std::pair<float, float>> current_freqs_cis(precomputed_freqs_cis_.begin() + freqs_offset, 
                                                                precomputed_freqs_cis_.begin() + freqs_offset + head_dim / 2);
-        apply_rope_vector(q_vec, n_heads, head_dim, pos, current_freqs_cis);
-        apply_rope_vector(k_vec, n_kv_heads, head_dim, pos, current_freqs_cis);
+        apply_rope_vector(q_vec, n_heads, head_dim, n_tokens, current_freqs_cis);
+        apply_rope_vector(k_vec, n_kv_heads, head_dim, n_tokens, current_freqs_cis);
         
         // KVCache Update (CPU uses host vectors)
         float* k_current_ptr = k_vec.data(); 
@@ -1420,44 +1462,71 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, K
         for (int kvh = 0; kvh < n_kv_heads; ++kvh) {
              size_t current_k_offset = (size_t)kvh * head_dim;
              size_t current_v_offset = (size_t)kvh * head_dim;
-             size_t write_offset = pos * n_kv_heads * head_dim + kvh * head_dim;
-             if (write_offset + head_dim <= cache->layers[l].k.size()) {
-                 std::memcpy(&cache->layers[l].k[write_offset], k_current_ptr + current_k_offset, head_dim * sizeof(float));
-                 std::memcpy(&cache->layers[l].v[write_offset], v_current_ptr + current_v_offset, head_dim * sizeof(float));
+             size_t write_offset = n_tokens * n_kv_heads * head_dim + kvh * head_dim;
+             if (write_offset + head_dim <= kv_cache->layers[l].k.size()) {
+                 std::memcpy(&kv_cache->layers[l].k[write_offset], k_current_ptr + current_k_offset, head_dim * sizeof(float));
+                 std::memcpy(&kv_cache->layers[l].v[write_offset], v_current_ptr + current_v_offset, head_dim * sizeof(float));
         } else {
-                 Logger::error("KVCache write out of bounds: layer=" + std::to_string(l) + ", pos=" + std::to_string(pos) + ", kv_head=" + std::to_string(kvh));
+                 Logger::error("KVCache write out of bounds: layer=" + std::to_string(l) + ", pos=" + std::to_string(n_tokens) + ", kv_head=" + std::to_string(kvh));
              }
          }
 
         // Attention 
         std::fill(attn_out_vec.begin(), attn_out_vec.end(), 0.0f); 
-        int current_seq_len = pos + 1;
+        int current_seq_len = n_tokens + 1;
         float scale = 1.0f / std::sqrt(head_dim);
         for (int h = 0; h < n_heads; ++h) {
             std::vector<float> q_head_rope_vec(q_vec.begin() + h * head_dim, q_vec.begin() + (h + 1) * head_dim);
             int kv_head_idx = h / (n_heads / n_kv_heads);
             std::vector<float> k_cache_head_vec(current_seq_len * head_dim); 
             std::vector<float> v_cache_head_vec(current_seq_len * head_dim); 
+            // +++ START ATTENTION LOGGING (Layer 0, Head 0, Pos 0/1) +++
+            bool log_attn_details = log_this_layer && (h == 0); // Log only first head of first layer
+            if (log_attn_details) {
+                log_vector_summary("  [Attn L0H0] Q Head Rope Vec", q_head_rope_vec);
+            }
+            // +++ END ATTENTION LOGGING +++
             for (int j = 0; j < current_seq_len; ++j) {
                 size_t cache_pos_offset = j * n_kv_heads * head_dim + kv_head_idx * head_dim;
-                if (cache_pos_offset + head_dim <= cache->layers[l].k.size()) {
-                    std::memcpy(k_cache_head_vec.data() + j * head_dim, &cache->layers[l].k[cache_pos_offset], head_dim * sizeof(float));
-                    std::memcpy(v_cache_head_vec.data() + j * head_dim, &cache->layers[l].v[cache_pos_offset], head_dim * sizeof(float));
+                if (cache_pos_offset + head_dim <= kv_cache->layers[l].k.size()) {
+                    std::memcpy(k_cache_head_vec.data() + j * head_dim, &kv_cache->layers[l].k[cache_pos_offset], head_dim * sizeof(float));
+                    std::memcpy(v_cache_head_vec.data() + j * head_dim, &kv_cache->layers[l].v[cache_pos_offset], head_dim * sizeof(float));
         } else {
                     std::fill(k_cache_head_vec.begin() + j * head_dim, k_cache_head_vec.begin() + (j + 1) * head_dim, 0.0f);
                     std::fill(v_cache_head_vec.begin() + j * head_dim, v_cache_head_vec.begin() + (j + 1) * head_dim, 0.0f);
                     Logger::error("Attention K/V access out of bounds: cache_pos_offset=" + std::to_string(cache_pos_offset));
                 }
             }
+            // +++ START ATTENTION LOGGING (Layer 0, Head 0, Pos 0/1) +++
+            if (log_attn_details) {
+                log_vector_summary("  [Attn L0H0] K Cache Head Vec (SeqLen=" + std::to_string(current_seq_len) + ")", k_cache_head_vec);
+                log_vector_summary("  [Attn L0H0] V Cache Head Vec (SeqLen=" + std::to_string(current_seq_len) + ")", v_cache_head_vec);
+            }
+            // +++ END ATTENTION LOGGING +++
             std::vector<float> scores_vec(current_seq_len);
             calculate_attention_scores(q_head_rope_vec, k_cache_head_vec, scores_vec, current_seq_len, head_dim, scale);
+            // +++ START ATTENTION LOGGING (Layer 0, Head 0, Pos 0/1) +++
+            if (log_attn_details) {
+                log_vector_summary("  [Attn L0H0] Scores Vec (Before Softmax)", scores_vec);
+            }
+            // +++ END ATTENTION LOGGING +++
             std::vector<float> probs_vec(current_seq_len);
             softmax_vector_cpu(scores_vec, probs_vec);
+            // +++ START ATTENTION LOGGING (Layer 0, Head 0, Pos 0/1) +++
+            if (log_attn_details) {
+                log_vector_summary("  [Attn L0H0] Probs Vec (After Softmax)", probs_vec);
+            }
+            // +++ END ATTENTION LOGGING +++
             std::vector<float> head_attn_out_vec(head_dim);
             weighted_sum_probs_v(probs_vec, v_cache_head_vec, head_attn_out_vec, current_seq_len, head_dim);
+            // +++ START ATTENTION LOGGING (Layer 0, Head 0, Pos 0/1) +++
+            if (log_attn_details) {
+                log_vector_summary("  [Attn L0H0] Head Attn Out Vec", head_attn_out_vec);
+            }
+            // +++ END ATTENTION LOGGING +++
             size_t out_offset = h * head_dim;
             for(int i=0; i<head_dim; ++i) {
-                attn_out_vec[out_offset + i] += head_attn_out_vec[i];
+                attn_out_vec[out_offset + i] += head_attn_out_vec[i]; // Note: += here, potential issue if not zeroed?
             }
         }
         // O Projection - Use correct type based on loaded weights
@@ -1483,20 +1552,20 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, K
 
         #pragma omp parallel for
         for(size_t i=0; i<hs; ++i) {
-            x_vec[i] = x_resid1_vec[i] + attn_proj_vec[i]; 
+            input[i] = x_resid1_vec[i] + attn_proj_vec[i]; 
         }
 
         // +++ START LAYER 0 LOGGING +++
         if (l == 0 && log_initial) {
-            log_vector_summary("Layer 0 After Attn Residual (x_vec)", x_vec);
+            log_vector_summary("Layer 0 After Attn Residual (input)", input); // FIX: Use input instead of x_vec
         }
         // +++ END LAYER 0 LOGGING +++
         
         // --- MLP Block --- 
-        std::vector<float> x_resid2_vec = x_vec; 
+        std::vector<float> x_resid2_vec = input; // FIX: Use input instead of x_vec
         // Post-attention RMSNorm
         const std::vector<float>& w_norm2_vec = lw.post_attention_layernorm_f32.empty() ? bf16vec_to_float_vec(lw.post_attention_layernorm) : lw.post_attention_layernorm_f32;
-        rmsnorm_vector_cpu(x_vec, w_norm2_vec, x_norm_vec2, eps);
+        rmsnorm_vector_cpu(input, w_norm2_vec, x_norm_vec2, eps);
         // Gate & Up Projections - Use correct type based on loaded weights
         // Gate
         if (!lw.gate_proj_q6k.empty()) {
@@ -1552,7 +1621,7 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, K
         // Add residual 2
         #pragma omp parallel for
         for(size_t i=0; i<hs; ++i) {
-            x_vec[i] = x_resid2_vec[i] + mlp_out_vec[i]; 
+            input[i] = x_resid2_vec[i] + mlp_out_vec[i]; 
         }
 
         // +++ START LAYER 0 LOGGING +++
@@ -1563,17 +1632,20 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, K
 
         // +++ START LAYER 0 LOGGING +++
         if (l == 0 && log_initial) {
-            log_vector_summary("Layer 0 End (After MLP Residual) (x_vec)", x_vec);
+            log_vector_summary("Layer 0 End (After MLP Residual) (input)", input); // FIX: Use input instead of x_vec
         }
         // +++ END LAYER 0 LOGGING +++
 
+        if (log_this_layer) {
+             Logger::info("[CPU_FWD] ------ END Layer " + std::to_string(l) + " (pos=" + std::to_string(n_tokens) + ") ------");
+        }
     } // End layer loop
 
     // --- Final Steps (Outside Layer Loop) ---
     // Final RMSNorm
     const std::vector<float>& w_final_norm_vec = final_norm_f32.empty() ? bf16vec_to_float_vec(final_norm) : final_norm_f32;
     std::vector<float> x_final_norm_vec(hs);
-    rmsnorm_vector_cpu(x_vec, w_final_norm_vec, x_final_norm_vec, eps);
+    rmsnorm_vector_cpu(input, w_final_norm_vec, x_final_norm_vec, eps);
     if (log_initial) { 
         log_vector_summary("Output of Final CPU RMSNorm (P0)", x_final_norm_vec); // Updated log msg
     }
@@ -1606,6 +1678,9 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, K
     if (log_initial) {
         log_vector_summary("Final Logits (P0, CPU Path)", logits, 10); // Updated log msg
     }
+    if (log_this_step) {
+        Logger::info("[CPU_FWD] forward complete. pos=" + std::to_string(n_tokens));
+    }
     return logits;
 
 } // End of forward function
@@ -1618,7 +1693,7 @@ int TinyLlamaModel::get_vocab_size() const {
 // --- Forward Pass (Device Implementation) --- 
 // Restore the #ifdef HAS_CUDA guard around the entire function definition
 #ifdef HAS_CUDA
-std::vector<float> TinyLlamaModel::forward_device(int token_id, int pos, KVCache* cache, const std::vector<int>* attention_mask, cudaStream_t stream) {
+std::vector<float> TinyLlamaModel::forward_device(int token_id, int pos, KVCache* kv_cache, const std::vector<int>* attention_mask, cudaStream_t stream) {
     // Logger::info("[CUDA] forward_device called for token: " + std::to_string(token_id) + " pos: " + std::to_string(pos));
     int hs = config_.hidden_size;
     int vs = config_.vocab_size; // Use member vs here
@@ -1776,30 +1851,30 @@ std::vector<float> TinyLlamaModel::forward_device(int token_id, int pos, KVCache
             const float* current_v_head_ptr = v_dev_ + kvh * head_dim;
 
             update_kv_cache_cuda(
-                cache->layers[l].k_dev,
+                kv_cache->layers[l].k_dev,
                 current_k_head_ptr,
                 pos, kvh,
-                cache->allocated_max_seq_len,
-                cache->allocated_num_kv_heads,
-                cache->allocated_head_dim,
+                kv_cache->allocated_max_seq_len,
+                kv_cache->allocated_num_kv_heads,
+                kv_cache->allocated_head_dim,
                 stream);
 
             update_kv_cache_cuda(
-                cache->layers[l].v_dev,
+                kv_cache->layers[l].v_dev,
                 current_v_head_ptr,
                 pos, kvh,
-                cache->allocated_max_seq_len,
-                cache->allocated_num_kv_heads,
-                cache->allocated_head_dim,
+                kv_cache->allocated_max_seq_len,
+                kv_cache->allocated_num_kv_heads,
+                kv_cache->allocated_head_dim,
                 stream);
         }
 
         // Attention
         float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
-         attention_cuda(q_dev_, cache->layers[l].k_dev, cache->layers[l].v_dev, attn_out_dev_,
+         attention_cuda(q_dev_, kv_cache->layers[l].k_dev, kv_cache->layers[l].v_dev, attn_out_dev_,
                         n_heads, pos + 1, head_dim, scale,
-                        cache->allocated_max_seq_len,
-                        cache->allocated_num_kv_heads,
+                        kv_cache->allocated_max_seq_len,
+                        kv_cache->allocated_num_kv_heads,
                         stream);
 
         // Attention Output Projection
