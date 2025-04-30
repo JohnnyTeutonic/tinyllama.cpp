@@ -1575,16 +1575,23 @@ int TinyLlamaModel::get_vocab_size() const {
 std::vector<float> TinyLlamaModel::forward_device(int token_id, int pos, KVCache* cache, const std::vector<int>* attention_mask, cudaStream_t stream) {
     // Logger::info("[CUDA] forward_device called for token: " + std::to_string(token_id) + " pos: " + std::to_string(pos));
     int hs = config_.hidden_size;
-    int vs = config_.vocab_size;
+    int vs = config_.vocab_size; // Use member vs here
     int n_heads = config_.num_attention_heads;
     int n_kv_heads = config_.num_key_value_heads;
-    int head_dim = hs / n_heads;
+    // --- FIX: Calculate head_dim instead of accessing non-existent member ---
+    // (Keep this fix from previous step, as it's likely correct)
+    if (n_heads == 0) { // Avoid division by zero
+        Logger::fatal("Number of attention heads is zero during forward_device.");
+        throw std::runtime_error("Division by zero: n_heads is zero.");
+    }
+    int head_dim = hs / n_heads; // Calculate head_dim
+    // --- END FIX ---
     int nhl = config_.num_hidden_layers;
     int is = config_.intermediate_size;
     float eps = config_.rms_norm_eps;
     int max_seq_len = config_.max_position_embeddings; // Added for cache size
 
-    // --- Device Memory Allocation --- 
+    // --- Device Memory Allocation ---
     float* x_dev = nullptr;
     float* x_norm_dev = nullptr;
     float* x_resid1_dev = nullptr;
@@ -1597,16 +1604,16 @@ std::vector<float> TinyLlamaModel::forward_device(int token_id, int pos, KVCache
     float* gate_vec_dev = nullptr;
     float* up_vec_dev = nullptr;
     float* swiglu_vec_dev = nullptr;
-    float* mlp_out_dev = nullptr;
+    float* mlp_down_dev = nullptr; // Match .back name
     float* logits_dev = nullptr;
     float* freqs_dev = nullptr; // For RoPE frequencies
 
-    // --- Set cuBLAS Stream --- 
+    // --- Set cuBLAS Stream ---
     cublasStatus_t stream_status = cublasSetStream(cublas_handle_, stream);
     if (stream_status != CUBLAS_STATUS_SUCCESS) {
         Logger::error("cublasSetStream failed in forward_device");
         // Handle error, maybe throw or return empty vector
-        return {}; 
+        return {};
     }
 
     // Allocate device buffers using async allocation on the specified stream
@@ -1618,25 +1625,56 @@ std::vector<float> TinyLlamaModel::forward_device(int token_id, int pos, KVCache
     gpuErrchk(cudaMallocAsync(&k_dev, n_kv_heads * head_dim * sizeof(float), stream));
     gpuErrchk(cudaMallocAsync(&v_dev, n_kv_heads * head_dim * sizeof(float), stream));
     gpuErrchk(cudaMallocAsync(&attn_out_dev, hs * sizeof(float), stream));
-    // gpuErrchk(cudaMallocAsync(&attn_proj_dev, hs * sizeof(float), stream)); // Use add_residual directly writing to x_dev
+    gpuErrchk(cudaMallocAsync(&attn_proj_dev, hs * sizeof(float), stream)); // Allocate outside loop like .back
     gpuErrchk(cudaMallocAsync(&gate_vec_dev, is * sizeof(float), stream));
     gpuErrchk(cudaMallocAsync(&up_vec_dev, is * sizeof(float), stream));
     gpuErrchk(cudaMallocAsync(&swiglu_vec_dev, is * sizeof(float), stream));
-    // gpuErrchk(cudaMallocAsync(&mlp_out_dev, hs * sizeof(float), stream)); // Use add_residual directly writing to x_dev
+    gpuErrchk(cudaMallocAsync(&mlp_down_dev, hs * sizeof(float), stream)); // Allocate outside loop like .back
     gpuErrchk(cudaMallocAsync(&logits_dev, vs * sizeof(float), stream));
 
-    // --- Initial Embedding Lookup & Copy --- 
-    lookup_embedding_bf16_f32_cuda(
-        token_embedding_table_dev_, // Use persistent device pointer
-        x_dev,                      // Destination: FP32 state vector on GPU
-        token_id,
-        hs,
-        vs                          // <-- PASS vocab_size
-        , stream                    // Pass stream
-    );
+    // --- Initial Embedding: Use CUDA kernel --- START MODIFICATION ---
+    // Determine which embedding table to use (prioritize FP32 if available on GPU)
+    const void* embed_table_dev_ptr = nullptr;
+    bool is_bf16_embedding = false;
+    if (token_embedding_table_f32_dev_) {
+        embed_table_dev_ptr = token_embedding_table_f32_dev_;
+        is_bf16_embedding = false;
+        // Logger::info("Using FP32 embedding table on GPU."); // Optional Log
+    } else if (token_embedding_table_dev_) {
+        embed_table_dev_ptr = token_embedding_table_dev_;
+        is_bf16_embedding = true;
+        // Logger::info("Using BF16 embedding table on GPU."); // Optional Log
+    } else {
+        Logger::error("No embedding table found on GPU (FP32 or BF16) in forward_device.");
+        // Handle error: Free allocated memory and return empty vector
+        gpuErrchk(cudaFreeAsync(x_dev, stream)); // Free using async with the stream
+        gpuErrchk(cudaFreeAsync(x_norm_dev, stream));
+        gpuErrchk(cudaFreeAsync(x_resid1_dev, stream));
+        gpuErrchk(cudaFreeAsync(x_resid2_dev, stream));
+        gpuErrchk(cudaFreeAsync(q_dev, stream));
+        gpuErrchk(cudaFreeAsync(k_dev, stream));
+        gpuErrchk(cudaFreeAsync(v_dev, stream));
+        gpuErrchk(cudaFreeAsync(attn_out_dev, stream));
+        gpuErrchk(cudaFreeAsync(attn_proj_dev, stream));
+        gpuErrchk(cudaFreeAsync(gate_vec_dev, stream));
+        gpuErrchk(cudaFreeAsync(up_vec_dev, stream));
+        gpuErrchk(cudaFreeAsync(swiglu_vec_dev, stream));
+        gpuErrchk(cudaFreeAsync(mlp_down_dev, stream));
+        gpuErrchk(cudaFreeAsync(logits_dev, stream));
+        gpuErrchk(cudaStreamSynchronize(stream)); // Wait for frees to complete
+        return {}; // Return empty vector on error
+    }
 
-    // --- Layer Loop --- 
+    // Launch the kernel to perform embedding lookup directly into x_dev
+    lookup_embedding_cuda(embed_table_dev_ptr, x_dev, token_id, hs, vs, is_bf16_embedding, stream);
+    // REMOVED: std::vector<float> x_vec = lookup_embedding(token_id); // Perform lookup on host first
+    // REMOVED: gpuErrchk(cudaMemcpyAsync(x_dev, x_vec.data(), hs * sizeof(float), cudaMemcpyHostToDevice, stream)); // Use async copy
+    // --- Initial Embedding: Use CUDA kernel --- END MODIFICATION ---
+
+
+    // --- Layer Loop ---
     for (int l = 0; l < nhl; ++l) {
+        const auto& lw = layers[l]; // Need layer weights reference
         // Layer weights device pointers (calculated offsets into persistent buffers)
         size_t layer_q_size    = (size_t)hs * hs;
         size_t layer_k_size    = (size_t)n_kv_heads * head_dim * hs; // kv_dim * hs
@@ -1646,136 +1684,147 @@ std::vector<float> TinyLlamaModel::forward_device(int token_id, int pos, KVCache
         size_t layer_up_size   = (size_t)is * hs;
         size_t layer_down_size = (size_t)hs * is;
 
-        // BF16 Pointers (Keep for reference? Or remove if not needed)
-        // const uint16_t* lw_q_proj_dev    = w_q_dev_    + (size_t)l * layer_q_size;
-        // const uint16_t* lw_k_proj_dev    = w_k_dev_    + (size_t)l * layer_k_size;
-        // const uint16_t* lw_v_proj_dev    = w_v_dev_    + (size_t)l * layer_v_size;
-        // const uint16_t* lw_o_proj_dev    = w_o_dev_    + (size_t)l * layer_o_size;
-        // const uint16_t* lw_gate_proj_dev = w_gate_dev_ + (size_t)l * layer_gate_size;
-        // const uint16_t* lw_up_proj_dev   = w_up_dev_   + (size_t)l * layer_up_size;
-        // const uint16_t* lw_down_proj_dev = w_down_dev_ + (size_t)l * layer_down_size;
-        
-        // FP32 Pointers
-        const float* lw_q_proj_f32_dev    = w_q_f32_dev_    + (size_t)l * layer_q_size;
-        const float* lw_k_proj_f32_dev    = w_k_f32_dev_    + (size_t)l * layer_k_size;
-        const float* lw_v_proj_f32_dev    = w_v_f32_dev_    + (size_t)l * layer_v_size;
-        const float* lw_o_proj_f32_dev    = w_o_f32_dev_    + (size_t)l * layer_o_size;
-        const float* lw_gate_proj_f32_dev = w_gate_f32_dev_ + (size_t)l * layer_gate_size;
-        const float* lw_up_proj_f32_dev   = w_up_f32_dev_   + (size_t)l * layer_up_size;
-        const float* lw_down_proj_f32_dev = w_down_f32_dev_ + (size_t)l * layer_down_size;
+        // --- Revert to BF16 weight pointers ---
+        const uint16_t* lw_q_proj_dev    = w_q_dev_    + (size_t)l * layer_q_size;
+        const uint16_t* lw_k_proj_dev    = w_k_dev_    + (size_t)l * layer_k_size;
+        const uint16_t* lw_v_proj_dev    = w_v_dev_    + (size_t)l * layer_v_size;
+        const uint16_t* lw_o_proj_dev    = w_o_dev_    + (size_t)l * layer_o_size;
+        const uint16_t* lw_gate_proj_dev = w_gate_dev_ + (size_t)l * layer_gate_size;
+        const uint16_t* lw_up_proj_dev   = w_up_dev_   + (size_t)l * layer_up_size;
+        const uint16_t* lw_down_proj_dev = w_down_dev_ + (size_t)l * layer_down_size;
 
         const float* lw_in_norm_dev   = layers[l].input_layernorm_dev;
         const float* lw_post_norm_dev = layers[l].post_attention_layernorm_dev;
 
         // Residual 1 Prep (Copy x -> x_resid1)
-        gpuErrchk(cudaMemcpyAsync(x_resid1_dev, x_dev, hs * sizeof(float), cudaMemcpyDeviceToDevice, stream));
+        gpuErrchk(cudaMemcpy(x_resid1_dev, x_dev, hs * sizeof(float), cudaMemcpyDeviceToDevice));
 
-        // RMSNorm 1 (Input: x_dev, Weight: lw_in_norm_dev, Output: x_norm_dev)
-        rmsnorm_vector_cuda(x_dev, lw_in_norm_dev, x_norm_dev, hs, eps, stream); 
+        // --- FIX: Use persistent norm weights --- 
+        rmsnorm_vector_cuda(x_dev, layers[l].input_layernorm_dev, x_norm_dev, hs, eps, stream); // Use persistent device pointer
+        gpuErrchk(cudaDeviceSynchronize()); // Add sync like .back
 
-        // Q, K, V projections (Input: x_norm_dev, Outputs: q_dev, k_dev, v_dev)
-        matvec_f32_f32_cuda(cublas_handle_, lw_q_proj_f32_dev, x_norm_dev, q_dev, hs, hs, stream); 
-        matvec_f32_f32_cuda(cublas_handle_, lw_k_proj_f32_dev, x_norm_dev, k_dev, n_kv_heads * head_dim, hs, stream); 
-        matvec_f32_f32_cuda(cublas_handle_, lw_v_proj_f32_dev, x_norm_dev, v_dev, n_kv_heads * head_dim, hs, stream); 
-
-        // Apply RoPE to Q (K/V handled in fused cache update)
-        rope_cuda(q_dev, n_heads, head_dim, all_freqs_cis_dev, pos, stream);
-
-        // KVCache Update (Fused RoPE for K, Separate Update for V)
+        // --- Revert QKV Projections to BF16 ---
+        matvec_bf16_f32_cuda(cublas_handle_, lw_q_proj_dev, x_norm_dev, q_dev, hs, hs); 
+        matvec_bf16_f32_cuda(cublas_handle_, lw_k_proj_dev, x_norm_dev, k_dev, n_kv_heads * head_dim, hs); 
+        matvec_bf16_f32_cuda(cublas_handle_, lw_v_proj_dev, x_norm_dev, v_dev, n_kv_heads * head_dim, hs); 
+        gpuErrchk(cudaDeviceSynchronize()); // Add sync like .back
+  
+        // --- FIX: Use persistent RoPE frequencies --- 
+        rope_cuda(q_dev, n_heads, head_dim, all_freqs_cis_dev, pos, stream); // Use persistent buffer + pos
+        rope_cuda(k_dev, n_kv_heads, head_dim, all_freqs_cis_dev, pos, stream); // Use persistent buffer + pos
+        gpuErrchk(cudaDeviceSynchronize()); // Add sync like .back
+  
+        // --- Revert KVCache Update to separate updates ---
         for (int kvh = 0; kvh < n_kv_heads; ++kvh) {
             const float* current_k_head_ptr = k_dev + kvh * head_dim;
             const float* current_v_head_ptr = v_dev + kvh * head_dim;
             
-            // Call fused kernel for K (Applies RoPE + Updates Cache)
-            rope_and_update_kv_cache_cuda(
-                cache->layers[l].k_dev, // Base K cache pointer
-                current_k_head_ptr,     // Original K data for this head
-                all_freqs_cis_dev,      // Global RoPE frequencies buffer
-                pos, kvh, max_seq_len, n_kv_heads, head_dim, stream);
-                                 
-            // Call original kernel for V (No RoPE needed for V)
             update_kv_cache_cuda(
-                cache->layers[l].v_dev, // Base V cache pointer
-                current_v_head_ptr,     // Original V data for this head (NO RoPE)
-                pos, kvh, max_seq_len, n_kv_heads, head_dim, stream);
+                cache->layers[l].k_dev,
+                current_k_head_ptr,
+                pos, kvh, 
+                cache->allocated_max_seq_len, // Use parameters stored in cache obj
+                cache->allocated_num_kv_heads,
+                cache->allocated_head_dim);
+                                 
+            update_kv_cache_cuda(
+                cache->layers[l].v_dev,
+                current_v_head_ptr,
+                pos, kvh, 
+                cache->allocated_max_seq_len, // Use parameters stored in cache obj
+                cache->allocated_num_kv_heads,
+                cache->allocated_head_dim);
         }
+        // No sync needed here based on .back
 
         // Attention (Input: q_dev, K/V Cache, Output: attn_out_dev)
         float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
-        attention_cuda(q_dev, cache->layers[l].k_dev, cache->layers[l].v_dev, attn_out_dev,
-                       n_heads, pos + 1, head_dim, scale, max_seq_len, n_kv_heads, stream);
-        
-        // Attention Output Projection (Input: attn_out_dev, Output: attn_proj_dev)
-        // We need a temporary buffer here if we fuse residual add into matvec
-        // For now, use add_residual_cuda separately
-        float* attn_proj_dev = nullptr; // Allocate temporary buffer for o_proj result
-        gpuErrchk(cudaMallocAsync(&attn_proj_dev, hs * sizeof(float), stream));
-        matvec_f32_f32_cuda(cublas_handle_, lw_o_proj_f32_dev, attn_out_dev, attn_proj_dev, hs, hs, stream); 
+         attention_cuda(q_dev, cache->layers[l].k_dev, cache->layers[l].v_dev, attn_out_dev,
+                        n_heads, pos + 1, head_dim, scale, 
+                        cache->allocated_max_seq_len, // Use cache parameters
+                        cache->allocated_num_kv_heads // Use cache parameters
+                        /*, stream */); // Remove stream arg like .back
+        gpuErrchk(cudaDeviceSynchronize()); // Add sync like .back
+         
+        // --- Revert Attention Output Projection to BF16 ---
+        // Use attn_proj_dev allocated outside loop
+        matvec_bf16_f32_cuda(cublas_handle_, lw_o_proj_dev, attn_out_dev, attn_proj_dev, hs, hs); 
+        gpuErrchk(cudaDeviceSynchronize()); // Add sync like .back
 
         // Residual 1 Add (Input: x_resid1_dev + attn_proj_dev, Output: x_dev)
+        // --- MODIFIED: Added stream argument --- 
         add_residual_cuda(attn_proj_dev, x_resid1_dev, x_dev, hs, stream);
-        gpuErrchk(cudaFreeAsync(attn_proj_dev, stream)); // Free the temporary buffer
+        // --- END MODIFICATION --- 
+        gpuErrchk(cudaDeviceSynchronize()); // Add sync like .back
+        // Don't free attn_proj_dev here, it's allocated outside
 
         // --- MLP Block --- 
         // Residual 2 Prep (Copy x -> x_resid2)
-        gpuErrchk(cudaMemcpyAsync(x_resid2_dev, x_dev, hs * sizeof(float), cudaMemcpyDeviceToDevice, stream));
+        gpuErrchk(cudaMemcpy(x_resid2_dev, x_dev, hs * sizeof(float), cudaMemcpyDeviceToDevice));
 
-        // RMSNorm 2 (Input: x_dev, Weight: lw_post_norm_dev, Output: x_norm_dev)
-        rmsnorm_vector_cuda(x_dev, lw_post_norm_dev, x_norm_dev, hs, eps, stream); 
-
-        // MLP Projections (Input: x_norm_dev -> gate/up)
-        matvec_f32_f32_cuda(cublas_handle_, lw_gate_proj_f32_dev, x_norm_dev, gate_vec_dev, is, hs, stream); 
-        matvec_f32_f32_cuda(cublas_handle_, lw_up_proj_f32_dev, x_norm_dev, up_vec_dev, is, hs, stream); 
+        // --- FIX: Use persistent norm weights --- 
+        rmsnorm_vector_cuda(x_dev, layers[l].post_attention_layernorm_dev, x_norm_dev, hs, eps, stream); // Use persistent device pointer
+        gpuErrchk(cudaDeviceSynchronize()); // Add sync like .back
+  
+        // --- Revert MLP Projections to BF16 ---
+        matvec_bf16_f32_cuda(cublas_handle_, lw_gate_proj_dev, x_norm_dev, gate_vec_dev, is, hs);
+        matvec_bf16_f32_cuda(cublas_handle_, lw_up_proj_dev, x_norm_dev, up_vec_dev, is, hs);
+        gpuErrchk(cudaDeviceSynchronize()); // Add sync like .back
 
         // SwiGLU (Input: gate_vec_dev, up_vec_dev, Output: swiglu_vec_dev)
-        swiglu_cuda(gate_vec_dev, up_vec_dev, swiglu_vec_dev, is, stream);
+        swiglu_cuda(gate_vec_dev, up_vec_dev, swiglu_vec_dev, is);
+        gpuErrchk(cudaDeviceSynchronize()); // Add sync like .back
 
-        // MLP Down Projection (Input: swiglu_vec_dev, Output: x_resid1_dev - Reuse buffer)
-        // Need temporary buffer for down_proj output before residual add
-        float* mlp_out_dev = nullptr; // Allocate temporary buffer
-        gpuErrchk(cudaMallocAsync(&mlp_out_dev, hs * sizeof(float), stream));
-        matvec_f32_f32_cuda(cublas_handle_, lw_down_proj_f32_dev, swiglu_vec_dev, mlp_out_dev, hs, is, stream); 
-        
-        // Residual 2 Add (Input: x_resid2_dev + mlp_out_dev, Output: x_dev)
-        add_residual_cuda(mlp_out_dev, x_resid2_dev, x_dev, hs, stream);
-        gpuErrchk(cudaFreeAsync(mlp_out_dev, stream)); // Free the temporary buffer
+        // --- Revert MLP Down Projection to BF16 ---
+        // Use mlp_down_dev allocated outside loop
+        matvec_bf16_f32_cuda(cublas_handle_, lw_down_proj_dev, swiglu_vec_dev, mlp_down_dev, hs, is);
+        gpuErrchk(cudaDeviceSynchronize()); // Add sync like .back
+         
+        // Residual 2 Add (Input: x_resid2_dev + mlp_down_dev, Output: x_dev)
+        // --- MODIFIED: Added stream argument --- 
+        add_residual_cuda(mlp_down_dev, x_resid2_dev, x_dev, hs, stream);
+        // --- END MODIFICATION ---
+        gpuErrchk(cudaDeviceSynchronize()); // Add sync like .back
+        // Don't free mlp_down_dev here
 
     } // End layer loop
 
     // --- Final Steps (Outside Layer Loop) --- 
-    
-    // Final RMSNorm (Input: x_dev, Weight: final_norm_dev, Output: x_norm_dev)
-    rmsnorm_vector_cuda(x_dev, final_norm_dev, x_norm_dev, hs, eps, stream); 
+     
+    // --- FIX: Use persistent final norm weights --- 
+    rmsnorm_vector_cuda(x_dev, final_norm_dev, x_norm_dev, hs, eps, stream); // Use persistent device pointer
+    gpuErrchk(cudaDeviceSynchronize()); // Add sync like .back
 
-    // Final LM Head Projection (Input: x_norm_dev, Output: logits_dev)
-    matvec_f32_f32_cuda(cublas_handle_, lm_head_f32_dev_, x_norm_dev, logits_dev, vs, hs, stream); 
+    // --- Revert Final LM Head Projection to BF16 ---
+    matvec_bf16_f32_cuda(cublas_handle_, lm_head_dev_, x_norm_dev, logits_dev, vs, hs); // Use BF16 lm_head_dev_
+    gpuErrchk(cudaDeviceSynchronize()); // Add sync like .back
 
     // --- Synchronize Stream before Copy and Free --- 
     // Wait for all kernels on the stream to complete before copying back logits
-    gpuErrchk(cudaStreamSynchronize(stream)); 
-
+    // gpuErrchk(cudaStreamSynchronize(stream)); // Not present in .back, rely on sync copies/frees
+ 
     // --- Copy Logits Device -> Host --- 
     std::vector<float> logits(vs);
     // Use synchronous copy since we just synchronized the stream
-    gpuErrchk(cudaMemcpy(logits.data(), logits_dev, vs * sizeof(float), cudaMemcpyDeviceToHost));
-
-    // --- Free Device Memory --- 
-    // Use cudaFreeAsync on the same stream for potentially better performance
-    gpuErrchk(cudaFreeAsync(x_dev, stream));
-    gpuErrchk(cudaFreeAsync(x_norm_dev, stream));
-    gpuErrchk(cudaFreeAsync(x_resid1_dev, stream));
-    gpuErrchk(cudaFreeAsync(x_resid2_dev, stream));
-    gpuErrchk(cudaFreeAsync(q_dev, stream));
-    gpuErrchk(cudaFreeAsync(k_dev, stream));
-    gpuErrchk(cudaFreeAsync(v_dev, stream));
-    gpuErrchk(cudaFreeAsync(attn_out_dev, stream));
-    // attn_proj_dev freed above
-    gpuErrchk(cudaFreeAsync(gate_vec_dev, stream));
-    gpuErrchk(cudaFreeAsync(up_vec_dev, stream));
-    gpuErrchk(cudaFreeAsync(swiglu_vec_dev, stream));
-    // mlp_out_dev freed above
-    gpuErrchk(cudaFreeAsync(logits_dev, stream));
-
+     gpuErrchk(cudaMemcpy(logits.data(), logits_dev, vs * sizeof(float), cudaMemcpyDeviceToHost));
+ 
+     // --- Free Device Memory --- 
+    // Use sync cudaFree for buffers allocated outside loop
+    gpuErrchk(cudaFree(x_dev)); // Use sync free now
+    gpuErrchk(cudaFree(x_norm_dev));
+    gpuErrchk(cudaFree(x_resid1_dev));
+    gpuErrchk(cudaFree(x_resid2_dev));
+    gpuErrchk(cudaFree(q_dev));
+    gpuErrchk(cudaFree(k_dev));
+    gpuErrchk(cudaFree(v_dev));
+    gpuErrchk(cudaFree(attn_out_dev));
+    gpuErrchk(cudaFree(attn_proj_dev)); // Free buffer allocated outside
+    gpuErrchk(cudaFree(gate_vec_dev));
+    gpuErrchk(cudaFree(up_vec_dev));
+    gpuErrchk(cudaFree(swiglu_vec_dev));
+    gpuErrchk(cudaFree(mlp_down_dev)); // Free buffer allocated outside
+    gpuErrchk(cudaFree(logits_dev));
+ 
     // Optional: Synchronize again to ensure frees are processed if needed before function returns,
     // although technically not required if caller manages stream synchronization.
     // gpuErrchk(cudaStreamSynchronize(stream)); 

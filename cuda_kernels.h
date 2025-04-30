@@ -107,12 +107,7 @@ void softmax_vector_cuda(const std::vector<float>& x_host,
                          int n);
 
 // Device-pointer RoPE wrapper (UPDATED SIGNATURE)
-void rope_cuda(float* x_dev, 
-               int num_heads, 
-               int head_dim, 
-               const float* all_freqs_cis_dev_base, // Changed from freqs_dev
-               int pos, // Added pos parameter
-               cudaStream_t stream = 0);
+void rope_cuda(float* vec, int num_heads, int head_dim, const float* freqs_cis_dev, int pos, cudaStream_t stream); // Modified signature
 
 /**
  * @brief CUDA Attention kernel wrapper (Reads directly from flat K/V Cache)
@@ -208,6 +203,25 @@ void lookup_embedding_bf16_f32_cuda(const uint16_t* embedding_table_dev,
                                     cudaStream_t stream = 0);
 
 void matvec_f32_f32_cuda(cublasHandle_t handle, const float * mat_f32_dev, const float * vec_f32_dev, float * out_f32_dev, int rows, int cols, cudaStream_t stream);
+
+// --- ADDED START ---
+// Performs embedding lookup directly on the GPU.
+// Reads from either a BF16 or FP32 embedding table on the device.
+// table_dev: Pointer to the embedding table on the device (either const uint16_t* or const float*).
+// output_dev: Pointer to the output buffer on the device (float*).
+// token_id: The ID of the token to look up.
+// hidden_size: The dimension of the embedding vector.
+// vocab_size: Total size of the vocabulary (for bounds checking).
+// is_bf16: True if table_dev points to BF16 data, False if it points to FP32 data.
+// stream: The CUDA stream to use.
+void lookup_embedding_cuda(const void* table_dev,
+                           float* output_dev,
+                           int token_id,
+                           int hidden_size,
+                           int vocab_size, // Added for bounds check
+                           bool is_bf16,
+                           cudaStream_t stream);
+// --- ADDED END ---
 
 #endif // HAS_CUDA
 
