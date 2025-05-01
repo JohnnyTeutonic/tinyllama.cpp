@@ -50,6 +50,13 @@ static void matvec_q4k_f32_vector_cpu(const std::vector<block_q4_K>& mat_q4k,
 // Forward declaration for float32_to_bfloat16 helper
 inline uint16_t float32_to_bfloat16(float val);
 
+// --- ADDED: Forward declaration for F32 matvec helper ---
+static void matvec_f32_f32_vector_cpu(const std::vector<float>& mat_f32,
+                                  const std::vector<float>& vec_f32,
+                                  std::vector<float>& out_f32,
+                                  int rows, int cols);
+// --- END ADDED ---
+
 // --- END: Forward Declarations for Helpers ---
 
 // --- START: Implementation for float32_to_bfloat16 ---
@@ -102,7 +109,8 @@ static void matvec_q6k_f32_vector_cpu(const std::vector<block_q6_K>& mat_q6k,
             const block_q6_K* qblock = &mat_q6k[block_row_offset + block_col_idx];
             // --- MODIFIED: Enable logging for the very first block (row 0, col 0) if requested --- 
             bool enable_dequant_log = log_first_block && (r == 0 && block_col_idx == 0);
-            dequantize_q6_k(qblock, dequantized_block, GGML_QK_K, enable_dequant_log);
+            // dequantize_q6_k(qblock, dequantized_block, GGML_QK_K, enable_dequant_log); // Original with flag
+            dequantize_q6_k(qblock, dequantized_block, GGML_QK_K); // Reverted: Remove boolean flag
             // --- END MODIFICATION ---
 
             // Calculate dot product for this block
@@ -176,14 +184,59 @@ static void matvec_q4k_f32_vector_cpu(const std::vector<block_q4_K>& mat_q4k,
 }
 // --- END: Implementation for matvec_q4k_f32_vector_cpu ---
 
+// --- ADDED: CPU Matrix-Vector Multiplication (F32 x F32 -> F32) ---
+static void matvec_f32_f32_vector_cpu(const std::vector<float>& mat_f32,
+                                  const std::vector<float>& vec_f32,
+                                  std::vector<float>& out_f32,
+                                  int rows, int cols)
+{
+    // Basic validation
+    if (mat_f32.empty() || vec_f32.empty()) {
+        Logger::error("matvec_f32_f32_vector_cpu: Input matrix or vector is empty.");
+        out_f32.assign(rows, 0.0f); // Assign zeros to output
+        return;
+    }
+    if (mat_f32.size() != (size_t)rows * cols) {
+        Logger::error("matvec_f32_f32_vector_cpu: Matrix dimensions mismatch. Expected "
+                      + std::to_string((size_t)rows * cols) + ", got " + std::to_string(mat_f32.size()));
+        out_f32.assign(rows, 0.0f);
+        return;
+    }
+    if (vec_f32.size() != (size_t)cols) {
+         Logger::error("matvec_f32_f32_vector_cpu: Vector dimension mismatch. Expected "
+                      + std::to_string(cols) + ", got " + std::to_string(vec_f32.size()));
+        out_f32.assign(rows, 0.0f);
+        return;
+    }
+
+    out_f32.resize(rows); // Ensure output vector has correct size
+
+    #pragma omp parallel for schedule(static) // Parallelize the outer loop over rows
+    for(int r = 0; r < rows; ++r) {
+        float sum = 0.0f;
+        size_t row_offset = (size_t)r * cols;
+        // Use pointer arithmetic for potential inner loop optimization
+        const float* mat_row_ptr = mat_f32.data() + row_offset;
+        const float* vec_ptr = vec_f32.data();
+
+        // Simple dot product - potentially optimize with SIMD later if needed
+        // Kahan summation might be overkill for F32*F32 but could be added if precision issues arise.
+        for(int c = 0; c < cols; ++c) {
+            sum += mat_row_ptr[c] * vec_ptr[c];
+        }
+        out_f32[r] = sum;
+    }
+}
+// --- END ADDED ---
+
 void log_vector_summary(const std::string& name, const std::vector<float>& v, int head_count) {
     if (v.empty()) {
         Logger::info(name + ": EMPTY");
         return;
     }
     std::stringstream ss;
-    ss << name << ": size=" << v.size() << ", first " << std::min((int)v.size(), head_count) << ": [";
-    for(int i = 0; i < std::min((int)v.size(), head_count); ++i) {
+    ss << name << ": size=" << v.size() << ", first " << std::min(v.size(), (size_t)head_count) << ": ["; // Removed (int) cast, cast head_count to size_t
+    for(size_t i = 0; i < std::min(v.size(), (size_t)head_count); ++i) { // Use size_t for loop, cast head_count
         ss << (i > 0 ? " " : "") << std::fixed << std::setprecision(4) << v[i];
     }
     ss << "]";
@@ -255,7 +308,14 @@ int argmax(const std::vector<float>& v) {
         Logger::error("Cannot perform argmax on empty vector"); // Log instead of throwing
         return -1; // Return an invalid index
     }
-    return std::distance(v.begin(), std::max_element(v.begin(), v.end()));
+    // +++ START ADDED LOGGING +++
+    auto max_it = std::max_element(v.begin(), v.end());
+    float max_val = *max_it;
+    int max_idx = std::distance(v.begin(), max_it);
+    Logger::debug("[ARGMAX HELPER] Max value found: " + std::to_string(max_val) + " at index: " + std::to_string(max_idx));
+    // +++ END ADDED LOGGING +++
+    return max_idx; // Return the calculated index
+    // return std::distance(v.begin(), std::max_element(v.begin(), v.end())); // Original return
 }
 // --- END: Argmax Helper ---
 
@@ -386,9 +446,11 @@ static std::vector<std::vector<float>> load_rmsnorm_bin(const std::string& filen
     infile.read(reinterpret_cast<char*>(flat.data()), flat.size() * sizeof(float));
     if (!infile) throw std::runtime_error("Failed to read all data from " + filename);
     std::vector<std::vector<float>> result(num_tokens, std::vector<float>(hidden_size));
-    for (int t = 0; t < num_tokens; ++t)
-        for (int h = 0; h < hidden_size; ++h)
+    for (int t = 0; t < num_tokens; ++t) { // Rewritten loop with braces
+        for (int h = 0; h < hidden_size; ++h) {
             result[t][h] = flat[t * hidden_size + h];
+        }
+    }
     return result;
 }
 
@@ -1046,7 +1108,9 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& config, const SafeTensorsLoade
 {
     Logger::info("Constructing TinyLlamaModel from SafeTensorsLoader.");
     initialize_weights(&loader, nullptr); // Load weights from loader
+#ifdef HAS_CUDA
     initialize_gpu_and_rope();            // Initialize GPU resources and RoPE
+#endif
     Logger::info("TinyLlamaModel construction from SafeTensorsLoader complete.");
 }
 
@@ -1082,7 +1146,9 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& config, const std::string& wei
         // Note: layers vector is resized inside initialize_weights
         initialize_weights(nullptr, gguf_data_.get()); // Map weights from GGUF data
         Logger::info("GGUF weights mapped.");
+#ifdef HAS_CUDA
         initialize_gpu_and_rope(); // Initialize GPU resources and RoPE
+#endif
     } else {
         Logger::info("Detected non-GGUF file (or failed GGUF check). Loading with SafeTensors loader...");
         // Need SafeTensorsLoader defined/included
@@ -1090,12 +1156,14 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& config, const std::string& wei
         // config_ remains as initially provided (or potentially parsed from a separate config file if needed)
         initialize_weights(&loader, nullptr); // Load weights from safetensors
         Logger::info("SafeTensors weights loaded.");
+#ifdef HAS_CUDA
         initialize_gpu_and_rope(); // Initialize GPU resources and RoPE
+#endif
     }
     Logger::info("TinyLlamaModel construction from path complete.");
 }
 
-// --- START: TinyLlamaModel Destructor Definition --- 
+// --- START: TinyLlamaModel Destructor Definition ---
 TinyLlamaModel::~TinyLlamaModel() {
 #ifdef HAS_CUDA
     Logger::info("Freeing TinyLlamaModel CUDA resources...");
@@ -1235,88 +1303,96 @@ TinyLlamaModel::~TinyLlamaModel() {
 } 
 // --- END: TinyLlamaModel Destructor Definition ---
 
-// Updated lookup_embedding to handle different source types and return std::vector<float>
+// --- Lookup Embedding (Handles Q4_K, F32, BF16) ---
+// REPLACED ORIGINAL FUNCTION
 std::vector<float> TinyLlamaModel::lookup_embedding(int token_id) {
     int hs = config_.hidden_size;
     int vs = config_.vocab_size;
+    bool log_initial = (token_id == config_.bos_token_id); // Simple way to log for first token usually
+
     if (token_id < 0 || token_id >= vs) {
-        Logger::error("Token ID out of bounds in lookup_embedding: " + std::to_string(token_id) + " (Vocab size: " + std::to_string(vs) + ")");
-        return std::vector<float>(hs, 0.0f); 
+        Logger::error("Token ID out of bounds in lookup_embedding: " + std::to_string(token_id));
+        return std::vector<float>(hs, 0.0f); // Return a zero vector
     }
-    
-    size_t offset = (size_t)token_id * hs;
-    std::vector<float> embedding_vec(hs, 0.0f); // Initialize output vector
 
-    // Prioritize F32, then BF16, then handle quantized (error for now)
-    if (!embed_tokens_f32.empty()) {
-        if (offset + hs > embed_tokens_f32.size()) {
-            Logger::error("Embedding offset out of bounds for F32 embeddings. Token: " + std::to_string(token_id));
-            return embedding_vec; // Return zero vec
-        }
-        // Logger::info("Using F32 embedding table for token: " + std::to_string(token_id));
-        std::copy(embed_tokens_f32.begin() + offset, embed_tokens_f32.begin() + offset + hs, embedding_vec.begin());
-    } else if (!embed_tokens.empty()) { // Check BF16 next
-    if (offset + hs > embed_tokens.size()) {
-            Logger::error("Embedding offset out of bounds for BF16 embeddings. Token: " + std::to_string(token_id));
-            return embedding_vec; // Return zero vec
-    }
-        // Logger::info("Using BF16 embedding table for token: " + std::to_string(token_id));
-        // Convert the bfloat16 vector slice to a float32 vector
-    std::vector<uint16_t> token_embedding_bf16(embed_tokens.begin() + offset, embed_tokens.begin() + offset + hs);
-        embedding_vec = bf16vec_to_float_vec(token_embedding_bf16);
-    } else if (!embed_tokens_q6k.empty()) {
-        Logger::error("Q6_K embedding dequantization not yet implemented in lookup_embedding. Token: " + std::to_string(token_id));
-        // TODO: Implement Q6_K lookup and dequantization
-        throw std::runtime_error("Q6_K embedding lookup NYI");
-    } else if (!embed_tokens_q4k.empty()) {
-        // --- START: Implement Q4_K Lookup --- 
-        // --- ADDED: Logging around Q4_K embedding --- 
-        bool log_initial = (token_id < 5); // Log first few tokens
-        if (log_initial) {
-             Logger::info("[CPU_EMBED] Using Q4_K embedding table for token: " + std::to_string(token_id));
-        }
-        // --- END: Logging --- 
+    std::vector<float> embedding_vec(hs, 0.0f); // Initialize with zeros
+
+    // 1. Prioritize Q4_K if available
+    if (!embed_tokens_q4k.empty()) {
+        // Logger::info("[CPU_EMBED] Using Q4_K embedding table for token: " + std::to_string(token_id)); // Optional log
         if (hs % GGML_QK_K != 0) {
-            throw std::runtime_error("Hidden size (" + std::to_string(hs) + ") must be divisible by GGML_QK_K (" + std::to_string(GGML_QK_K) + ") for Q4_K embedding lookup.");
-        }
-        size_t num_blocks_per_row = hs / GGML_QK_K;
-        size_t start_block_index = (size_t)token_id * num_blocks_per_row;
-
-        if ((start_block_index + num_blocks_per_row) > embed_tokens_q4k.size()) {
-            Logger::error("Calculated block range out of bounds for Q4_K embeddings. Token: " + std::to_string(token_id) + 
-                         ", StartBlock: " + std::to_string(start_block_index) + ", NumBlocks: " + std::to_string(num_blocks_per_row) + 
-                         ", TotalBlocks: " + std::to_string(embed_tokens_q4k.size()));
-            return embedding_vec; // Return zero vec
+             Logger::error("Hidden size (" + std::to_string(hs) + ") is not divisible by GGML_QK_K (" + std::to_string(GGML_QK_K) + ") for Q4_K embedding lookup.");
+             return embedding_vec; // Return zeros
         }
 
-        float dequantized_block[GGML_QK_K]; // Temp buffer for one block
-        for (size_t block_idx = 0; block_idx < num_blocks_per_row; ++block_idx) {
-            const block_q4_K* qblock = &embed_tokens_q4k[start_block_index + block_idx];
-            // --- MODIFIED: Enable logging for the first block --- 
-            bool enable_dequant_log = (block_idx == 0 && log_initial); 
-            dequantize_q4_k_m(qblock, dequantized_block, GGML_QK_K, enable_dequant_log);
+        size_t blocks_per_row = hs / GGML_QK_K;
+        size_t start_block_idx = (size_t)token_id * blocks_per_row;
+        size_t end_block_idx = start_block_idx + blocks_per_row;
+
+        if (end_block_idx > embed_tokens_q4k.size()) {
+            Logger::error("Calculated block index out of bounds for Q4_K embedding table. Token: " + std::to_string(token_id) + ", StartBlock: " + std::to_string(start_block_idx) + ", EndBlock: " + std::to_string(end_block_idx) + ", TableSize: " + std::to_string(embed_tokens_q4k.size()));
+            return embedding_vec; // Return zeros
+        }
+
+        float dequantized_block[GGML_QK_K]; // Temporary buffer for one block
+
+        for (size_t block_idx = 0; block_idx < blocks_per_row; ++block_idx) {
+            const block_q4_K* qblock = &embed_tokens_q4k[start_block_idx + block_idx];
+            // --- MODIFICATION: Enable logging for the first block of the embedding ---
+            bool log_this_embedding_block = log_initial && (block_idx == 0);
+            dequantize_q4_k_m(qblock, dequantized_block, GGML_QK_K, log_this_embedding_block); // Pass flag
             // --- END MODIFICATION ---
             
-            // Copy dequantized floats into the output vector
-            size_t output_offset = block_idx * GGML_QK_K;
-            if (output_offset + GGML_QK_K > embedding_vec.size()) {
-                 throw std::runtime_error("Internal error: Output offset exceeds embedding vector size during Q4_K dequantization.");
-            }
-            std::memcpy(&embedding_vec[output_offset], dequantized_block, GGML_QK_K * sizeof(float));
+            // Copy dequantized data into the correct slice of the output vector
+            std::memcpy(embedding_vec.data() + block_idx * GGML_QK_K,
+                        dequantized_block,
+                        GGML_QK_K * sizeof(float));
         }
-        // --- ADDED: Logging after Q4_K embedding --- 
+        // --- ADDED: Logging after Q4_K embedding ---
         if (log_initial) {
-            log_vector_summary("[CPU_EMBED] Output Embedding (Token " + std::to_string(token_id) + ")", embedding_vec);
+            log_vector_summary("[CPU_EMBED Q4_K] Output Embedding (Token " + std::to_string(token_id) + ")", embedding_vec);
         }
         // --- END: Logging ---
-        // --- END: Implement Q4_K Lookup --- 
+        return embedding_vec; // Return the dequantized vector
+
+    // 2. Check F32 if Q4_K is empty
+    } else if (!embed_tokens_f32.empty()) {
+        // Logger::info("[CPU_EMBED] Using F32 embedding table for token: " + std::to_string(token_id)); // Optional log
+        size_t offset = (size_t)token_id * hs;
+        if (offset + hs > embed_tokens_f32.size()) {
+             Logger::error("Embedding offset out of bounds in F32 lookup for token: " + std::to_string(token_id));
+             return embedding_vec; // Return zeros initialized earlier
+        }
+        // Directly copy the slice
+        std::copy(embed_tokens_f32.begin() + offset, embed_tokens_f32.begin() + offset + hs, embedding_vec.begin());
+         if (log_initial) {
+             log_vector_summary("[CPU_EMBED F32] Output Embedding (Token " + std::to_string(token_id) + ")", embedding_vec);
+         }
+        return embedding_vec;
+
+    // 3. Fallback to BF16 if F32 is also empty
+    } else if (!embed_tokens.empty()) {
+        // Logger::info("[CPU_EMBED] Using BF16 embedding table for token: " + std::to_string(token_id)); // Optional log
+        size_t offset = (size_t)token_id * hs;
+        if (offset + hs > embed_tokens.size()) {
+             Logger::error("Embedding offset out of bounds in BF16 lookup for token: " + std::to_string(token_id));
+             return embedding_vec; // Return zeros initialized earlier
+        }
+        // Create a sub-vector view (or copy)
+        std::vector<uint16_t> token_embedding_bf16(embed_tokens.begin() + offset, embed_tokens.begin() + offset + hs);
+        // Convert the bfloat16 vector slice to a float32 vector (fills embedding_vec)
+        embedding_vec = bf16vec_to_float_vec(token_embedding_bf16);
+         if (log_initial) {
+             log_vector_summary("[CPU_EMBED BF16] Output Embedding (Token " + std::to_string(token_id) + ")", embedding_vec);
+         }
+         return embedding_vec;
+
+    // 4. Error if all tables are empty
     } else {
-        Logger::error("No valid embedding table found (F32, BF16, Q6K, Q4K) for token: " + std::to_string(token_id));
+        Logger::error("No valid embedding table found (Q4_K, F32, BF16) for token: " + std::to_string(token_id));
         // Return the zero vector initialized earlier
+        return embedding_vec;
     }
-    
-    // Logger::info("Performed embedding lookup for token: " + std::to_string(token_id));
-    return embedding_vec; // Return the vector
 }
 
 // --- Forward Pass (CPU Implementation Only) --- 
@@ -1400,26 +1476,29 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& input, int n_toke
              if (log_this_layer) log_vector_summary("  Input (x_norm_vec1)", x_norm_vec1);
              matvec_q4k_f32_vector_cpu(lw.q_proj_q4k, x_norm_vec1, q_vec, hs, hs, log_matvec_dequant);
              if (log_this_layer) log_vector_summary("  Output (q_vec)", q_vec);
-        } else if (!lw.q_proj_f32.empty()) {
-             // TODO: Implement F32 matvec if needed, for now convert F32->BF16 ON THE FLY (INEFFICIENT)
-             if (log_this_layer) Logger::warning("[CPU_FWD L" + std::to_string(l) + "] MatVec: Q_Proj (F32->BF16 - Inefficient)");
-             std::vector<uint16_t> temp_bf16(lw.q_proj_f32.size()); for(size_t i=0; i<lw.q_proj_f32.size(); ++i) temp_bf16[i] = float32_to_bfloat16(lw.q_proj_f32[i]);
-             matvec_bf16_f32_vector_cpu(temp_bf16, x_norm_vec1, q_vec, hs, hs);
+        } else if (!lw.q_proj_f32.empty()) { // <<< CHECK F32 FIRST
+             if (log_this_layer) Logger::info("[CPU_FWD L" + std::to_string(l) + "] MatVec: Q_Proj (F32)");
+             matvec_f32_f32_vector_cpu(lw.q_proj_f32, x_norm_vec1, q_vec, hs, hs); // <<< USE F32 MATVEC
+             if (log_this_layer) log_vector_summary("  Output (q_vec)", q_vec);
         } else if (!lw.q_proj.empty()) { // Fallback BF16
+            if (log_this_layer) Logger::warning("[CPU_FWD L" + std::to_string(l) + "] MatVec: Q_Proj (BF16 Fallback)");
             matvec_bf16_f32_vector_cpu(lw.q_proj, x_norm_vec1, q_vec, hs, hs);
+             if (log_this_layer) log_vector_summary("  Output (q_vec)", q_vec);
         } else {
             throw std::runtime_error("Layer " + std::to_string(l) + ": No valid Q projection weights found!");
         }
         // K
         if (!lw.k_proj_q6k.empty()) {
+            if (log_this_layer) Logger::info("[CPU_FWD L" + std::to_string(l) + "] MatVec: K_Proj (Q6_K)");
             matvec_q6k_f32_vector_cpu(lw.k_proj_q6k, x_norm_vec1, k_vec, n_kv_heads * head_dim, hs);
         } else if (!lw.k_proj_q4k.empty()) {
+            if (log_this_layer) Logger::info("[CPU_FWD L" + std::to_string(l) + "] MatVec: K_Proj (Q4_K)");
             matvec_q4k_f32_vector_cpu(lw.k_proj_q4k, x_norm_vec1, k_vec, n_kv_heads * head_dim, hs);
-        } else if (!lw.k_proj_f32.empty()) {
-             // TODO: Implement F32 matvec if needed, for now convert F32->BF16 ON THE FLY (INEFFICIENT)
-             std::vector<uint16_t> temp_bf16(lw.k_proj_f32.size()); for(size_t i=0; i<lw.k_proj_f32.size(); ++i) temp_bf16[i] = float32_to_bfloat16(lw.k_proj_f32[i]);
-             matvec_bf16_f32_vector_cpu(temp_bf16, x_norm_vec1, k_vec, n_kv_heads * head_dim, hs);
+        } else if (!lw.k_proj_f32.empty()) { // <<< CHECK F32 FIRST
+             if (log_this_layer) Logger::info("[CPU_FWD L" + std::to_string(l) + "] MatVec: K_Proj (F32)");
+             matvec_f32_f32_vector_cpu(lw.k_proj_f32, x_norm_vec1, k_vec, n_kv_heads * head_dim, hs); // <<< USE F32 MATVEC
         } else if (!lw.k_proj.empty()) { // Fallback BF16
+             if (log_this_layer) Logger::warning("[CPU_FWD L" + std::to_string(l) + "] MatVec: K_Proj (BF16 Fallback)");
              matvec_bf16_f32_vector_cpu(lw.k_proj, x_norm_vec1, k_vec, n_kv_heads * head_dim, hs);
         } else {
             throw std::runtime_error("Layer " + std::to_string(l) + ": No valid K projection weights found!");
@@ -1431,15 +1510,17 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& input, int n_toke
         }
         // +++ END V-PROJ LOGGING +++
         if (!lw.v_proj_q6k.empty()) {
-             matvec_q6k_f32_vector_cpu(lw.v_proj_q6k, x_norm_vec1, v_vec, n_kv_heads * head_dim, hs, log_matvec_dequant); // Pass log flag
+             if (log_this_layer) Logger::info("[CPU_FWD L" + std::to_string(l) + "] MatVec: V_Proj (Q6_K)");
+             matvec_q6k_f32_vector_cpu(lw.v_proj_q6k, x_norm_vec1, v_vec, n_kv_heads * head_dim, hs, log_matvec_dequant);
         } else if (!lw.v_proj_q4k.empty()) {
-             matvec_q4k_f32_vector_cpu(lw.v_proj_q4k, x_norm_vec1, v_vec, n_kv_heads * head_dim, hs, log_matvec_dequant); // Pass log flag
-        } else if (!lw.v_proj_f32.empty()) {
-             // TODO: Implement F32 matvec if needed, for now convert F32->BF16 ON THE FLY (INEFFICIENT)
-             std::vector<uint16_t> temp_bf16(lw.v_proj_f32.size()); for(size_t i=0; i<lw.v_proj_f32.size(); ++i) temp_bf16[i] = float32_to_bfloat16(lw.v_proj_f32[i]);
-             matvec_bf16_f32_vector_cpu(temp_bf16, x_norm_vec1, v_vec, n_kv_heads * head_dim, hs); // No log flag here yet
+             if (log_this_layer) Logger::info("[CPU_FWD L" + std::to_string(l) + "] MatVec: V_Proj (Q4_K)");
+             matvec_q4k_f32_vector_cpu(lw.v_proj_q4k, x_norm_vec1, v_vec, n_kv_heads * head_dim, hs, log_matvec_dequant);
+        } else if (!lw.v_proj_f32.empty()) { // <<< CHECK F32 FIRST
+             if (log_this_layer) Logger::info("[CPU_FWD L" + std::to_string(l) + "] MatVec: V_Proj (F32)");
+             matvec_f32_f32_vector_cpu(lw.v_proj_f32, x_norm_vec1, v_vec, n_kv_heads * head_dim, hs); // <<< USE F32 MATVEC
         } else if (!lw.v_proj.empty()) { // Fallback BF16
-             matvec_bf16_f32_vector_cpu(lw.v_proj, x_norm_vec1, v_vec, n_kv_heads * head_dim, hs); // No log flag here yet
+             if (log_this_layer) Logger::warning("[CPU_FWD L" + std::to_string(l) + "] MatVec: V_Proj (BF16 Fallback)");
+             matvec_bf16_f32_vector_cpu(lw.v_proj, x_norm_vec1, v_vec, n_kv_heads * head_dim, hs);
         } else {
             throw std::runtime_error("Layer " + std::to_string(l) + ": No valid V projection weights found!");
         }
@@ -1531,14 +1612,16 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& input, int n_toke
         }
         // O Projection - Use correct type based on loaded weights
         if (!lw.o_proj_q6k.empty()) {
+             if (log_this_layer) Logger::info("[CPU_FWD L" + std::to_string(l) + "] MatVec: O_Proj (Q6_K)");
              matvec_q6k_f32_vector_cpu(lw.o_proj_q6k, attn_out_vec, attn_proj_vec, hs, hs);
         } else if (!lw.o_proj_q4k.empty()) {
+             if (log_this_layer) Logger::info("[CPU_FWD L" + std::to_string(l) + "] MatVec: O_Proj (Q4_K)");
              matvec_q4k_f32_vector_cpu(lw.o_proj_q4k, attn_out_vec, attn_proj_vec, hs, hs);
-        } else if (!lw.o_proj_f32.empty()) {
-             // TODO: Implement F32 matvec if needed, for now convert F32->BF16 ON THE FLY (INEFFICIENT)
-             std::vector<uint16_t> temp_bf16(lw.o_proj_f32.size()); for(size_t i=0; i<lw.o_proj_f32.size(); ++i) temp_bf16[i] = float32_to_bfloat16(lw.o_proj_f32[i]);
-             matvec_bf16_f32_vector_cpu(temp_bf16, attn_out_vec, attn_proj_vec, hs, hs);
+        } else if (!lw.o_proj_f32.empty()) { // <<< CHECK F32 FIRST
+             if (log_this_layer) Logger::info("[CPU_FWD L" + std::to_string(l) + "] MatVec: O_Proj (F32)");
+             matvec_f32_f32_vector_cpu(lw.o_proj_f32, attn_out_vec, attn_proj_vec, hs, hs); // <<< USE F32 MATVEC
         } else if (!lw.o_proj.empty()) { // Fallback BF16
+             if (log_this_layer) Logger::warning("[CPU_FWD L" + std::to_string(l) + "] MatVec: O_Proj (BF16 Fallback)");
              matvec_bf16_f32_vector_cpu(lw.o_proj, attn_out_vec, attn_proj_vec, hs, hs);
         } else {
             throw std::runtime_error("Layer " + std::to_string(l) + ": No valid O projection weights found!");
@@ -1569,28 +1652,32 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& input, int n_toke
         // Gate & Up Projections - Use correct type based on loaded weights
         // Gate
         if (!lw.gate_proj_q6k.empty()) {
+            if (log_this_layer) Logger::info("[CPU_FWD L" + std::to_string(l) + "] MatVec: Gate_Proj (Q6_K)");
             matvec_q6k_f32_vector_cpu(lw.gate_proj_q6k, x_norm_vec2, gate_vec, is, hs);
         } else if (!lw.gate_proj_q4k.empty()) {
+            if (log_this_layer) Logger::info("[CPU_FWD L" + std::to_string(l) + "] MatVec: Gate_Proj (Q4_K)");
             matvec_q4k_f32_vector_cpu(lw.gate_proj_q4k, x_norm_vec2, gate_vec, is, hs);
-        } else if (!lw.gate_proj_f32.empty()) {
-             // TODO: Implement F32 matvec if needed, for now convert F32->BF16 ON THE FLY (INEFFICIENT)
-             std::vector<uint16_t> temp_bf16(lw.gate_proj_f32.size()); for(size_t i=0; i<lw.gate_proj_f32.size(); ++i) temp_bf16[i] = float32_to_bfloat16(lw.gate_proj_f32[i]);
-             matvec_bf16_f32_vector_cpu(temp_bf16, x_norm_vec2, gate_vec, is, hs);
+        } else if (!lw.gate_proj_f32.empty()) { // <<< CHECK F32 FIRST
+            if (log_this_layer) Logger::info("[CPU_FWD L" + std::to_string(l) + "] MatVec: Gate_Proj (F32)");
+            matvec_f32_f32_vector_cpu(lw.gate_proj_f32, x_norm_vec2, gate_vec, is, hs); // <<< USE F32 MATVEC
         } else if (!lw.gate_proj.empty()) { // Fallback BF16
+            if (log_this_layer) Logger::warning("[CPU_FWD L" + std::to_string(l) + "] MatVec: Gate_Proj (BF16 Fallback)");
             matvec_bf16_f32_vector_cpu(lw.gate_proj, x_norm_vec2, gate_vec, is, hs);
         } else {
             throw std::runtime_error("Layer " + std::to_string(l) + ": No valid Gate projection weights found!");
         }
         // Up
         if (!lw.up_proj_q6k.empty()) {
+             if (log_this_layer) Logger::info("[CPU_FWD L" + std::to_string(l) + "] MatVec: Up_Proj (Q6_K)");
              matvec_q6k_f32_vector_cpu(lw.up_proj_q6k, x_norm_vec2, up_vec, is, hs);
         } else if (!lw.up_proj_q4k.empty()) {
+             if (log_this_layer) Logger::info("[CPU_FWD L" + std::to_string(l) + "] MatVec: Up_Proj (Q4_K)");
              matvec_q4k_f32_vector_cpu(lw.up_proj_q4k, x_norm_vec2, up_vec, is, hs);
-        } else if (!lw.up_proj_f32.empty()) {
-             // TODO: Implement F32 matvec if needed, for now convert F32->BF16 ON THE FLY (INEFFICIENT)
-             std::vector<uint16_t> temp_bf16(lw.up_proj_f32.size()); for(size_t i=0; i<lw.up_proj_f32.size(); ++i) temp_bf16[i] = float32_to_bfloat16(lw.up_proj_f32[i]);
-             matvec_bf16_f32_vector_cpu(temp_bf16, x_norm_vec2, up_vec, is, hs);
+        } else if (!lw.up_proj_f32.empty()) { // <<< CHECK F32 FIRST
+             if (log_this_layer) Logger::info("[CPU_FWD L" + std::to_string(l) + "] MatVec: Up_Proj (F32)");
+             matvec_f32_f32_vector_cpu(lw.up_proj_f32, x_norm_vec2, up_vec, is, hs); // <<< USE F32 MATVEC
         } else if (!lw.up_proj.empty()) { // Fallback BF16
+             if (log_this_layer) Logger::warning("[CPU_FWD L" + std::to_string(l) + "] MatVec: Up_Proj (BF16 Fallback)");
              matvec_bf16_f32_vector_cpu(lw.up_proj, x_norm_vec2, up_vec, is, hs);
         } else {
             throw std::runtime_error("Layer " + std::to_string(l) + ": No valid Up projection weights found!");
@@ -1605,14 +1692,16 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& input, int n_toke
         }
         // Down Projection - Use correct type based on loaded weights
         if (!lw.down_proj_q6k.empty()) {
+            if (log_this_layer) Logger::info("[CPU_FWD L" + std::to_string(l) + "] MatVec: Down_Proj (Q6_K)");
             matvec_q6k_f32_vector_cpu(lw.down_proj_q6k, swiglu_result_vec, mlp_out_vec, hs, is);
         } else if (!lw.down_proj_q4k.empty()) {
+            if (log_this_layer) Logger::info("[CPU_FWD L" + std::to_string(l) + "] MatVec: Down_Proj (Q4_K)");
             matvec_q4k_f32_vector_cpu(lw.down_proj_q4k, swiglu_result_vec, mlp_out_vec, hs, is);
-        } else if (!lw.down_proj_f32.empty()) {
-             // TODO: Implement F32 matvec if needed, for now convert F32->BF16 ON THE FLY (INEFFICIENT)
-             std::vector<uint16_t> temp_bf16(lw.down_proj_f32.size()); for(size_t i=0; i<lw.down_proj_f32.size(); ++i) temp_bf16[i] = float32_to_bfloat16(lw.down_proj_f32[i]);
-             matvec_bf16_f32_vector_cpu(temp_bf16, swiglu_result_vec, mlp_out_vec, hs, is);
+        } else if (!lw.down_proj_f32.empty()) { // <<< CHECK F32 FIRST
+            if (log_this_layer) Logger::info("[CPU_FWD L" + std::to_string(l) + "] MatVec: Down_Proj (F32)");
+            matvec_f32_f32_vector_cpu(lw.down_proj_f32, swiglu_result_vec, mlp_out_vec, hs, is); // <<< USE F32 MATVEC
         } else if (!lw.down_proj.empty()) { // Fallback BF16
+            if (log_this_layer) Logger::warning("[CPU_FWD L" + std::to_string(l) + "] MatVec: Down_Proj (BF16 Fallback)");
             matvec_bf16_f32_vector_cpu(lw.down_proj, swiglu_result_vec, mlp_out_vec, hs, is);
         } else {
              throw std::runtime_error("Layer " + std::to_string(l) + ": No valid Down projection weights found!");
@@ -1651,32 +1740,36 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& input, int n_toke
     }
 
     std::vector<float> logits(vs); 
-    // Conditional LM Head MatVec (CPU)
+    bool lm_head_logged = false; // Track if we logged the method
+
+    // Conditional LM Head MatVec (CPU) - REVISED ORDER & F32 HANDLING
     if (!lm_head_q6k.empty()) {
-        Logger::info("Using Q6_K LM Head for CPU MatVec.");
-        matvec_q6k_f32_vector_cpu(lm_head_q6k, x_final_norm_vec, logits, vs, hs); // Use _cpu suffix
+        if (log_initial) Logger::info("[CPU_FWD] Using Q6_K LM Head");
+        matvec_q6k_f32_vector_cpu(lm_head_q6k, x_final_norm_vec, logits, vs, hs, log_initial);
+        lm_head_logged = true;
     } else if (!lm_head_q4k.empty()) {
-         Logger::fatal("Q4_K LM Head MatVec not implemented yet for CPU!");
-         throw std::runtime_error("Q4_K CPU MatVec NYI");
-         // matvec_q4k_f32_vector_cpu(lm_head_q4k, x_final_norm_vec, logits, vs, hs);
-    } else if (!lm_head_f32.empty()) {
-        Logger::info("Using F32 LM Head for CPU MatVec (needs matvec_f32_f32_vector_cpu).");
-        // TODO: Implement matvec_f32_f32_vector_cpu or use an existing library if available
-        // For now, convert F32 matrix to BF16 ON THE FLY (INEFFICIENT) to reuse existing BF16 matvec
-         Logger::warning("Converting F32 LM head to BF16 temporarily for CPU matvec - VERY INEFFICIENT!");
-         std::vector<uint16_t> lm_head_bf16_temp(lm_head_f32.size());
-         for(size_t i=0; i < lm_head_f32.size(); ++i) lm_head_bf16_temp[i] = float32_to_bfloat16(lm_head_f32[i]);
-         matvec_bf16_f32_vector_cpu(lm_head_bf16_temp, x_final_norm_vec, logits, vs, hs); // Use _cpu suffix
-    } else if (!lm_head.empty()) { // Fallback to BF16 (original)
-         Logger::info("Using BF16 LM Head for CPU MatVec.");
-         matvec_bf16_f32_vector_cpu(lm_head, x_final_norm_vec, logits, vs, hs); // Use _cpu suffix
+        if (log_initial) Logger::info("[CPU_FWD] Using Q4_K LM Head");
+        matvec_q4k_f32_vector_cpu(lm_head_q4k, x_final_norm_vec, logits, vs, hs, log_initial); // ADDED CALL (assuming function exists and works now)
+        lm_head_logged = true;
+    } else if (!lm_head_f32.empty()) { // Check for F32 weights BEFORE falling back to BF16
+        if (log_initial) Logger::info("[CPU_FWD] Using F32 LM Head");
+        // *** USE THE NEW F32x F32 MATVEC ***
+        matvec_f32_f32_vector_cpu(lm_head_f32, x_final_norm_vec, logits, vs, hs);
+        lm_head_logged = true;
+    } else if (!lm_head.empty()) { // Fallback to original BF16 if NO OTHER TYPE is present
+         // THIS PATH SHOULD IDEALLY NOT BE HIT IF F32 WEIGHTS ARE LOADED CORRECTLY
+         // It implies lm_head_f32 is empty, but lm_head (bf16) is not.
+         Logger::warning("Using BF16 LM head weights directly - Ensure F32 version wasn't expected.");
+         if (log_initial) Logger::info("[CPU_FWD] Using BF16 LM Head (Fallback)");
+         matvec_bf16_f32_vector_cpu(lm_head, x_final_norm_vec, logits, vs, hs); // Use original BF16 weights
+         lm_head_logged = true;
     } else {
          Logger::fatal("No valid LM Head weights found (Q6_K, Q4_K, F32, or BF16).");
          throw std::runtime_error("Missing LM head weights");
     }
 
-    if (log_initial) {
-        log_vector_summary("Final Logits (P0, CPU Path)", logits, 10); // Updated log msg
+    if (log_initial && lm_head_logged) {
+        log_vector_summary("Final Logits (CPU Path)", logits, 10);
     }
     if (log_this_step) {
         Logger::info("[CPU_FWD] forward complete. pos=" + std::to_string(n_tokens));
@@ -1732,12 +1825,12 @@ std::vector<float> TinyLlamaModel::forward_device(int token_id, int pos, KVCache
     */
     // --- END: REMOVE Local Device Memory Allocation & Pointers ---
 
-    // --- Set cuBLAS Stream ---
+    // --- Set cuBLAS Stream --- 
     cublasStatus_t stream_status = cublasSetStream(cublas_handle_, stream);
     if (stream_status != CUBLAS_STATUS_SUCCESS) {
         Logger::error("cublasSetStream failed in forward_device");
         // Handle error, maybe throw or return empty vector
-        return {};
+        return {}; 
     }
 
     // --- START: REMOVE Local Device Memory Allocation ---
@@ -1844,25 +1937,25 @@ std::vector<float> TinyLlamaModel::forward_device(int token_id, int pos, KVCache
         // RoPE
         rope_cuda(q_dev_, n_heads, head_dim, all_freqs_cis_dev, pos, stream);
         rope_cuda(k_dev_, n_kv_heads, head_dim, all_freqs_cis_dev, pos, stream);
-
+  
         // KVCache Update
         for (int kvh = 0; kvh < n_kv_heads; ++kvh) {
             const float* current_k_head_ptr = k_dev_ + kvh * head_dim;
             const float* current_v_head_ptr = v_dev_ + kvh * head_dim;
-
+            
             update_kv_cache_cuda(
                 kv_cache->layers[l].k_dev,
                 current_k_head_ptr,
-                pos, kvh,
+                pos, kvh, 
                 kv_cache->allocated_max_seq_len,
                 kv_cache->allocated_num_kv_heads,
                 kv_cache->allocated_head_dim,
                 stream);
-
+                                 
             update_kv_cache_cuda(
                 kv_cache->layers[l].v_dev,
                 current_v_head_ptr,
-                pos, kvh,
+                pos, kvh, 
                 kv_cache->allocated_max_seq_len,
                 kv_cache->allocated_num_kv_heads,
                 kv_cache->allocated_head_dim,
@@ -1872,7 +1965,7 @@ std::vector<float> TinyLlamaModel::forward_device(int token_id, int pos, KVCache
         // Attention
         float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
          attention_cuda(q_dev_, kv_cache->layers[l].k_dev, kv_cache->layers[l].v_dev, attn_out_dev_,
-                        n_heads, pos + 1, head_dim, scale,
+                        n_heads, pos + 1, head_dim, scale, 
                         kv_cache->allocated_max_seq_len,
                         kv_cache->allocated_num_kv_heads,
                         stream);
@@ -1930,14 +2023,14 @@ std::vector<float> TinyLlamaModel::forward_device(int token_id, int pos, KVCache
              return {};
         }
         // --- END MODIFICATION ---
-
+         
         // Residual 2 Add
         add_residual_cuda(mlp_down_dev_, x_resid2_dev_, x_dev_, hs, stream);
 
     } // End layer loop
 
-    // --- Final Steps (Outside Layer Loop) ---
-
+    // --- Final Steps (Outside Layer Loop) --- 
+     
     // Final RMSNorm
     rmsnorm_vector_cuda(x_dev_, final_norm_dev, x_norm_dev_, hs, eps, stream);
 
@@ -1956,11 +2049,11 @@ std::vector<float> TinyLlamaModel::forward_device(int token_id, int pos, KVCache
 
     // Synchronize Stream before Copy
     gpuErrchk(cudaStreamSynchronize(stream));
-
+ 
     // Copy Logits Device -> Host
     std::vector<float> logits(vs);
      gpuErrchk(cudaMemcpy(logits.data(), logits_dev_, vs * sizeof(float), cudaMemcpyDeviceToHost));
-
+ 
     // --- START: REMOVE Local Device Memory Free --- 
     /*
     gpuErrchk(cudaFree(x_dev));
@@ -1968,7 +2061,7 @@ std::vector<float> TinyLlamaModel::forward_device(int token_id, int pos, KVCache
     gpuErrchk(cudaFree(logits_dev));
     */
     // --- END: REMOVE Local Device Memory Free ---
-
+ 
     return logits;
 
 } // End forward_device
@@ -2035,6 +2128,24 @@ void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
         vec.assign(src, src + num_blocks); // Use num_blocks for assignment
     };
 
+    // --- ADDED: Helper lambda for FP16 assignment (reads uint16_t, converts to float) ---
+    auto assign_vec_f16 = [&](std::vector<float>& vec_f32, const GGUFTensorInfo& tinfo) {
+        size_t n_elem = tinfo.num_elements;
+        if (n_elem == 0) { vec_f32.clear(); return; }
+        const uint16_t* src = reinterpret_cast<const uint16_t*>(gguf.tensor_data.data() + tinfo.offset);
+        // Check source pointer validity (optional extra check)
+        uintptr_t src_end_addr = reinterpret_cast<uintptr_t>(src) + n_elem * sizeof(uint16_t);
+        if (src_end_addr > reinterpret_cast<uintptr_t>(gguf.tensor_data.data()) + gguf.tensor_data.size()) {
+             throw std::out_of_range("Calculated source range for FP16 tensor '" + tinfo.name + "' exceeds data buffer.");
+        }
+        vec_f32.resize(n_elem);
+        #pragma omp parallel for
+        for(size_t i = 0; i < n_elem; ++i) {
+            vec_f32[i] = fp16_to_fp32(src[i]);
+        }
+    };
+    // --- END ADDED HELPER ---
+
     for (const auto& tinfo : gguf.tensor_infos) {
         const std::string& name = tinfo.name;
 
@@ -2066,11 +2177,64 @@ void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
 
         // Top-level weights
         if (name == "model.embed_tokens.weight" || name == "token_embd.weight") {
-            if (tinfo.type == GGMLType::GGML_TYPE_F32) { // Use .type and correct enum name
+            if (tinfo.type == GGMLType::GGML_TYPE_F32) {
                 assign_vec_f32(model.embed_tokens_f32, tinfo);
                 Logger::info("Mapped GGUF tensor '" + name + "' (FP32) to model.embed_tokens_f32");
-            } else if (tinfo.type == GGMLType::GGML_TYPE_Q4_K) { // Use .type and correct enum name
-                assign_vec_q4k(model.embed_tokens_q4k, tinfo);
+            } else if (tinfo.type == GGMLType::GGML_TYPE_F16) { // <<< ADDED F16 CASE >>>
+                assign_vec_f16(model.embed_tokens_f32, tinfo);
+                Logger::info("Mapped GGUF tensor '" + name + "' (FP16) to model.embed_tokens_f32");
+            } else if (tinfo.type == GGMLType::GGML_TYPE_Q4_K) {
+                // --- ADD DETAILED LOGGING FOR Q4_K EMBEDDING MAPPING ---
+                size_t num_blocks = 0;
+                uintptr_t src_addr = 0;
+                uintptr_t src_end_addr_calc = 0;
+                uintptr_t data_start_addr = reinterpret_cast<uintptr_t>(gguf.tensor_data.data());
+                uintptr_t data_end_addr = data_start_addr + total_data_size;
+                const block_q4_K* first_block_ptr = nullptr;
+                uint16_t raw_d = 0, raw_dmin = 0;
+                float converted_d = NAN, converted_dmin = NAN;
+
+                try {
+                    if (GGML_QK_K != 0 && tinfo.num_elements % GGML_QK_K == 0) {
+                        num_blocks = tinfo.num_elements / GGML_QK_K;
+                        src_addr = reinterpret_cast<uintptr_t>(gguf.tensor_data.data()) + tinfo.offset;
+                        src_end_addr_calc = src_addr + num_blocks * sizeof(block_q4_K);
+                        // Check if src_addr is valid and points within the buffer before dereferencing
+                        if (num_blocks > 0 && src_addr >= data_start_addr && (src_addr + sizeof(block_q4_K)) <= data_end_addr) {
+                             first_block_ptr = reinterpret_cast<const block_q4_K*>(src_addr);
+                             // Safely read d and dmin only if the pointer is valid
+                             raw_d = first_block_ptr->d;
+                             raw_dmin = first_block_ptr->dmin;
+                             converted_d = fp16_to_fp32(raw_d); // Assuming fp16_to_fp32 exists
+                             converted_dmin = fp16_to_fp32(raw_dmin);
+                        } else if (num_blocks > 0) {
+                            // Pointer calculation is okay, but read would be out of bounds
+                             Logger::warning("[MAP GGUF Q4_K EMBEDDING]: Calculated source address " + std::to_string(src_addr) + " is out of bounds for reading the first block.");
+                        }
+                    } else {
+                         Logger::warning("[MAP GGUF Q4_K EMBEDDING]: num_elements not divisible by GGML_QK_K or GGML_QK_K is zero.");
+                    }
+                    std::stringstream log_map;
+                    log_map << "[MAP GGUF Q4_K EMBEDDING]: Tensor='" << tinfo.name << "', Offset=" << tinfo.offset
+                           << ", NumElem=" << tinfo.num_elements << ", NumBlocks=" << num_blocks
+                           << ", SizeBytes(TensorInfo)=" << tinfo.size_in_bytes << ", SizeBytes(Calc)=" << (num_blocks * sizeof(block_q4_K)) << "\\n"
+                           << "    DataBuffer: [" << data_start_addr << " - " << data_end_addr << "] (Size: " << total_data_size << ")\\n"
+                           << "    SrcPtrAddr: " << src_addr << " (RelOffset: " << (src_addr - data_start_addr) << ")\\n"
+                           << "    CalcEndPtr: " << src_end_addr_calc << "\\n"
+                           << "    ReadRangeOK: " << (src_addr >= data_start_addr && src_end_addr_calc <= data_end_addr && src_addr <= src_end_addr_calc ? "YES" : "NO!") << "\\n";
+                    if (first_block_ptr && src_addr >= data_start_addr && (src_addr + sizeof(block_q4_K)) <= data_end_addr) {
+                         log_map << "    First Block @ " << reinterpret_cast<uintptr_t>(first_block_ptr) << ":\\n"
+                                << "      Raw d=0x" << std::hex << raw_d << std::dec << " -> fp32=" << converted_d << "\\n"
+                                << "      Raw dmin=0x" << std::hex << raw_dmin << std::dec << " -> fp32=" << converted_dmin;
+                    } else {
+                         log_map << "    First Block: Could not read (invalid ptr or num_blocks=0 or OOB).";
+                    }
+                    Logger::info(log_map.str());
+                } catch (const std::exception& log_ex) {
+                     Logger::error("Exception during Q4_K embedding mapping log generation: " + std::string(log_ex.what()));
+                }
+                // --- END DETAILED LOGGING ---
+                assign_vec_q4k(model.embed_tokens_q4k, tinfo); // Assign the vector
                 Logger::info("Mapped GGUF tensor '" + name + "' (Q4_K) to model.embed_tokens_q4k");
             } else if (tinfo.type == GGMLType::GGML_TYPE_Q6_K) { // Use .type and correct enum name
                 assign_vec_q6k(model.embed_tokens_q6k, tinfo);
@@ -2083,13 +2247,16 @@ void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
             continue;
         }
         if (name == "lm_head.weight" || name == "output.weight") {
-            if (tinfo.type == GGMLType::GGML_TYPE_F32) { // Use .type and correct enum name
+            if (tinfo.type == GGMLType::GGML_TYPE_F32) {
                 assign_vec_f32(model.lm_head_f32, tinfo);
                 Logger::info("Mapped GGUF tensor '" + name + "' (FP32) to model.lm_head_f32");
-            } else if (tinfo.type == GGMLType::GGML_TYPE_Q4_K) { // Use .type and correct enum name
+            } else if (tinfo.type == GGMLType::GGML_TYPE_F16) { // <<< ADDED F16 CASE >>>
+                assign_vec_f16(model.lm_head_f32, tinfo);
+                Logger::info("Mapped GGUF tensor '" + name + "' (FP16) to model.lm_head_f32");
+            } else if (tinfo.type == GGMLType::GGML_TYPE_Q4_K) {
                 assign_vec_q4k(model.lm_head_q4k, tinfo);
                 Logger::info("Mapped GGUF tensor '" + name + "' (Q4_K) to model.lm_head_q4k");
-            } else if (tinfo.type == GGMLType::GGML_TYPE_Q6_K) { // Use .type and correct enum name
+            } else if (tinfo.type == GGMLType::GGML_TYPE_Q6_K) {
                 assign_vec_q6k(model.lm_head_q6k, tinfo);
                 Logger::info("Mapped GGUF tensor '" + name + "' (Q6_K) to model.lm_head_q6k");
             } else {
@@ -2100,9 +2267,12 @@ void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
             continue;
         }
         if (name == "model.norm.weight" || name == "norm.weight" || name == "output_norm.weight") {
-            if (tinfo.type == GGMLType::GGML_TYPE_F32) { // Use .type and correct enum name
+            if (tinfo.type == GGMLType::GGML_TYPE_F32) {
                 assign_vec_f32(model.final_norm_f32, tinfo);
                 Logger::info("Mapped GGUF tensor '" + name + "' (FP32) to model.final_norm_f32");
+            } else if (tinfo.type == GGMLType::GGML_TYPE_F16) { // <<< ADDED F16 CASE >>>
+                 assign_vec_f16(model.final_norm_f32, tinfo);
+                 Logger::info("Mapped GGUF tensor '" + name + "' (FP16) to model.final_norm_f32");
             } else {
                 assign_vec_bf16(model.final_norm, tinfo);
                 Logger::info("Mapped GGUF tensor '" + name + "' (BF16/Other) to model.final_norm"); // Adjusted log
@@ -2149,159 +2319,106 @@ void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
             std::string suffix = name.substr(suffix_start_pos);
             auto& lw = model.get_layers()[layer_idx];
 
-            // Map known fields based on suffix (the suffix logic remains the same)
+            // Map known fields based on suffix, adding F16 cases
             // Q_PROJ
-            if (suffix == "self_attn.q_proj.weight" || suffix == "attn.wq.weight" || suffix == "attn_q.weight") { 
-                if (tinfo.type == GGMLType::GGML_TYPE_F32) { // Use .type and correct enum name
+            if (suffix == "self_attn.q_proj.weight" || suffix == "attn.wq.weight" || suffix == "attn_q.weight") {
+                if (tinfo.type == GGMLType::GGML_TYPE_F32) {
                     assign_vec_f32(lw.q_proj_f32, tinfo);
                     Logger::info("Mapped GGUF tensor '" + name + "' (FP32) to layers[" + std::to_string(layer_idx) + "].q_proj_f32");
-                } else if (tinfo.type == GGMLType::GGML_TYPE_Q4_K) { // Use .type and correct enum name
+                 } else if (tinfo.type == GGMLType::GGML_TYPE_F16) { // <<< ADDED F16 CASE >>>
+                    assign_vec_f16(lw.q_proj_f32, tinfo);
+                    Logger::info("Mapped GGUF tensor '" + name + "' (FP16) to layers[" + std::to_string(layer_idx) + "].q_proj_f32");
+                } else if (tinfo.type == GGMLType::GGML_TYPE_Q4_K) {
                     assign_vec_q4k(lw.q_proj_q4k, tinfo);
                     Logger::info("Mapped GGUF tensor '" + name + "' (Q4_K) to layers[" + std::to_string(layer_idx) + "].q_proj_q4k");
-                } else if (tinfo.type == GGMLType::GGML_TYPE_Q6_K) { // Use .type and correct enum name
+                } else if (tinfo.type == GGMLType::GGML_TYPE_Q6_K) {
                     assign_vec_q6k(lw.q_proj_q6k, tinfo);
                     Logger::info("Mapped GGUF tensor '" + name + "' (Q6_K) to layers[" + std::to_string(layer_idx) + "].q_proj_q6k");
                 } else {
-                    assign_vec_bf16(lw.q_proj, tinfo); // REMOVED const_cast
+                    assign_vec_bf16(lw.q_proj, tinfo);
                     Logger::info("Mapped GGUF tensor '" + name + "' (BF16/Other) to layers[" + std::to_string(layer_idx) + "].q_proj");
                 }
-                Logger::info("-> Successfully assigned '" + name + "' to layer " + std::to_string(layer_idx)); // Add success log
+                Logger::info("-> Successfully assigned '" + name + "' to layer " + std::to_string(layer_idx));
                 continue;
             }
             // K_PROJ
             if (suffix == "self_attn.k_proj.weight" || suffix == "attn.wk.weight" || suffix == "attn_k.weight") { 
-                if (tinfo.type == GGMLType::GGML_TYPE_F32) { // Use .type and correct enum name
-                    assign_vec_f32(lw.k_proj_f32, tinfo);
-                    Logger::info("Mapped GGUF tensor '" + name + "' (FP32) to layers[" + std::to_string(layer_idx) + "].k_proj_f32");
-                } else if (tinfo.type == GGMLType::GGML_TYPE_Q4_K) { // Use .type and correct enum name
-                    assign_vec_q4k(lw.k_proj_q4k, tinfo);
-                    Logger::info("Mapped GGUF tensor '" + name + "' (Q4_K) to layers[" + std::to_string(layer_idx) + "].k_proj_q4k");
-                } else if (tinfo.type == GGMLType::GGML_TYPE_Q6_K) { // Use .type and correct enum name
-                    assign_vec_q6k(lw.k_proj_q6k, tinfo);
-                    Logger::info("Mapped GGUF tensor '" + name + "' (Q6_K) to layers[" + std::to_string(layer_idx) + "].k_proj_q6k");
-                } else {
-                    assign_vec_bf16(lw.k_proj, tinfo); // REMOVED const_cast
-                    Logger::info("Mapped GGUF tensor '" + name + "' (BF16/Other) to layers[" + std::to_string(layer_idx) + "].k_proj");
-                }
-                Logger::info("-> Successfully assigned '" + name + "' to layer " + std::to_string(layer_idx)); // Add success log
+                if (tinfo.type == GGMLType::GGML_TYPE_F32) { assign_vec_f32(lw.k_proj_f32, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (FP32) to layers[" + std::to_string(layer_idx) + "].k_proj_f32"); } 
+                else if (tinfo.type == GGMLType::GGML_TYPE_F16) { assign_vec_f16(lw.k_proj_f32, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (FP16) to layers[" + std::to_string(layer_idx) + "].k_proj_f32"); } 
+                else if (tinfo.type == GGMLType::GGML_TYPE_Q4_K) { assign_vec_q4k(lw.k_proj_q4k, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (Q4_K) to layers[" + std::to_string(layer_idx) + "].k_proj_q4k"); }
+                else if (tinfo.type == GGMLType::GGML_TYPE_Q6_K) { assign_vec_q6k(lw.k_proj_q6k, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (Q6_K) to layers[" + std::to_string(layer_idx) + "].k_proj_q6k"); } 
+                else { assign_vec_bf16(lw.k_proj, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (BF16/Other) to layers[" + std::to_string(layer_idx) + "].k_proj"); }
+                 Logger::info("-> Successfully assigned '" + name + "' to layer " + std::to_string(layer_idx));
                 continue;
             }
             // V_PROJ
             if (suffix == "self_attn.v_proj.weight" || suffix == "attn.wv.weight" || suffix == "attn_v.weight") { 
-                if (tinfo.type == GGMLType::GGML_TYPE_F32) { // Use .type and correct enum name
-                    assign_vec_f32(lw.v_proj_f32, tinfo);
-                    Logger::info("Mapped GGUF tensor '" + name + "' (FP32) to layers[" + std::to_string(layer_idx) + "].v_proj_f32");
-                } else if (tinfo.type == GGMLType::GGML_TYPE_Q4_K) { // Use .type and correct enum name
-                    assign_vec_q4k(lw.v_proj_q4k, tinfo);
-                    Logger::info("Mapped GGUF tensor '" + name + "' (Q4_K) to layers[" + std::to_string(layer_idx) + "].v_proj_q4k");
-                } else if (tinfo.type == GGMLType::GGML_TYPE_Q6_K) { // Use .type and correct enum name
-                    assign_vec_q6k(lw.v_proj_q6k, tinfo);
-                    Logger::info("Mapped GGUF tensor '" + name + "' (Q6_K) to layers[" + std::to_string(layer_idx) + "].v_proj_q6k");
-                } else {
-                    assign_vec_bf16(lw.v_proj, tinfo); // REMOVED const_cast
-                    Logger::info("Mapped GGUF tensor '" + name + "' (BF16/Other) to layers[" + std::to_string(layer_idx) + "].v_proj");
-                }
-                Logger::info("-> Successfully assigned '" + name + "' to layer " + std::to_string(layer_idx)); // Add success log
+                if (tinfo.type == GGMLType::GGML_TYPE_F32) { assign_vec_f32(lw.v_proj_f32, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (FP32) to layers[" + std::to_string(layer_idx) + "].v_proj_f32"); } 
+                else if (tinfo.type == GGMLType::GGML_TYPE_F16) { assign_vec_f16(lw.v_proj_f32, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (FP16) to layers[" + std::to_string(layer_idx) + "].v_proj_f32"); } 
+                else if (tinfo.type == GGMLType::GGML_TYPE_Q4_K) { assign_vec_q4k(lw.v_proj_q4k, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (Q4_K) to layers[" + std::to_string(layer_idx) + "].v_proj_q4k"); }
+                else if (tinfo.type == GGMLType::GGML_TYPE_Q6_K) { assign_vec_q6k(lw.v_proj_q6k, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (Q6_K) to layers[" + std::to_string(layer_idx) + "].v_proj_q6k"); } 
+                else { assign_vec_bf16(lw.v_proj, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (BF16/Other) to layers[" + std::to_string(layer_idx) + "].v_proj"); }
+                Logger::info("-> Successfully assigned '" + name + "' to layer " + std::to_string(layer_idx));
                 continue;
             }
             // O_PROJ
             if (suffix == "self_attn.o_proj.weight" || suffix == "attn.wo.weight" || suffix == "attn_output.weight") { 
-                if (tinfo.type == GGMLType::GGML_TYPE_F32) { // Use .type and correct enum name
-                    assign_vec_f32(lw.o_proj_f32, tinfo);
-                    Logger::info("Mapped GGUF tensor '" + name + "' (FP32) to layers[" + std::to_string(layer_idx) + "].o_proj_f32");
-                } else if (tinfo.type == GGMLType::GGML_TYPE_Q4_K) { // Use .type and correct enum name
-                    assign_vec_q4k(lw.o_proj_q4k, tinfo);
-                    Logger::info("Mapped GGUF tensor '" + name + "' (Q4_K) to layers[" + std::to_string(layer_idx) + "].o_proj_q4k");
-                } else if (tinfo.type == GGMLType::GGML_TYPE_Q6_K) { // Use .type and correct enum name
-                    assign_vec_q6k(lw.o_proj_q6k, tinfo);
-                    Logger::info("Mapped GGUF tensor '" + name + "' (Q6_K) to layers[" + std::to_string(layer_idx) + "].o_proj_q6k");
-                } else {
-                    assign_vec_bf16(lw.o_proj, tinfo); // REMOVED const_cast
-                    Logger::info("Mapped GGUF tensor '" + name + "' (BF16/Other) to layers[" + std::to_string(layer_idx) + "].o_proj");
-                }
-                Logger::info("-> Successfully assigned '" + name + "' to layer " + std::to_string(layer_idx)); // Add success log
+                if (tinfo.type == GGMLType::GGML_TYPE_F32) { assign_vec_f32(lw.o_proj_f32, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (FP32) to layers[" + std::to_string(layer_idx) + "].o_proj_f32"); } 
+                else if (tinfo.type == GGMLType::GGML_TYPE_F16) { assign_vec_f16(lw.o_proj_f32, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (FP16) to layers[" + std::to_string(layer_idx) + "].o_proj_f32"); } 
+                else if (tinfo.type == GGMLType::GGML_TYPE_Q4_K) { assign_vec_q4k(lw.o_proj_q4k, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (Q4_K) to layers[" + std::to_string(layer_idx) + "].o_proj_q4k"); }
+                else if (tinfo.type == GGMLType::GGML_TYPE_Q6_K) { assign_vec_q6k(lw.o_proj_q6k, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (Q6_K) to layers[" + std::to_string(layer_idx) + "].o_proj_q6k"); } 
+                else { assign_vec_bf16(lw.o_proj, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (BF16/Other) to layers[" + std::to_string(layer_idx) + "].o_proj"); }
+                Logger::info("-> Successfully assigned '" + name + "' to layer " + std::to_string(layer_idx));
                 continue;
             }
             // GATE_PROJ
             if (suffix == "mlp.gate_proj.weight" || suffix == "ffn.w1.weight" || suffix == "ffn_gate.weight") { 
-                if (tinfo.type == GGMLType::GGML_TYPE_F32) { // Use .type and correct enum name
-                    assign_vec_f32(lw.gate_proj_f32, tinfo);
-                    Logger::info("Mapped GGUF tensor '" + name + "' (FP32) to layers[" + std::to_string(layer_idx) + "].gate_proj_f32");
-                } else if (tinfo.type == GGMLType::GGML_TYPE_Q4_K) { // Use .type and correct enum name
-                    assign_vec_q4k(lw.gate_proj_q4k, tinfo);
-                    Logger::info("Mapped GGUF tensor '" + name + "' (Q4_K) to layers[" + std::to_string(layer_idx) + "].gate_proj_q4k");
-                } else if (tinfo.type == GGMLType::GGML_TYPE_Q6_K) { // Use .type and correct enum name
-                    assign_vec_q6k(lw.gate_proj_q6k, tinfo);
-                    Logger::info("Mapped GGUF tensor '" + name + "' (Q6_K) to layers[" + std::to_string(layer_idx) + "].gate_proj_q6k");
-                } else {
-                    assign_vec_bf16(lw.gate_proj, tinfo); // REMOVED const_cast
-                    Logger::info("Mapped GGUF tensor '" + name + "' (BF16/Other) to layers[" + std::to_string(layer_idx) + "].gate_proj");
-                }
-                Logger::info("-> Successfully assigned '" + name + "' to layer " + std::to_string(layer_idx)); // Add success log
+                if (tinfo.type == GGMLType::GGML_TYPE_F32) { assign_vec_f32(lw.gate_proj_f32, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (FP32) to layers[" + std::to_string(layer_idx) + "].gate_proj_f32"); } 
+                else if (tinfo.type == GGMLType::GGML_TYPE_F16) { assign_vec_f16(lw.gate_proj_f32, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (FP16) to layers[" + std::to_string(layer_idx) + "].gate_proj_f32"); } 
+                else if (tinfo.type == GGMLType::GGML_TYPE_Q4_K) { assign_vec_q4k(lw.gate_proj_q4k, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (Q4_K) to layers[" + std::to_string(layer_idx) + "].gate_proj_q4k"); } 
+                else if (tinfo.type == GGMLType::GGML_TYPE_Q6_K) { assign_vec_q6k(lw.gate_proj_q6k, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (Q6_K) to layers[" + std::to_string(layer_idx) + "].gate_proj_q6k"); } 
+                else { assign_vec_bf16(lw.gate_proj, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (BF16/Other) to layers[" + std::to_string(layer_idx) + "].gate_proj"); }
+                Logger::info("-> Successfully assigned '" + name + "' to layer " + std::to_string(layer_idx));
                 continue;
             }
             // UP_PROJ
             if (suffix == "mlp.up_proj.weight" || suffix == "ffn.w3.weight" || suffix == "ffn_up.weight") { 
-                if (tinfo.type == GGMLType::GGML_TYPE_F32) { // Use .type and correct enum name
-                    assign_vec_f32(lw.up_proj_f32, tinfo);
-                    Logger::info("Mapped GGUF tensor '" + name + "' (FP32) to layers[" + std::to_string(layer_idx) + "].up_proj_f32");
-                } else if (tinfo.type == GGMLType::GGML_TYPE_Q4_K) { // Use .type and correct enum name
-                    assign_vec_q4k(lw.up_proj_q4k, tinfo);
-                    Logger::info("Mapped GGUF tensor '" + name + "' (Q4_K) to layers[" + std::to_string(layer_idx) + "].up_proj_q4k");
-                } else if (tinfo.type == GGMLType::GGML_TYPE_Q6_K) { // Use .type and correct enum name
-                    assign_vec_q6k(lw.up_proj_q6k, tinfo);
-                    Logger::info("Mapped GGUF tensor '" + name + "' (Q6_K) to layers[" + std::to_string(layer_idx) + "].up_proj_q6k");
-                } else {
-                    assign_vec_bf16(lw.up_proj, tinfo); // REMOVED const_cast
-                    Logger::info("Mapped GGUF tensor '" + name + "' (BF16/Other) to layers[" + std::to_string(layer_idx) + "].up_proj");
-                }
-                Logger::info("-> Successfully assigned '" + name + "' to layer " + std::to_string(layer_idx)); // Add success log
+                if (tinfo.type == GGMLType::GGML_TYPE_F32) { assign_vec_f32(lw.up_proj_f32, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (FP32) to layers[" + std::to_string(layer_idx) + "].up_proj_f32"); } 
+                else if (tinfo.type == GGMLType::GGML_TYPE_F16) { assign_vec_f16(lw.up_proj_f32, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (FP16) to layers[" + std::to_string(layer_idx) + "].up_proj_f32"); } 
+                else if (tinfo.type == GGMLType::GGML_TYPE_Q4_K) { assign_vec_q4k(lw.up_proj_q4k, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (Q4_K) to layers[" + std::to_string(layer_idx) + "].up_proj_q4k"); } 
+                else if (tinfo.type == GGMLType::GGML_TYPE_Q6_K) { assign_vec_q6k(lw.up_proj_q6k, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (Q6_K) to layers[" + std::to_string(layer_idx) + "].up_proj_q6k"); } 
+                else { assign_vec_bf16(lw.up_proj, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (BF16/Other) to layers[" + std::to_string(layer_idx) + "].up_proj"); }
+                Logger::info("-> Successfully assigned '" + name + "' to layer " + std::to_string(layer_idx));
                 continue;
             }
             // DOWN_PROJ
             if (suffix == "mlp.down_proj.weight" || suffix == "ffn.w2.weight" || suffix == "ffn_down.weight") { 
-                if (tinfo.type == GGMLType::GGML_TYPE_F32) { // Use .type and correct enum name
-                    assign_vec_f32(lw.down_proj_f32, tinfo);
-                    Logger::info("Mapped GGUF tensor '" + name + "' (FP32) to layers[" + std::to_string(layer_idx) + "].down_proj_f32");
-                } else if (tinfo.type == GGMLType::GGML_TYPE_Q4_K) { // Use .type and correct enum name
-                    assign_vec_q4k(lw.down_proj_q4k, tinfo);
-                    Logger::info("Mapped GGUF tensor '" + name + "' (Q4_K) to layers[" + std::to_string(layer_idx) + "].down_proj_q4k");
-                } else if (tinfo.type == GGMLType::GGML_TYPE_Q6_K) { // Use .type and correct enum name
-                    assign_vec_q6k(lw.down_proj_q6k, tinfo);
-                    Logger::info("Mapped GGUF tensor '" + name + "' (Q6_K) to layers[" + std::to_string(layer_idx) + "].down_proj_q6k");
-                } else {
-                    assign_vec_bf16(lw.down_proj, tinfo); // REMOVED const_cast
-                    Logger::info("Mapped GGUF tensor '" + name + "' (BF16/Other) to layers[" + std::to_string(layer_idx) + "].down_proj");
-                }
-                Logger::info("-> Successfully assigned '" + name + "' to layer " + std::to_string(layer_idx)); // Add success log
+                if (tinfo.type == GGMLType::GGML_TYPE_F32) { assign_vec_f32(lw.down_proj_f32, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (FP32) to layers[" + std::to_string(layer_idx) + "].down_proj_f32"); } 
+                else if (tinfo.type == GGMLType::GGML_TYPE_F16) { assign_vec_f16(lw.down_proj_f32, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (FP16) to layers[" + std::to_string(layer_idx) + "].down_proj_f32"); } 
+                else if (tinfo.type == GGMLType::GGML_TYPE_Q4_K) { assign_vec_q4k(lw.down_proj_q4k, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (Q4_K) to layers[" + std::to_string(layer_idx) + "].down_proj_q4k"); } 
+                else if (tinfo.type == GGMLType::GGML_TYPE_Q6_K) { assign_vec_q6k(lw.down_proj_q6k, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (Q6_K) to layers[" + std::to_string(layer_idx) + "].down_proj_q6k"); } 
+                else { assign_vec_bf16(lw.down_proj, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (BF16/Other) to layers[" + std::to_string(layer_idx) + "].down_proj"); }
+                Logger::info("-> Successfully assigned '" + name + "' to layer " + std::to_string(layer_idx));
                 continue;
             }
             // LAYER NORM (ATTN)
             if (suffix == "input_layernorm.weight" || suffix == "attn_norm.weight") { 
-                if (tinfo.type == GGMLType::GGML_TYPE_F32) { // Use .type and correct enum name
-                    assign_vec_f32(lw.input_layernorm_f32, tinfo);
-                    Logger::info("Mapped GGUF tensor '" + name + "' (FP32) to layers[" + std::to_string(layer_idx) + "].input_layernorm_f32");
-                } else {
-                    assign_vec_bf16(lw.input_layernorm, tinfo); // REMOVED const_cast
-                    Logger::info("Mapped GGUF tensor '" + name + "' (BF16/Other) to layers[" + std::to_string(layer_idx) + "].input_layernorm");
-                }
-                Logger::info("-> Successfully assigned '" + name + "' to layer " + std::to_string(layer_idx)); // Add success log
+                if (tinfo.type == GGMLType::GGML_TYPE_F32) { assign_vec_f32(lw.input_layernorm_f32, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (FP32) to layers[" + std::to_string(layer_idx) + "].input_layernorm_f32"); } 
+                else if (tinfo.type == GGMLType::GGML_TYPE_F16) { assign_vec_f16(lw.input_layernorm_f32, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (FP16) to layers[" + std::to_string(layer_idx) + "].input_layernorm_f32"); } 
+                else { assign_vec_bf16(lw.input_layernorm, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (BF16/Other) to layers[" + std::to_string(layer_idx) + "].input_layernorm"); }
+                Logger::info("-> Successfully assigned '" + name + "' to layer " + std::to_string(layer_idx));
                 continue;
             }
             // LAYER NORM (FFN)
             if (suffix == "post_attention_layernorm.weight" || suffix == "ffn_norm.weight") { 
-                if (tinfo.type == GGMLType::GGML_TYPE_F32) { // Use .type and correct enum name
-                    assign_vec_f32(lw.post_attention_layernorm_f32, tinfo);
-                    Logger::info("Mapped GGUF tensor '" + name + "' (FP32) to layers[" + std::to_string(layer_idx) + "].post_attention_layernorm_f32");
-                } else {
-                    assign_vec_bf16(lw.post_attention_layernorm, tinfo); // REMOVED const_cast
-                    Logger::info("Mapped GGUF tensor '" + name + "' (BF16/Other) to layers[" + std::to_string(layer_idx) + "].post_attention_layernorm");
-                }
-                Logger::info("-> Successfully assigned '" + name + "' to layer " + std::to_string(layer_idx)); // Add success log
+                if (tinfo.type == GGMLType::GGML_TYPE_F32) { assign_vec_f32(lw.post_attention_layernorm_f32, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (FP32) to layers[" + std::to_string(layer_idx) + "].post_attention_layernorm_f32"); } 
+                else if (tinfo.type == GGMLType::GGML_TYPE_F16) { assign_vec_f16(lw.post_attention_layernorm_f32, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (FP16) to layers[" + std::to_string(layer_idx) + "].post_attention_layernorm_f32"); } 
+                else { assign_vec_bf16(lw.post_attention_layernorm, tinfo); Logger::info("Mapped GGUF tensor '" + name + "' (BF16/Other) to layers[" + std::to_string(layer_idx) + "].post_attention_layernorm"); }
+                Logger::info("-> Successfully assigned '" + name + "' to layer " + std::to_string(layer_idx));
                 continue;
             }
         }
-        Logger::warning("Unmapped GGUF tensor: '" + name + "' with type: " + std::to_string(static_cast<int>(tinfo.type))); // Added type logging
+        Logger::warning("Unmapped GGUF tensor: '" + name + "' with type: " + std::to_string(static_cast<int>(tinfo.type)));
     }
     Logger::info("Finished mapping GGUF weights.");
 }
@@ -2355,12 +2472,12 @@ ModelConfig parse_model_config_from_gguf(const GGUFData& gguf) {
                  else if constexpr (std::is_same_v<StoredType, std::string> && std::is_arithmetic_v<TargetType>) {
                     try {
                         std::string s = stored_val;
-                        if constexpr (std::is_integral_v<TargetType>) result_value = static_cast<TargetType>(std::stoll(s));
-                        else if constexpr (std::is_floating_point_v<TargetType>) result_value = static_cast<TargetType>(std::stof(s));
+                        if constexpr (std::is_integral_v<TargetType>) { result_value = static_cast<TargetType>(std::stoll(s)); }
+                        else if constexpr (std::is_floating_point_v<TargetType>) { result_value = static_cast<TargetType>(std::stof(s)); }
                          conversion_ok = true;
                     } catch (const std::exception& e) {
                         Logger::warning("Metadata string-to-numeric conversion failed for key '" + key + "', value: '" + stored_val + "': " + e.what());
-}
+                    }
                  }
                 // else { // Optional: Log if no specific conversion path was taken but types differ
                 //     if constexpr (!std::is_same_v<StoredType, TargetType>) {

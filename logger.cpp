@@ -37,6 +37,12 @@ void Logger::warning(const std::string& message) {
     log << "[WARNING] " << message << std::endl;
 }
 
+void Logger::debug(const std::string& message) {
+    ensure_log_truncated();
+    std::ofstream log("debugging.log", std::ios::app);
+    log << "[DEBUG] " << message << std::endl;
+}
+
 void Logger::fatal(const std::string& message) {
     ensure_log_truncated(); // Ensure log file is ready
     // Log to file first

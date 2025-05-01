@@ -19,6 +19,73 @@
 #include <iomanip> // Include for std::setw, std::fixed, std::setprecision
 #include "vocab_loader.h"
 
+// --- START: Helper Functions (Sampling & Softmax) ---
+
+// Softmax function (copied from model.cpp helpers)
+static void softmax_vector_cpu(const std::vector<float>& x, std::vector<float>& out) {
+    if (x.empty()) return;
+    out.resize(x.size());
+
+    // Find max value (for numerical stability)
+    float max_val = -std::numeric_limits<float>::infinity();
+    for (float val : x) {
+        if (val > max_val) {
+            max_val = val;
+        }
+    }
+
+    // Exp and sum
+    float sum = 0.0f;
+    for (size_t i = 0; i < x.size(); ++i) {
+        out[i] = std::exp(x[i] - max_val);
+        sum += out[i];
+    }
+
+    // Normalize
+    if (sum == 0.0f) { // Handle case where all exp(x_i - max_val) are zero
+         // Assign uniform probability (or handle as error/special case)
+         float uniform_prob = 1.0f / out.size();
+         for (size_t i = 0; i < out.size(); ++i) {
+             out[i] = uniform_prob;
+         }
+         // Optionally log a warning
+         // Logger::warning("Softmax sum is zero, assigning uniform probability.");
+    } else {
+        float inv_sum = 1.0f / sum;
+        for (size_t i = 0; i < out.size(); ++i) {
+            out[i] *= inv_sum;
+        }
+    }
+}
+
+// Sample from a multinomial distribution given probabilities
+static int sample_multinomial(const std::vector<float>& probabilities) {
+    if (probabilities.empty()) {
+        throw std::runtime_error("Cannot sample from empty probability vector.");
+    }
+
+    // Set up random number generation
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+    float sample = dist(gen);
+
+    // Calculate cumulative probabilities and find the sample index
+    float cumulative_prob = 0.0f;
+    for (size_t i = 0; i < probabilities.size(); ++i) {
+        cumulative_prob += probabilities[i];
+        if (sample < cumulative_prob) {
+            return static_cast<int>(i);
+        }
+    }
+
+    // Should not happen if probabilities sum to 1, but return last index as fallback
+    Logger::warning("Multinomial sampling failed to find index due to sample value >= cumulative sum. Returning last index.");
+     return static_cast<int>(probabilities.size() - 1);
+}
+
+// --- END: Helper Functions ---
+
 // Utility: Read file into string
 std::string read_file(const std::string& path) {
     std::ifstream file(path, std::ios::binary);
@@ -183,6 +250,15 @@ int main(int argc, char** argv) {
             std::vector<int> prompt_ids = tokenizer.tokens_to_ids(prompt_tokens);
 
             Logger::info("Tokenizing prompt...");
+            // +++ START TOKEN LOGGING +++
+            std::stringstream ptk_ss;
+            ptk_ss << "Prompt token IDs (SafeTensors): [";
+            for(size_t i=0; i < prompt_ids.size(); ++i) {
+                ptk_ss << prompt_ids[i] << (i + 1 < prompt_ids.size() ? ", " : "");
+            }
+            ptk_ss << "]";
+            Logger::info(ptk_ss.str());
+            // +++ END TOKEN LOGGING +++
 
             Logger::info("Tokenized IDs: Count=" + std::to_string(prompt_ids.size()));
             std::stringstream ss_token_ids;
@@ -208,6 +284,9 @@ int main(int argc, char** argv) {
             std::mt19937 rng(1234); // Random number generator for sampling
 
             for (int pos = 0; pos < total_steps; ++pos) {
+                // +++ START POS 0 LOGGING +++
+                bool log_this_step = (pos == 0);
+                // +++ END POS 0 LOGGING +++
                 Logger::info("--- main loop: START pos=" + std::to_string(pos) + " ---");
                 if (pos >= mcfg.max_position_embeddings) {
                     Logger::info("Reached max sequence length.");
@@ -238,24 +317,40 @@ int main(int argc, char** argv) {
                 current_x_vec = model.lookup_embedding(input_token_id);
                 
                 // Log the vector state
-                log_vector_summary("main loop: current_x after lookup (C++ Vec)", current_x_vec); 
+                // +++ START POS 0 LOGGING +++
+                if (log_this_step) {
+                    log_vector_summary("Prompt Input Embedding (pos=0)", current_x_vec, 10);
+                }
+                // +++ END POS 0 LOGGING +++
+                // log_vector_summary("main loop: current_x after lookup (C++ Vec)", current_x_vec); 
 
                 // --- Select Forward Pass based on CUDA availability ---
                 std::vector<float> logits;
+/* // <<< COMMENT OUT CUDA PATH
 #ifdef HAS_CUDA
                 // Use CUDA-accelerated forward pass
                 Logger::info("main loop: Calling model.forward_device for pos=" + std::to_string(pos));
                 logits = model.forward_device(input_token_id, pos, &cache, nullptr); // Use device pipeline
                 Logger::info("main loop: Returned from model.forward_device for pos=" + std::to_string(pos));
+                // +++ START POS 0 LOGGING +++
+                if (log_this_step) {
+                    Logger::info("Completed model.forward() for prompt token at pos=0.");
+                }
+                // +++ END POS 0 LOGGING +++
 #else
-                // Use CPU forward pass
+*/ // <<< END COMMENT OUT CUDA PATH
+                // Use CPU forward pass (NOW ALWAYS USED FOR DEBUGGING)
                 // Need the embedding vector for the CPU path
-                std::vector<float> current_x = model.lookup_embedding(input_token_id);
+                // std::vector<float> current_x = model.lookup_embedding(input_token_id); // lookup_embedding already called
                 Logger::info("main loop: Calling model.forward (CPU) for pos=" + std::to_string(pos));
-                log_vector_summary("main loop: Input embedding to CPU forward", current_x); // Log input
-                logits = model.forward(current_x, pos, &cache, nullptr); // Use original CPU pipeline
+                // log_vector_summary("main loop: Input embedding to CPU forward", current_x_vec); // Log input // Already logged if pos==0
+                // Pass current_x_vec which holds the embedding looked up earlier
+                logits = model.forward(current_x_vec, pos, &cache, nullptr); // Use original CPU pipeline
                 Logger::info("main loop: Returned from model.forward (CPU) for pos=" + std::to_string(pos));
-#endif
+// <<< REMOVE #endif and corresponding #else that might exist if CUDA path was commented out
+/*
+#endif // HAS_CUDA
+*/
                 // --- End Forward Pass Selection ---
 
                 // Check if logits are empty (could happen if forward fails)
@@ -288,23 +383,41 @@ int main(int argc, char** argv) {
                         break;
                     }
                     
-                    // Sample from the returned logits (which are only for the current position)
-                    // next_token_id = sample_top_k_top_p_temperature(logits, /*temp=*/0.7f, /*top_k=*/50, /*top_p=*/0.9f, rng); // Use sampling
-                    next_token_id = argmax(logits); // Use greedy sampling (match Python)
+                    // +++ START GEN STEP 0 LOGGING +++
+                    bool log_first_gen_step = (generated_count == 0);
+                    if (log_first_gen_step) {
+                        log_vector_summary("Output Logits (step=0, pos=" + std::to_string(pos) + ")", logits, 10);
+                    }
+                    // +++ END GEN STEP 0 LOGGING +++
                     
-                    // --- ADD LOGGING HERE ---
-                    Logger::info("C++ Generation: pos=" + std::to_string(pos) +
-                                 ", sampled_token_id=" + std::to_string(next_token_id) +
-                                 ", checking against eos_id=" + std::to_string(eos_id)); // Log sampled ID and EOS ID
-                    // --- END LOGGING ---\
+                    // --- MODIFIED: Use Greedy Sampling (argmax) --- 
+                    // Apply sampling (e.g., top-k, top-p, temperature) - REMOVED
+                    // float temperature = 0.8f; 
+                    // int top_k = 50; 
+                    // float top_p = 0.9f; 
+                    // std::vector<float> probabilities(logits.size()); 
+                    // softmax_vector_cpu(logits, probabilities); 
+                    // next_token_id = sample_multinomial(probabilities); 
+                    // Greedy sampling - ADDED
+                    next_token_id = argmax(logits); 
+                    // --- END MODIFICATION ---
 
-                    // Store generated token
-                    generated_only_ids.push_back(next_token_id);
-                    generated_ids.push_back(next_token_id); // Keep track of the full sequence for context
+                    generated_only_ids.push_back(next_token_id); // Store only generated tokens
+                    generated_ids.push_back(next_token_id); // Store full sequence
+                    
+                    // Decode for logging
+                    std::string next_token_str = "<INVALID>";
+                    if (next_token_id >= 0 && static_cast<size_t>(next_token_id) < tokenizer.vocab_size()) {
+                         std::vector<std::string> token_vec_str = tokenizer.ids_to_tokens({next_token_id});
+                         if (!token_vec_str.empty()) { next_token_str = token_vec_str[0]; }
+                    }
+                    // +++ START GEN STEP LOGGING +++
+                    Logger::info("Gen Step " + std::to_string(generated_count) + " (Pos " + std::to_string(pos + 1) + "): Generated token ID: " + std::to_string(next_token_id) + " ('" + next_token_str + "')");
+                    // +++ END GEN STEP LOGGING +++
+
                     generated_count++;
 
                     // Print the token as it's generated
-                    std::string next_token_str = tokenizer.decode(std::vector<int>{next_token_id}, false);
                     Logger::info("Step " + std::to_string(generated_count+1) + ": Predicted token ID: " + std::to_string(next_token_id) + " ('" + next_token_str + "')");
                     std::cout << next_token_str << std::flush; // Print token immediately, with flush
 

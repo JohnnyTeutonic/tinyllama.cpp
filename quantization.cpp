@@ -126,65 +126,25 @@ namespace { // Keep anonymous namespace for potentially internal-only helpers in
     std::vector<float> k_lookup_table_scale;
     std::vector<float> k_lookup_table_min;
 
-    // Helper to extract 6-bit scale and min indices from the Q4_K block data.
-    // Corrected based on llama.cpp logic, requires access to scales AND weights (qs).
-    // Assumes the 'scales' array is 12 bytes, as per standard Q4_K. If the header's
-    // 16-byte comment/assert is correct for this project, this needs adjustment.
-    inline void get_scale_min_k4(
-        int j,                       // Sub-block index (0-15)
-        const uint8_t* q_scales,     // Pointer to the start of the 12-byte scales array for the block
-        const uint8_t* q_weights,    // Pointer to the start of the 128-byte qs array for the block
-        uint8_t* scale_index,        // Output: 6-bit scale index
-        uint8_t* min_index           // Output: 6-bit min index
-    ) {
-        assert(j >= 0 && j < 16);
-
-        // Determine which byte in q_scales contains the scale and upper 2 bits of min
-        int scale_byte_index = j / 2; // Each byte holds info for 2 sub-blocks
-        uint8_t scale_byte = q_scales[scale_byte_index];
-
-        // Determine which byte in q_weights contains the lower 4 bits of min
-        // Each byte in qs holds 2 weights (nibbles). 16 weights per sub-block.
-        // 128 bytes in qs total. Each sub-block uses 128/16 = 8 bytes of qs.
-        int qs_byte_base_index = j * 8; 
-        // The min bits are in the first 4 bytes of the sub-block's qs data
-        int min_bits_byte_index = qs_byte_base_index + (j % 4); // Index 0,1,2,3 within the sub-block's 8 bytes
-        uint8_t min_bits_byte = q_weights[min_bits_byte_index];
-
-        if (j % 2 == 0) { // First sub-block within the scale byte
-            *scale_index = scale_byte & 0x0F; // Lower 4 bits for scale
-            *min_index = (scale_byte >> 4) & 0x03; // Upper 2 bits for min upper
-            // Combine with lower 4 bits from qs
-            *min_index |= (min_bits_byte & 0x0F) << 2; // Lower nibble of qs byte provides lower 4 bits of min
-        } else { // Second sub-block within the scale byte
-            *scale_index = (scale_byte >> 4) & 0x0F; // Upper 4 bits for scale
-            *min_index = (scale_byte >> 6) & 0x03; // Bits 6 & 7 for min upper (shifted down)
-            // Combine with lower 4 bits from qs
-            *min_index |= (min_bits_byte >> 4) << 2; // Upper nibble of qs byte provides lower 4 bits of min
-        }
-        // IMPORTANT: This logic assumes the standard 12-byte scales layout.
-        // If the project truly uses a 16-byte layout, the extraction from q_scales needs modification.
-    }
-
 }
 
-// --- START: Correct helper based on ggml-quants.c function ---
-static inline void get_scale_min_k4_ref(
-    int j, // Sub-block index (0-15)
-    const uint8_t* scales, // Pointer to the 12-byte scales field
-    const uint8_t* qs,     // Pointer to the 128-byte qs field (base pointer)
-    uint8_t* s,            // Output scale index (6-bit)
-    uint8_t* m             // Output min index (6-bit)
+// --- START: Correct helper based on standard llama.cpp Q4_K logic ---
+static inline void get_scale_min_indices_q4_K(
+    int j,                   // Sub-block index (0-15)
+    const uint8_t* scales,   // Pointer to the 12-byte scales field in block_q4_K
+    uint8_t* scale_index,    // Output: 4-bit scale index (0-15)
+    uint8_t* min_index       // Output: 4-bit min index (0-15)
 ) {
-    int is = j / 2; // scales byte index (0-7)
-    if (j % 2 == 0) { // Even sub-blocks (0, 2, ..., 14)
-        *s = scales[is] & 0x0F;                       // Scale: Lower nibble of scales[0..7]
-        uint8_t m_hi = (scales[is + 8] >> 0) & 0x03;   // Min high bits: Lower 2 bits of scales[8..15]
-        *m = m_hi | ((qs[j / 4] & 0x0F) << 2);         // Min low bits: Lower nibble of qs[0..7]
-    } else { // Odd sub-blocks (1, 3, ..., 15)
-        *s = (scales[is] >> 4) & 0x0F;                // Scale: Upper nibble of scales[0..7]
-        uint8_t m_hi = (scales[is + 8] >> 4) & 0x03;   // Min high bits: Upper 2 bits of scales[8..15]
-        *m = m_hi | ((qs[j / 4 + 8] >> 4) << 2);       // Min low bits: Upper nibble of qs[8..15]
+    assert(j >= 0 && j < 16);
+    int scale_byte_index = j / 2; // Index into scales bytes 0-5
+    int min_byte_index = j / 2 + 6; // Index into scales bytes 6-11
+
+    if (j % 2 == 0) { // Even sub-block uses lower nibble
+        *scale_index = scales[scale_byte_index] & 0x0F;
+        *min_index   = scales[min_byte_index] & 0x0F;
+    } else {          // Odd sub-block uses upper nibble
+        *scale_index = scales[scale_byte_index] >> 4;
+        *min_index   = scales[min_byte_index] >> 4;
     }
 }
 // --- END: Correct helper ---
@@ -219,8 +179,8 @@ void dequantize_q4_k_m(
     if (log_this_block && log_count_q4 < 5) { // Log first 5 blocks only
         log_count_q4++;
         std::cout << "[DEBUG] Dequant Q4_K Block #" << log_count_q4.load() << ":" << std::endl;
-        std::cout << "  Super Scale (d): " << d_super << " (raw FP16: 0x" << std::hex << qblock->d << std::dec << ")" << std::endl;
-        std::cout << "  Super Min (dmin): " << min_super << " (raw FP16: 0x" << std::hex << qblock->dmin << std::dec << ")" << std::endl;
+        std::cout << "  Raw Super Scale (d): 0x" << std::hex << qblock->d << std::dec << std::endl;
+        std::cout << "  Raw Super Min (dmin): 0x" << std::hex << qblock->dmin << std::dec << std::endl;
         std::cout << "  Scales (12 bytes): ";
         for(int i=0; i<12; ++i) std::cout << std::hex << (int)scales_ptr[i] << " ";
         std::cout << std::dec << std::endl;
@@ -233,7 +193,11 @@ void dequantize_q4_k_m(
     // Process 16 sub-blocks
     for (int j = 0; j < GGML_QK_K / 16; ++j) { // j = 0..15 (sub-block index)
         uint8_t scale_idx, min_idx;
-        get_scale_min_k4_ref(j, scales_ptr, qs_ptr, &scale_idx, &min_idx);
+        get_scale_min_indices_q4_K(j, scales_ptr, &scale_idx, &min_idx);
+
+        // Ensure indices are within bounds for the lookup tables (0-15 ideally, but tables are 64)
+        assert(scale_idx < 64 && "Scale index out of bounds");
+        assert(min_idx < 64 && "Min index out of bounds");
 
         // Calculate scale and min for this sub-block
         const float scale = d_super * K_SCALE_VALUES[scale_idx];
@@ -320,8 +284,8 @@ void dequantize_q6_k(
             // Combine to form 6-bit quantized value
             int quantized_val = q_low | (q_high << 4);
 
-            // Dequantize: need to subtract 32 to center around 0
-            float val = d * scale * (static_cast<float>(quantized_val) - 32.0f);
+            // Dequantize: Multiply by super-scale 'd' and block-scale 'scale'.
+            float val = d * scale * static_cast<float>(quantized_val);
             y[l] = val;
         }
     }

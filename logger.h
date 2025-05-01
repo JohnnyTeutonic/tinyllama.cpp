@@ -12,6 +12,8 @@ public:
     static void error(const std::string& message);
     // Log a warning message (appends to debugging.log)
     static void warning(const std::string& message);
+    // Log a debug message (appends to debugging.log)
+    static void debug(const std::string& message);
     // Log a fatal message (appends to debugging.log and terminates)
     static void fatal(const std::string& message);
     // Log vector stats: min, max, mean, all_finite, and first n_show values

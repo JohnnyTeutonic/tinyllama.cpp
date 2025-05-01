@@ -51,7 +51,6 @@ static void softmax_vector_cpu(const std::vector<float>& x, std::vector<float>& 
     }
 }
 
-
 // Sample from a multinomial distribution given probabilities
 static int sample_multinomial(const std::vector<float>& probabilities) {
     if (probabilities.empty()) {
@@ -96,11 +95,17 @@ void run_generation_experiment(TinyLlamaModel& model,
 
     try {
         // 1. Format and Tokenize Prompt (using the specified method)
-        Logger::info("User prompt: " + prompt);
-        std::string formatted_prompt = tokenizer.apply_chat_template(prompt);
-        Logger::info("Formatted prompt: " + formatted_prompt);
-        // Encode using the specified method
-        std::vector<int> prompt_tokens = tokenizer.encode(formatted_prompt, true, use_regex_pretokenize);
+        // Logger::info("User prompt (raw): " + prompt); // Reverted: Log raw prompt if needed
+        // --- RESTORE CHAT TEMPLATE --- 
+        std::string formatted_prompt = tokenizer.apply_chat_template(prompt); // Use the template again
+        Logger::info("Formatted prompt: " + formatted_prompt); // Log the result of the template
+        // --- END RESTORE ---
+        
+        // --- REVERT TO encode (handles template output) ---
+        // std::vector<std::string> prompt_tokens_str = tokenizer.tokenize(prompt); // Tokenize the raw prompt
+        // std::vector<int> prompt_tokens = tokenizer.tokens_to_ids(prompt_tokens_str); // Convert strings to IDs
+        std::vector<int> prompt_tokens = tokenizer.encode(formatted_prompt, true, false); // Encode the *formatted* prompt, add BOS, use whitespace pre-tok
+        // --- END REVERT ---
         
         // Log tokenization result for this mode
         std::stringstream ptk_ss;
@@ -110,6 +115,22 @@ void run_generation_experiment(TinyLlamaModel& model,
         }
         ptk_ss << "]";
         Logger::info(ptk_ss.str());
+        // +++ ADDED: Log full token count +++
+        Logger::info("Full prompt token count: " + std::to_string(prompt_tokens.size()));
+        // +++ ADDED: Log decoded prompt tokens for verification +++
+        if (!prompt_tokens.empty()) {
+            std::vector<std::string> decoded_prompt_strs = tokenizer.ids_to_tokens(prompt_tokens);
+            std::stringstream dpt_ss;
+            dpt_ss << "Decoded prompt tokens: [";
+            for(size_t i=0; i < decoded_prompt_strs.size(); ++i) {
+                dpt_ss << "'" << decoded_prompt_strs[i] << "'" << (i + 1 < decoded_prompt_strs.size() ? ", " : "");
+            }
+            dpt_ss << "]";
+            Logger::debug(dpt_ss.str());
+        } else {
+             Logger::debug("Decoded prompt tokens: [] (Prompt was empty)");
+        }
+        // --- END ADDED ---
 
         // --- Generation Setup ---
         int bos_token_id = config.bos_token_id; // Assuming bos is added by encode
@@ -133,19 +154,31 @@ void run_generation_experiment(TinyLlamaModel& model,
         // --- ADDED: Prompt Processing Loop ---
         Logger::info("Processing prompt tokens to fill KVCache...");
         if (!prompt_tokens.empty()) {
-            for (size_t i = 0; i < prompt_tokens.size(); ++i) { 
+            // --- MODIFICATION: Skip BOS if present ---
+            size_t start_index = 0;
+            if (prompt_tokens[0] == bos_token_id) {
+                Logger::info("Detected BOS token ID " + std::to_string(bos_token_id) + " at the start of prompt tokens. Skipping explicit processing.");
+                start_index = 1; // Start from the second token
+            } else {
+                 Logger::info("BOS token not detected at the start, processing all prompt tokens.");
+            }
+            // --- END MODIFICATION ---
+
+            for (size_t i = start_index; i < prompt_tokens.size(); ++i) {
                 int current_token_id = prompt_tokens[i];
-                int current_pos = static_cast<int>(i);
-                
-                // Log only for the very first token (pos=0)
+                // --- MODIFICATION: Adjust position if BOS was skipped ---
+                int current_pos = static_cast<int>(i - start_index); // Position relative to the *actual* start of content
+                // --- END MODIFICATION ---
+
+                // Log only for the very first *processed* token (pos=0 relative to content)
                 bool log_this_prompt_step = (current_pos == 0);
-                
+
                 std::vector<float> input_embedding = model.lookup_embedding(current_token_id);
                 if (input_embedding.empty() || input_embedding.size() != config.hidden_size) {
-                    throw std::runtime_error("Prompt Processing: Failed to get valid embedding for token ID " + std::to_string(current_token_id) + " at pos " + std::to_string(current_pos));
+                    throw std::runtime_error("Prompt Processing: Failed to get valid embedding for token ID " + std::to_string(current_token_id) + " at effective pos " + std::to_string(current_pos));
                 }
                 if (log_this_prompt_step) {
-                    log_vector_summary("Prompt Input Embedding (pos=0)", input_embedding, 10);
+                    log_vector_summary("Prompt Input Embedding (Effective pos=0)", input_embedding, 10);
                 }
 
                 // Call forward to fill KVCache, ignore logits
@@ -153,28 +186,42 @@ void run_generation_experiment(TinyLlamaModel& model,
                 std::vector<float> ignored_logits = model.forward(input_embedding, current_pos, &kv_cache, nullptr);
                 if (log_this_prompt_step) {
                     // Optionally log something after the forward call for pos=0
-                    Logger::info("Completed model.forward() for prompt token at pos=0.");
+                    Logger::info("Completed model.forward() for prompt token at effective pos=0.");
                 }
             }
-             Logger::info("Finished processing " + std::to_string(prompt_tokens.size()) + " prompt tokens.");
+             // Log the number of *effectively* processed tokens
+             Logger::info("Finished processing " + std::to_string(prompt_tokens.size() - start_index) + " effective prompt tokens.");
         } else {
             Logger::info("Prompt is empty, skipping KVCache prefill.");
         }
         // --- END: Prompt Processing Loop ---
 
         // --- Generation Loop (Starts predicting token AFTER the last prompt token) ---
-        // The position for the *first generated token* will be the length of the prompt.
-        int first_gen_pos = prompt_tokens.empty() ? 0 : prompt_tokens.size(); 
-        // Start loop using the state *after* processing the last prompt token.
-        // The position passed to forward() in the first iteration should be the position of the last prompt token.
+        // The position for the *first generated token* will be the *effective* length of the prompt (excluding BOS).
+        int effective_prompt_len = prompt_tokens.empty() ? 0 : (prompt_tokens.size() - (prompt_tokens[0] == bos_token_id ? 1 : 0));
+        int first_gen_pos = effective_prompt_len; 
+        // The position passed to forward() in the first iteration should be the position of the last *processed* prompt token.
         int current_loop_pos = first_gen_pos - 1; 
 
         // Get the ID of the *last* token from the prompt (or BOS if prompt was empty)
-        int next_token_id_input = prompt_tokens.empty() ? bos_token_id : prompt_tokens.back();
+        // int next_token_id_input = prompt_tokens.empty() ? bos_token_id : prompt_tokens.back(); // Original: Use last token
+        // --- MODIFICATION: Use second-to-last token if prompt isn't tiny --- 
+        int next_token_id_input;
+        if (prompt_tokens.size() <= 1) { // Handle empty or single-token (BOS) prompt
+             next_token_id_input = bos_token_id;
+        } else {
+             next_token_id_input = prompt_tokens[prompt_tokens.size() - 2]; // Use the token BEFORE the final space
+             Logger::info("Using second-to-last prompt token (" + std::to_string(next_token_id_input) + ") as input for first prediction instead of last token (" + std::to_string(prompt_tokens.back()) + ")");
+        }
+        // --- END MODIFICATION ---
         Logger::info("Starting generation loop. Input token for first prediction: " + std::to_string(next_token_id_input) + ", Starting pos for forward(): " + std::to_string(current_loop_pos) );
         
         for (int step = 0; step < max_new_tokens; ++step) {
             int current_token_id = next_token_id_input; // Use the input token for this step
+
+            // +++ START ADDED LOGGING +++
+            Logger::info("[GGUF GEN LOOP] step=" + std::to_string(step) + ", current_token_id=" + std::to_string(current_token_id) + ", current_loop_pos=" + std::to_string(current_loop_pos));
+            // +++ END ADDED LOGGING +++
 
             std::vector<float> input_embedding = model.lookup_embedding(current_token_id);
             if (input_embedding.empty() || input_embedding.size() != config.hidden_size) {
@@ -193,12 +240,21 @@ void run_generation_experiment(TinyLlamaModel& model,
                  log_vector_summary("Output Logits (step=0, pos=" + std::to_string(current_loop_pos) + ")", logits, 10);
              }
 
-             // Temperature Sampling
-             if (temperature > 0.0f) {
-                for(float& logit : logits) { logit /= temperature; }
-             }
-             softmax_vector_cpu(logits, probabilities);
-             int next_token_id = sample_multinomial(probabilities);
+             // --- MODIFIED: Use Greedy Sampling (argmax) --- 
+             // Temperature Scaling - REMOVED
+             // if (temperature > 0.0f) {
+             //    for(float& logit : logits) { logit /= temperature; }
+             // }
+             // Softmax - REMOVED
+             // softmax_vector_cpu(logits, probabilities);
+             // Multinomial Sampling - REMOVED
+             // int next_token_id = sample_multinomial(probabilities);
+             // Greedy Sampling (argmax) - ADDED
+             int next_token_id = argmax(logits);
+             // +++ START ADDED LOGGING +++
+             Logger::debug("[GGUF GEN LOOP] argmax returned token ID: " + std::to_string(next_token_id));
+             // +++ END ADDED LOGGING +++
+             // --- END MODIFICATION ---
 
              // Decode for logging
              std::string next_token_str = "<INVALID>";
@@ -256,11 +312,14 @@ int main(int argc, char **argv) {
     Logger::info("GGUF Loader - Starting...");
 
     // TODO: Add file path argument parsing (e.g., from argv)
-    std::string filename = "data/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"; // Hardcoded for now
+    std::string filename = "data/TinyLlama-1.1B-Chat-v1.0.FP16.gguf"; // Hardcoded for now
 
     try {
-        TinyLlamaModel model({}, filename); // Model auto-loads config from GGUF
-        const auto& config = model.get_config();
+        // --- Load Model ---
+        Logger::info("Loading GGUF model and tokenizer...");
+        ModelConfig config; // Config will be loaded from GGUF
+        TinyLlamaModel model(config, filename); // Constructor handles loading
+        config = model.get_config(); // Update config with values read from GGUF
         std::stringstream ss;
         ss << "--- Model Summary ---\n";
         ss << "Hidden size: " << config.hidden_size << "\n";
@@ -320,14 +379,16 @@ int main(int argc, char **argv) {
         Logger::info("Initializing Tokenizer and running experiments...");
         try {
              // 1. Get GGUF Data from model (check if it exists)
-            const GGUFData* gguf_data = model.get_gguf_data();
-            if (!gguf_data) {
-                throw std::runtime_error("Failed to get GGUF data from model for tokenizer initialization.");
-            }
+             // const GGUFData* gguf_data = model.get_gguf_data(); // NO LONGER NEEDED FOR TOKENIZER
+             // if (!gguf_data) {
+             //    throw std::runtime_error("Failed to get GGUF data from model for tokenizer initialization.");
+             // }
 
-            // 2. Initialize Tokenizer using GGUF data
-            Tokenizer tokenizer(*gguf_data); 
-            Logger::info("Tokenizer initialized from GGUF. Vocab size: " + std::to_string(tokenizer.vocab_size()));
+            // 2. Initialize Tokenizer using the external JSON file
+            std::string tokenizer_json_path = "data/tokenizer.json";
+            // Tokenizer tokenizer("", tokenizer_json_path); // <<< OLD WAY - Incorrectly ignores merges
+            Tokenizer tokenizer(tokenizer_json_path, tokenizer_json_path); // <<< NEW WAY - Pass JSON path for both model and vocab
+            Logger::info("Tokenizer initialized from JSON: " + tokenizer_json_path + ". Vocab size: " + std::to_string(tokenizer.vocab_size()));
 
             // 3. Define Prompt and parameters
             std::string prompt = "What is the capital of France?";
@@ -335,7 +396,7 @@ int main(int argc, char **argv) {
             float temperature = 0.8f;
             
             // --- Run experiment with REGEX pre-tokenization ---
-            run_generation_experiment(model, tokenizer, config, prompt, true, max_new_tokens, temperature);
+            // run_generation_experiment(model, tokenizer, config, prompt, true, max_new_tokens, temperature); // <<<< COMMENT THIS OUT
             
             // --- Run experiment with WHITESPACE pre-tokenization ---
             run_generation_experiment(model, tokenizer, config, prompt, false, max_new_tokens, temperature);
