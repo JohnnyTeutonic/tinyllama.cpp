@@ -157,7 +157,7 @@ void matvec_f32_f32_cuda(cublasHandle_t handle,
                           float* out_f32_dev,
                           int rows, // M dimension (output size)
                           int cols, // K dimension (input size)
-                          cudaStream_t stream)
+                          cudaStream_t stream) 
 {
     // --- REMOVED BF16->FP32 conversion --- 
     /* 
@@ -189,7 +189,7 @@ void matvec_f32_f32_cuda(cublasHandle_t handle,
 
     // Call regular cublasSgemm
     // Assuming A (mat_f32_dev) is row-major MxK, we transpose it to act column-major KxM for cuBLAS
-    status = cublasSgemm(handle,
+    status = cublasSgemm(handle, 
                          CUBLAS_OP_T,     // Transpose A (row-major -> col-major)
                          CUBLAS_OP_N,     // No transpose B
                          M,               // Rows of C and op(A)
@@ -200,7 +200,7 @@ void matvec_f32_f32_cuda(cublasHandle_t handle,
                          K,               // Leading dimension of A = K for row-major (before transpose)
                          vec_f32_dev,     // B matrix (input vector)
                          K,               // Leading dimension of B = K for Kx1 col-major
-                         &beta,           // Scalar beta
+                         &beta,           // Scalar beta 
                          out_f32_dev,     // C matrix (output vector)
                          M);              // Leading dimension of C = M for Mx1 col-major
 
@@ -857,15 +857,15 @@ void update_kv_cache_cuda(float* cache_base_ptr, // Base pointer for K or V for 
                             const float* current_kv_head_vector, // Pointer to current token's K or V *for this specific head*
                             int pos,
                             int kv_head_idx,
-                            int max_seq_len,
-                            int num_kv_heads,
+                            int max_seq_len, 
+                            int num_kv_heads, 
                             int head_dim,
                             cudaStream_t stream)
 {
     // We need one thread per element in the head dimension to copy
     dim3 blockDim(head_dim); 
     dim3 gridDim(1); // Only need one block as kv_head_idx is specified
-
+    
     // Check if pos is within bounds (optional but good practice)
     if (pos < 0 || pos >= max_seq_len) {
         Logger::error("update_kv_cache_cuda: pos out of bounds (" + std::to_string(pos) + " >= " + std::to_string(max_seq_len) + ")");
@@ -878,17 +878,17 @@ void update_kv_cache_cuda(float* cache_base_ptr, // Base pointer for K or V for 
     }
     if (!current_kv_head_vector) {
         Logger::error("update_kv_cache_cuda: Input K/V vector pointer is null.");
-        return;
+         return;
     }
 
-
+    
     update_kv_cache_kernel<<<gridDim, blockDim, 0, stream>>>(
         cache_base_ptr,         // Pass base cache pointer for the layer
         current_kv_head_vector, // Pass pointer to the *current* head's K/V data
-        pos,
-        kv_head_idx,
-        max_seq_len,
-        num_kv_heads,
+        pos, 
+        kv_head_idx, 
+        max_seq_len, 
+        num_kv_heads, 
         head_dim
     );
     gpuErrchk(cudaGetLastError()); // Check for errors after kernel launch
@@ -943,7 +943,7 @@ __global__ void rope_and_update_kv_cache_kernel(
         //        (unsigned long long)cache_offset_0, (unsigned long long)cache_offset_1, (unsigned long long)total_cache_size, pos, kv_head_idx, pair_idx);
          return;
     }
-
+    
     cache_base_ptr[cache_offset_0] = kv0_rotated;
     cache_base_ptr[cache_offset_1] = kv1_rotated;
 }
@@ -955,8 +955,8 @@ void rope_and_update_kv_cache_cuda(
     const float* all_freqs_cis_base,// Global RoPE frequencies buffer
     int pos,
     int kv_head_idx,
-    int max_seq_len,
-    int num_kv_heads,
+    int max_seq_len, 
+    int num_kv_heads, 
     int head_dim,
     cudaStream_t stream
 ) {
@@ -1000,8 +1000,8 @@ void rope_and_update_kv_cache_cuda(
 // Handles both BF16 and FP32 tables
 __global__ void lookup_embedding_kernel(const void* __restrict__ table_dev,
                                         float* __restrict__ output_dev,
-                                        int token_id,
-                                        int hidden_size,
+                                               int token_id,
+                                               int hidden_size,
                                         int vocab_size,
                                         bool is_bf16) {
 
@@ -1044,8 +1044,8 @@ __global__ void lookup_embedding_kernel(const void* __restrict__ table_dev,
 // Host wrapper function matching the signature in cuda_kernels.h
 void lookup_embedding_cuda(const void* table_dev,
                            float* output_dev,
-                           int token_id,
-                           int hidden_size,
+                                    int token_id,
+                                    int hidden_size,
                            int vocab_size,
                            bool is_bf16,
                            cudaStream_t stream) {
@@ -1075,7 +1075,7 @@ void lookup_embedding_cuda(const void* table_dev,
 
     // Check for kernel launch errors (optional but recommended for debugging)
     gpuErrchk(cudaGetLastError());
-}
+    }
 // --- END: NEW GENERIC EMBEDDING LOOKUP WRAPPER ---
 
 #endif // HAS_CUDA

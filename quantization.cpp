@@ -1,4 +1,5 @@
 #include "quantization.h"
+#include "logger.h"
 #include <stdexcept> // For potential errors later
 #include <cstdint>   // For integer types
 #include <cstring>   // For std::memcpy
@@ -13,6 +14,7 @@
 #include <iostream>  // For debug
 #include <iomanip>   // For std::hex
 #include <atomic>    // For std::atomic
+#include <sstream>   // For std::stringstream
 
 // --- START: K-Quant Lookup Tables (Static Globals) ---
 // Re-adding these definitions at file scope
@@ -128,7 +130,32 @@ namespace { // Keep anonymous namespace for potentially internal-only helpers in
 
 }
 
-// --- START: Correct helper based on standard llama.cpp Q4_K logic ---
+// --- START: Correct helper (Based on llama.cpp k_quants.c) ---
+static inline void get_scale_min_indices_q4_K(
+    int j,                   // Sub-block index (0-15)
+    const uint8_t* scales,   // Pointer to the 12-byte scales field in block_q4_K
+    uint8_t* scale_index,    // Output: 4-bit scale index (0-15)
+    uint8_t* min_index       // Output: 4-bit min index (0-15)
+    ) {
+        assert(j >= 0 && j < 16);
+
+    // llama.cpp logic:
+    // Scales are in bytes 0-7, Mins are in bytes 8-11
+    // Each byte contains two 4-bit indices.
+
+    // Scale Index Extraction:
+    // Byte index cycles through 0..7. Nibble selected by j / 8 (0 or 1).
+    *scale_index = scales[j % 8] >> (4 * (j / 8));
+    *scale_index &= 0x0F; // Ensure only 4 bits are kept
+
+    // Min Index Extraction:
+    // Byte index cycles through 8..11 (j % 4 + 8). Nibble selected by j / 4 (0, 1, 2, or 3).
+    *min_index = scales[j % 4 + 8] >> (4 * (j / 4));
+    *min_index &= 0x0F; // Ensure only 4 bits are kept
+}
+// --- END: Correct helper ---
+
+/* --- OLD INCORRECT HELPER --- 
 static inline void get_scale_min_indices_q4_K(
     int j,                   // Sub-block index (0-15)
     const uint8_t* scales,   // Pointer to the 12-byte scales field in block_q4_K
@@ -136,8 +163,8 @@ static inline void get_scale_min_indices_q4_K(
     uint8_t* min_index       // Output: 4-bit min index (0-15)
 ) {
     assert(j >= 0 && j < 16);
-    int scale_byte_index = j / 2; // Index into scales bytes 0-5
-    int min_byte_index = j / 2 + 6; // Index into scales bytes 6-11
+    int scale_byte_index = j / 2; // Index into scales bytes 0-5 // <<< WRONG LOGIC
+    int min_byte_index = j / 2 + 6; // Index into scales bytes 6-11 // <<< WRONG LOGIC
 
     if (j % 2 == 0) { // Even sub-block uses lower nibble
         *scale_index = scales[scale_byte_index] & 0x0F;
@@ -147,7 +174,12 @@ static inline void get_scale_min_indices_q4_K(
         *min_index   = scales[min_byte_index] >> 4;
     }
 }
-// --- END: Correct helper ---
+*/
+
+
+// Dequantize a Q4_K block (256 weights)
+// Input: qblock - pointer to the block_q4_K struct
+// Output: output - buffer to write 256 dequantized float values
 
 // Dequantize Q4_K data - Rewritten to match llama.cpp loop structure
 void dequantize_q4_k_m(
@@ -170,23 +202,46 @@ void dequantize_q4_k_m(
     const float dmin_raw = fp16_to_fp32(qblock->dmin);
     float d_super = d_raw;
     float min_super = dmin_raw;
-    constexpr float CLAMP_LIMIT = 100.0f; 
-    if (!std::isfinite(d_super) || std::abs(d_super) > CLAMP_LIMIT) d_super = 0.0f;
-    if (!std::isfinite(min_super) || std::abs(min_super) > CLAMP_LIMIT) min_super = 0.0f;
+    // --- REMOVED Clamping --- 
+    // Optional: Add only finiteness check if needed, but clamping is wrong.
+    // if (!std::isfinite(d_super)) { /* Handle NaN/inf, e.g., log warning or set to 0 */ d_super = 0.0f; }
+    // if (!std::isfinite(min_super)) { /* Handle NaN/inf */ min_super = 0.0f; }
+    // --- END REMOVED --- 
 
     // --- ADDED: Logging ---
     static std::atomic<int> log_count_q4 = 0;
     if (log_this_block && log_count_q4 < 5) { // Log first 5 blocks only
-        log_count_q4++;
-        std::cout << "[DEBUG] Dequant Q4_K Block #" << log_count_q4.load() << ":" << std::endl;
-        std::cout << "  Raw Super Scale (d): 0x" << std::hex << qblock->d << std::dec << std::endl;
-        std::cout << "  Raw Super Min (dmin): 0x" << std::hex << qblock->dmin << std::dec << std::endl;
-        std::cout << "  Scales (12 bytes): ";
-        for(int i=0; i<12; ++i) std::cout << std::hex << (int)scales_ptr[i] << " ";
-        std::cout << std::dec << std::endl;
-        std::cout << "  QS (first 16/128 bytes): ";
-        for(int i=0; i<16; ++i) std::cout << std::hex << (int)qs_ptr[i] << " ";
-        std::cout << std::dec << "..." << std::endl;
+        // log_count_q4++; // Moved increment to end to ensure #1 is logged
+        std::stringstream ss_log; // Use stringstream for logger
+        ss_log << "[DEQUANT_Q4K] Block #" << (log_count_q4.load() + 1) << ":";
+        Logger::debug(ss_log.str()); ss_log.str(""); // Log and clear
+
+        ss_log << "  Super Scale (d_super): " << d_super << " (Raw FP16: 0x" << std::hex << qblock->d << std::dec << ")";
+        Logger::debug(ss_log.str()); ss_log.str("");
+
+        ss_log << "  Super Min (min_super): " << min_super << " (Raw FP16: 0x" << std::hex << qblock->dmin << std::dec << ")";
+        Logger::debug(ss_log.str()); ss_log.str("");
+
+        ss_log << "  Scales Field (12 bytes): ";
+        for(int i=0; i<12; ++i) ss_log << "0x" << std::hex << (int)scales_ptr[i] << " ";
+        ss_log << std::dec;
+        Logger::debug(ss_log.str()); ss_log.str("");
+        
+        // --- Log details for the FIRST sub-block (j=0) --- 
+        uint8_t first_scale_idx, first_min_idx;
+        get_scale_min_indices_q4_K(0, scales_ptr, &first_scale_idx, &first_min_idx);
+        const float first_scale = d_super * K_SCALE_VALUES[first_scale_idx];
+        const float first_minv = min_super * K_MIN_VALUES[first_min_idx];
+        ss_log << "  Sub-block 0: scale_idx=" << (int)first_scale_idx << ", min_idx=" << (int)first_min_idx 
+                  << ", scale=" << first_scale << ", minv=" << first_minv;
+        Logger::debug(ss_log.str()); ss_log.str("");
+
+        ss_log << "  Sub-block 0 QS (8 bytes): ";
+        const uint8_t* first_qs_sub_block = qs_ptr; // j=0
+        for(int i=0; i<8; ++i) ss_log << "0x" << std::hex << (int)first_qs_sub_block[i] << " ";
+        ss_log << std::dec;
+        Logger::debug(ss_log.str()); ss_log.str("");
+        // --- End sub-block 0 details ---
     }
     // --- END ADDED: Logging ---
 
@@ -220,10 +275,13 @@ void dequantize_q4_k_m(
     }
 
     // --- ADDED: Logging Output ---
-    if (log_this_block && log_count_q4 <= 5) {
-        std::cout << "  Output FP32 (first 16/256): ";
-        for(int i=0; i<16; ++i) std::cout << output[i] << " ";
-        std::cout << "..." << std::endl;
+    if (log_this_block && log_count_q4 < 5) {
+        std::stringstream ss_out_log; // Use stringstream
+        ss_out_log << "  Output FP32 (first 16/256 from Sub-block 0): ";
+        for(int i=0; i<16; ++i) ss_out_log << output[i] << " ";
+        ss_out_log << "...";
+        Logger::debug(ss_out_log.str()); // Log output
+        log_count_q4++; // Increment counter AFTER logging is complete
     }
     // --- END ADDED: Logging ---
 }
@@ -250,18 +308,35 @@ void dequantize_q6_k(
     // --- ADDED: Logging ---
     static std::atomic<int> log_count_q6 = 0;
     if (log_this_block && log_count_q6 < 5) { // Log first 5 blocks only
-        log_count_q6++;
-        std::cout << "[DEBUG] Dequant Q6_K Block #" << log_count_q6.load() << ":" << std::endl;
-        std::cout << "  Super Scale (d): " << d << " (raw FP16: 0x" << std::hex << qblock->d << std::dec << ")" << std::endl;
-        std::cout << "  Scales (16 bytes, int8): ";
-        for(int i=0; i<16; ++i) std::cout << (int)scales[i] << " ";
-        std::cout << std::endl;
-        std::cout << "  QL (first 16/128 bytes): ";
-        for(int i=0; i<16; ++i) std::cout << std::hex << (int)ql[i] << " ";
-        std::cout << std::dec << "..." << std::endl;
-         std::cout << "  QH (first 16/64 bytes): ";
-        for(int i=0; i<16; ++i) std::cout << std::hex << (int)qh[i] << " ";
-        std::cout << std::dec << "..." << std::endl;
+        // log_count_q6++; // Moved increment
+        std::stringstream ss_log; // Use stringstream for logger
+        ss_log << "[DEQUANT_Q6K] Block #" << (log_count_q6.load() + 1) << ":";
+        Logger::debug(ss_log.str()); ss_log.str(""); // Log and clear
+
+        ss_log << "  Super Scale (d): " << d << " (Raw FP16: 0x" << std::hex << qblock->d << std::dec << ")";
+        Logger::debug(ss_log.str()); ss_log.str("");
+
+        ss_log << "  Block Scales (16 bytes, int8): ";
+        for(int i=0; i<16; ++i) ss_log << (int)scales[i] << " ";
+        Logger::debug(ss_log.str()); ss_log.str("");
+        
+        // --- Log details for the FIRST sub-block (i=0) ---
+        const float first_sub_block_scale = static_cast<float>(scales[0]);
+        ss_log << "  Sub-block 0: block_scale=" << first_sub_block_scale;
+        Logger::debug(ss_log.str()); ss_log.str("");
+
+        ss_log << "  Sub-block 0 QL (16 bytes): ";
+        const uint8_t* first_ql_sub_block = ql; // i=0
+        for(int k=0; k<16; ++k) ss_log << "0x" << std::hex << (int)first_ql_sub_block[k] << " ";
+        ss_log << std::dec;
+        Logger::debug(ss_log.str()); ss_log.str("");
+
+        ss_log << "  Sub-block 0 QH (4 bytes): ";
+        const uint8_t* first_qh_sub_block = qh; // i=0
+        for(int k=0; k<4; ++k) ss_log << "0x" << std::hex << (int)first_qh_sub_block[k] << " ";
+        ss_log << std::dec;
+        Logger::debug(ss_log.str()); ss_log.str("");
+        // --- End sub-block 0 details ---
     }
     // --- END ADDED: Logging ---
 
@@ -290,10 +365,13 @@ void dequantize_q6_k(
         }
     }
     // --- ADDED: Logging Output ---
-    if (log_this_block && log_count_q6 <= 5) {
-        std::cout << "  Output FP32 (first 16/256): ";
-        for(int i=0; i<16; ++i) std::cout << output[i] << " ";
-        std::cout << "..." << std::endl;
+    if (log_this_block && log_count_q6 < 5) {
+        std::stringstream ss_out_log; // Use stringstream
+        ss_out_log << "  Output FP32 (first 16/256 from Sub-block 0): ";
+        for(int i=0; i<16; ++i) ss_out_log << output[i] << " ";
+        ss_out_log << "...";
+        Logger::debug(ss_out_log.str()); // Log output
+        log_count_q6++; // Increment counter AFTER logging complete
     }
     // --- END ADDED: Logging ---
 }
@@ -762,14 +840,13 @@ const char* ggml_type_name(GGMLType type) {
         case GGMLType::GGML_TYPE_I8:   return "I8";
         case GGMLType::GGML_TYPE_I16:  return "I16";
         case GGMLType::GGML_TYPE_I32:  return "I32";
+        case GGMLType::GGML_TYPE_BF16: return "BF16";
         case GGMLType::GGML_TYPE_COUNT: return "COUNT"; // Should not happen
         default: return "Unknown";
     }
 }
 
 size_t ggml_type_size(GGMLType type) {
-    std::cout << "ggml_type_size called with type: " << static_cast<int>(type) << " (" << ggml_type_name(type) << ")" << std::endl; // Log name too
-    
     switch (type) {
         case GGMLType::GGML_TYPE_F32:
             return sizeof(float);
@@ -797,6 +874,7 @@ size_t ggml_type_size(GGMLType type) {
         case GGMLType::GGML_TYPE_Q8_K: return 290; // Example size (adjust based on actual struct)
         case GGMLType::GGML_TYPE_I16: return sizeof(int16_t);
         case GGMLType::GGML_TYPE_I32: return sizeof(int32_t);
+        case GGMLType::GGML_TYPE_BF16: return sizeof(uint16_t); // <<< ADDED BF16 (size 2) >>>
         case GGMLType::GGML_TYPE_COUNT: // Fallthrough
         default:
             std::cout << "  UNKNOWN GGML TYPE: " << static_cast<int>(type) << std::endl;
@@ -805,8 +883,6 @@ size_t ggml_type_size(GGMLType type) {
 }
 
 size_t ggml_type_block_size(GGMLType type) {
-    std::cout << "ggml_type_block_size called with type: " << static_cast<int>(type) << " (" << ggml_type_name(type) << ")" << std::endl; // Log name too
-    
     switch (type) {
         // --- K-Quant Types ---
         case GGMLType::GGML_TYPE_Q2_K:
@@ -830,6 +906,7 @@ size_t ggml_type_block_size(GGMLType type) {
         case GGMLType::GGML_TYPE_I8:
         case GGMLType::GGML_TYPE_I16:
         case GGMLType::GGML_TYPE_I32:
+        case GGMLType::GGML_TYPE_BF16: // <<< ADDED BF16 >>>
             return 1;
             // break; // <<< ADDED BREAK
 

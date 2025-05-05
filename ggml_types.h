@@ -24,6 +24,7 @@ enum GGMLType {
     GGML_TYPE_I8   = 16,
     GGML_TYPE_I16  = 17,
     GGML_TYPE_I32  = 18,
+    GGML_TYPE_BF16 = 30,
     GGML_TYPE_COUNT, // Sentinel value
 };
 

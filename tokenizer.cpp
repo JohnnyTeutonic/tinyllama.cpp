@@ -8,8 +8,40 @@
 #include <unordered_set>
 #include "logger.h"  // Include logger
 #include <nlohmann/json.hpp>
+#include <queue>      // <<< ADDED for priority_queue in BPE from scores
+#include <map>        // <<< ADDED for map in BPE from scores
+#include <cctype>     // <<< ADDED for std::toupper
 
 using json = nlohmann::json;
+
+// --- ADDED: Helper for Case Fallback ---
+// Capitalizes the first logical letter of a string, handling SentencePiece space prefix.
+// Note: Assumes the first letter is single-byte ASCII/Latin for simplicity.
+std::string capitalize_first_letter(const std::string& s) {
+    if (s.empty()) return s;
+
+    std::string result = s;
+    size_t first_letter_pos = 0;
+    const std::string sp_space = "\xE2\x96\x81"; // SentencePiece space U+2581
+
+    // Check if starts with sp_space
+    if (result.rfind(sp_space, 0) == 0) { 
+        if (result.length() > sp_space.length()) {
+            first_letter_pos = sp_space.length(); // Capitalize after the space prefix
+        } else {
+            return result; // String is only the space prefix, nothing to capitalize
+        }
+    } 
+    // else: starts with a normal character, capitalize at index 0
+
+    if (first_letter_pos < result.length()) {
+        // Simple toupper on the byte at the position
+        result[first_letter_pos] = std::toupper(static_cast<unsigned char>(result[first_letter_pos]));
+    }
+
+    return result;
+}
+// --- END ADDED ---
 
 // Constructor: Load tokenizer from file path and vocab
 Tokenizer::Tokenizer(const std::string& model_path, const std::string& vocab_path) 
@@ -71,6 +103,285 @@ Tokenizer::Tokenizer(const std::string& model_path, const std::string& vocab_pat
     }
     
     Logger::info("Successfully initialized tokenizer with " + std::to_string(id_to_token_.size()) + " tokens");
+
+    // --- Manually inject known chat tokens if not loaded from JSON ---
+    const std::vector<std::pair<std::string, int>> known_chat_tokens = {
+        {"<|system|>", 32000},
+        {"<|user|>", 32001},
+        {"<|assistant|>", 32002}
+    };
+    int manually_injected_count = 0;
+    size_t vocab_size = id_to_token_.size();
+    for (const auto& pair : known_chat_tokens) {
+        const std::string& tok = pair.first;
+        int id = pair.second;
+        // Check if token already exists OR if ID clashes with loaded vocab
+        if (added_tokens_.find(tok) == added_tokens_.end() && static_cast<size_t>(id) >= vocab_size) { 
+            added_tokens_[tok] = id;
+            id_to_added_token_[id] = tok;
+            manually_injected_count++;
+            Logger::info("[MANUAL INJECT] Added missing chat token: '" + tok + "' with assumed ID: " + std::to_string(id));
+        } else if (added_tokens_.find(tok) != added_tokens_.end()){
+             Logger::debug("[MANUAL INJECT] Chat token '" + tok + "' already loaded from JSON. Skipping injection.");
+        } else { // ID clash
+             Logger::warning("[MANUAL INJECT] Cannot add chat token '" + tok + "', assumed ID " + std::to_string(id) + " clashes with loaded vocab size (" + std::to_string(vocab_size) + ").");
+        }
+    }
+    if (manually_injected_count > 0) {
+         Logger::info("Manually injected " + std::to_string(manually_injected_count) + " missing chat tokens.");
+    }
+    // --- End Manual Injection ---
+}
+
+// --- ADDED: Constructor from GGUF Data ---
+Tokenizer::Tokenizer(const GGUFData& gguf_data)
+    : initialized_from_gguf_(true) // Set the flag
+{
+    Logger::info("Initializing Tokenizer from GGUFData...");
+
+    // --- Load Vocabulary and Scores (Using CORRECTED member names) ---
+    if (gguf_data.tokenizer_tokens.empty()) { // CORRECTED
+        throw std::runtime_error("GGUF data does not contain 'tokenizer.ggml.tokens'");
+    }
+    if (gguf_data.tokenizer_scores.empty()) { // CORRECTED
+         Logger::warning("GGUF data does not contain 'tokenizer.ggml.scores'. BPE merging from scores will not work.");
+    }
+    if (gguf_data.tokenizer_tokens.size() != gguf_data.tokenizer_scores.size() && !gguf_data.tokenizer_scores.empty()) { // CORRECTED (x3)
+        Logger::warning("GGUF token and score array sizes mismatch: tokens=" + std::to_string(gguf_data.tokenizer_tokens.size()) + ", scores=" + std::to_string(gguf_data.tokenizer_scores.size())); // CORRECTED (x2)
+    }
+
+    id_to_token_ = gguf_data.tokenizer_tokens; // CORRECTED
+    token_scores_ = gguf_data.tokenizer_scores; // CORRECTED
+    // token_types_ = gguf_data.tokenizer_token_types; // CORRECTED (plural) - Cannot directly assign vector<uint> to vector<int>
+    // --- CORRECTED ASSIGNMENT for token_types_ ---
+    token_types_.resize(gguf_data.tokenizer_token_types.size());
+    std::transform(gguf_data.tokenizer_token_types.begin(), 
+                   gguf_data.tokenizer_token_types.end(), 
+                   token_types_.begin(),
+                   [](unsigned int u) { return static_cast<int32_t>(u); });
+    // --- END CORRECTION ---
+
+    // Populate token_to_id_ map
+    token_to_id_.reserve(id_to_token_.size());
+    for (size_t i = 0; i < id_to_token_.size(); ++i) {
+        token_to_id_[id_to_token_[i]] = static_cast<int>(i);
+    }
+    Logger::info("Loaded " + std::to_string(id_to_token_.size()) + " tokens from GGUF.");
+    if (!token_scores_.empty()) {
+        Logger::info("Loaded " + std::to_string(token_scores_.size()) + " token scores from GGUF.");
+    }
+     if (!token_types_.empty()) {
+        Logger::info("Loaded " + std::to_string(token_types_.size()) + " token types from GGUF.");
+    } else {
+         Logger::info("Token types array not found or empty in GGUF.");
+    }
+
+    // --- Populate byte_char_to_id_ for fast byte token lookup ---
+    byte_char_to_id_.clear();
+    std::regex byte_token_regex(R"(<0x([0-9A-Fa-f]{2})>)");
+    for (size_t i = 0; i < id_to_token_.size(); ++i) {
+        const std::string& tok = id_to_token_[i];
+        std::smatch match;
+        if (std::regex_match(tok, match, byte_token_regex)) {
+            int byte_val = std::stoi(match[1].str(), nullptr, 16);
+            char byte_char = static_cast<char>(byte_val);
+            byte_char_to_id_[byte_char] = static_cast<int>(i);
+            Logger::debug("Mapped byte token '" + tok + "' to char 0x" + match[1].str() + " (ID: " + std::to_string(i) + ")");
+        }
+    }
+
+    // --- Helper to get metadata value (avoids repeating logic) ---
+    auto get_meta_value = [&](const std::string& key, auto default_value) {
+        using TargetType = typename std::decay<decltype(default_value)>::type;
+        auto it = gguf_data.metadata.find(key);
+        if (it != gguf_data.metadata.end()) {
+            return std::visit([&](const auto& val) -> TargetType {
+                using T = std::decay_t<decltype(val)>;
+                // More robust type checking like in model.cpp parse_model_config_from_gguf is recommended here
+                if constexpr (std::is_arithmetic_v<TargetType> && std::is_arithmetic_v<T>) {
+                     // Check for potential overflow before casting
+                     // This is simplified - use the more robust check from model.cpp if needed
+                     if constexpr (std::is_integral_v<TargetType> && std::is_floating_point_v<T>) {
+                         if (val > static_cast<T>(std::numeric_limits<TargetType>::max()) || val < static_cast<T>(std::numeric_limits<TargetType>::lowest())) {
+                             Logger::warning("Potential overflow casting float to int for GGUF key '" + key + "'. Using default."); return default_value;
+                         }
+                     } else if constexpr (std::is_floating_point_v<TargetType> && std::is_integral_v<T>) {
+                          // Generally safe, but large integers might lose precision
+                     } // Add more specific checks as needed
+                     return static_cast<TargetType>(val);
+                } else if constexpr (std::is_same_v<TargetType, bool> && std::is_same_v<T, bool>) {
+                     return val;
+                 } else if constexpr (std::is_same_v<TargetType, std::string> && std::is_same_v<T, std::string>) {
+                     return val;
+                 }
+                 Logger::warning("GGUF metadata key '" + key + "' type mismatch or unhandled conversion. Using default.");
+                 return default_value;
+
+            }, it->second);
+        }
+        return default_value;
+    };
+
+     auto get_meta_string = [&](const std::string& key, const std::string& default_val) -> std::string {
+        auto it = gguf_data.metadata.find(key);
+        if (it != gguf_data.metadata.end() && std::holds_alternative<std::string>(it->second)) {
+            return std::get<std::string>(it->second);
+        }
+        return default_val;
+    };
+
+    // --- Load Special Token IDs ---
+    bos_token_id_ = get_meta_value("tokenizer.ggml.bos_token_id", -1);
+    eos_token_id_ = get_meta_value("tokenizer.ggml.eos_token_id", -1);
+    unk_token_id_ = get_meta_value("tokenizer.ggml.unknown_token_id", -1); // Use unknown_token_id
+    pad_token_id_ = get_meta_value("tokenizer.ggml.padding_token_id", -1); // Use padding_token_id
+
+    // Define corresponding token strings (important for encode/decode checks)
+    if (bos_token_id_ >= 0 && bos_token_id_ < id_to_token_.size()) bos_token_ = id_to_token_[bos_token_id_]; else bos_token_ = "";
+    if (eos_token_id_ >= 0 && eos_token_id_ < id_to_token_.size()) eos_token_ = id_to_token_[eos_token_id_]; else eos_token_ = "";
+    if (unk_token_id_ >= 0 && unk_token_id_ < id_to_token_.size()) unk_token_ = id_to_token_[unk_token_id_]; else unk_token_ = "<unk>"; // Fallback
+    if (pad_token_id_ >= 0 && pad_token_id_ < id_to_token_.size()) pad_token_ = id_to_token_[pad_token_id_]; else pad_token_ = ""; // Often not used
+
+    Logger::info("Loaded Special Tokens from GGUF: BOS=" + std::to_string(bos_token_id_) +
+                 " ('" + bos_token_ + "'), EOS=" + std::to_string(eos_token_id_) +
+                 " ('" + eos_token_ + "'), UNK=" + std::to_string(unk_token_id_) +
+                 " ('" + unk_token_ + "'), PAD=" + std::to_string(pad_token_id_) +
+                 " ('" + pad_token_ + "')");
+
+
+    // --- Load Pre-tokenizer Type ---
+    pre_tok_type_ = get_meta_string("tokenizer.ggml.pre", "unknown");
+    // Infer if unknown
+    if (pre_tok_type_ == "unknown") {
+         std::string arch = get_meta_string("general.architecture", "unknown");
+         if (arch == "llama") {
+             pre_tok_type_ = "llama"; // Assume llama pre-tok for llama arch if not specified
+             Logger::info("Inferred pre_tok_type_ = 'llama' based on architecture.");
+         }
+    }
+    // --- FINAL: Do not override pre_tok_type_ after this point ---
+    Logger::info("[FINAL] pre_tok_type_ is set to '" + pre_tok_type_ + "'. No downstream code should override this value.");
+
+    // --- Load Chat Template Special Tokens ---
+    chat_template_special_tokens.clear();
+    std::string chat_template = get_meta_string("tokenizer.chat_template", "");
+    if (!chat_template.empty()) {
+        Logger::info("Parsing chat_template for special tokens...");
+        // Regex for <|...|> tokens
+        std::regex special_token_regex(R"(<\|[^>]+\|>)");
+        auto tokens_begin = std::sregex_iterator(chat_template.begin(), chat_template.end(), special_token_regex);
+        auto tokens_end = std::sregex_iterator();
+        for (auto it = tokens_begin; it != tokens_end; ++it) {
+            std::string found = it->str();
+            chat_template_special_tokens.insert(found);
+            Logger::info("Found chat template special token: " + found);
+        }
+        // Optionally, also look for <s>, </s>, <unk> if present in template
+        std::vector<std::string> std_specials = {"<s>", "</s>", "<unk>"};
+        for (const auto& s : std_specials) {
+            if (chat_template.find(s) != std::string::npos) {
+                chat_template_special_tokens.insert(s);
+                Logger::info("Found chat template standard special token: " + s);
+            }
+        }
+    } else {
+        Logger::info("No chat_template found in GGUF metadata.");
+    }
+
+    // --- Add Chat Template Special Tokens to added_tokens_ ---
+    int chat_template_added_count = 0;
+    for (const auto& special_token : chat_template_special_tokens) {
+        auto it = token_to_id_.find(special_token);
+        if (it != token_to_id_.end()) {
+            int token_id = it->second;
+            // Avoid duplicates
+            if (added_tokens_.find(special_token) == added_tokens_.end()) {
+                added_tokens_[special_token] = token_id;
+                id_to_added_token_[token_id] = special_token;
+                chat_template_added_count++;
+                Logger::info("Added chat template special token to added_tokens_: '" + special_token + "' (ID: " + std::to_string(token_id) + ")");
+            }
+        } else {
+            Logger::warning("Chat template special token not found in vocab: '" + special_token + "'");
+        }
+    }
+    if (chat_template_added_count > 0) {
+        Logger::info("Total chat template special tokens added to added_tokens_: " + std::to_string(chat_template_added_count));
+    }
+
+    // --- Identify Added/Special Tokens from Types ---
+    // Populate added_tokens_ and id_to_added_token_ based on token_types_
+    added_tokens_.clear();       // Clear any previous added tokens (e.g., from default constructor)
+    id_to_added_token_.clear();
+
+    if (!token_types_.empty() && token_types_.size() == id_to_token_.size()) {
+        int added_count = 0;
+        for (size_t i = 0; i < token_types_.size(); ++i) {
+            // Definition from GGUF spec v3:
+            // 1: NORMAL, 2: UNKNOWN, 3: CONTROL, 4: USER_DEFINED, 5: UNUSED, 6: BYTE
+            // Consider CONTROL and USER_DEFINED as potentially "added" special tokens
+            // Also include BOS/EOS/UNK/PAD explicitly if their type indicates they should be handled specially
+            bool is_special_type = (token_types_[i] == 3 || token_types_[i] == 4);
+            int token_id = static_cast<int>(i);
+            bool is_known_special_id = (token_id == bos_token_id_ ||
+                                        token_id == eos_token_id_ ||
+                                        token_id == unk_token_id_ ||
+                                        token_id == pad_token_id_);
+
+            // Add if it's marked as CONTROL/USER_DEFINED OR if it's one of the known special IDs (BOS/EOS etc.)
+            // This ensures things like [INST] are added if marked as CONTROL, and <s> is added even if marked NORMAL
+            if (is_special_type || is_known_special_id) {
+                 const std::string& token_str = id_to_token_[i];
+                 // Avoid adding duplicates
+                 if (added_tokens_.find(token_str) == added_tokens_.end()) {
+                    added_tokens_[token_str] = token_id;
+                    id_to_added_token_[token_id] = token_str;
+                    added_count++;
+                    // Logger::debug("Added special token from GGUF type/ID: '" + token_str + "' (ID: " + std::to_string(token_id) + ", Type: " + std::to_string(token_types_[i]) + ")");
+                 }
+            }
+        }
+        Logger::info("Identified " + std::to_string(added_tokens_.size()) + " added/special tokens from GGUF token_types array and known IDs.");
+    } else {
+         Logger::warning("Cannot identify added tokens from GGUF types (array missing or size mismatch). Manually adding BOS/EOS/UNK/PAD if found.");
+         // Manually add BOS/EOS/UNK/PAD to added_tokens_ if they were found by ID earlier
+         if (bos_token_id_ != -1 && !bos_token_.empty()) { added_tokens_[bos_token_] = bos_token_id_; id_to_added_token_[bos_token_id_] = bos_token_; }
+         if (eos_token_id_ != -1 && !eos_token_.empty()) { added_tokens_[eos_token_] = eos_token_id_; id_to_added_token_[eos_token_id_] = eos_token_; }
+         if (unk_token_id_ != -1 && !unk_token_.empty()) { added_tokens_[unk_token_] = unk_token_id_; id_to_added_token_[unk_token_id_] = unk_token_; }
+         if (pad_token_id_ != -1 && !pad_token_.empty()) { added_tokens_[pad_token_] = pad_token_id_; id_to_added_token_[pad_token_id_] = pad_token_; }
+         Logger::info("Manually added BOS/EOS/UNK/PAD tokens results in " + std::to_string(added_tokens_.size()) + " added tokens.");
+    }
+
+    Logger::info("Tokenizer successfully initialized from GGUFData.");
+}
+// --- END ADDED ---
+
+std::vector<std::string> Tokenizer::regex_tokenize(const std::string& text) const { // Ensure 'const' is present
+    std::vector<std::string> tokens;
+    // Regex pattern similar to llama.cpp: optional space followed by non-space characters
+    // This helps handle the leading space convention in many BPE tokenizers.
+    // Need double escapes for backslashes in C++ string literals.
+    try {
+        // Wrap regex operations in a try-catch block for robustness
+        std::regex pattern(" ?[^\\s]+");
+
+        auto words_begin = std::sregex_iterator(text.begin(), text.end(), pattern);
+        auto words_end = std::sregex_iterator();
+
+        for (std::sregex_iterator i = words_begin; i != words_end; ++i) {
+            std::smatch match = *i;
+            if (!match.str().empty()) { // Avoid adding empty matches if any occur
+               tokens.push_back(match.str());
+            }
+        }
+    } catch (const std::regex_error& e) {
+        // Log regex errors if they occur
+        Logger::error("Regex error in regex_tokenize: " + std::string(e.what()) + " for text: '" + text + "'");
+        // Fallback or rethrow depending on desired behavior.
+        // For now, return the partially collected tokens (if any) or an empty vector.
+        return tokens;
+    }
+    return tokens;
 }
 
 // Tokenize text using BPE if available, falling back to space tokenization
@@ -106,38 +417,29 @@ std::vector<std::string> Tokenizer::space_tokenize(const std::string& text) cons
 std::vector<std::string> Tokenizer::bpe_tokenize(const std::string& text) const {
     std::vector<std::string> all_tokens;
     
-    // Heuristic to detect if space prefix (Ġ or   ) is used in the loaded vocab
+    // Check if we're using a TinyLlama-style tokenizer
     bool using_space_prefix = false;
-    const std::string gpt2_space_prefix = "\xC4\xA0"; // Ġ (U+0120)
-    const std::string tinyllama_space_prefix = "\xE2\x96\x81"; //   (U+2581)
-    
-    // --- Use id_to_token_ like .bak --- 
-    for (const auto& token : id_to_token_) { // Iterate through the loaded vocab vector
-         if (!token.empty()) {
-            if (token.size() >= gpt2_space_prefix.size() && token.substr(0, gpt2_space_prefix.size()) == gpt2_space_prefix) {
+    for (const auto& token : id_to_token_) {
+        if (!token.empty() && token[0] == '\xC4' && token.size() > 1 && token[1] == '\xA0') {
+            // UTF-8 representation of Ġ (U+0120)
                  using_space_prefix = true;
                  break;
             } 
-             if (token.size() >= tinyllama_space_prefix.size() && token.substr(0, tinyllama_space_prefix.size()) == tinyllama_space_prefix) {
+        // TinyLlama uses a special unicode character ' ' (U+2581)
+        if (!token.empty() && token[0] == '\xE2' && token.size() > 2 && token[1] == '\x96' && token[2] == '\x81') {
+            // UTF-8 representation of   (U+2581)
                  using_space_prefix = true;
                  break;
              }
-         }
     }
-    if (using_space_prefix) {
-         // Logger::info("bpe_tokenize detected space prefix"); // Simplified log
-    } else {
-        // Logger::info("bpe_tokenize did not detect standard space prefix.");
-    }
-
-    // Preprocess text: Add leading space if using prefix and text doesn't start with space
+    
+    // Add a leading space if needed
     std::string processed_text = text;
-    if (using_space_prefix && !processed_text.empty() && processed_text[0] != ' ') {
-        processed_text = " " + processed_text;
-        // Logger::info("Added leading space for prefix handling.");
+    if (using_space_prefix && !text.empty() && text[0] != ' ') {
+        processed_text = " " + text;
     }
 
-    // --- START: Reverted Pre-tokenization logic from .bak --- 
+    // Split the text by whitespace to get words
     std::vector<std::string> words;
     std::string current_word;
     bool in_whitespace = true;
@@ -159,98 +461,131 @@ std::vector<std::string> Tokenizer::bpe_tokenize(const std::string& text) const 
                 if (!current_word.empty()) {
                     words.push_back(current_word);
                 }
-                current_word = " "; // Start new word with space marker
+                current_word = " ";
                 in_whitespace = false;
             }
         } else {
-            // If switching from whitespace to non-whitespace, and using prefix, start word with space marker
-            if (in_whitespace && using_space_prefix) {
-                 if (!current_word.empty()) { // If there was already a space marker
-                     words.push_back(current_word); // Add previous space marker word
-                 } 
-                 current_word = " "; // Start new word with space marker
-            }
             current_word.push_back(c);
             in_whitespace = false;
         }
     }
+    
     // Add the last word if there is one
     if (!current_word.empty()) {
         words.push_back(current_word);
     }
-     // --- END: Reverted Pre-tokenization logic from .bak --- 
 
     // Process each word with BPE
-    for (auto& word : words) { // Use 'word' like in .bak
+    for (auto& word : words) {
+        // +++ START Trace Logging Check +++
+        bool trace_this_word = (word == " Studying"); // NEW Check for Studying
+        if (trace_this_word) {
+            Logger::debug("[BPE TRACE] START Processing word: '" + word + "'");
+        }
+        // +++ END Trace Logging Check +++
+
         // Special handling for TinyLlama-style prefix
         if (using_space_prefix && word.size() > 0 && word[0] == ' ') {
             // Replace the space at the beginning with the special token
             if (word.size() == 1) {
-                // This is just a space - use the UTF-8 sequence for   (U+2581)
                 word = "\xE2\x96\x81"; 
             } else {
-                word = "\xE2\x96\x81" + word.substr(1); // Or use detected_space_prefix if needed
+                word = "\xE2\x96\x81" + word.substr(1);
             }
-        } // Removed the extra prefix handling for regex output
+            // Update trace flag if the original word was the target, AFTER replacement
+            trace_this_word = (word == "\xE2\x96\x81Studying"); // NEW Check for Studying
+            if (trace_this_word) { // Log the word after potential space replacement
+                 Logger::debug("[BPE TRACE] Word after space replacement: '" + word + "'");
+            }
+        }
         
-        // Apply space prefix if needed
-        // Note: The regex might capture leading spaces, adjust prefix logic if needed.
-        // Let's refine prefix handling here based on regex output.
-        // Logger::info("Processing segment: '" + current_segment + "'");
-
-        // Split word into initial pieces (UTF-8 characters)
-        std::vector<std::string> chars; // Use 'chars' like .bak
+        // Split word into individual UTF-8 characters
+        std::vector<std::string> chars;
         for (size_t i = 0; i < word.size(); ) {
+            // Get unicode code point and advance i accordingly
             int bytes = 1;
-            unsigned char c = static_cast<unsigned char>(word[i]);
-            if ((c & 0xF8) == 0xF0) bytes = 4;
-            else if ((c & 0xF0) == 0xE0) bytes = 3;
-            else if ((c & 0xE0) == 0xC0) bytes = 2;
+            if ((word[i] & 0xE0) == 0xC0) bytes = 2;
+            else if ((word[i] & 0xF0) == 0xE0) bytes = 3;
+            else if ((word[i] & 0xF8) == 0xF0) bytes = 4;
             
-            if (i + bytes > word.size()) { // Handle potential trailing broken char
-                 bytes = word.size() - i;
-            }
+            // Get the character
+            if (i + bytes <= word.size()) {
             chars.push_back(word.substr(i, bytes));
+        } else {
+                // Handle truncated UTF-8 sequence
+                chars.push_back(word.substr(i));
+            }
             i += bytes;
         }
-        // Logger::info("Initial pieces: " + std::to_string(pieces.size()));
+
+        if (trace_this_word) {
+            std::stringstream ss_initial_chars;
+            ss_initial_chars << "[BPE TRACE] Initial chars: [";
+            for(size_t k=0; k<chars.size(); ++k) ss_initial_chars << "'" << chars[k] << "'" << (k+1<chars.size() ? "," : "");
+            ss_initial_chars << "]";
+            Logger::debug(ss_initial_chars.str());
+        }
 
         if (chars.empty()) continue;
 
-        // Apply BPE merges iteratively
+        // Apply BPE merges
         bool changes = true;
-        while (changes && chars.size() > 1) { // Match .bak loop condition
-            changes = false; // Match .bak logic
-            int best_rank = std::numeric_limits<int>::max();
-            int best_idx = -1;
+        int merge_iteration = 0;
+        while (changes && chars.size() > 1) {
+            merge_iteration++;
+            if (trace_this_word) {
+                Logger::debug("[BPE TRACE] --- Merge Iteration " + std::to_string(merge_iteration) + " ---");
+                std::stringstream ss_chars_before;
+                ss_chars_before << "[BPE TRACE] Chars before iteration: [";
+                for(size_t k=0; k<chars.size(); ++k) ss_chars_before << "'" << chars[k] << "'" << (k+1<chars.size() ? "," : "");
+                ss_chars_before << "]";
+                Logger::debug(ss_chars_before.str());
+            }
+            changes = false;
+            int best_score = std::numeric_limits<int>::max();
+            int best_i = -1;
 
             for (size_t i = 0; i < chars.size() - 1; ++i) {
-                std::string merge_key = chars[i] + chars[i+1];
-                auto it = bpe_merges_.find(merge_key);
-                if (it != bpe_merges_.end()) {
-                    int current_rank = it->second;
-                    if (current_rank < best_rank) {
-                        best_rank = current_rank;
-                        best_idx = static_cast<int>(i);
-                    }
+                std::string pair = chars[i] + chars[i + 1];
+                auto it = bpe_merges_.find(pair);
+                if (trace_this_word) {
+                     Logger::debug("[BPE TRACE] Checking pair[" + std::to_string(i) + "]: '" + chars[i] + "' + '" + chars[i+1] + "' -> '" + pair + "'. Found in merges: " + (it != bpe_merges_.end() ? "Yes (Score: " + std::to_string(it->second) + ")" : "No"));
+                }
+                if (it != bpe_merges_.end() && it->second < best_score) {
+                    best_score = it->second;
+                    best_i = i;
                 }
             }
+            
+            if (trace_this_word) {
+                Logger::debug("[BPE TRACE] Best merge found at index: " + std::to_string(best_i) + " with score: " + (best_i >= 0 ? std::to_string(best_score) : "N/A"));
+            }
 
-            if (best_idx != -1) {
-                 // Perform the merge
-                 // Logger::info("Merging '" + chars[best_idx] + "' and '" + chars[best_idx + 1] + "' with rank " + std::to_string(best_rank));
-                 std::string merged = chars[best_idx] + chars[best_idx + 1]; // Match .bak
-                 chars[best_idx] = merged;
-                 chars.erase(chars.begin() + best_idx + 1);
-                 changes = true; // Match .bak
-            } else {
-                // break; // .bak doesn't explicitly break here, relies on changes flag
+            if (best_i >= 0) {
+                std::string merged = chars[best_i] + chars[best_i + 1];
+                if (trace_this_word) {
+                     Logger::debug("[BPE TRACE] Applying merge: '" + chars[best_i] + "' + '" + chars[best_i + 1] + "' -> '" + merged + "' at index " + std::to_string(best_i));
+                }
+                chars[best_i] = merged;
+                chars.erase(chars.begin() + best_i + 1);
+                changes = true;
+                if (trace_this_word) {
+                    std::stringstream ss_chars_after;
+                    ss_chars_after << "[BPE TRACE] Chars after merge: [";
+                    for(size_t k=0; k<chars.size(); ++k) ss_chars_after << "'" << chars[k] << "'" << (k+1<chars.size() ? "," : "");
+                    ss_chars_after << "]";
+                    Logger::debug(ss_chars_after.str());
+                }
             }
         }
-        // Add the final pieces for this word to the result
+        if (trace_this_word) {
+             Logger::debug("[BPE TRACE] END Processing word: '" + word + "'");
+        }
+        
+        // Collect the final tokens
         all_tokens.insert(all_tokens.end(), chars.begin(), chars.end());
     }
-    // Logger::info("Final token count: " + std::to_string(final_tokens.size()));
+    
     return all_tokens;
 }
 
@@ -355,12 +690,47 @@ std::vector<int> Tokenizer::tokens_to_ids(const std::vector<std::string>& tokens
     ids.reserve(tokens.size());
     
     for (const auto& token : tokens) {
-        auto it = token_to_id_.find(token);
-        if (it != token_to_id_.end()) {
-            ids.push_back(it->second);
+        // --- MODIFIED: Added Case Fallback Logic --- 
+        auto added_it = added_tokens_.find(token);
+        if (added_it != added_tokens_.end()) {
+            // Found in added special tokens
+            ids.push_back(added_it->second); 
+            Logger::debug("[TOK_TO_ID] Found added token: '" + token + "' -> ID: " + std::to_string(added_it->second));
         } else {
-            ids.push_back(unk_token_id_);  // Use defined UNK token ID
+            // Not found in added, check base vocabulary (original case)
+            auto base_it = token_to_id_.find(token);
+            if (base_it != token_to_id_.end()) {
+                ids.push_back(base_it->second);
+                Logger::debug("[TOK_TO_ID] Found base token: '" + token + "' -> ID: " + std::to_string(base_it->second));
+            } else {
+                // Not found in original case, try capitalized fallback
+                std::string capitalized_token = capitalize_first_letter(token);
+                if (capitalized_token != token) { // Only try if capitalization actually changed something
+                    auto capitalized_it = token_to_id_.find(capitalized_token);
+                    if (capitalized_it != token_to_id_.end()) {
+                        // Found capitalized version in base vocab
+                        ids.push_back(capitalized_it->second);
+                        Logger::debug("[TOK_TO_ID] FALLBACK: Found capitalized base token: '" + token + "' -> '" + capitalized_token + "' -> ID: " + std::to_string(capitalized_it->second));
+                        continue; // Skip to next token
+                    }
+                }
+                
+                // --- Byte token fallback (if not found in original or capitalized) ---
+                if (token.length() == 1) {
+                    char c = token[0];
+                    auto byte_it = byte_char_to_id_.find(c);
+                    if (byte_it != byte_char_to_id_.end()) {
+                        ids.push_back(byte_it->second);
+                        Logger::debug("[TOK_TO_ID] FALLBACK: Mapped single-byte token '" + std::string(1, c) + "' to byte token ID " + std::to_string(byte_it->second));
+                        continue; // Skip to next token
+                    }
+                }
+                // Not found anywhere (original, capitalized, byte), use UNK
+                Logger::debug("[TOK_TO_ID] UNKNOWN: Token '" + token + "' not found in added, base, capitalized fallback, or byte tokens. Using UNK ID: " + std::to_string(unk_token_id_));
+                ids.push_back(unk_token_id_); 
+            }
         }
+        // --- END MODIFICATION --- 
     }
     
     return ids;
@@ -368,42 +738,209 @@ std::vector<int> Tokenizer::tokens_to_ids(const std::vector<std::string>& tokens
 
 // Convert IDs to tokens
 std::vector<std::string> Tokenizer::ids_to_tokens(const std::vector<int>& ids) const {
+    // Logger::debug("ids_to_tokens called with " + std::to_string(ids.size()) + " IDs.");
     std::vector<std::string> tokens;
     tokens.reserve(ids.size());
     
     for (int id : ids) {
-        if (id >= 0 && static_cast<size_t>(id) < id_to_token_.size() && !id_to_token_[id].empty()) {
+        // --- UPDATED: Check added tokens first, then base vocab --- 
+        auto added_it = id_to_added_token_.find(id);
+        if (added_it != id_to_added_token_.end()) {
+            // Found in added tokens reverse map
+            tokens.push_back(added_it->second);
+            // Logger::debug("ID " + std::to_string(id) + " -> Added Token: '" + added_it->second + "'");
+        } else if (id >= 0 && static_cast<size_t>(id) < id_to_token_.size()) {
+            // Found in base GGUF vocabulary vector
+            if (!id_to_token_[id].empty()) { // Check if token string is valid
             tokens.push_back(id_to_token_[id]);
+                 // Logger::debug("ID " + std::to_string(id) + " -> Base Token: '" + id_to_token_[id] + "'");
         } else {
+                // ID is within base vocab range but has an empty string (shouldn't happen often)
             tokens.push_back(unk_token_);
+                 Logger::warning("ID " + std::to_string(id) + " found in base vocab range but has empty string. Using UNK.");
+            }
+        } else {
+            // ID not found in added tokens or base vocab range
+             tokens.push_back(unk_token_);
+            // Logger::warning("ID " + std::to_string(id) + " not found in added tokens or base vocab. Using UNK.");
         }
+        // --- END UPDATED --- 
     }
     
     return tokens;
 }
 
-// Encode text to token IDs (using BPE for Llama GGUF)
+// Encode text to token IDs
 std::vector<int> Tokenizer::encode(const std::string& text, 
-                                 bool add_special_tokens, 
-                                 bool use_regex_pretokenize /* = false */) const // SET DEFAULT TO FALSE (in comment for definition)
+                                 bool add_bos, 
+                                 bool add_eos, 
+                                 PreTokenizeMethod pre_tok_override) const 
 {
-    // Logger::info("Tokenizer::encode called. Text: '" + text + "', add_special: " + 
-    //              (add_special_tokens ? "true" : "false") + ", use_regex: " + (use_regex_pretokenize ? "true" : "false"));
-    // For GGUF Llama, we assume BPE is the method.
-    std::vector<std::string> tokens = bpe_tokenize(text); // Call the reverted BPE tokenizer (no flag)
-    // Logger::info("Tokenized into " + std::to_string(tokens.size()) + " string pieces.");
-    
-    // Convert string tokens to IDs
-    std::vector<int> ids = tokens_to_ids(tokens);
-    // Logger::info("Converted to " + std::to_string(ids.size()) + " IDs (before special tokens).");
+    std::vector<int> final_ids;
+    Logger::debug("[ENCODE] Encoding text: '" + text + "' (add_bos=" + std::to_string(add_bos) + ", add_eos=" + std::to_string(add_eos) + ")");
 
-    // Prepend BOS if requested and available
-    if (add_special_tokens && bos_token_id_ >= 0) {
-        ids.insert(ids.begin(), bos_token_id_);
-        // Logger::info("Prepended BOS token ID: " + std::to_string(bos_token_id_));
+    // --- Simplified Path for Merge-Based Tokenizer (from JSON) ---
+    if (!initialized_from_gguf_) {
+        Logger::debug("[ENCODE] Using simplified merge-based tokenizer path (calling bpe_tokenize directly).");
+        
+        std::vector<std::string> bpe_pieces = bpe_tokenize(text); // Call the restored bpe_tokenize
+        Logger::debug("[ENCODE] bpe_tokenize returned " + std::to_string(bpe_pieces.size()) + " pieces.");
+
+        final_ids = tokens_to_ids(bpe_pieces);
+
+        // Add BOS/EOS *after* converting pieces to IDs
+        if (add_bos && bos_token_id_ != -1) {
+            final_ids.insert(final_ids.begin(), bos_token_id_);
+            Logger::debug("[ENCODE] Prepended BOS token: " + std::to_string(bos_token_id_));
+        }
+        if (add_eos && eos_token_id_ != -1) {
+            final_ids.push_back(eos_token_id_);
+            Logger::debug("[ENCODE] Appended EOS token: " + std::to_string(eos_token_id_));
+        }
+
+        Logger::debug("[ENCODE] Final IDs (Simplified Merge Path): " + std::to_string(final_ids.size()) + " tokens.");
+        return final_ids;
     }
-    // NOTE: EOS is typically added *after* generation, not during prompt encoding.
-    return ids;
+    // --- End Simplified Merge-Based Path ---
+
+    // --- Existing Path for GGUF Score-Based Tokenizer ---
+    else {
+        Logger::debug("[ENCODE] Using GGUF score-based tokenizer path.");
+        // 1. Handle BOS token
+        if (add_bos && bos_token_id_ != -1) {
+            final_ids.push_back(bos_token_id_);
+            Logger::debug("[ENCODE] Added BOS token: " + std::to_string(bos_token_id_));
+        }
+
+        // 2. Pre-tokenization / Splitting by special tokens
+        std::vector<std::pair<std::string, bool>> segments; // Pair: <text_segment, is_special>
+        std::string current_segment;
+        std::string text_to_process = text;
+
+        // --- Determine effective pre-tokenizer method --- 
+        PreTokenizeMethod method_to_use;
+        if (pre_tok_override == PreTokenizeMethod::DEFAULT) {
+            if (pre_tok_type_ == "default") {
+                method_to_use = PreTokenizeMethod::DEFAULT;
+                Logger::debug("[ENCODE] Using DEFAULT pre-tokenization path (split by special tokens, BPE for non-specials).");
+            } else if (pre_tok_type_ == "llama") {
+                method_to_use = PreTokenizeMethod::LLAMA_REGEX;
+            } else {
+                method_to_use = PreTokenizeMethod::WHITESPACE;
+            }
+        } else {
+            method_to_use = pre_tok_override;
+        }
+        std::string method_str;
+        if (method_to_use == PreTokenizeMethod::LLAMA_REGEX) method_str = "LLAMA_REGEX";
+        else if (method_to_use == PreTokenizeMethod::WHITESPACE) method_str = "WHITESPACE";
+        else method_str = "DEFAULT";
+        Logger::debug("[ENCODE] Effective pre-tokenization method: " + method_str);
+        // --- End Determine --- 
+
+        if (method_to_use == PreTokenizeMethod::DEFAULT) {
+            // --- Special splitting and BPE for 'default' ---
+            // Build regex pattern for splitting by *all* special tokens: those with IDs (added_tokens_) and those from chat_template_special_tokens
+            std::unordered_set<std::string> all_special_tokens;
+            for (const auto& pair : added_tokens_) {
+                all_special_tokens.insert(pair.first);
+            }
+            // Add chat_template_special_tokens if not already present
+            for (const auto& s : chat_template_special_tokens) {
+                all_special_tokens.insert(s);
+            }
+            std::string special_pattern_str = "(";
+            bool first_special = true;
+            for(const auto& tok : all_special_tokens) {
+                if (!tok.empty()) {
+                    if (!first_special) special_pattern_str += "|";
+                    std::string escaped_token = std::regex_replace(tok, std::regex("[\\^\\$\\.\\*\\+\\?\\(\\)\\[\\]\\{\\}\\|]"), "\\$&");
+                    special_pattern_str += escaped_token;
+                    first_special = false;
+                }
+            }
+            special_pattern_str += ")";
+
+            std::vector<std::pair<std::string, bool>> segments;
+            if (all_special_tokens.empty()) {
+                segments.push_back({text, false});
+                Logger::debug("[ENCODE] No special tokens found, treating whole text as one segment.");
+            } else {
+                std::regex special_regex(special_pattern_str); 
+                auto words_begin = std::sregex_iterator(text.begin(), text.end(), special_regex);
+                auto words_end = std::sregex_iterator();
+                long last_pos = 0;
+                for (std::sregex_iterator i = words_begin; i != words_end; ++i) {
+                    std::smatch match = *i;
+                    long current_pos = match.position();
+                    std::string match_str = match.str();
+                    if (current_pos > last_pos) {
+                        segments.push_back({text.substr(last_pos, current_pos - last_pos), false});
+                    }
+                    segments.push_back({match_str, true});
+                    last_pos = current_pos + match.length();
+                }
+                if (last_pos < text.length()) {
+                    segments.push_back({text.substr(last_pos), false});
+                }
+                Logger::debug("[ENCODE] Split text into " + std::to_string(segments.size()) + " segments by special tokens.");
+            }
+            for (const auto& segment_pair : segments) {
+                const std::string& segment_to_process = segment_pair.first;
+                bool is_special = segment_pair.second;
+                if (segment_to_process.empty()) continue;
+                if (is_special) {
+                    auto it = added_tokens_.find(segment_to_process);
+                    if (it != added_tokens_.end()) {
+                        final_ids.push_back(it->second);
+                        Logger::debug("[ENCODE] Added special token ID: " + std::to_string(it->second) + " for '" + segment_to_process + "'");
+                    } else {
+                        Logger::debug("[ENCODE] Skipping template-only special token: '" + segment_to_process + "'");
+                        // Do nothing: skip template-only special tokens
+                    }
+                } else {
+                    std::vector<std::string> bpe_pieces;
+                    if (initialized_from_gguf_) {
+                        if (!token_scores_.empty()) {
+                            Logger::debug("[ENCODE] Passing segment to bpe_tokenize_from_scores: '" + segment_to_process + "'");
+                            bpe_pieces = bpe_tokenize_from_scores(segment_to_process);
+                        } else {
+                            Logger::warning("[ENCODE] GGUF Initialized but no scores. Tokenizing segment '" + segment_to_process + "' with space fallback.");
+                            std::vector<std::string> space_pieces;
+                            std::string word;
+                            std::istringstream iss(segment_to_process);
+                            while (iss >> word) { space_pieces.push_back(word); }
+                            bpe_pieces = space_pieces;
+                        }
+                    } else {
+                        Logger::debug("[ENCODE] Passing segment to bpe_tokenize (merge-based): '" + segment_to_process + "' with method: " + method_str);
+                        bpe_pieces = bpe_tokenize(segment_to_process); // For 'default', use whitespace BPE
+                    }
+                    std::vector<int> segment_ids = tokens_to_ids(bpe_pieces);
+                    final_ids.insert(final_ids.end(), segment_ids.begin(), segment_ids.end());
+                    std::stringstream ss_bpe;
+                    ss_bpe << "[ENCODE] BPE Results for segment '" << segment_to_process << "': Pieces=[ ";
+                    for(const auto& p : bpe_pieces) ss_bpe << "'" << p << "' ";
+                    ss_bpe << "], IDs=[ ";
+                    for(int id : segment_ids) ss_bpe << id << " ";
+                    ss_bpe << "]";
+                    Logger::debug(ss_bpe.str());
+                }
+            }
+        } else {
+            // --- Existing logic for LLAMA_REGEX and WHITESPACE ---
+            // ... existing code ...
+        }
+
+        // 4. Handle EOS token
+        if (add_eos && eos_token_id_ != -1) {
+            final_ids.push_back(eos_token_id_);
+            Logger::debug("[ENCODE] Added EOS token: " + std::to_string(eos_token_id_));
+        }
+
+        Logger::debug("[ENCODE] Final IDs: " + std::to_string(final_ids.size()) + " tokens.");
+        return final_ids;
+    }
 }
 
 // Decode token IDs to text
@@ -446,22 +983,58 @@ std::string Tokenizer::decode(const std::vector<int>& ids, bool skip_special_tok
 }
 
 // Apply Chat Template (Basic Implementation)
-std::string Tokenizer::apply_chat_template(const std::string& user_prompt) const {
-     // TODO: Implement proper Jinja-like template processing based on chat_template_ member
-     // For now, implement a very basic Llama-style template assuming user role only
-      Logger::info("Applying BASIC chat template (Llama user/assistant style). GGUF template ignored for now.");
+std::string Tokenizer::apply_chat_template(const std::string& user_prompt, 
+                                          const std::string& system_message,
+                                          const ModelConfig& config) const // <<< Keep config for potential future use?
+{
+    // --- GET SPECIAL TOKENS (Ensure they are loaded correctly) ---
+    // Helper to find token string by name in added_tokens_
+    auto find_added_token_str = [&](const std::string& content, const std::string& fallback) -> std::string {
+        for (const auto& pair : added_tokens_) {
+            if (pair.first == content) return pair.first;
+        }
+        // Log only if fallback is used AND the token map isn't empty (i.e., expected to be found)
+        if (!added_tokens_.empty()) {
+             Logger::warning("Could not find added token '" + content + "' in added_tokens_ map. Using fallback: '" + fallback + "'");
+        } // else: map is empty (e.g., NoAdded case), fallback is expected, don't warn.
+        return fallback; // Return the fallback if not found
+    };
 
-     // Get EOS token string, default to "" if not found/valid
-     std::string eos_str = "";
+    // Use find_added_token_str with appropriate fallbacks just in case
+    std::string sys_tok = find_added_token_str("<|system|>", "<|system|>");
+    std::string user_tok = find_added_token_str("<|user|>", "<|user|>");
+    std::string assist_tok = find_added_token_str("<|assistant|>", "<|assistant|>");
+    // Use the actual EOS token string associated with the loaded eos_token_id_
+    std::string eos_tok_str = eos_token_; 
      if (eos_token_id_ >= 0 && static_cast<size_t>(eos_token_id_) < id_to_token_.size()) {
-          eos_str = id_to_token_[eos_token_id_];
-     }
+        eos_tok_str = id_to_token_[eos_token_id_];
+    } else {
+        Logger::warning("apply_chat_template: EOS token ID not found in vocab, using default '</s>'");
+    }
 
-     // Basic template: <|user|>\nPROMPT + EOS<|assistant|>\n
-     std::string formatted = "<|user|>\n" + user_prompt + eos_str + "\n<|assistant|>\n";
-     // Note: BOS is typically added by the `encode` method itself based on the flag.
-     
-     return formatted;
+    // --- REVISED LOGIC: Always use Manual TinyLlama Format --- 
+    Logger::info("Applying MANUALLY IMPLEMENTED TinyLlama chat template structure (NO NEWLINES).");
+    std::stringstream ss;
+    // Add system prompt if provided
+    if (!system_message.empty()) {
+        // ss << sys_tok << "\n" << system_message << eos_tok_str << "\n"; // Original
+        ss << sys_tok << system_message << eos_tok_str; // No newlines
+    }
+    // Add user prompt
+    // ss << user_tok << "\n" << user_prompt << eos_tok_str << "\n"; // Original
+    ss << user_tok << user_prompt << eos_tok_str; // No newlines
+    // Add the assistant prompt start
+    // ss << assist_tok << "\n"; // Original (without trailing space)
+    ss << assist_tok; // No newline
+
+    // --- REMOVED: Logic block that tried to parse GGUF metadata template --- 
+    /*
+    else if (!config.chat_template_string.empty()) { ... Jinja attempt ... }
+    else { ... Fallback for missing template ... }
+    */
+
+    // Note: BOS is typically added by the `encode` method itself based on the flag.
+    return ss.str();
 }
 
 // Load vocabulary from JSON file
@@ -499,13 +1072,29 @@ void Tokenizer::load_vocab_from_json(const std::string& vocab_path,
                         std::string token = token_obj["content"];
                         int id = token_obj["id"];
                         
-                        // Map special tokens to their IDs
+                        // Map standard special tokens to member strings (if found)
                         if (token == "<unk>") unk_token_ = token;
                         else if (token == "<s>") bos_token_ = token;
                         else if (token == "</s>") eos_token_ = token;
                         else if (token == "<pad>") pad_token_ = token;
                         
-                        Logger::info("Found special token: " + token + " with ID " + std::to_string(id));
+                        // Store all added tokens in the member map
+                        added_tokens_[token] = id;
+
+                        // --- ADDED: Ensure id_to_token_ is populated for added tokens ---
+                        if (id >= 0) { // Basic check for valid ID
+                             if (static_cast<size_t>(id) >= id_to_token.size()) {
+                                 // Resize needed - resize generously enough, or precisely?
+                                 // Let's resize precisely for now, might be less efficient if IDs are sparse
+                                 id_to_token.resize(id + 1);
+                             }
+                             // Only assign if the spot is empty (avoid overwriting base vocab)
+                             // Or should added tokens always overwrite? Assume they do for now.
+                             id_to_token[id] = token; 
+                        }
+                        // --- END ADDED ---
+                        
+                        Logger::info("Processed added token: " + token + " with ID " + std::to_string(id)); // Changed log msg
                     }
                 }
             }
@@ -651,17 +1240,19 @@ void Tokenizer::load_bpe_merges_from_json(const std::string& model_path) {
                             int priority = merge_index++;
                             bpe_merges_[pair] = priority;
                             
-                            if (bpe_merges_.size() <= 5 || bpe_merges_.size() % 1000 == 0) {
-                                Logger::info("Added merge: '" + first + "' + '" + second + "' -> '" + pair + "' with priority " + std::to_string(priority));
+                            // Optional logging removed for brevity
+                            // if (bpe_merges_.size() <= 5 || bpe_merges_.size() % 1000 == 0) {
+                            //     Logger::info("Added merge: '" + first + "' + '" + second + "' -> '" + pair + "' with priority " + std::to_string(priority));
+                            // }
                             }
                         }
                     }
                 }
             }
-        } 
-        // Fallback for other formats
+        // Fallback for other formats (e.g., classic BPE without the HF structure)
         else if (model_json.contains("merges") && model_json["merges"].is_array()) {
             // Classic BPE merges format
+            Logger::info("Detected classic BPE merges format (fallback)."); // Added log
             const auto& merges = model_json["merges"];
             
             for (size_t i = 0; i < merges.size(); ++i) {
@@ -678,17 +1269,22 @@ void Tokenizer::load_bpe_merges_from_json(const std::string& model_path) {
             }
         } 
         else {
+            // Keep original error for truly unsupported formats
             throw std::runtime_error("Unsupported tokenizer model format: no merges found");
         }
         
         if (bpe_merges_.empty()) {
-            Logger::info("No BPE merges found in the model file");
+            // Changed to warning as heuristic might still fail
+            Logger::warning("No BPE merges found or loaded from the model file."); 
         } else {
             Logger::info("Loaded " + std::to_string(bpe_merges_.size()) + " BPE merges");
         }
         
     } catch (const std::exception& e) {
-        throw std::runtime_error("Error loading BPE merges: " + std::string(e.what()));
+        // Use Logger::error for consistency
+        std::string error_msg = "Error loading BPE merges from \"" + model_path + "\": " + std::string(e.what());
+        Logger::error(error_msg);
+        throw std::runtime_error(error_msg); // Re-throw after logging
     }
 }
 
@@ -699,124 +1295,135 @@ void Tokenizer::load_sentencepiece_model(const std::string& model_path) {
     sentencepiece_model_loaded_ = false;
 }
 
-// --- START: NEW Tokenizer Constructor from GGUF Data ---
-Tokenizer::Tokenizer(const GGUFData& gguf_data) {
-    Logger::info("Initializing Tokenizer from GGUFData...");
-
-    // Check for necessary data
-    if (gguf_data.tokenizer_tokens.empty()) {
-        throw std::runtime_error("Tokenizer Error: GGUF data missing tokenizer.ggml.tokens.");
-    }
-
-    // 1. Copy Vocabulary and Scores (assuming they exist)
-    id_to_token_ = gguf_data.tokenizer_tokens;
-    // scores_ = gguf_data.tokenizer_scores; // Not used by this BPE implementation directly
-    // token_types_ = gguf_data.tokenizer_token_types; // Not used by this BPE implementation directly
-    Logger::info("Loaded " + std::to_string(id_to_token_.size()) + " tokens from GGUF.");
-
-    // 2. Build token_to_id map
-    token_to_id_.clear();
-    for (size_t i = 0; i < id_to_token_.size(); ++i) {
-        token_to_id_[id_to_token_[i]] = static_cast<int>(i);
-    }
-    Logger::info("Built token_to_id map.");
-
-    // 3. Load Special Token IDs from Metadata
-     auto get_meta_int = [&](const std::string& key, int default_val) -> int {
-        auto it = gguf_data.metadata.find(key);
-        if (it != gguf_data.metadata.end()) {
-            try {
-                 return std::visit([&](const auto& val) -> int {
-                    using T = std::decay_t<decltype(val)>;
-                     if constexpr (std::is_integral_v<T> && !std::is_same_v<T, bool>) {
-                         // --- FIXED RANGE CHECK --- 
-                         // Check if the unsigned value exceeds the maximum positive value of int.
-                         // Any value <= INT_MAX is safe to cast to int (including 0 and positive values).
-                         // Negative values are impossible for unsigned types being read here (e.g., uint32_t).
-                         if (val <= static_cast<typename std::make_unsigned<T>::type>(std::numeric_limits<int>::max())) {
-                            return static_cast<int>(val);
-                         } else {
-                             Logger::warning("Metadata integer value for key '" + key + "' ('" + std::to_string(val) + "') exceeds INT_MAX. Using default.");
-                         }
-                         // --- END FIXED RANGE CHECK ---
-                     } else {
-                         Logger::warning("Metadata value for key '" + key + "' is not an integer type. Using default.");
-                     }
-                     return default_val;
-                 }, it->second);
-            } catch (const std::bad_variant_access& e) {
-                Logger::error("Bad variant access for key '" + key + "': " + e.what() + ". Using default.");
-            } catch (...) {
-                Logger::error("Unknown error accessing metadata key '" + key + "'. Using default.");
-            }
-        }
-        // Logger::info("Metadata key '" + key + "' not found. Using default: " + std::to_string(default_val));
-        return default_val;
-    };
-
-    bos_token_id_ = get_meta_int("tokenizer.ggml.bos_token_id", -1);
-    eos_token_id_ = get_meta_int("tokenizer.ggml.eos_token_id", -1);
-    unk_token_id_ = get_meta_int("tokenizer.ggml.unknown_token_id", -1);
-    pad_token_id_ = get_meta_int("tokenizer.ggml.padding_token_id", -1);
-
-    // Set string representations if IDs are valid
-    unk_token_ = (unk_token_id_ >= 0 && unk_token_id_ < id_to_token_.size()) ? id_to_token_[unk_token_id_] : "<unk>";
-    bos_token_ = (bos_token_id_ >= 0 && bos_token_id_ < id_to_token_.size()) ? id_to_token_[bos_token_id_] : "<s>";
-    eos_token_ = (eos_token_id_ >= 0 && eos_token_id_ < id_to_token_.size()) ? id_to_token_[eos_token_id_] : "</s>";
-    pad_token_ = (pad_token_id_ >= 0 && pad_token_id_ < id_to_token_.size()) ? id_to_token_[pad_token_id_] : "<pad>";
-
-    Logger::info("Special token IDs: BOS=" + std::to_string(bos_token_id_) + " ('" + bos_token_ + "')" +
-                 ", EOS=" + std::to_string(eos_token_id_) + " ('" + eos_token_ + "')" +
-                 ", UNK=" + std::to_string(unk_token_id_) + " ('" + unk_token_ + "')" +
-                 ", PAD=" + std::to_string(pad_token_id_) + " ('" + pad_token_ + "')");
-
-    // 4. Load Model Type
-    std::string model_type = "unknown";
-    auto it_model = gguf_data.metadata.find("tokenizer.ggml.model");
-    if (it_model != gguf_data.metadata.end() && std::holds_alternative<std::string>(it_model->second)) {
-        model_type = std::get<std::string>(it_model->second);
-    }
-    Logger::info("Tokenizer model type from GGUF: " + model_type);
-
-    // 5. Process Merges (Only for BPE-based models like llama)
-    bpe_merges_.clear();
-    if (model_type == "llama") {
-        Logger::info("Processing BPE merges from GGUF...");
-        const auto& merges_vec = gguf_data.tokenizer_merges;
-        if (merges_vec.empty()) {
-            Logger::warning("Tokenizer: LLaMA model type specified but no merges found in GGUF (tokenizer.ggml.merges).");
-        } else {
-            bpe_merges_.clear(); // Ensure map is clear before loading
-            int merge_rank = 0;
-            for (const std::string& merge_str : merges_vec) {
-                size_t space_pos = merge_str.find(' ');
-                if (space_pos == std::string::npos) {
-                    Logger::warning("Invalid merge format: '" + merge_str + "'. Skipping.");
-                    continue;
-                }
-                std::string token1_str = merge_str.substr(0, space_pos);
-                std::string token2_str = merge_str.substr(space_pos + 1);
-                
-                // --- FIXED: Use concatenated string as key, rank as value ---
-                std::string merge_key = token1_str + token2_str;
-                bpe_merges_[merge_key] = merge_rank++;
-            }
-             Logger::info("Processed " + std::to_string(bpe_merges_.size()) + " BPE merges from GGUF.");
-        }
-    } else {
-         Logger::warning("GGUF Tokenizer model type '" + model_type + "' not explicitly handled for merges (assuming no BPE).");
-    }
-
-    // Mark SentencePiece as not loaded since we are using GGUF BPE
-    sentencepiece_model_loaded_ = false;
-
-    Logger::info("Tokenizer initialization from GGUFData complete.");
-}
-// --- END: NEW Tokenizer Constructor from GGUF Data ---
-
 // --- ADDED: GGUF Vocab Size Implementation ---
 int Tokenizer::vocab_size() const {
     return id_to_token_.size();
 }
 
+// --- ADDED: Implementation for is_added_token ---
+bool Tokenizer::is_added_token(int id) const {
+    // Check if the ID exists as a key in the reverse map of added tokens.
+    return id_to_added_token_.count(id) > 0;
+}
+// --- END ADDED ---
+
 // --- END: GGUF Vocab Size Implementation ---
+
+// --- ADDED: BPE Tokenization from Scores --- 
+
+// Helper struct for priority queue
+struct BPEMerge {
+    float score; // Score of the merged token
+    int index;   // Index of the first token in the pair within the current sequence
+    // Add timestamp/counter if needed to break ties consistently (optional)
+
+    // Order by score descending (highest score = highest priority)
+    bool operator<(const BPEMerge& other) const {
+        return score < other.score;
+    }
+};
+
+std::vector<std::string> Tokenizer::bpe_tokenize_from_scores(const std::string& text) const {
+    std::vector<std::string> all_tokens;
+
+    // --- ADDED Llama Regex Pre-tokenization ---
+    std::vector<std::string> initial_units;
+    std::regex llama_regex(R"('s|'t|'re|'ve|'m|'ll|'d| ?[[:alpha:]]+| ?[[:digit:]]+| ?[^\s[:alpha:][:digit:]]+|\s+(?!\S)|\s+)");
+    std::smatch match;
+    std::string text_to_search = text;
+    while (std::regex_search(text_to_search, match, llama_regex)) {
+        initial_units.push_back(match.str(0));
+        text_to_search = match.suffix().str();
+    }
+    if (!text_to_search.empty()) { // Capture any remaining part
+        initial_units.push_back(text_to_search);
+    }
+    // Logger::debug("[BPE_SCORES] Regex pre-tokenization units: " + ... ); // Optional: log units
+
+    // --- Filter out standalone space units ---
+    std::vector<std::string> filtered_units;
+    int spaces_filtered = 0;
+    for (const std::string& unit : initial_units) {
+        if (unit == " ") {
+            spaces_filtered++;
+                     } else {
+            filtered_units.push_back(unit);
+                     }
+    }
+    if (spaces_filtered > 0) {
+        Logger::debug("[BPE_SCORES] Filtered out " + std::to_string(spaces_filtered) + " standalone space units.");
+            }
+
+    // --- Process each unit using longest-match BPE ---
+    for (const std::string& unit_raw : filtered_units) { // Use filtered_units
+        if (unit_raw.empty()) continue;
+
+        // --- Convert leading space if necessary ---
+        std::string unit = unit_raw;
+        const std::string sp_space = "\xE2\x96\x81"; // SentencePiece space U+2581
+        bool using_space_prefix = true; // Assume needed for merge tokenizer
+        if (using_space_prefix && unit.length() > 0 && unit[0] == ' ') {
+            unit.replace(0, 1, sp_space);
+            // Logger::debug("[BPE_TOKENIZE] Replaced leading space with SP space: '" + unit_raw + "' -> '" + unit + "'");
+        } else if (using_space_prefix && unit == "\n") { 
+             // Handle newline specifically if needed - maybe map to a space token?
+             // For now, let it pass through and potentially map to <0x0A> if it exists
+             // Or convert to SP space? Let's try converting to SP space.
+             // unit = sp_space; 
+             // Logger::debug("[BPE_TOKENIZE] Converted newline unit to SP space.");
+             // Keep newline for now, let BPE/tokens_to_ids handle it
+             Logger::debug("[BPE_TOKENIZE] Passing newline unit through: '" + unit_raw + "'");
+        }
+        
+        // Split processed_unit into individual UTF-8 characters
+        std::vector<std::string> chars;
+        for (size_t i = 0; i < unit.size(); ) {
+            // Get unicode code point and advance i accordingly
+            int bytes = 1;
+            if ((unit[i] & 0xE0) == 0xC0) bytes = 2;
+            else if ((unit[i] & 0xF0) == 0xE0) bytes = 3;
+            else if ((unit[i] & 0xF8) == 0xF0) bytes = 4;
+            
+            // Get the character
+            if (i + bytes <= unit.size()) {
+            chars.push_back(unit.substr(i, bytes));
+        } else {
+                // Handle truncated UTF-8 sequence
+                chars.push_back(unit.substr(i));
+            }
+            i += bytes;
+        }
+
+        if (chars.empty()) continue;
+
+        // Apply BPE merges
+        bool changes = true;
+        while (changes && chars.size() > 1) {
+            changes = false;
+            int best_score = std::numeric_limits<int>::max();
+            int best_i = -1;
+
+            for (size_t i = 0; i < chars.size() - 1; ++i) {
+                std::string pair = chars[i] + chars[i + 1];
+                auto it = bpe_merges_.find(pair);
+                if (it != bpe_merges_.end() && it->second < best_score) {
+                    best_score = it->second;
+                    best_i = i;
+                }
+            }
+            
+            if (best_i >= 0) {
+                std::string merged = chars[best_i] + chars[best_i + 1];
+                chars[best_i] = merged;
+                chars.erase(chars.begin() + best_i + 1);
+                changes = true;
+            }
+        }
+        
+        // Collect the final tokens
+        all_tokens.insert(all_tokens.end(), chars.begin(), chars.end());
+    }
+
+    return all_tokens;
+}
+// --- END BPE Tokenization from Scores ---

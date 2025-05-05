@@ -30,6 +30,13 @@ struct ModelConfig {
     std::string torch_dtype;
     int bos_token_id;
     int eos_token_id;
+    // --- ADDED: Model Type Identification ---
+    std::string architecture = "unknown"; // e.g., "llama", "tinyllama"
+    std::string model_name = "unknown";   // e.g., "LLaMA v2", "TinyLlama-1.1B-Chat-v1.0"
+    std::string chat_template_type = "unknown"; // e.g., "llama2", "tinyllama"
+    std::string pre_tokenizer_type = "unknown"; // e.g., "llama", "default"
+    std::string chat_template_string; // <<< ADDED: Stores template from metadata
+    // --- END ADDED ---
 };
 
 struct GGUFData; // Forward declaration

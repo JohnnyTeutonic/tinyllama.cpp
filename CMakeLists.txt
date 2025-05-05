@@ -21,6 +21,7 @@ find_package(Threads REQUIRED)
 find_package(nlohmann_json 3.2.0 REQUIRED)
 find_package(OpenMP REQUIRED)
 find_package(OpenSSL)
+find_package(Boost REQUIRED COMPONENTS regex)
 
 # Handle CUDA
 find_package(CUDA)
@@ -58,6 +59,7 @@ target_include_directories(tinyllama_core PUBLIC # Use PUBLIC so executables inh
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CUDA_INCLUDE_DIRS}
     ${cpp-httplib_SOURCE_DIR} # Add include directory for httplib
+    ${Boost_INCLUDE_DIRS}
 )
 
 # Link system/other libraries
@@ -104,6 +106,14 @@ add_executable(gguf_loader
 
 # Link GGUF loader against the core library (inherits CUDA/OpenMP/etc links)
 target_link_libraries(gguf_loader PRIVATE tinyllama_core)
+
+# --- ADDED: Tokenizer Test Executable ---
+add_executable(test_tokenizer
+    test_tokenizer.cpp
+)
+# Link the test executable against the core library
+target_link_libraries(test_tokenizer PRIVATE tinyllama_core Boost::regex)
+# --- END ADDED ---
 
 # Link OpenSSL if found (needed by httplib if SSL support is enabled)
 if(OPENSSL_FOUND)
