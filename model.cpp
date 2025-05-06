@@ -57,12 +57,12 @@ static void matvec_f32_f32_vector_cpu(const std::vector<float>& mat_f32,
                                   int rows, int cols);
 // --- END ADDED ---
 
+// --- ADDED: Forward declaration for dequantize_q8_k ---
+void dequantize_q8_k(const std::vector<block_q8_K>& q8k_vec, std::vector<float>& out_f32, int n);
+// --- END ADDED ---
+
 // --- END: Forward Declarations for Helpers ---
 
-// --- START: Implementation for float32_to_bfloat16 ---
-// Convert float32 to bfloat16
-// Note: This is a basic implementation and might not handle all edge cases like NaN/Inf correctly depending on the compiler/platform.
-// Refined version based on common practices:
 inline uint16_t float32_to_bfloat16(float val) {
     uint32_t bits;
     std::memcpy(&bits, &val, sizeof(float));
@@ -1443,7 +1443,7 @@ std::vector<float> TinyLlamaModel::lookup_embedding(int token_id) {
         size_t offset = (size_t)token_id * hs;
         if (offset + hs > embed_tokens.size()) {
              Logger::error("Embedding offset out of bounds in BF16 lookup for token: " + std::to_string(token_id));
-             return embedding_vec; // Return zeros initialized earlier
+             return embedding_vec; // Return zeros d earlier
         }
         // Create a sub-vector view (or copy)
         std::vector<uint16_t> token_embedding_bf16(embed_tokens.begin() + offset, embed_tokens.begin() + offset + hs);
@@ -1568,16 +1568,23 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& input, int n_toke
         // +++ END ADDED LOG +++
         if (!lw.q_proj_q6k.empty()) {
             if (log_this_layer) Logger::info("[CPU_FWD L" + std::to_string(l) + "] MatVec: Q_Proj (Q6_K)");
-            // +++ ADDED ENTER BLOCK LOG +++
-            Logger::debug("[CPU_FWD L" + std::to_string(l) + "] Q_Proj: Entering Q6_K block. Log dequant = " + std::string(log_matvec_dequant ? "true" : "false"));
-            // +++ END ADDED LOG +++
-            if (log_this_layer) log_vector_summary("  Input (x_norm_vec1)", x_norm_vec1);
-            matvec_q6k_f32_vector_cpu(lw.q_proj_q6k, x_norm_vec1, q_vec, hs, hs, log_matvec_dequant);
-            if (log_this_layer) log_vector_summary("  Output (q_vec)", q_vec);
+            // --- Version 2: Dequantize Q6_K and Q8_K to FP32, then dot ---
+            std::vector<float> q_proj_f32(hs * hs);
+            for (size_t i = 0; i < lw.q_proj_q6k.size(); ++i)
+                dequantize_q6_k(&lw.q_proj_q6k[i], &q_proj_f32[i * GGML_QK_K], GGML_QK_K);
+            std::vector<block_q8_K> x_norm_q8k = quantize_fp32_to_q8_K(x_norm_vec1);
+            std::vector<float> x_norm_q8k_f32(hs);
+            dequantize_q8_k(x_norm_q8k, x_norm_q8k_f32, hs);
+            matvec_f32_f32_vector_cpu(q_proj_f32, x_norm_q8k_f32, q_vec, hs, hs);
         } else if (!lw.q_proj_q4k.empty()) {
             if (log_this_layer) Logger::info("[CPU_FWD L" + std::to_string(l) + "] MatVec: Q_Proj (Q4_K)");
-            if (log_this_layer) log_vector_summary("  Input (x_norm_vec1)", x_norm_vec1);
-            matvec_q4k_f32_vector_cpu(lw.q_proj_q4k, x_norm_vec1, q_vec, hs, hs, log_matvec_dequant);
+            std::vector<float> q_proj_f32(hs * hs);
+            for (size_t i = 0; i < lw.q_proj_q4k.size(); ++i)
+                dequantize_q4_k_m(&lw.q_proj_q4k[i], &q_proj_f32[i * GGML_QK_K], GGML_QK_K);
+            std::vector<block_q8_K> x_norm_q8k = quantize_fp32_to_q8_K(x_norm_vec1); // Define x_norm_q8k
+            std::vector<float> x_norm_q8k_f32(hs);
+            dequantize_q8_k(x_norm_q8k, x_norm_q8k_f32, hs);
+            matvec_f32_f32_vector_cpu(q_proj_f32, x_norm_q8k_f32, q_vec, hs, hs);
             if (log_this_layer) log_vector_summary("  Output (q_vec)", q_vec);
         } else if (!lw.q_proj_f32.empty()) { // <<< CHECK F32 FIRST
             if (log_this_layer) Logger::info("[CPU_FWD L" + std::to_string(l) + "] MatVec: Q_Proj (F32)");
@@ -1596,10 +1603,24 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& input, int n_toke
         // K
         if (!lw.k_proj_q6k.empty()) {
             if (log_this_layer) Logger::info("[CPU_FWD L" + std::to_string(l) + "] MatVec: K_Proj (Q6_K)");
-            matvec_q6k_f32_vector_cpu(lw.k_proj_q6k, x_norm_vec1, k_vec, n_kv_heads * head_dim, hs);
+            std::vector<float> k_proj_f32(n_kv_heads * head_dim * hs);
+            for (size_t i = 0; i < lw.k_proj_q6k.size(); ++i)
+                dequantize_q6_k(&lw.k_proj_q6k[i], &k_proj_f32[i * GGML_QK_K], GGML_QK_K);
+            std::vector<block_q8_K> x_norm_q8k = quantize_fp32_to_q8_K(x_norm_vec1);
+            std::vector<float> x_norm_q8k_f32(hs);
+            dequantize_q8_k(x_norm_q8k, x_norm_q8k_f32, hs);
+            matvec_f32_f32_vector_cpu(k_proj_f32, x_norm_q8k_f32, k_vec, n_kv_heads * head_dim, hs);
         } else if (!lw.k_proj_q4k.empty()) {
             if (log_this_layer) Logger::info("[CPU_FWD L" + std::to_string(l) + "] MatVec: K_Proj (Q4_K)");
-            matvec_q4k_f32_vector_cpu(lw.k_proj_q4k, x_norm_vec1, k_vec, n_kv_heads * head_dim, hs);
+            // --- Version 2: Dequantize Q4_K and Q8_K to FP32, then dot ---
+            std::vector<float> k_proj_f32(n_kv_heads * head_dim * hs);
+            for (size_t i = 0; i < lw.k_proj_q4k.size(); ++i)
+                dequantize_q4_k_m(&lw.k_proj_q4k[i], &k_proj_f32[i * GGML_QK_K], GGML_QK_K);
+            std::vector<block_q8_K> x_norm_q8k = quantize_fp32_to_q8_K(x_norm_vec1); // Define x_norm_q8k
+            std::vector<float> x_norm_q8k_f32(hs);
+            dequantize_q8_k(x_norm_q8k, x_norm_q8k_f32, hs);
+            matvec_f32_f32_vector_cpu(k_proj_f32, x_norm_q8k_f32, k_vec, n_kv_heads * head_dim, hs);
+            if (log_this_layer) log_vector_summary("  Output (k_vec)", k_vec);
         } else if (!lw.k_proj_f32.empty()) { // <<< CHECK F32 FIRST
              if (log_this_layer) Logger::info("[CPU_FWD L" + std::to_string(l) + "] MatVec: K_Proj (F32)");
              matvec_f32_f32_vector_cpu(lw.k_proj_f32, x_norm_vec1, k_vec, n_kv_heads * head_dim, hs); // <<< USE F32 MATVEC
@@ -1623,10 +1644,25 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& input, int n_toke
         // +++ END V-PROJ LOGGING +++
         if (!lw.v_proj_q6k.empty()) {
              if (log_this_layer) Logger::info("[CPU_FWD L" + std::to_string(l) + "] MatVec: V_Proj (Q6_K)");
-             matvec_q6k_f32_vector_cpu(lw.v_proj_q6k, x_norm_vec1, v_vec, n_kv_heads * head_dim, hs, log_matvec_dequant);
+            std::vector<float> v_proj_f32(n_kv_heads * head_dim * hs);
+            for (size_t i = 0; i < lw.v_proj_q6k.size(); ++i)
+                dequantize_q6_k(&lw.v_proj_q6k[i], &v_proj_f32[i * GGML_QK_K], GGML_QK_K);
+            std::vector<block_q8_K> x_norm_q8k = quantize_fp32_to_q8_K(x_norm_vec1);
+            std::vector<float> x_norm_q8k_f32(hs);
+            dequantize_q8_k(x_norm_q8k, x_norm_q8k_f32, hs);
+            matvec_f32_f32_vector_cpu(v_proj_f32, x_norm_q8k_f32, v_vec, n_kv_heads * head_dim, hs);
         } else if (!lw.v_proj_q4k.empty()) {
              if (log_this_layer) Logger::info("[CPU_FWD L" + std::to_string(l) + "] MatVec: V_Proj (Q4_K)");
-             matvec_q4k_f32_vector_cpu(lw.v_proj_q4k, x_norm_vec1, v_vec, n_kv_heads * head_dim, hs, log_matvec_dequant);
+             // --- Version 2: Dequantize Q4_K and Q8_K to FP32, then dot ---
+             std::vector<float> v_proj_f32(n_kv_heads * head_dim * hs);
+             for (size_t i = 0; i < lw.v_proj_q4k.size(); ++i)
+                 dequantize_q4_k_m(&lw.v_proj_q4k[i], &v_proj_f32[i * GGML_QK_K], GGML_QK_K);
+             std::vector<float> x_norm_q8k_f32(hs);
+             std::vector<block_q8_K> x_norm_q8k = quantize_fp32_to_q8_K(x_norm_vec1);
+             dequantize_q8_k(x_norm_q8k, x_norm_q8k_f32, hs);
+             matvec_f32_f32_vector_cpu(v_proj_f32, x_norm_q8k_f32, v_vec, n_kv_heads * head_dim, hs);
+             // --- END Q4_K * Q8_K PATH ---
+             // matvec_q4k_f32_vector_cpu(lw.v_proj_q4k, x_norm_vec1, v_vec, n_kv_heads * head_dim, hs, true); // <<< REMOVED OLD CALL
         } else if (!lw.v_proj_f32.empty()) { // <<< CHECK F32 FIRST
              if (log_this_layer) Logger::info("[CPU_FWD L" + std::to_string(l) + "] MatVec: V_Proj (F32)");
              matvec_f32_f32_vector_cpu(lw.v_proj_f32, x_norm_vec1, v_vec, n_kv_heads * head_dim, hs); // <<< USE F32 MATVEC
@@ -1733,10 +1769,24 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& input, int n_toke
         // O Projection - Use correct type based on loaded weights
         if (!lw.o_proj_q6k.empty()) {
              if (log_this_layer) Logger::info("[CPU_FWD L" + std::to_string(l) + "] MatVec: O_Proj (Q6_K)");
-             matvec_q6k_f32_vector_cpu(lw.o_proj_q6k, attn_out_vec, attn_proj_vec, hs, hs);
+             // --- Version 2: Dequantize Q6_K and Q8_K to FP32, then dot ---
+             std::vector<float> o_proj_f32(hs * hs);
+             for (size_t i = 0; i < lw.o_proj_q6k.size(); ++i)
+                 dequantize_q6_k(&lw.o_proj_q6k[i], &o_proj_f32[i * GGML_QK_K], GGML_QK_K);
+             std::vector<float> attn_out_q8k_f32(hs);
+            std::vector<block_q8_K> attn_out_q8k = quantize_fp32_to_q8_K(attn_out_vec);
+             dequantize_q8_k(attn_out_q8k, attn_out_q8k_f32, hs);
+             matvec_f32_f32_vector_cpu(o_proj_f32, attn_out_q8k_f32, attn_proj_vec, hs, hs);
         } else if (!lw.o_proj_q4k.empty()) {
              if (log_this_layer) Logger::info("[CPU_FWD L" + std::to_string(l) + "] MatVec: O_Proj (Q4_K)");
-             matvec_q4k_f32_vector_cpu(lw.o_proj_q4k, attn_out_vec, attn_proj_vec, hs, hs);
+             // --- Version 2: Dequantize Q4_K and Q8_K to FP32, then dot ---
+             std::vector<float> o_proj_f32(hs * hs);
+             for (size_t i = 0; i < lw.o_proj_q4k.size(); ++i)
+                 dequantize_q4_k_m(&lw.o_proj_q4k[i], &o_proj_f32[i * GGML_QK_K], GGML_QK_K);
+             std::vector<float> attn_out_q8k_f32(hs);
+             std::vector<block_q8_K> attn_out_q8k = quantize_fp32_to_q8_K(attn_out_vec);
+             dequantize_q8_k(attn_out_q8k, attn_out_q8k_f32, hs);
+             matvec_f32_f32_vector_cpu(o_proj_f32, attn_out_q8k_f32, attn_proj_vec, hs, hs);
         } else if (!lw.o_proj_f32.empty()) { // <<< CHECK F32 FIRST
              if (log_this_layer) Logger::info("[CPU_FWD L" + std::to_string(l) + "] MatVec: O_Proj (F32)");
              matvec_f32_f32_vector_cpu(lw.o_proj_f32, attn_out_vec, attn_proj_vec, hs, hs); // <<< USE F32 MATVEC
@@ -1773,10 +1823,25 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& input, int n_toke
         // Gate
         if (!lw.gate_proj_q6k.empty()) {
             if (log_this_layer) Logger::info("[CPU_FWD L" + std::to_string(l) + "] MatVec: Gate_Proj (Q6_K)");
-            matvec_q6k_f32_vector_cpu(lw.gate_proj_q6k, x_norm_vec2, gate_vec, is, hs);
+            // --- Version 2: Dequantize Q6_K and Q8_K to FP32, then dot ---
+            std::vector<float> gate_proj_f32(is * hs);
+            for (size_t i = 0; i < lw.gate_proj_q6k.size(); ++i)
+                dequantize_q6_k(&lw.gate_proj_q6k[i], &gate_proj_f32[i * GGML_QK_K], GGML_QK_K);
+            std::vector<float> x_norm2_q8k_f32(hs);
+            std::vector<block_q8_K> x_norm2_q8k = quantize_fp32_to_q8_K(x_norm_vec2);
+            dequantize_q8_k(x_norm2_q8k, x_norm2_q8k_f32, hs);
+            matvec_f32_f32_vector_cpu(gate_proj_f32, x_norm2_q8k_f32, gate_vec, is, hs);
         } else if (!lw.gate_proj_q4k.empty()) {
             if (log_this_layer) Logger::info("[CPU_FWD L" + std::to_string(l) + "] MatVec: Gate_Proj (Q4_K)");
-            matvec_q4k_f32_vector_cpu(lw.gate_proj_q4k, x_norm_vec2, gate_vec, is, hs);
+            // --- Version 2: Dequantize Q4_K and Q8_K to FP32, then dot ---
+            std::vector<float> gate_proj_f32(is * hs);
+            for (size_t i = 0; i < lw.gate_proj_q4k.size(); ++i)
+                dequantize_q4_k_m(&lw.gate_proj_q4k[i], &gate_proj_f32[i * GGML_QK_K], GGML_QK_K);
+            if (log_this_layer) log_vector_summary("Layer 0 Gate Proj Weights (FP32)", gate_proj_f32, 10); // Log dequantized weights
+            std::vector<float> x_norm2_q8k_f32(hs);
+            std::vector<block_q8_K> x_norm2_q8k = quantize_fp32_to_q8_K(x_norm_vec2);
+            dequantize_q8_k(x_norm2_q8k, x_norm2_q8k_f32, hs);
+            matvec_f32_f32_vector_cpu(gate_proj_f32, x_norm2_q8k_f32, gate_vec, is, hs);
         } else if (!lw.gate_proj_f32.empty()) { // <<< CHECK F32 FIRST
             if (log_this_layer) Logger::info("[CPU_FWD L" + std::to_string(l) + "] MatVec: Gate_Proj (F32)");
             matvec_f32_f32_vector_cpu(lw.gate_proj_f32, x_norm_vec2, gate_vec, is, hs); // <<< USE F32 MATVEC
@@ -1786,13 +1851,29 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& input, int n_toke
         } else {
             throw std::runtime_error("Layer " + std::to_string(l) + ": No valid Gate projection weights found!");
         }
+        if (log_this_layer) log_vector_summary("Layer 0 Gate Vec", gate_vec);
         // Up
         if (!lw.up_proj_q6k.empty()) {
              if (log_this_layer) Logger::info("[CPU_FWD L" + std::to_string(l) + "] MatVec: Up_Proj (Q6_K)");
-             matvec_q6k_f32_vector_cpu(lw.up_proj_q6k, x_norm_vec2, up_vec, is, hs);
+             // --- Version 2: Dequantize Q6_K and Q8_K to FP32, then dot ---
+             std::vector<float> up_proj_f32(is * hs);
+             for (size_t i = 0; i < lw.up_proj_q6k.size(); ++i)
+                 dequantize_q6_k(&lw.up_proj_q6k[i], &up_proj_f32[i * GGML_QK_K], GGML_QK_K);
+             std::vector<block_q8_K> x_norm2_q8k = quantize_fp32_to_q8_K(x_norm_vec2);
+             std::vector<float> x_norm2_q8k_f32(hs);
+             dequantize_q8_k(x_norm2_q8k, x_norm2_q8k_f32, hs);
+             matvec_f32_f32_vector_cpu(up_proj_f32, x_norm2_q8k_f32, up_vec, is, hs);
         } else if (!lw.up_proj_q4k.empty()) {
              if (log_this_layer) Logger::info("[CPU_FWD L" + std::to_string(l) + "] MatVec: Up_Proj (Q4_K)");
-             matvec_q4k_f32_vector_cpu(lw.up_proj_q4k, x_norm_vec2, up_vec, is, hs);
+             // --- Version 2: Dequantize Q4_K and Q8_K to FP32, then dot ---
+             std::vector<float> up_proj_f32(is * hs);
+             for (size_t i = 0; i < lw.up_proj_q4k.size(); ++i)
+                 dequantize_q4_k_m(&lw.up_proj_q4k[i], &up_proj_f32[i * GGML_QK_K], GGML_QK_K);
+             if (log_this_layer) log_vector_summary("Layer 0 Up Proj Weights (FP32)", up_proj_f32, 10); // Log dequantized weights
+             std::vector<float> x_norm2_q8k_f32(hs);
+             std::vector<block_q8_K> x_norm2_q8k = quantize_fp32_to_q8_K(x_norm_vec2);
+             dequantize_q8_k(x_norm2_q8k, x_norm2_q8k_f32, hs);
+             matvec_f32_f32_vector_cpu(up_proj_f32, x_norm2_q8k_f32, up_vec, is, hs);
         } else if (!lw.up_proj_f32.empty()) { // <<< CHECK F32 FIRST
              if (log_this_layer) Logger::info("[CPU_FWD L" + std::to_string(l) + "] MatVec: Up_Proj (F32)");
              matvec_f32_f32_vector_cpu(lw.up_proj_f32, x_norm_vec2, up_vec, is, hs); // <<< USE F32 MATVEC
@@ -1802,6 +1883,7 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& input, int n_toke
         } else {
             throw std::runtime_error("Layer " + std::to_string(l) + ": No valid Up projection weights found!");
         }
+        if (log_this_layer) log_vector_summary("Layer 0 Up Vec", up_vec);
 
         // SiLU Activation
         silu_cpu(gate_vec, silu_out_vec);
@@ -1810,13 +1892,27 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& input, int n_toke
         for(size_t i = 0; i < is; ++i) {
             swiglu_result_vec[i] = silu_out_vec[i] * up_vec[i];
         }
+        if (log_this_layer) log_vector_summary("Layer 0 SwiGLU Result Vec", swiglu_result_vec);
         // Down Projection - Use correct type based on loaded weights
         if (!lw.down_proj_q6k.empty()) {
             if (log_this_layer) Logger::info("[CPU_FWD L" + std::to_string(l) + "] MatVec: Down_Proj (Q6_K)");
-            matvec_q6k_f32_vector_cpu(lw.down_proj_q6k, swiglu_result_vec, mlp_out_vec, hs, is);
+            // --- Version 2: Dequantize Q6_K and Q8_K to FP32, then dot ---
+            std::vector<float> down_proj_f32(hs * is);
+            for (size_t i = 0; i < lw.down_proj_q6k.size(); ++i)
+                dequantize_q6_k(&lw.down_proj_q6k[i], &down_proj_f32[i * GGML_QK_K], GGML_QK_K);
+            std::vector<float> swiglu_q8k_f32(is);
+            std::vector<block_q8_K> swiglu_q8k = quantize_fp32_to_q8_K(swiglu_result_vec);
+            dequantize_q8_k(swiglu_q8k, swiglu_q8k_f32, is);
+            matvec_f32_f32_vector_cpu(down_proj_f32, swiglu_q8k_f32, mlp_out_vec, hs, is);
         } else if (!lw.down_proj_q4k.empty()) {
             if (log_this_layer) Logger::info("[CPU_FWD L" + std::to_string(l) + "] MatVec: Down_Proj (Q4_K)");
-            matvec_q4k_f32_vector_cpu(lw.down_proj_q4k, swiglu_result_vec, mlp_out_vec, hs, is);
+            std::vector<float> down_proj_f32(hs * is);
+            for (size_t i = 0; i < lw.down_proj_q4k.size(); ++i)
+                dequantize_q4_k_m(&lw.down_proj_q4k[i], &down_proj_f32[i * GGML_QK_K], GGML_QK_K);
+            std::vector<block_q8_K> swiglu_q8k = quantize_fp32_to_q8_K(swiglu_result_vec);
+            std::vector<float> swiglu_q8k_f32(is);
+            dequantize_q8_k(swiglu_q8k, swiglu_q8k_f32, is);
+            matvec_f32_f32_vector_cpu(down_proj_f32, swiglu_q8k_f32, mlp_out_vec, hs, is);
         } else if (!lw.down_proj_f32.empty()) { // <<< CHECK F32 FIRST
             if (log_this_layer) Logger::info("[CPU_FWD L" + std::to_string(l) + "] MatVec: Down_Proj (F32)");
             matvec_f32_f32_vector_cpu(lw.down_proj_f32, swiglu_result_vec, mlp_out_vec, hs, is); // <<< USE F32 MATVEC
@@ -1873,11 +1969,23 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& input, int n_toke
     // Conditional LM Head MatVec (CPU) - REVISED ORDER & F32 HANDLING
     if (!lm_head_q6k.empty()) {
         if (log_this_step) Logger::info("[CPU_FWD] Using Q6_K LM Head");
-        matvec_q6k_f32_vector_cpu(lm_head_q6k, x_final_norm_vec, logits, vs, hs, log_this_step); // Pass log flag
+        std::vector<float> lm_head_f32(vs * hs);
+        for (size_t i = 0; i < lm_head_q6k.size(); ++i)
+            dequantize_q6_k(&lm_head_q6k[i], &lm_head_f32[i * GGML_QK_K], GGML_QK_K);
+        std::vector<block_q8_K> final_norm_q8k = quantize_fp32_to_q8_K(x_final_norm_vec);
+        std::vector<float> final_norm_q8k_f32(hs);
+        dequantize_q8_k(final_norm_q8k, final_norm_q8k_f32, hs);
+        matvec_f32_f32_vector_cpu(lm_head_f32, final_norm_q8k_f32, logits, vs, hs);
         lm_head_logged = true;
     } else if (!lm_head_q4k.empty()) {
         if (log_this_step) Logger::info("[CPU_FWD] Using Q4_K LM Head");
-        matvec_q4k_f32_vector_cpu(lm_head_q4k, x_final_norm_vec, logits, vs, hs, log_this_step); // Pass log flag
+            std::vector<float> lm_head_f32(vs * hs);
+        for (size_t i = 0; i < lm_head_q4k.size(); ++i)
+            dequantize_q4_k_m(&lm_head_q4k[i], &lm_head_f32[i * GGML_QK_K], GGML_QK_K);
+        std::vector<block_q8_K> final_norm_q8k = quantize_fp32_to_q8_K(x_final_norm_vec);
+        std::vector<float> final_norm_q8k_f32(hs);
+        dequantize_q8_k(final_norm_q8k, final_norm_q8k_f32, hs);
+        matvec_f32_f32_vector_cpu(lm_head_f32, final_norm_q8k_f32, logits, vs, hs);
         lm_head_logged = true;
     } else if (!lm_head_f32.empty()) { // Check for F32 weights BEFORE falling back to BF16
         if (log_this_step) Logger::info("[CPU_FWD] Using F32 LM Head");
@@ -2520,6 +2628,10 @@ ModelConfig parse_model_config_from_gguf(const GGUFData& gguf) {
     config.num_hidden_layers = get_meta_value("llama.block_count", 32);
     config.num_key_value_heads = get_meta_value("llama.attention.head_count_kv", config.num_attention_heads); // Default to head_count if kv not present
     config.max_position_embeddings = get_meta_value("llama.context_length", 4096);
+    if (config.max_position_embeddings == 0 || config.max_position_embeddings > 8192) {
+        Logger::warning("max_position_embeddings from GGUF is " + std::to_string(config.max_position_embeddings) + ", overriding to sensible default (2048)");
+        config.max_position_embeddings = 2048;
+    }
     config.rms_norm_eps = get_meta_value("llama.attention.layer_norm_rms_epsilon", 1e-5f);
     config.rope_theta = get_meta_value("llama.rope.freq_base", 10000.0f); // Use freq_base if present
     // config.hidden_act = get_meta_value("llama.activation_function", "silu"); // GGUF usually doesn't store this string
@@ -2586,4 +2698,3 @@ ModelConfig parse_model_config_from_gguf(const GGUFData& gguf) {
 
     return config;
 }
-// --- END: Definition for parse_model_config_from_gguf ---

@@ -63,6 +63,16 @@ struct block_q3_K {
 };
 static_assert(sizeof(block_q3_K) == 32 + 64 + 12 + 2 + 2, "Size mismatch for block_q3_K"); // Should be 112 bytes
 
+// Represents a block of 256 8-bit quantized values using K-Quants
+// Based on ggml.c: block_q8_K
+struct block_q8_K {
+    uint16_t d;                     // Super-block scale factor (FP16)
+    int8_t qs[GGML_QK_K];           // Quantized values (8-bit integers)
+    int16_t bsums[GGML_QK_K / 16];  // Block sums, used for dot product calculation (16 sums)
+};
+// static_assert removed temporarily due to apply issues.
+// Expected size: sizeof(uint16_t) + (sizeof(int8_t) * GGML_QK_K) + (sizeof(int16_t) * (GGML_QK_K / 16)) = 2 + 256 + 32 = 290
+
 // --- Quantization Type Information ---
 
 // Helper to get string name for GGMLType
@@ -108,3 +118,44 @@ void quantize_q4_k_m(const float* f_data, void* q_data, int num_elements);
 
 // Basic Q6_K quantization function for round-trip testing
 void quantize_q6_k(const float* f_data, void* q_data, int num_elements);
+
+// --- ADDED: Q8_K Quantization Function Declaration ---
+std::vector<block_q8_K> quantize_fp32_to_q8_K(const std::vector<float>& f_data);
+
+// --- ADDED: Q6_K * Q8_K Dot Product Function Declaration ---
+float vec_dot_q6_k_q8_k_cpu(
+    int n, // Number of elements
+    const std::vector<block_q6_K>& x, // Q6_K vector (matrix row)
+    const std::vector<block_q8_K>& y,  // Q8_K vector (quantized activation)
+    bool log_this_call // ADDED: Logging flag
+);
+
+// --- ADDED: Q6_K * Q8_K Matrix-Vector Product Function Declaration ---
+void matvec_q6k_q8k_cpu(
+    const std::vector<block_q6_K>& mat_q6k, // Q6_K matrix weights
+    const std::vector<block_q8_K>& vec_q8k, // Q8_K input vector (quantized activation)
+    std::vector<float>& out_f32,           // Output FP32 vector
+    int rows,                              // Matrix rows (output vector size)
+    int cols,                              // Matrix cols (input vector size)
+    bool log_calls // ADDED: Logging flag
+);
+
+// --- ADDED: Q4_K * Q8_K Dot Product Function Declaration ---
+float vec_dot_q4_k_q8_k_cpu(
+    int n,
+    const std::vector<block_q4_K>& x_vec,
+    const std::vector<block_q8_K>& y_vec,
+    bool log_this_call // Optional logging flag (currently unused)
+);
+
+// --- ADDED: Q4_K * Q8_K Matrix-Vector Product Function Declaration ---
+void matvec_q4k_q8k_cpu(
+    const std::vector<block_q4_K>& mat_q4k,
+    const std::vector<block_q8_K>& vec_q8k,
+    std::vector<float>& out_f32,
+    int rows,
+    int cols,
+    bool log_calls // Optional logging flag (currently unused)
+);
+
+// --- Utility functions (if any) ---

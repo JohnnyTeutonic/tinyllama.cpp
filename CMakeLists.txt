@@ -152,3 +152,9 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 
 message(STATUS "Project source directory: ${CMAKE_CURRENT_SOURCE_DIR}")
+
+add_executable(dequantize_roundtrip dequantize_roundtrip.cpp)
+target_link_libraries(dequantize_roundtrip PRIVATE tinyllama_core)
+
+add_executable(matvec_test matvec_test.cpp)
+target_link_libraries(matvec_test PRIVATE tinyllama_core)
