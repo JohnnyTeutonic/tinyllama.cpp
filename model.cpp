@@ -1165,6 +1165,341 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
     // --- END: Allocate Persistent Workspace Buffers ---
 
     Logger::info("Finished initializing GPU resources and RoPE.");
+
+    // --- Refactored: Allocate and copy persistent embedding and LM head weights (FP32/BF16) ---
+    // Embedding Table
+    if (!token_embedding_table_f32_dev_) {
+        if (!embed_tokens_f32.empty()) {
+            gpuErrchk(cudaMalloc(&token_embedding_table_f32_dev_, embed_tokens_f32.size() * sizeof(float)));
+            gpuErrchk(cudaMemcpy(token_embedding_table_f32_dev_, embed_tokens_f32.data(), embed_tokens_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
+            Logger::info("Copied token_embedding_table (fp32) to GPU.");
+        } else if (!embed_tokens.empty()) {
+            // Convert BF16 to FP32 and upload both
+            std::vector<float> embed_tokens_f32_tmp = bf16vec_to_float_vec(embed_tokens);
+            gpuErrchk(cudaMalloc(&token_embedding_table_f32_dev_, embed_tokens_f32_tmp.size() * sizeof(float)));
+            gpuErrchk(cudaMemcpy(token_embedding_table_f32_dev_, embed_tokens_f32_tmp.data(), embed_tokens_f32_tmp.size() * sizeof(float), cudaMemcpyHostToDevice));
+            Logger::info("Converted and copied token_embedding_table (bf16->fp32) to GPU.");
+            if (!token_embedding_table_dev_) {
+                gpuErrchk(cudaMalloc(&token_embedding_table_dev_, embed_tokens.size() * sizeof(uint16_t)));
+                gpuErrchk(cudaMemcpy(token_embedding_table_dev_, embed_tokens.data(), embed_tokens.size() * sizeof(uint16_t), cudaMemcpyHostToDevice));
+                Logger::info("Copied token_embedding_table (bf16) to GPU.");
+            }
+        }
+    }
+    // LM Head
+    if (!lm_head_f32_dev_) {
+        if (!lm_head_f32.empty()) {
+            gpuErrchk(cudaMalloc(&lm_head_f32_dev_, lm_head_f32.size() * sizeof(float)));
+            gpuErrchk(cudaMemcpy(lm_head_f32_dev_, lm_head_f32.data(), lm_head_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
+            Logger::info("Copied lm_head (fp32) to GPU.");
+        } else if (!lm_head.empty()) {
+            std::vector<float> lm_head_f32_tmp = bf16vec_to_float_vec(lm_head);
+            gpuErrchk(cudaMalloc(&lm_head_f32_dev_, lm_head_f32_tmp.size() * sizeof(float)));
+            gpuErrchk(cudaMemcpy(lm_head_f32_dev_, lm_head_f32_tmp.data(), lm_head_f32_tmp.size() * sizeof(float), cudaMemcpyHostToDevice));
+            Logger::info("Converted and copied lm_head (bf16->fp32) to GPU.");
+            if (!lm_head_dev_) {
+                gpuErrchk(cudaMalloc(&lm_head_dev_, lm_head.size() * sizeof(uint16_t)));
+                gpuErrchk(cudaMemcpy(lm_head_dev_, lm_head.data(), lm_head.size() * sizeof(uint16_t), cudaMemcpyHostToDevice));
+                Logger::info("Copied lm_head (bf16) to GPU.");
+            }
+        }
+    }
+    // --- End Refactor ---
+
+    // Q8_0 fallback for embedding table
+    if (!token_embedding_table_f32_dev_ && !embed_tokens_q8_0.empty()) {
+        std::vector<float> embed_tokens_q8_0_f32(embed_tokens_q8_0.size() * GGML_QK8_0);
+        for (size_t i = 0; i < embed_tokens_q8_0.size(); ++i) {
+            dequantize_q8_0_block(&embed_tokens_q8_0[i], &embed_tokens_q8_0_f32[i * GGML_QK8_0]);
+        }
+        gpuErrchk(cudaMalloc(&token_embedding_table_f32_dev_, embed_tokens_q8_0_f32.size() * sizeof(float)));
+        gpuErrchk(cudaMemcpy(token_embedding_table_f32_dev_, embed_tokens_q8_0_f32.data(), embed_tokens_q8_0_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
+        Logger::info("Dequantized and copied token_embedding_table (Q8_0->fp32) to GPU.");
+    }
+    // Q4_K fallback for embedding table
+    if (!token_embedding_table_f32_dev_ && !embed_tokens_q4k.empty()) {
+        std::vector<float> embed_tokens_q4k_f32(embed_tokens_q4k.size() * GGML_QK_K);
+        for (size_t i = 0; i < embed_tokens_q4k.size(); ++i) {
+            dequantize_q4_k_m(&embed_tokens_q4k[i], &embed_tokens_q4k_f32[i * GGML_QK_K], GGML_QK_K);
+        }
+        gpuErrchk(cudaMalloc(&token_embedding_table_f32_dev_, embed_tokens_q4k_f32.size() * sizeof(float)));
+        gpuErrchk(cudaMemcpy(token_embedding_table_f32_dev_, embed_tokens_q4k_f32.data(), embed_tokens_q4k_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
+        Logger::info("Dequantized and copied token_embedding_table (Q4_K->fp32) to GPU.");
+    }
+
+    // Q8_0 fallback for LM head
+    if (!lm_head_f32_dev_ && !lm_head_q8_0.empty()) {
+        std::vector<float> lm_head_q8_0_f32(lm_head_q8_0.size() * GGML_QK8_0);
+        for (size_t i = 0; i < lm_head_q8_0.size(); ++i) {
+            dequantize_q8_0_block(&lm_head_q8_0[i], &lm_head_q8_0_f32[i * GGML_QK8_0]);
+        }
+        gpuErrchk(cudaMalloc(&lm_head_f32_dev_, lm_head_q8_0_f32.size() * sizeof(float)));
+        gpuErrchk(cudaMemcpy(lm_head_f32_dev_, lm_head_q8_0_f32.data(), lm_head_q8_0_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
+        Logger::info("Dequantized and copied lm_head (Q8_0->fp32) to GPU.");
+    }
+    // Q4_K fallback for LM head
+    if (!lm_head_f32_dev_ && !lm_head_q4k.empty()) {
+        std::vector<float> lm_head_q4k_f32(lm_head_q4k.size() * GGML_QK_K);
+        for (size_t i = 0; i < lm_head_q4k.size(); ++i) {
+            dequantize_q4_k_m(&lm_head_q4k[i], &lm_head_q4k_f32[i * GGML_QK_K], GGML_QK_K);
+        }
+        gpuErrchk(cudaMalloc(&lm_head_f32_dev_, lm_head_q4k_f32.size() * sizeof(float)));
+        gpuErrchk(cudaMemcpy(lm_head_f32_dev_, lm_head_q4k_f32.data(), lm_head_q4k_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
+        Logger::info("Dequantized and copied lm_head (Q4_K->fp32) to GPU.");
+    }
+
+    // --- Refactored: Allocate and copy persistent layer weights (FP32/BF16) ---
+    // Concatenate and upload for each weight type: Q, K, V, O, Gate, Up, Down
+    size_t layer_q_size = (size_t)hs * hs;
+    size_t layer_k_size = (size_t)kv_dim * hs;
+    size_t layer_v_size = (size_t)kv_dim * hs;
+    size_t layer_o_size = (size_t)hs * hs;
+    size_t layer_gate_size = (size_t)is * hs;
+    size_t layer_up_size = (size_t)is * hs;
+    size_t layer_down_size = (size_t)hs * is;
+    int num_layers = nhl;
+
+    // Helper lambda to concatenate and upload
+    auto upload_layer_f32 = [&](const std::vector<std::vector<float>>& src, float*& dev_ptr, size_t elem_size) {
+        std::vector<float> concat;
+        for (const auto& v : src) concat.insert(concat.end(), v.begin(), v.end());
+        if (!concat.empty()) {
+            gpuErrchk(cudaMalloc(&dev_ptr, concat.size() * sizeof(float)));
+            gpuErrchk(cudaMemcpy(dev_ptr, concat.data(), concat.size() * sizeof(float), cudaMemcpyHostToDevice));
+        }
+    };
+    auto upload_layer_bf16 = [&](const std::vector<std::vector<uint16_t>>& src, float*& dev_ptr, size_t elem_size) {
+        std::vector<float> concat;
+        for (const auto& v : src) {
+            std::vector<float> tmp = bf16vec_to_float_vec(v);
+            concat.insert(concat.end(), tmp.begin(), tmp.end());
+        }
+        if (!concat.empty()) {
+            gpuErrchk(cudaMalloc(&dev_ptr, concat.size() * sizeof(float)));
+            gpuErrchk(cudaMemcpy(dev_ptr, concat.data(), concat.size() * sizeof(float), cudaMemcpyHostToDevice));
+        }
+    };
+
+    // Q
+    if (!w_q_f32_dev_) {
+        std::vector<std::vector<float>> src_f32(num_layers);
+        std::vector<std::vector<uint16_t>> src_bf16(num_layers);
+        for (int i = 0; i < num_layers; ++i) {
+            src_f32[i] = layers[i].q_proj_f32;
+            src_bf16[i] = layers[i].q_proj;
+        }
+        if (!src_f32[0].empty()) upload_layer_f32(src_f32, w_q_f32_dev_, layer_q_size);
+        else if (!src_bf16[0].empty()) upload_layer_bf16(src_bf16, w_q_f32_dev_, layer_q_size);
+    }
+    // K
+    if (!w_k_f32_dev_) {
+        std::vector<std::vector<float>> src_f32(num_layers);
+        std::vector<std::vector<uint16_t>> src_bf16(num_layers);
+        for (int i = 0; i < num_layers; ++i) {
+            src_f32[i] = layers[i].k_proj_f32;
+            src_bf16[i] = layers[i].k_proj;
+        }
+        if (!src_f32[0].empty()) upload_layer_f32(src_f32, w_k_f32_dev_, layer_k_size);
+        else if (!src_bf16[0].empty()) upload_layer_bf16(src_bf16, w_k_f32_dev_, layer_k_size);
+    }
+    // V
+    if (!w_v_f32_dev_) {
+        std::vector<std::vector<float>> src_f32(num_layers);
+        std::vector<std::vector<uint16_t>> src_bf16(num_layers);
+        for (int i = 0; i < num_layers; ++i) {
+            src_f32[i] = layers[i].v_proj_f32;
+            src_bf16[i] = layers[i].v_proj;
+        }
+        if (!src_f32[0].empty()) upload_layer_f32(src_f32, w_v_f32_dev_, layer_v_size);
+        else if (!src_bf16[0].empty()) upload_layer_bf16(src_bf16, w_v_f32_dev_, layer_v_size);
+    }
+    // O
+    if (!w_o_f32_dev_) {
+        std::vector<std::vector<float>> src_f32(num_layers);
+        std::vector<std::vector<uint16_t>> src_bf16(num_layers);
+        for (int i = 0; i < num_layers; ++i) {
+            src_f32[i] = layers[i].o_proj_f32;
+            src_bf16[i] = layers[i].o_proj;
+        }
+        if (!src_f32[0].empty()) upload_layer_f32(src_f32, w_o_f32_dev_, layer_o_size);
+        else if (!src_bf16[0].empty()) upload_layer_bf16(src_bf16, w_o_f32_dev_, layer_o_size);
+    }
+    // Gate
+    if (!w_gate_f32_dev_) {
+        std::vector<std::vector<float>> src_f32(num_layers);
+        std::vector<std::vector<uint16_t>> src_bf16(num_layers);
+        for (int i = 0; i < num_layers; ++i) {
+            src_f32[i] = layers[i].gate_proj_f32;
+            src_bf16[i] = layers[i].gate_proj;
+        }
+        if (!src_f32[0].empty()) upload_layer_f32(src_f32, w_gate_f32_dev_, layer_gate_size);
+        else if (!src_bf16[0].empty()) upload_layer_bf16(src_bf16, w_gate_f32_dev_, layer_gate_size);
+    }
+    // Up
+    if (!w_up_f32_dev_) {
+        std::vector<std::vector<float>> src_f32(num_layers);
+        std::vector<std::vector<uint16_t>> src_bf16(num_layers);
+        for (int i = 0; i < num_layers; ++i) {
+            src_f32[i] = layers[i].up_proj_f32;
+            src_bf16[i] = layers[i].up_proj;
+        }
+        if (!src_f32[0].empty()) upload_layer_f32(src_f32, w_up_f32_dev_, layer_up_size);
+        else if (!src_bf16[0].empty()) upload_layer_bf16(src_bf16, w_up_f32_dev_, layer_up_size);
+    }
+    // Down
+    if (!w_down_f32_dev_) {
+        std::vector<std::vector<float>> src_f32(num_layers);
+        std::vector<std::vector<uint16_t>> src_bf16(num_layers);
+        for (int i = 0; i < num_layers; ++i) {
+            src_f32[i] = layers[i].down_proj_f32;
+            src_bf16[i] = layers[i].down_proj;
+        }
+        if (!src_f32[0].empty()) upload_layer_f32(src_f32, w_down_f32_dev_, layer_down_size);
+        else if (!src_bf16[0].empty()) upload_layer_bf16(src_bf16, w_down_f32_dev_, layer_down_size);
+    }
+    // --- End Refactor ---
+
+    // Q8_0 fallback for Q projection
+    if (!w_q_f32_dev_) {
+        bool all_have_q8_0 = true;
+        for (int i = 0; i < num_layers; ++i) {
+            if (layers[i].q_proj_q8_0.empty()) { all_have_q8_0 = false; break; }
+        }
+        if (all_have_q8_0) {
+            std::vector<block_q8_0> concat;
+            for (int i = 0; i < num_layers; ++i) {
+                concat.insert(concat.end(), layers[i].q_proj_q8_0.begin(), layers[i].q_proj_q8_0.end());
+            }
+            std::vector<float> deq(concat.size() * GGML_QK8_0);
+            for (size_t i = 0; i < concat.size(); ++i) {
+                dequantize_q8_0_block(&concat[i], &deq[i * GGML_QK8_0]);
+            }
+            gpuErrchk(cudaMalloc(&w_q_f32_dev_, deq.size() * sizeof(float)));
+            gpuErrchk(cudaMemcpy(w_q_f32_dev_, deq.data(), deq.size() * sizeof(float), cudaMemcpyHostToDevice));
+            Logger::info("Dequantized and copied Q projection (Q8_0->fp32) to GPU.");
+        }
+    }
+    // Q8_0 fallback for K projection
+    if (!w_k_f32_dev_) {
+        bool all_have_q8_0 = true;
+        for (int i = 0; i < num_layers; ++i) {
+            if (layers[i].k_proj_q8_0.empty()) { all_have_q8_0 = false; break; }
+        }
+        if (all_have_q8_0) {
+            std::vector<block_q8_0> concat;
+            for (int i = 0; i < num_layers; ++i) {
+                concat.insert(concat.end(), layers[i].k_proj_q8_0.begin(), layers[i].k_proj_q8_0.end());
+            }
+            std::vector<float> deq(concat.size() * GGML_QK8_0);
+            for (size_t i = 0; i < concat.size(); ++i) {
+                dequantize_q8_0_block(&concat[i], &deq[i * GGML_QK8_0]);
+            }
+            gpuErrchk(cudaMalloc(&w_k_f32_dev_, deq.size() * sizeof(float)));
+            gpuErrchk(cudaMemcpy(w_k_f32_dev_, deq.data(), deq.size() * sizeof(float), cudaMemcpyHostToDevice));
+            Logger::info("Dequantized and copied K projection (Q8_0->fp32) to GPU.");
+        }
+    }
+
+    // Q8_0 fallback for V projection
+    if (!w_v_f32_dev_) {
+        bool all_have_q8_0 = true;
+        for (int i = 0; i < num_layers; ++i) {
+            if (layers[i].v_proj_q8_0.empty()) { all_have_q8_0 = false; break; }
+        }
+        if (all_have_q8_0) {
+            std::vector<block_q8_0> concat;
+            for (int i = 0; i < num_layers; ++i) {
+                concat.insert(concat.end(), layers[i].v_proj_q8_0.begin(), layers[i].v_proj_q8_0.end());
+            }
+            std::vector<float> deq(concat.size() * GGML_QK8_0);
+            for (size_t i = 0; i < concat.size(); ++i) {
+                dequantize_q8_0_block(&concat[i], &deq[i * GGML_QK8_0]);
+            }
+            gpuErrchk(cudaMalloc(&w_v_f32_dev_, deq.size() * sizeof(float)));
+            gpuErrchk(cudaMemcpy(w_v_f32_dev_, deq.data(), deq.size() * sizeof(float), cudaMemcpyHostToDevice));
+            Logger::info("Dequantized and copied V projection (Q8_0->fp32) to GPU.");
+        }
+    }
+    // Q8_0 fallback for O projection
+    if (!w_o_f32_dev_) {
+        bool all_have_q8_0 = true;
+        for (int i = 0; i < num_layers; ++i) {
+            if (layers[i].o_proj_q8_0.empty()) { all_have_q8_0 = false; break; }
+        }
+        if (all_have_q8_0) {
+            std::vector<block_q8_0> concat;
+            for (int i = 0; i < num_layers; ++i) {
+                concat.insert(concat.end(), layers[i].o_proj_q8_0.begin(), layers[i].o_proj_q8_0.end());
+            }
+            std::vector<float> deq(concat.size() * GGML_QK8_0);
+            for (size_t i = 0; i < concat.size(); ++i) {
+                dequantize_q8_0_block(&concat[i], &deq[i * GGML_QK8_0]);
+            }
+            gpuErrchk(cudaMalloc(&w_o_f32_dev_, deq.size() * sizeof(float)));
+            gpuErrchk(cudaMemcpy(w_o_f32_dev_, deq.data(), deq.size() * sizeof(float), cudaMemcpyHostToDevice));
+            Logger::info("Dequantized and copied O projection (Q8_0->fp32) to GPU.");
+        }
+    }
+    // Q8_0 fallback for Gate projection
+    if (!w_gate_f32_dev_) {
+        bool all_have_q8_0 = true;
+        for (int i = 0; i < num_layers; ++i) {
+            if (layers[i].gate_proj_q8_0.empty()) { all_have_q8_0 = false; break; }
+        }
+        if (all_have_q8_0) {
+            std::vector<block_q8_0> concat;
+            for (int i = 0; i < num_layers; ++i) {
+                concat.insert(concat.end(), layers[i].gate_proj_q8_0.begin(), layers[i].gate_proj_q8_0.end());
+            }
+            std::vector<float> deq(concat.size() * GGML_QK8_0);
+            for (size_t i = 0; i < concat.size(); ++i) {
+                dequantize_q8_0_block(&concat[i], &deq[i * GGML_QK8_0]);
+            }
+            gpuErrchk(cudaMalloc(&w_gate_f32_dev_, deq.size() * sizeof(float)));
+            gpuErrchk(cudaMemcpy(w_gate_f32_dev_, deq.data(), deq.size() * sizeof(float), cudaMemcpyHostToDevice));
+            Logger::info("Dequantized and copied Gate projection (Q8_0->fp32) to GPU.");
+        }
+    }
+    // Q8_0 fallback for Up projection
+    if (!w_up_f32_dev_) {
+        bool all_have_q8_0 = true;
+        for (int i = 0; i < num_layers; ++i) {
+            if (layers[i].up_proj_q8_0.empty()) { all_have_q8_0 = false; break; }
+        }
+        if (all_have_q8_0) {
+            std::vector<block_q8_0> concat;
+            for (int i = 0; i < num_layers; ++i) {
+                concat.insert(concat.end(), layers[i].up_proj_q8_0.begin(), layers[i].up_proj_q8_0.end());
+            }
+            std::vector<float> deq(concat.size() * GGML_QK8_0);
+            for (size_t i = 0; i < concat.size(); ++i) {
+                dequantize_q8_0_block(&concat[i], &deq[i * GGML_QK8_0]);
+            }
+            gpuErrchk(cudaMalloc(&w_up_f32_dev_, deq.size() * sizeof(float)));
+            gpuErrchk(cudaMemcpy(w_up_f32_dev_, deq.data(), deq.size() * sizeof(float), cudaMemcpyHostToDevice));
+            Logger::info("Dequantized and copied Up projection (Q8_0->fp32) to GPU.");
+        }
+    }
+    // Q8_0 fallback for Down projection
+    if (!w_down_f32_dev_) {
+        bool all_have_q8_0 = true;
+        for (int i = 0; i < num_layers; ++i) {
+            if (layers[i].down_proj_q8_0.empty()) { all_have_q8_0 = false; break; }
+        }
+        if (all_have_q8_0) {
+            std::vector<block_q8_0> concat;
+            for (int i = 0; i < num_layers; ++i) {
+                concat.insert(concat.end(), layers[i].down_proj_q8_0.begin(), layers[i].down_proj_q8_0.end());
+            }
+            std::vector<float> deq(concat.size() * GGML_QK8_0);
+            for (size_t i = 0; i < concat.size(); ++i) {
+                dequantize_q8_0_block(&concat[i], &deq[i * GGML_QK8_0]);
+            }
+            gpuErrchk(cudaMalloc(&w_down_f32_dev_, deq.size() * sizeof(float)));
+            gpuErrchk(cudaMemcpy(w_down_f32_dev_, deq.data(), deq.size() * sizeof(float), cudaMemcpyHostToDevice));
+            Logger::info("Dequantized and copied Down projection (Q8_0->fp32) to GPU.");
+        }
+    }
 }
 // --- END: Private Helper: Initialize GPU Resources & RoPE ---
 

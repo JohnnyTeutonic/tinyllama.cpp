@@ -152,24 +152,49 @@ void run_generation_experiment(TinyLlamaModel& model,
              int input_token_id = (pos < num_prompt_tokens) ? prompt_ids[pos] : next_token_id;
              Logger::info("Loop pos=" + std::to_string(pos) + ", input_token_id=" + std::to_string(input_token_id));
 
-             // 2. Get Input Embedding
-             std::vector<float> input_embedding = model.lookup_embedding(input_token_id);
-            if (input_embedding.empty() || input_embedding.size() != config.hidden_size) {
-                 throw std::runtime_error("Failed to get valid embedding for token ID " + std::to_string(input_token_id) + " at pos " + std::to_string(pos));
-             }
-              if (pos == 0) { // Log first embedding
-                  log_vector_summary("Input Embedding (pos=0)", input_embedding, 10);
-              }
+             // 2. Get Input Embedding (Moved inside #else for CPU path)
+             // std::vector<float> input_embedding = model.lookup_embedding(input_token_id);
+             // if (input_embedding.empty() || input_embedding.size() != config.hidden_size) {
+             //     throw std::runtime_error("Failed to get valid embedding for token ID " + std::to_string(input_token_id) + " at pos " + std::to_string(pos));
+             // }
+             // if (pos == 0) { // Log first embedding
+             //     log_vector_summary("Input Embedding (pos=0)", input_embedding, 10);
+             // }
 
              // 3. Perform Forward Pass
-             // Pass the input_embedding vector by value
-             std::vector<float> logits = model.forward(input_embedding, pos, &kv_cache, nullptr);
+             std::vector<float> logits;
+#ifdef HAS_CUDA
+            Logger::info("Loop pos=" + std::to_string(pos) + ", calling model.forward_device with token_id=" + std::to_string(input_token_id));
+            logits = model.forward_device(input_token_id, pos, &kv_cache, nullptr);
+            if (pos == 0) { // Log first logits from CUDA path
+                 log_vector_summary("Output Logits from forward_device (pos=0)", logits, 10);
+            }
+#else
+            // Get Input Embedding for CPU Path
+            std::vector<float> input_embedding = model.lookup_embedding(input_token_id);
+            if (input_embedding.empty() || input_embedding.size() != config.hidden_size) {
+                 throw std::runtime_error("Failed to get valid embedding for token ID " + std::to_string(input_token_id) + " at pos " + std::to_string(pos));
+            }
+            if (pos == 0) { // Log first embedding for CPU path
+                  log_vector_summary("Input Embedding to CPU forward (pos=0)", input_embedding, 10);
+            }
+            Logger::info("Loop pos=" + std::to_string(pos) + ", calling model.forward (CPU) with embedding");
+            logits = model.forward(input_embedding, pos, &kv_cache, nullptr);
+            if (pos == 0) { // Log first logits from CPU path
+                  log_vector_summary("Output Logits from CPU forward (pos=0)", logits, 10);
+            }
+#endif // HAS_CUDA
+
             if (logits.empty() || logits.size() != config.vocab_size) {
-                 throw std::runtime_error("model.forward() returned invalid logits at pos " + std::to_string(pos) + ". Size: " + std::to_string(logits.size()) + ", Expected: " + std::to_string(config.vocab_size));
+#ifdef HAS_CUDA
+                 throw std::runtime_error("model.forward_device() returned invalid logits at pos " + std::to_string(pos) + ". Size: " + std::to_string(logits.size()) + ", Expected: " + std::to_string(config.vocab_size));
+#else
+                 throw std::runtime_error("model.forward() (CPU) returned invalid logits at pos " + std::to_string(pos) + ". Size: " + std::to_string(logits.size()) + ", Expected: " + std::to_string(config.vocab_size));
+#endif
              }
-             if (pos == 0) { // Log first logits
-                  log_vector_summary("Output Logits (pos=0)", logits, 10);
-              }
+             // if (pos == 0) { // Log first logits (original combined log point)
+             //      log_vector_summary("Output Logits (pos=0)", logits, 10);
+             //  }
 
              // --- IMPORTANT: Increment cache sequence length *AFTER* forward call for position `pos` ---
              kv_cache.seq_len = pos + 1;
