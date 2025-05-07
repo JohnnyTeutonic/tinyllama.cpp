@@ -158,3 +158,6 @@ target_link_libraries(dequantize_roundtrip PRIVATE tinyllama_core)
 
 add_executable(matvec_test matvec_test.cpp)
 target_link_libraries(matvec_test PRIVATE tinyllama_core)
+
+add_executable(compare_quant_fp16 compare_quant_fp16.cpp)
+target_link_libraries(compare_quant_fp16 PRIVATE tinyllama_core)

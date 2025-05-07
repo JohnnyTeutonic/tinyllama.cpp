@@ -9,3 +9,4 @@ myenv/
 *.pyc
 */debugging.log
 deps/
+*.bak

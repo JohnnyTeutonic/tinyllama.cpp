@@ -283,7 +283,7 @@ int main(int argc, char **argv) {
         std::string gguf_path;
     };
     std::vector<ModelExperimentConfig> models_to_test = {
-        {"TinyLlama", "data/llama-2-7b.Q4_K_M.gguf"} // Updated to quantized model
+        {"TinyLlama", "data/tiny_llama_q8_requantised.gguf"} // Updated to quantized model
     };
 
     // Configuration for Special Token Sources - REMOVED (using external JSON)

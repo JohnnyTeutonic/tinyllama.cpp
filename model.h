@@ -13,8 +13,33 @@
 #include <cublas_v2.h>    // <<< INCLUDE CUBLAS >>>
 #include "cuda_kernels.h" // Needed for gpuErrchk
 #endif
-#include "quantization.h" // For block_q4_K, block_q6_K
+#include "quantization.h" // For block_q4_K, block_q6_K, block_q8_0, GGML_QK8_0
 #include <memory>
+
+// --- ADDED: TensorName Enum and Helper ---
+enum class TensorName {
+    Q_PROJ, K_PROJ, V_PROJ, O_PROJ,
+    GATE_PROJ, UP_PROJ, DOWN_PROJ,
+    TOKEN_EMBD, LM_HEAD,
+    UNKNOWN
+};
+
+// Helper to convert TensorName to string (optional, for logging)
+static std::string tensor_name_to_string(TensorName tn) {
+    switch (tn) {
+        case TensorName::Q_PROJ: return "Q_PROJ";
+        case TensorName::K_PROJ: return "K_PROJ";
+        case TensorName::V_PROJ: return "V_PROJ";
+        case TensorName::O_PROJ: return "O_PROJ";
+        case TensorName::GATE_PROJ: return "GATE_PROJ";
+        case TensorName::UP_PROJ: return "UP_PROJ";
+        case TensorName::DOWN_PROJ: return "DOWN_PROJ";
+        case TensorName::TOKEN_EMBD: return "TOKEN_EMBD";
+        case TensorName::LM_HEAD: return "LM_HEAD";
+        default: return "UNKNOWN";
+    }
+}
+// --- END ADDED ---
 
 struct ModelConfig {
     int hidden_size;
@@ -116,6 +141,10 @@ struct LayerWeights {
     std::vector<block_q4_K> gate_proj_q4k, up_proj_q4k, down_proj_q4k;
     std::vector<block_q6_K> q_proj_q6k, k_proj_q6k, v_proj_q6k, o_proj_q6k;
     std::vector<block_q6_K> gate_proj_q6k, up_proj_q6k, down_proj_q6k;
+    // --- ADDED: Q8_0 fields for LayerWeights ---
+    std::vector<block_q8_0> q_proj_q8_0, k_proj_q8_0, v_proj_q8_0, o_proj_q8_0;
+    std::vector<block_q8_0> gate_proj_q8_0, up_proj_q8_0, down_proj_q8_0;
+    // --- END ADDED ---
 
 #ifdef HAS_CUDA
     // Device pointers for RMSNorm weights
@@ -171,6 +200,9 @@ private:
     std::vector<float> embed_tokens_f32, lm_head_f32, final_norm_f32;
     std::vector<block_q4_K> embed_tokens_q4k, lm_head_q4k, final_norm_q4k;
     std::vector<block_q6_K> embed_tokens_q6k, lm_head_q6k, final_norm_q6k;
+    // --- ADDED: Q8_0 fields for TinyLlamaModel ---
+    std::vector<block_q8_0> embed_tokens_q8_0, lm_head_q8_0;
+    // --- END ADDED ---
 
     std::vector<LayerWeights> layers; // num_hidden_layers
 

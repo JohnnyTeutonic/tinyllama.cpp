@@ -16,13 +16,14 @@ struct block_q6_K;
 constexpr int GGML_QK_K = 256;   // Default K-Quants block size
 
 // --- ADDED: FP16/FP32 Conversion Utilities Declarations ---
-float fp16_to_fp32(uint16_t h);
+float fp16_to_fp32(uint16_t h, bool is_gguf_scale_field = false);
 uint16_t fp32_to_fp16(float f);
 // --- END ADDED ---
 
 // Dequantization scales for Q4_K from ggml.c - keep as is
 // ... existing code ...
 
+#pragma pack(push, 1)
 // Represents a block of 256 4-bit quantized values using K-Quants
 // Corrected based on ggml.c
 struct block_q4_K {
@@ -72,6 +73,17 @@ struct block_q8_K {
 };
 // static_assert removed temporarily due to apply issues.
 // Expected size: sizeof(uint16_t) + (sizeof(int8_t) * GGML_QK_K) + (sizeof(int16_t) * (GGML_QK_K / 16)) = 2 + 256 + 32 = 290
+
+// --- ADDED: Q8_0 Block Definition ---
+#define GGML_QK8_0 32 // Standard block size for Q8_0 (make sure this matches ggml.c if used)
+struct block_q8_0 {
+    uint16_t d;           // Scale (typically FP16)
+    int8_t  qs[GGML_QK8_0];  // Quantized values
+};
+static_assert(sizeof(block_q8_0) == sizeof(uint16_t) + GGML_QK8_0, "Size mismatch for block_q8_0");
+// --- END ADDED ---
+
+#pragma pack(pop)
 
 // --- Quantization Type Information ---
 
@@ -157,5 +169,9 @@ void matvec_q4k_q8k_cpu(
     int cols,
     bool log_calls // Optional logging flag (currently unused)
 );
+
+// --- ADDED: Declaration for dequantize_q8_0_block ---
+void dequantize_q8_0_block(const block_q8_0* qblock, float* output); // Dequantizes GGML_QK8_0 elements
+// --- END ADDED ---
 
 // --- Utility functions (if any) ---

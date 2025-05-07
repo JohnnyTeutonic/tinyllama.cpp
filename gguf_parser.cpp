@@ -227,6 +227,7 @@ GGUFData load_gguf_meta(const std::string& filename) {
     // 4. Read Tensor Info
     result.tensor_infos.reserve(static_cast<size_t>(result.header.tensor_count));
     Logger::info("Reading Tensor Info (" + std::to_string(result.header.tensor_count) + " tensors)...");
+    uint64_t accumulated_offset_debug = 0; // For debugging tensor offsets
     for (uint64_t i = 0; i < result.header.tensor_count; ++i) {
         GGUFTensorInfo info;
         try {
@@ -245,8 +246,20 @@ GGUFData load_gguf_meta(const std::string& filename) {
             uint32_t ggml_type_u32;
             read_raw(file, ggml_type_u32);
             info.type = static_cast<GGMLType>(ggml_type_u32);
+            
+            // --- ADDED: Log file position BEFORE reading offset ---
+            uint64_t pos_before_offset_read = file.tellg();
+            // --- END: Log file position ---
 
             read_raw(file, info.offset);
+
+            // --- ADDED: Detailed offset logging ---
+            std::stringstream ss_offset_log;
+            ss_offset_log << "[GGUF_TENSOR_INFO] Tensor " << i << " ('" << info.name << "'):"
+                          << "\n  Raw offset from file: " << info.offset
+                          << "\n  File pos before offset read: " << pos_before_offset_read
+                          << "\n  Calculated accumulated_offset_debug (before this tensor): " << accumulated_offset_debug;
+            // --- END: Detailed offset logging ---
 
             // Calculate num_elements and size_in_bytes
             info.num_elements = 1;
@@ -280,15 +293,22 @@ GGUFData load_gguf_meta(const std::string& filename) {
                  }
                  info.size_in_bytes = static_cast<size_t>(info.num_elements * type_size);
             }
+            
+            // --- ADDED: Update and log accumulated_offset_debug ---
+            ss_offset_log << "\n  Calculated size_in_bytes for this tensor: " << info.size_in_bytes;
+            Logger::info(ss_offset_log.str()); // Log all offset info
+            accumulated_offset_debug += info.size_in_bytes;
+            // --- END: Update and log ---
 
             result.tensor_infos.push_back(info);
+            // Keep existing summary log for tensor info, but it's less detailed for offset debugging
             {
                  std::stringstream ss_tensor;
                  ss_tensor << "Tensor " << i << ": Name='" << info.name << "', Type=" << ggml_type_name(info.type)
                            << ", Shape=[ ";
                  for(size_t d=0; d<info.shape.size(); ++d) ss_tensor << info.shape[d] << (d==info.shape.size()-1 ? "" : ", ");
                  ss_tensor << " ], Offset=" << info.offset << ", Size=" << info.size_in_bytes << " bytes";
-                 Logger::info(ss_tensor.str());
+                 Logger::info(ss_tensor.str()); // Re-enable this important log
             }
         } catch (const std::exception& e) {
              std::string tensor_name = info.name.empty() ? ("(unknown, index " + std::to_string(i) + ")") : info.name;
@@ -329,20 +349,68 @@ GGUFData load_gguf_meta(const std::string& filename) {
     }
 
     uint64_t current_pos = file.tellg();
+    Logger::info("[GGUF_LOAD] Current file position before padding seek: " + std::to_string(current_pos));
     uint64_t padding = (alignment - (current_pos % alignment)) % alignment;
+    Logger::info("[GGUF_LOAD] Calculated padding: " + std::to_string(padding));
     if (padding > 0) {
-         Logger::info("Seeking past " + std::to_string(padding) + " padding bytes to reach alignment " + std::to_string(alignment) + ".");
+        Logger::info("[GGUF_LOAD] Seeking past " + std::to_string(padding) + " padding bytes to reach alignment " + std::to_string(alignment) + ".");
         file.seekg(padding, std::ios::cur);
         if (!file) {
             throw std::runtime_error("GGUF Error: Failed to seek past padding before tensor data.");
         }
-    } else {
-        Logger::info("Data section is already aligned.");
     }
+    uint64_t data_start_pos = file.tellg(); // This is the actual start of the tensor data blob in the file
+    Logger::info("[GGUF_LOAD] File position after padding seek (data_start_pos): " + std::to_string(data_start_pos));
 
-    // 6. Read Tensor Data Block
-    uint64_t data_start_pos = file.tellg();
-    file.seekg(0, std::ios::end);
+    // --- START: Targeted read debug for blk.0.ffn_down.weight's d field ---
+    std::string target_tensor_name_debug = "blk.0.ffn_down.weight";
+    uint64_t offset_of_d_in_block_q6k = 208;
+    if (result.tensor_infos_map.count(target_tensor_name_debug)) {
+        const GGUFTensorInfo& t_info_debug = result.tensor_infos_map.at(target_tensor_name_debug);
+        if (t_info_debug.type == GGML_TYPE_Q6_K) { // Ensure it's a Q6_K tensor
+            uint64_t tensor_relative_offset = t_info_debug.offset; // Offset of this tensor relative to data_start_pos
+            uint64_t d_field_abs_file_offset = data_start_pos + tensor_relative_offset + offset_of_d_in_block_q6k;
+            
+            Logger::info("[GGUF_DEBUG_READ] Targeting tensor '" + target_tensor_name_debug + "' (type Q6_K)");
+            Logger::info("[GGUF_DEBUG_READ]   data_start_pos (file): " + std::to_string(data_start_pos));
+            Logger::info("[GGUF_DEBUG_READ]   tensor_relative_offset (metadata): " + std::to_string(tensor_relative_offset));
+            Logger::info("[GGUF_DEBUG_READ]   d_field_offset_in_block: " + std::to_string(offset_of_d_in_block_q6k));
+            Logger::info("[GGUF_DEBUG_READ]   Calculated d_field_abs_file_offset: " + std::to_string(d_field_abs_file_offset));
+
+            uint64_t seek_pos_debug = d_field_abs_file_offset - 4; // Seek a bit before d
+            int bytes_to_read_debug = 8; // Read a few bytes around d
+            std::vector<uint8_t> debug_buffer(bytes_to_read_debug);
+            
+            uint64_t original_file_pos_before_debug_read = file.tellg(); // Save current pos (should be data_start_pos)
+            file.seekg(seek_pos_debug, std::ios::beg);
+            if (!file) {
+                Logger::error("[GGUF_DEBUG_READ] Failed to seek to debug position: " + std::to_string(seek_pos_debug));
+            } else {
+                Logger::info("[GGUF_DEBUG_READ] At debug seek position: " + std::to_string(file.tellg()));
+                file.read(reinterpret_cast<char*>(debug_buffer.data()), bytes_to_read_debug);
+                if (!file) {
+                    Logger::error("[GGUF_DEBUG_READ] Failed to read debug bytes. Read " + std::to_string(file.gcount()) + " bytes.");
+                } else {
+                    std::stringstream ss_debug_bytes;
+                    ss_debug_bytes << "[GGUF_DEBUG_READ]   Read " << file.gcount() << " bytes from file @ " << seek_pos_debug << ": ";
+                    for(int k=0; k < file.gcount(); ++k) ss_debug_bytes << "0x" << std::hex << (int)debug_buffer[k] << " ";
+                    Logger::info(ss_debug_bytes.str());
+                }
+                // CRUCIAL: Seek back to data_start_pos to not mess up the main read
+                file.clear(); // Clear any EOF/fail flags from small read
+                file.seekg(original_file_pos_before_debug_read, std::ios::beg);
+                Logger::info("[GGUF_DEBUG_READ] Seeked back to original_file_pos_before_debug_read: " + std::to_string(file.tellg()));
+            }
+        } else {
+            Logger::warning("[GGUF_DEBUG_READ] Target tensor '" + target_tensor_name_debug + "' is not Q6_K. Skipping debug read.");
+        }
+    } else {
+        Logger::warning("[GGUF_DEBUG_READ] Target tensor '" + target_tensor_name_debug + "' not found for debug read.");
+    }
+    // --- END: Targeted read debug ---
+
+    // 6. Read Tensor Data Block (Main logic)
+    file.seekg(0, std::ios::end); // This was already here, to get file_end_pos
     uint64_t file_end_pos = file.tellg();
     file.seekg(data_start_pos, std::ios::beg); // Seek back to start of data
 
@@ -351,11 +419,9 @@ GGUFData load_gguf_meta(const std::string& filename) {
     }
 
     uint64_t data_size = file_end_pos - data_start_pos;
-    Logger::info("Reading tensor data block: " + std::to_string(data_size) + " bytes from offset " + std::to_string(data_start_pos) + ".");
-
-    // --- ADDED: Log calculated data size --- 
-    Logger::info("Calculated tensor data block size: " + std::to_string(data_size) + " bytes.");
-    // --- END: Added Log ---
+    // --- Log calculated data size (already present, keep) ---
+    Logger::info("[GGUF_LOAD] Calculated tensor data block size: " + std::to_string(data_size) + " bytes.");
+    // --- End Log ---
 
     if (data_size > 0) {
         // Resize the vector in the result struct
@@ -366,18 +432,34 @@ GGUFData load_gguf_meta(const std::string& filename) {
         }
 
         // Read the data directly into the vector's buffer
+        Logger::info("[GGUF_LOAD] Reading " + std::to_string(data_size) + " bytes into tensor_data vector...");
         file.read(reinterpret_cast<char*>(result.tensor_data.data()), static_cast<std::streamsize>(data_size));
-        if (!file) {
+        uint64_t pos_after_read = file.tellg(); // Get pos after read
+        std::streamsize bytes_read = file.gcount(); // Get bytes actually read
+        Logger::info("[GGUF_LOAD] File position after read: " + std::to_string(pos_after_read)); // Log pos after read
+        Logger::info("[GGUF_LOAD] Bytes reported read by gcount(): " + std::to_string(bytes_read)); // Log gcount
+        Logger::info("[GGUF_LOAD] Stream state after read: good=" + std::to_string(file.good()) 
+                   + ", eof=" + std::to_string(file.eof()) + ", fail=" + std::to_string(file.fail())); // Log stream state
+
+        if (!file || bytes_read != static_cast<std::streamsize>(data_size)) { // Check stream state AND bytes read
             // Check if EOF was reached unexpectedly (read less than data_size)
              if (file.eof()) {
-                 throw std::runtime_error("GGUF Error: Reached EOF prematurely while reading tensor data. Expected " + std::to_string(data_size) + " bytes, read " + std::to_string(file.gcount()) + ".");
+                 throw std::runtime_error("GGUF Error: Reached EOF prematurely while reading tensor data. Expected " 
+                                          + std::to_string(data_size) + " bytes, read " + std::to_string(bytes_read) + ".");
              } else {
-                 throw std::runtime_error("GGUF Error: Failed to read tensor data block from file.");
+                 throw std::runtime_error("GGUF Error: Failed to read tensor data block from file. Stream state indicates error.");
              }
         }
-         Logger::info("Successfully read tensor data block.");
+         Logger::info("[GGUF_LOAD] Successfully read tensor data block.");
+         // Log first few bytes of tensor_data
+         if (data_size >= 16) {
+            std::stringstream ss_bytes;
+            ss_bytes << "[GGUF_LOAD] First 16 bytes of tensor_data buffer: ";
+            for(int i=0; i<16; ++i) ss_bytes << "0x" << std::hex << (int)result.tensor_data[i] << " ";
+            Logger::info(ss_bytes.str());
+         }
     } else {
-         Logger::info("Tensor data block size is 0. Nothing to read.");
+         Logger::info("[GGUF_LOAD] Tensor data block size is 0. Nothing to read.");
     }
 
     file.close();

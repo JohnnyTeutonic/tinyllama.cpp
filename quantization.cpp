@@ -39,16 +39,27 @@ static std::atomic<int> g_vec_dot_q4_k_q8_k_log_count{0};
 
 // Function to convert FP16 (uint16_t) to FP32 (float)
 // Based on standard conversion techniques
-float fp16_to_fp32(uint16_t h) {
-    uint32_t sign = (h >> 15) & 1;
-    uint32_t exp_fp16 = (h >> 10) & 0x1f;
-    uint32_t mant_fp16 = h & 0x3ff;
+float fp16_to_fp32(uint16_t h, bool is_gguf_scale_field) { // MODIFIED: Added is_gguf_scale_field
+    uint16_t h_to_convert = h;
+    bool original_sign_bit_was_set = (h & 0x8000);
+
+    if (is_gguf_scale_field && original_sign_bit_was_set) {
+        // For GGUF scale fields, if sign bit is set, we assume it's an anomaly
+        // and proceed with the conversion as if the sign bit was 0, effectively using magnitude.
+        // A debug log can be added here if needed to track when this occurs.
+        // Logger::debug("[FP16_SCALE_PATCH] Original raw scale 0x" + std::to_hex(h) + " had sign. Using magnitude.");
+        h_to_convert = h & 0x7FFF; // Mask off the sign bit
+    }
+
+    uint32_t sign = (h_to_convert >> 15) & 1; // Will be 0 if sign was masked for scale fields
+    uint32_t exp_fp16 = (h_to_convert >> 10) & 0x1f;
+    uint32_t mant_fp16 = h_to_convert & 0x3ff;
 
     uint32_t x;
 
     if (exp_fp16 == 0) { // Subnormal or zero
         if (mant_fp16 == 0) { // Zero
-            x = (sign << 31);
+            x = (sign << 31); // sign will be 0 if it was a scale field with original sign set
         } else { // Subnormal FP16 -> Normal FP32
             exp_fp16 = 1;
             while ((mant_fp16 & 0x400) == 0) {
@@ -61,6 +72,10 @@ float fp16_to_fp32(uint16_t h) {
             x = (sign << 31) | (exp_fp32 << 23) | mant_fp32;
         }
     } else if (exp_fp16 == 0x1f) { // Inf or NaN
+        // For Inf/NaN, preserve original sign bit if it wasn't a scale field that got masked.
+        // If it *was* a scale field and got masked, sign is now 0, so it becomes +Inf/+NaN.
+        // If it was a scale field but original_sign_bit_was_set was false, sign is also 0.
+        // This effectively makes anomalous "negative Inf/NaN scales" into positive ones.
         x = (sign << 31) | (0xff << 23) | (mant_fp16 << 13);
     } else { // Normal number
         uint32_t exp_fp32 = (exp_fp16 - 15 + 127);
@@ -70,6 +85,18 @@ float fp16_to_fp32(uint16_t h) {
 
     float f;
     std::memcpy(&f, &x, sizeof(float));
+
+    // The old patch using std::abs() and std::cerr is now effectively replaced by the
+    // is_gguf_scale_field logic for fields where it's true.
+    // For non-scale fields (is_gguf_scale_field=false), if h had sign bit, f will be negative.
+    // If we still want to ensure positive for scales even if a negative sneaks through (shouldn't happen):
+    if (is_gguf_scale_field && f < 0.0f && !(std::isnan(f) || std::isinf(f)) ) {
+        // This case should ideally not be hit if h_to_convert had its sign bit cleared.
+        // But as a safeguard for scales:
+        // Logger::debug("[FP16_SCALE_PATCH_SAFEGUARD] Scale still negative: " + std::to_string(f) + " from raw 0x" + std::to_hex(h) + ". Taking abs.");
+        f = std::abs(f);
+    }
+
     return f;
 }
 
@@ -183,7 +210,7 @@ static inline void get_scale_min_indices_q4_K(
 // Input: qblock - pointer to the block_q4_K struct
 // Output: output - buffer to write 256 dequantized float values
 
-// Dequantize Q4_K data - Rewritten to match llama.cpp loop structure
+// Dequantize Q4_K data - Corrected to match GGUF block layout with normalized sub-block scales
 void dequantize_q4_k_m(
     const block_q4_K* qblock,
     float* output, // Output buffer for GGML_QK_K floats
@@ -196,107 +223,31 @@ void dequantize_q4_k_m(
         return;
     }
 
-    const uint8_t* scales_ptr = qblock->scales;
+    const float d = fp16_to_fp32(qblock->d, true); // GGUF scale field
+    const float dmin = fp16_to_fp32(qblock->dmin, true); // GGUF min field
+    const uint8_t* scales_u8 = qblock->scales;
     const uint8_t* qs_ptr = qblock->qs;
 
-    // Convert d and dmin, clamp if necessary
-    const float d_raw = fp16_to_fp32(qblock->d);
-    const float dmin_raw = fp16_to_fp32(qblock->dmin);
-    float d_super = d_raw;
-    float min_super = dmin_raw;
-    // --- REMOVED Clamping --- 
-    // Optional: Add only finiteness check if needed, but clamping is wrong.
-    // if (!std::isfinite(d_super)) { /* Handle NaN/inf, e.g., log warning or set to 0 */ d_super = 0.0f; }
-    // if (!std::isfinite(min_super)) { /* Handle NaN/inf */ min_super = 0.0f; }
-    // --- END REMOVED --- 
-
-    // --- ADDED: Logging ---
-    static std::atomic<int> log_count_q4 = 0;
-    if (log_this_block && log_count_q4 < 5) { // Log first 5 blocks only
-        // log_count_q4++; // Moved increment to end to ensure #1 is logged
-        std::stringstream ss_log; // Use stringstream for logger
-        ss_log << "[DEQUANT_Q4K] Block #" << (log_count_q4.load() + 1) << ":";
-        Logger::debug(ss_log.str()); ss_log.str(""); // Log and clear
-
-        ss_log << "  Super Scale (d_super): " << d_super << " (Raw FP16: 0x" << std::hex << qblock->d << std::dec << ")";
-        Logger::debug(ss_log.str()); ss_log.str("");
-
-        ss_log << "  Super Min (min_super): " << min_super << " (Raw FP16: 0x" << std::hex << qblock->dmin << std::dec << ")";
-        Logger::debug(ss_log.str()); ss_log.str("");
-
-        ss_log << "  Scales Field (12 bytes): ";
-        for(int i=0; i<12; ++i) ss_log << "0x" << std::hex << (int)scales_ptr[i] << " ";
-        ss_log << std::dec;
-        Logger::debug(ss_log.str()); ss_log.str("");
-        
-        // --- Log details for the FIRST sub-block (j=0) --- 
-        uint8_t first_scale_idx, first_min_idx;
-        get_scale_min_indices_q4_K(0, scales_ptr, &first_scale_idx, &first_min_idx);
-        const float first_scale = d_super * K_SCALE_VALUES[first_scale_idx];
-        const float first_minv = min_super * K_MIN_VALUES[first_min_idx];
-        ss_log << "  Sub-block 0: scale_idx=" << (int)first_scale_idx << ", min_idx=" << (int)first_min_idx 
-                  << ", scale=" << first_scale << ", minv=" << first_minv;
-        Logger::debug(ss_log.str()); ss_log.str("");
-
-        ss_log << "  Sub-block 0 QS (8 bytes): ";
-        const uint8_t* first_qs_sub_block = qs_ptr; // j=0
-        for(int i=0; i<8; ++i) ss_log << "0x" << std::hex << (int)first_qs_sub_block[i] << " ";
-        ss_log << std::dec;
-        Logger::debug(ss_log.str()); ss_log.str("");
-        // --- End sub-block 0 details ---
-    }
-    // --- END ADDED: Logging ---
-
-    // Process 16 sub-blocks
-    for (int j = 0; j < GGML_QK_K / 16; ++j) { // j = 0..15 (sub-block index)
-        uint8_t scale_idx, min_idx;
-        get_scale_min_indices_q4_K(j, scales_ptr, &scale_idx, &min_idx);
-
-        // Ensure indices are within bounds for the lookup tables (0-15 ideally, but tables are 64)
-        assert(scale_idx < 64 && "Scale index out of bounds");
-        assert(min_idx < 64 && "Min index out of bounds");
-
-        // Calculate scale and min for this sub-block
-        const float scale = d_super * K_SCALE_VALUES[scale_idx];
-        const float minv = min_super * K_MIN_VALUES[min_idx];
-
-        // Pointer to the 8 bytes of quantized values for this sub-block
-        const uint8_t* qs_sub_block = qs_ptr + j * 8;
-        // Pointer to the 16 floats in the output buffer for this sub-block
-        float* output_sub_block = output + j * 16;
-
-        // Dequantize the 16 values for this sub-block
-        for (int l = 0; l < 8; ++l) { // Process 8 bytes
-            uint8_t packed_qs = qs_sub_block[l];
-            uint8_t nibble_low = packed_qs & 0x0F;
-            uint8_t nibble_high = packed_qs >> 4;
-
-            // FIXED: Adjust for zero-point (8) in the dequantization formula
-            // This correctly maps q=0 to minv-8*scale, q=8 to minv, and q=15 to minv+7*scale
-            // Original incorrect formula: output = scale * q + minv
-            output_sub_block[l]     = scale * (static_cast<float>(nibble_low) - 8.0f) + minv;
-            output_sub_block[l + 8] = scale * (static_cast<float>(nibble_high) - 8.0f) + minv;
+    for (int j = 0; j < GGML_QK_K / 16; ++j) { // j is sub-block index 0..15
+        const float sub_scale_factor_normalized = static_cast<float>(scales_u8[j]) / 4.0f; 
+        const float final_sub_block_scale = d * sub_scale_factor_normalized;
+        const size_t qs_offset = j * 8;
+        for (int k = 0; k < 8; ++k) { // k is byte index within the sub-block's qs
+            const uint8_t q_byte = qs_ptr[qs_offset + k];
+            const int8_t q_low  = ((q_byte & 0x0F) - 8);
+            output[j * 16 + k] = final_sub_block_scale * q_low + dmin;
+            const int8_t q_high = ((q_byte >> 4) - 8);
+            output[j * 16 + k + 8] = final_sub_block_scale * q_high + dmin;
         }
     }
-
-    // --- ADDED: Logging Output ---
-    if (log_this_block && log_count_q4 < 5) {
-        std::stringstream ss_out_log; // Use stringstream
-        ss_out_log << "  Output FP32 (first 16/256 from Sub-block 0): ";
-        for(int i=0; i<16; ++i) ss_out_log << output[i] << " ";
-        ss_out_log << "...";
-        Logger::debug(ss_out_log.str()); // Log output
-        log_count_q4++; // Increment counter AFTER logging is complete
-    }
-    // --- END ADDED: Logging ---
 }
 
 // --- Dequantization for Q6_K ---
 void dequantize_q6_k(
     const block_q6_K* qblock,
-    float* output, // Changed name to match llama.cpp style
-    int num_weights_in_block, // Still useful for assert
-    bool log_this_block // ADDED: Log flag
+    float* output, 
+    int num_weights_in_block, 
+    bool log_this_block
 ) {
     if (num_weights_in_block != GGML_QK_K) {
          std::cout << "Warning: dequantize_q6_k called with num_weights != GGML_QK_K (" << num_weights_in_block << ")" << std::endl;
@@ -304,90 +255,60 @@ void dequantize_q6_k(
          return;
     }
 
-    const float d = fp16_to_fp32(qblock->d); // Super scale
+    const float d_super = fp16_to_fp32(qblock->d, true); // Super scale
+    const uint8_t* ql_ptr = qblock->ql;
+    const uint8_t* qh_ptr = qblock->qh;
+    const int8_t* scales_ptr = qblock->scales;
 
-    const uint8_t* __restrict ql = qblock->ql;
-    const uint8_t* __restrict qh = qblock->qh;
-    const int8_t* __restrict scales = qblock->scales; // 16 x int8 scales
+    // --- ADDED: Logging --- (Can be re-enabled/refined if needed after correction)
+    // static std::atomic<int> log_count_q6 = 0;
+    // static std::atomic<int> detailed_log_count_q6 = 0;
+    // bool should_do_detailed_log_q6 = log_this_block && (detailed_log_count_q6 < 2);
+    // if (should_do_detailed_log_q6) { ... Logger ... }
+    // --- END ADDED ---
 
-    // --- ADDED: Logging ---
-    static std::atomic<int> log_count_q6 = 0;
-    if (log_this_block && log_count_q6 < 5) { // Log first 5 blocks only
-        // log_count_q6++; // Moved increment
-        std::stringstream ss_log; // Use stringstream for logger
-        ss_log << "[DEQUANT_Q6K] Block #" << (log_count_q6.load() + 1) << ":";
-        Logger::debug(ss_log.str()); ss_log.str(""); // Log and clear
+    for (int sub_block_idx = 0; sub_block_idx < GGML_QK_K / 16; ++sub_block_idx) { // Iterate 16 times for 16 sub-blocks of 16 weights
+        const float s_sub_block = static_cast<float>(scales_ptr[sub_block_idx]); // Current sub-block scale (int8_t to float)
+        const float effective_scale = d_super * s_sub_block;                   // Effective scale for this sub-block
 
-        ss_log << "  Super Scale (d): " << d << " (Raw FP16: 0x" << std::hex << qblock->d << std::dec << ")";
-        Logger::debug(ss_log.str()); ss_log.str("");
+        // Pointers to the start of quant data for this sub-block
+        const uint8_t* current_ql = ql_ptr + sub_block_idx * 8;  // Each sub-block of 16 weights uses 8 bytes from ql
+        const uint8_t* current_qh = qh_ptr + sub_block_idx * 4;  // Each sub-block of 16 weights uses 4 bytes from qh
+        float* current_output_ptr = output + sub_block_idx * 16;
 
-        ss_log << "  Block Scales (16 bytes, int8): ";
-        for(int i=0; i<16; ++i) ss_log << (int)scales[i] << " ";
-        Logger::debug(ss_log.str()); ss_log.str("");
-        
-        // --- Log details for the FIRST sub-block (i=0) ---
-        const float first_sub_block_scale_factor = static_cast<float>(scales[0]);
-        ss_log << "  Sub-block 0: block_scale_factor=" << first_sub_block_scale_factor;
-        Logger::debug(ss_log.str()); ss_log.str("");
-
-        ss_log << "  Sub-block 0 QL (first 16 bytes): "; // QL for the whole block relevant for sub-block 0
-        const uint8_t* first_ql_sub_block = ql; // i=0
-        for(int k=0; k<16; ++k) ss_log << "0x" << std::hex << (int)first_ql_sub_block[k] << " ";
-        ss_log << std::dec;
-        Logger::debug(ss_log.str()); ss_log.str("");
-
-        ss_log << "  Sub-block 0 QH (first 4 bytes): "; // QH for the whole block relevant for sub-block 0
-        const uint8_t* first_qh_sub_block = qh; // i=0
-        for(int k=0; k<4; ++k) ss_log << "0x" << std::hex << (int)first_qh_sub_block[k] << " ";
-        ss_log << std::dec;
-        Logger::debug(ss_log.str()); ss_log.str("");
-        // --- End sub-block 0 details ---
-    }
-    // --- END ADDED: Logging ---
-
-
-    // Process 16 sub-blocks (16 values each)
-    for (int i = 0; i < GGML_QK_K / 16; ++i) { // i = 0..15 (sub-block index)
-        const float scale_factor = static_cast<float>(scales[i]); // Get the int8 scale factor for this sub-block
-        const float sub_block_scale = d * scale_factor; // Actual scale for the sub-block
-        float* __restrict y = output + i * 16;          // Output pointer for this sub-block
-
-        // Pointer to the start of the 16 bytes of ql for this sub-block
-        const uint8_t* ql_sub = ql + i * 16;
-        // Pointer to the start of the 4 bytes of qh for this sub-block
-        const uint8_t* qh_sub = qh + i * 4;
-
-        // Dequantize 16 values for this sub-block
-        for (int l = 0; l < 16; ++l) {
+        for (int N_in_subblock = 0; N_in_subblock < 16; ++N_in_subblock) { // Iterate over 16 weights in the sub-block
             // Lower 4 bits from ql
-            uint8_t q_low = ql_sub[l] & 0x0F;
+            // N_in_subblock / 2 gives byte index within current_ql (0-7)
+            uint8_t q_low_byte = current_ql[N_in_subblock / 2];
+            int q_low = (N_in_subblock % 2 == 0) ? (q_low_byte & 0x0F) : (q_low_byte >> 4);
 
-            // Higher 2 bits from qh (packed - 4 sets of 2 bits per byte)
-            int byte_idx_qh = l / 4;        // Which byte in qh (0..3 for this sub-block)
-            int shift_qh = (l % 4) * 2;   // Which 2 bits (0, 2, 4, 6)
-            uint8_t q_high = (qh_sub[byte_idx_qh] >> shift_qh) & 0x03;
+            // Upper 2 bits from qh
+            // N_in_subblock / 4 gives byte index within current_qh (0-3)
+            uint8_t q_high_byte = current_qh[N_in_subblock / 4]; 
+            int q_high_shift = (N_in_subblock % 4) * 2; // 0, 2, 4, 6
+            int q_high = (q_high_byte >> q_high_shift) & 0x03;
+            
+            int quant_val = (q_high << 4) | q_low; // Combine to form 6-bit value (0-63)
+            
+            current_output_ptr[N_in_subblock] = effective_scale * (static_cast<float>(quant_val) - 32.0f);
 
-            // Combine to form 6-bit quantized value [0, 63]
-            int quantized_val = q_low | (q_high << 4);
-
-            // Dequantize: Multiply by super-scale 'd' and block-scale-factor 'scale_factor'.
-            // IMPORTANT: The dequantization formula for Q6_K according to ggml.c is:
-            // val = d * scale_factor * (quantized_val - 32)
-            // We need to subtract the zero-point 32 AFTER getting the 6-bit value.
-            float val = sub_block_scale * (static_cast<float>(quantized_val) - 32.0f);
-            y[l] = val;
+            // Optional detailed logging for the very first element of the very first block
+            // if (log_this_block && sub_block_idx == 0 && N_in_subblock == 0 && detailed_log_count_q6 < 2) {
+            //     std::stringstream detail_ss;
+            //     detail_ss << "[DEQUANT_Q6K_DETAIL] First element calc (Overall Block #" << log_count_q6.load() << ", Sub #0, Elem #0):\n"
+            //               << "  qblock->d_hex=0x" << std::hex << qblock->d << std::dec << ", d_super=" << d_super << "\n"
+            //               << "  sub_block_idx=" << sub_block_idx << ", scales_ptr[" << sub_block_idx << "]=" << static_cast<int>(scales_ptr[sub_block_idx]) << " (s_sub_block=" << s_sub_block << ")\n"
+            //               << "  effective_scale=" << effective_scale << "\n"
+            //               << "  N_in_subblock=" << N_in_subblock << " -> ql_byte_offset=" << (N_in_subblock/2) << " qh_byte_offset=" << (N_in_subblock/4) << "\n"
+            //               << "  q_low_byte=0x" << std::hex << (int)q_low_byte << ", q_high_byte=0x" << (int)q_high_byte << std::dec << "\n"
+            //               << "  q_low_bits=" << q_low << ", q_high_bits=" << q_high << " -> quant_val=" << quant_val << " (val-32: " << (static_cast<float>(quant_val) - 32.0f) << ")\n"
+            //               << "  Output = " << effective_scale << " * (" << (static_cast<float>(quant_val) - 32.0f) << ") = " << current_output_ptr[N_in_subblock];
+            //     Logger::debug(detail_ss.str());
+            // }
         }
     }
-    // --- ADDED: Logging Output ---
-    if (log_this_block && log_count_q6 < 5) {
-        std::stringstream ss_out_log; // Use stringstream
-        ss_out_log << "  Output FP32 (first 16/256 from Sub-block 0): ";
-        for(int i=0; i<16; ++i) ss_out_log << output[i] << " ";
-        ss_out_log << "...";
-        Logger::debug(ss_out_log.str()); // Log output
-        log_count_q6++; // Increment counter AFTER logging complete
-    }
-    // --- END ADDED: Logging ---
+    // if (log_this_block && detailed_log_count_q6 < 2) detailed_log_count_q6++;
+    // if (log_this_block) log_count_q6++;
 }
 
 // --- Handling for I8 (Integer 8-bit) ---
@@ -879,7 +800,7 @@ size_t ggml_type_block_size(GGMLType type) {
      return 0;
 }
 
-// --- End Quantization Type Information ---
+// --- END Quantization Type Information ---
 
 // --- ADDED: Implementation for quantize_fp32_to_q8_K ---
 std::vector<block_q8_K> quantize_fp32_to_q8_K(const std::vector<float>& f_data) {
@@ -892,6 +813,10 @@ std::vector<block_q8_K> quantize_fp32_to_q8_K(const std::vector<float>& f_data) 
     const float* x = f_data.data();
     block_q8_K* y = q_data.data();
 
+    // --- ADDED: Logging for Q8_K scales ---
+    static std::atomic<int> log_count_q8k_quant_scales = 0;
+    // --- END: Logging for Q8_K scales ---
+
     for (size_t i = 0; i < num_blocks; ++i) {
         // 1. Find max absolute value in the block
         float amax = 0.0f;
@@ -900,9 +825,21 @@ std::vector<block_q8_K> quantize_fp32_to_q8_K(const std::vector<float>& f_data) 
         }
 
         // 2. Calculate scale and inverse scale
-        const float d = amax / 127.0f;
-        const float id = (d != 0.f) ? 1.0f / d : 0.0f;
-        y[i].d = fp32_to_fp16(d); // Store scale as FP16
+        const float d_fp32 = amax / 127.0f; // This is the scale before FP16 conversion
+        const float id = (d_fp32 != 0.f) ? 1.0f / d_fp32 : 0.0f;
+        y[i].d = fp32_to_fp16(d_fp32); // Store scale as FP16
+
+        // --- ADDED: Logging for Q8_K scales (after conversion) ---
+        if (log_count_q8k_quant_scales < 10) { // Log for the first few blocks quantized
+            std::stringstream q8k_scale_log_ss;
+            q8k_scale_log_ss << "[Q8K_QUANT_SCALES] Block #" << i 
+                             << " Input amax=" << amax
+                             << " -> d_fp32=" << d_fp32 
+                             << " -> Stored d_fp16=0x" << std::hex << y[i].d << std::dec;
+            Logger::debug(q8k_scale_log_ss.str());
+            log_count_q8k_quant_scales++;
+        }
+        // --- END: Logging for Q8_K scales ---
 
         // 3. Quantize and calculate block sums
         int16_t block_sum[16] = {0}; // Accumulator for sums of 16 elements
@@ -1166,14 +1103,48 @@ void matvec_q4k_q8k_cpu(
 // --- END ADDED --- 
 
 // --- ADDED: Dequantize Q8_K blocks to FP32 ---
-void dequantize_q8_k(const std::vector<block_q8_K>& q8k_vec, std::vector<float>& out_f32, int n) {
-    if (q8k_vec.empty() || n == 0) return;
-    if (out_f32.size() != (size_t)n) out_f32.resize(n);
-    int num_blocks = n / GGML_QK_K;
-    for (int b = 0; b < num_blocks; ++b) {
-        float d = fp16_to_fp32(q8k_vec[b].d);
-        for (int i = 0; i < GGML_QK_K; ++i) {
-            out_f32[b * GGML_QK_K + i] = d * q8k_vec[b].qs[i];
+void dequantize_q8_k(const std::vector<block_q8_K>& q_data, std::vector<float>& x, int n, bool log_this_block) {
+    if (n % GGML_QK_K != 0) {
+        std::cerr << "Error: n must be a multiple of GGML_QK_K for Q8_K dequantization." << std::endl;
+        return;
+    }
+    size_t num_blocks = n / GGML_QK_K;
+    if (q_data.size() < num_blocks) {
+        std::cerr << "Error: Not enough Q8_K blocks provided for dequantization." << std::endl;
+        return;
+    }
+    // --- ADDED: Logging for Q8_K DEQUANT scales ---
+    static std::atomic<int> log_count_q8k_dequant_scales = 0;
+    // --- END: Logging for Q8_K DEQUANT scales ---
+
+    for (size_t i = 0; i < num_blocks; ++i) {
+        const block_q8_K* qblock = &q_data[i];
+        float* x_block = &x[i * GGML_QK_K];
+
+        const float d = fp16_to_fp32(qblock->d, true); // MODIFIED: Pass true for is_gguf_scale_field
+
+        // --- ADDED: Logging for Q8_K DEQUANT scales ---
+        if (log_this_block && log_count_q8k_dequant_scales < 10) { 
+            std::stringstream scale_log_ss;
+            scale_log_ss << "[Q8K_DEQUANT_SCALES] Block #" << (log_count_q8k_dequant_scales.load())
+                         << " Raw_d_fp16=0x" << std::hex << qblock->d << std::dec
+                         << " -> d=" << d;
+            Logger::debug(scale_log_ss.str());
+            log_count_q8k_dequant_scales++;
         }
+        // --- END: Logging for Q8_K DEQUANT scales ---
+
+        for (int j = 0; j < GGML_QK_K; ++j) {
+            x_block[j] = d * static_cast<float>(qblock->qs[j]);
+        }
+    }
+}
+
+// --- ADDED: Dequantize Q8_0 blocks to FP32 ---
+// Dequantizes a single block_q8_0
+void dequantize_q8_0_block(const block_q8_0* qblock, float* output) {
+    const float d_fp32 = fp16_to_fp32(qblock->d, true); // GGUF scale field is true
+    for (int i = 0; i < GGML_QK8_0; ++i) { // GGML_QK8_0 is typically 32
+        output[i] = d_fp32 * static_cast<float>(qblock->qs[i]);
     }
 }
