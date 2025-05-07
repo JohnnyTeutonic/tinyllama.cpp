@@ -326,7 +326,6 @@ int main(int argc, char** argv) {
 
                 // --- Select Forward Pass based on CUDA availability ---
                 std::vector<float> logits;
-/* // <<< COMMENT OUT CUDA PATH
 #ifdef HAS_CUDA
                 // Use CUDA-accelerated forward pass
                 Logger::info("main loop: Calling model.forward_device for pos=" + std::to_string(pos));
@@ -334,23 +333,20 @@ int main(int argc, char** argv) {
                 Logger::info("main loop: Returned from model.forward_device for pos=" + std::to_string(pos));
                 // +++ START POS 0 LOGGING +++
                 if (log_this_step) {
-                    Logger::info("Completed model.forward() for prompt token at pos=0.");
+                    Logger::info("Completed model.forward_device() for prompt token at pos=0.");
                 }
                 // +++ END POS 0 LOGGING +++
 #else
-*/ // <<< END COMMENT OUT CUDA PATH
-                // Use CPU forward pass (NOW ALWAYS USED FOR DEBUGGING)
-                // Need the embedding vector for the CPU path
-                // std::vector<float> current_x = model.lookup_embedding(input_token_id); // lookup_embedding already called
+                // Use CPU forward pass
                 Logger::info("main loop: Calling model.forward (CPU) for pos=" + std::to_string(pos));
-                // log_vector_summary("main loop: Input embedding to CPU forward", current_x_vec); // Log input // Already logged if pos==0
-                // Pass current_x_vec which holds the embedding looked up earlier
                 logits = model.forward(current_x_vec, pos, &cache, nullptr); // Use original CPU pipeline
                 Logger::info("main loop: Returned from model.forward (CPU) for pos=" + std::to_string(pos));
-// <<< REMOVE #endif and corresponding #else that might exist if CUDA path was commented out
-/*
+                // +++ START POS 0 LOGGING +++
+                if (log_this_step) {
+                    Logger::info("Completed model.forward() (CPU) for prompt token at pos=0.");
+                }
+                // +++ END POS 0 LOGGING +++
 #endif // HAS_CUDA
-*/
                 // --- End Forward Pass Selection ---
 
                 // Check if logits are empty (could happen if forward fails)
