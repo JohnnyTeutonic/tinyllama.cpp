@@ -116,20 +116,57 @@ The main way to use this project is via the web server:
 *   Open your web browser and navigate to `http://localhost:8080`.
 *   You should see a chat interface where you can interact with the model.
 
-### 4. Other Executables (Optional)
+### 4. Other Executables / Command-Line Usage
 
-*   **`tinyllama`:** The original command-line interface. Less sophisticated than the web UI.
-    ```bash
-    ./build/bin/tinyllama ./data 
-    ```
-*   **`tinyllama_api_example`:** A minimal example showing how to use the `TinyLlamaSession` C++ API programmatically (see `main_api_example.cpp`).
-    ```bash
-    ./build/bin/tinyllama_api_example ./data 
-    ```
-*   **`gguf_loader`:** Command-line interface specifically for loading `.gguf` model files.
-    ```bash
-    ./build/bin/tinyllama_gguf path/to/your/model.gguf
-    ```
+Besides the web server, you can interact with the models directly via command-line executables. These are typically found in `./build/bin/`.
+
+*   **`tinyllama`**:
+    *   **Description**: Command-line interface for chat. Can load models from a SafeTensors model directory (containing `config.json`, `model.safetensors`, `tokenizer.json`) OR by providing a direct path to a `.gguf` model file.
+    *   **Usage**: `./build/bin/tinyllama <model_path_or_dir> [prompt] [steps] [temperature]`
+        *   `<model_path_or_dir>`: Path to model directory or `.gguf` file. (Default: `data`)
+        *   `[prompt]`: The text prompt to send to the model. (Default: "Hello, world!")
+        *   `[steps]`: Maximum number of new tokens to generate. (Default: `64`)
+        *   `[temperature]`: Sampling temperature. (Default: `0.7`)
+    *   **Example (SafeTensors directory)**:
+        ```bash
+        ./build/bin/tinyllama ./data "Who is the prime minister of Australia?" 32 0.1
+        ```
+    *   **Example (GGUF file)**:
+        ```bash
+        ./build/bin/tinyllama ./models/my_model.Q4_K_M.gguf "Explain black holes." 128 0.5
+        ```
+
+*   **`tinyllamagguf`**:
+    *   **Description**: Command-line interface specifically for loading `.gguf` model files for chat.
+    *   **Usage**: `./build/bin/tinyllamagguf <path_to_gguf_file> [prompt] [steps] [temperature]`
+        *   `<path_to_gguf_file>`: Direct path to the `.gguf` model file. (Required)
+        *   `[prompt]`: The text prompt. (Default: "What is the capital of France?")
+        *   `[steps]`: Maximum number of new tokens. (Default: `64`)
+        *   `[temperature]`: Sampling temperature. (Default: `0.7`)
+    *   **Example**:
+        ```bash
+        ./build/bin/tinyllamagguf ./models/another_model.Q8_0.gguf "Tell me a story." 256 0.8
+        ```
+        *(Note: Ensure `tokenizer.json` is present in the same directory as the `.gguf` file for `tinyllamagguf` and when using `.gguf` with `tinyllama`.)*
+
+## PyTorch SafeTensors Inference
+
+For users interested in a Python-based reference or for direct PyTorch inference with SafeTensors models (compatible with Llama 2 / TinyLlama architecture), a dedicated implementation is available in the `pytorch/` directory.
+
+This directory contains:
+
+*   `run_inference.py`: The main script to execute inference using PyTorch.
+*   `tinyllama.py`: Contains the PyTorch model definition (e.g., for TinyLlama).
+*   `utils.py`: Utility helper functions.
+*   `requirements.txt`: Lists the necessary Python packages to run the PyTorch inference scripts. Install these using `pip install -r pytorch/requirements.txt`.
+*   `README.md`: A dedicated README within the `pytorch/` directory provides more specific instructions on how to set up and run the PyTorch-based inference.
+
+This can be useful for:
+*   Verifying model outputs against a pure PyTorch implementation.
+*   Experimenting with the model in a Python environment before using the C++ application.
+*   Users who prefer or require a PyTorch-based workflow for SafeTensors models.
+
+Please refer to the `pytorch/README.md` for detailed usage instructions for this PyTorch implementation.
 
 ## Project Structure
 
@@ -150,5 +187,3 @@ The main way to use this project is via the web server:
 
 ## Future Enhancements
 *   Streaming responses in the web UI. 
-*   A Unified API for both safetensors and GGUF format models
-*   Configuration options for running inference programs
