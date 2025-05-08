@@ -226,8 +226,8 @@ std::string TinyLlamaSession::generate(const std::string& prompt,
 {
     Logger::info("Generate called. Prompt: \"" + prompt + "\", Steps: " + std::to_string(steps));
 
-    // TODO: Implement proper prompt formatting (using system_prompt if provided)
-    std::string formatted_prompt = prompt; // Basic placeholder
+    // Apply the Q: prompt\nA: format
+    std::string formatted_prompt = "Q: " + prompt + "\nA:"; 
 
     // Tokenize
     std::vector<std::string> token_strs = tokenizer_->tokenize(formatted_prompt);
