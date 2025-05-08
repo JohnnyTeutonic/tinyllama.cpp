@@ -23,11 +23,45 @@ These are needed to **build and run** the C++ application:
 
 1.  **CMake (>= 3.11):** Used for building the project.
 2.  **C++17 Compliant Compiler:** Such as g++, Clang, or MSVC.
-3.  **nlohmann/json:** For parsing JSON configuration files. (Fetched automatically by CMake).
+3.  **nlohmann/json:** For parsing JSON configuration files. (Fetched automatically by CMake if not found system-wide).
 4.  **cpp-httplib:** For the web server backend. (Fetched automatically by CMake).
 5.  **OpenMP (Optional):** For multi-threading CPU acceleration. CMake will try to find it; performance will be lower without it.
 6.  **CUDA Toolkit (Optional):** Required **only** if you want GPU-accelerated inference. CMake will detect it if available and build the CUDA kernels. You'll need a compatible NVIDIA GPU and drivers.
-7.  **OpenSSL (Optional):** Required by `cpp-httplib` if HTTPS support is needed (currently not explicitly used, but linked if found).
+7.  **OpenSSL (Optional):** Required by `cpp-httplib` for HTTPS support in the web server (`tinyllama_server`). Not needed for core inference or the `tinyllama` CLI tool. Linked automatically if found by CMake.
+8.  **Boost.Regex (Optional):** Was required only for the now-removed `test_tokenizer` executable. No longer needed.
+
+#### Installing C++ Dependencies on Linux (Debian/Ubuntu Example)
+
+This section provides example commands for installing the necessary C++ dependencies on Debian-based Linux distributions like Ubuntu. Package names and commands may vary for other distributions (e.g., Fedora, Arch Linux, CentOS).
+
+```bash
+# 1. Update package lists
+sudo apt update
+
+# 2. Essential build tools (includes g++ compiler) and CMake
+sudo apt install build-essential cmake
+
+# 3. nlohmann/json (JSON parsing library)
+#    Note: CMake will attempt to fetch this if not found by the system.
+#    For a system-wide install:
+sudo apt install nlohmann-json3-dev
+
+# 4. OpenMP (for parallel processing)
+#    Usually comes with modern g++, but can be installed explicitly if needed.
+sudo apt install libomp-dev
+
+# 5. OpenSSL (Optional: Only needed for HTTPS support in tinyllama_server)
+#    If you require HTTPS for the server, uncomment and run:
+# sudo apt install libssl-dev
+
+# 6. Boost.Regex (No longer needed as test_tokenizer was removed)
+# sudo apt install libboost-regex-dev
+```
+*   **cpp-httplib:** This library is fetched directly by CMake ...
+*   **Other Distributions:** For non-Debian/Ubuntu systems, please use your distribution's package manager ...
+
+##### CUDA Toolkit (Optional - For GPU Acceleration)
+# ... (CUDA section remains the same) ...
 
 ### Python Setup Dependencies
 

@@ -15,12 +15,6 @@
 #ifdef _WIN32
 #include <windows.h>
 #endif
-#ifdef __has_include
-#  if __has_include(<openssl/sha.h>)
-#    include <openssl/sha.h>
-#    define HAVE_OPENSSL_SHA
-#  endif
-#endif
 #include <cstdint> // For uintptr_t, uint16_t
 #include <numeric> // For std::accumulate
 #include <cassert> // For assert()
@@ -28,34 +22,6 @@
 #include "gguf_parser.h"
 #include <variant> // Add include for variant index
 #include "quantization.h" // Include for GGML_QK_K
-
-static uint32_t calculate_vector_checksum(const std::vector<float>& data) {
-    if (data.empty()) {
-        return 0;
-    }
-
-#ifdef HAVE_OPENSSL_SHA
-    unsigned char hash[SHA256_DIGEST_LENGTH];
-    SHA256_CTX sha256;
-    SHA256_Init(&sha256);
-    SHA256_Update(&sha256, data.data(), data.size() * sizeof(float));
-    SHA256_Final(hash, &sha256);
-
-    uint32_t checksum_val = 0;
-    std::memcpy(&checksum_val, hash, sizeof(uint32_t));
-    return checksum_val;
-#else
-    uint32_t checksum_val = 0;
-    for (size_t i = 0; i < data.size(); ++i) {
-        uint32_t u_val;
-        std::memcpy(&u_val, &data[i], sizeof(float)); 
-        checksum_val = checksum_val ^ (u_val + 0x9e3779b9 + (checksum_val << 6) + (checksum_val >> 2));
-    }
-    checksum_val = checksum_val ^ static_cast<uint32_t>(data.size()); 
-    return checksum_val;
-#endif
-}
-
 
 static void matvec_q6k_f32_vector_cpu(const std::vector<block_q6_K>& mat_q6k,
                                   const std::vector<float>& vec_f32,
@@ -1090,8 +1056,6 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
         std::vector<float> concat;
         for (const auto& v : src) concat.insert(concat.end(), v.begin(), v.end());
         if (!concat.empty()) {
-            uint32_t checksum = calculate_vector_checksum(concat); // Ensures correct spelling
-            Logger::info("Checksum HOST FP32 for " + weight_name + ": " + std::to_string(checksum) + " (Size: " + std::to_string(concat.size()) + ")");
             Logger::info("[UPLOAD_F32_LAMBDA] Processing: " + weight_name);
             gpuErrchk(cudaMalloc(&dev_ptr, concat.size() * sizeof(float)));
             gpuErrchk(cudaMemcpy(dev_ptr, concat.data(), concat.size() * sizeof(float), cudaMemcpyHostToDevice));
@@ -1104,9 +1068,6 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
             concat.insert(concat.end(), tmp.begin(), tmp.end());
         }
         if (!concat.empty()) {
-            uint32_t checksum = calculate_vector_checksum(concat); // Corrected TYPO here as well
-            Logger::info("Checksum HOST FP32 for " + weight_name + ": " + std::to_string(checksum) + " (Size: " + std::to_string(concat.size()) + ")");
-            Logger::info("[UPLOAD_BF16_LAMBDA] Processing: " + weight_name);
             gpuErrchk(cudaMalloc(&dev_ptr, concat.size() * sizeof(float)));
             gpuErrchk(cudaMemcpy(dev_ptr, concat.data(), concat.size() * sizeof(float), cudaMemcpyHostToDevice));
         }
