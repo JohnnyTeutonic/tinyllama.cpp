@@ -54,30 +54,18 @@ void rmsnorm_vector_cuda(const std::vector<float>& x_in_host,
 /**
  * @brief Host-vector version: Allocates all device buffers internally.
  */
-void matvec_bf16_f32_cuda(cublasHandle_t handle,
-                          const std::vector<uint16_t>& mat_bf16_host,
-                          const std::vector<float>& vec_f32_host, 
+void matvec_f32_f32_cuda(cublasHandle_t handle,
+                          const std::vector<float>& mat_f32_host,
+                          const std::vector<float>& vec_f32_host,
                           std::vector<float>& out_f32_host,
                           int rows,
                           int cols);
 
 /**
- * @brief Host-Matrix / Device-Vectors version.
- * Handles temp allocation & copy for the matrix.
- */
-void matvec_bf16_f32_cuda(cublasHandle_t handle,
-                          const std::vector<uint16_t>& mat_bf16_host, // HOST Matrix
-                          const float* vec_f32_dev,                 // DEVICE Vector In
-                          float* out_f32_dev,                       // DEVICE Vector Out
-                          int rows,
-                          int cols,
-                          cudaStream_t stream = 0);                  // Added stream
-
-/**
  * @brief Device-pointer version: for use with device input/output buffers.
  */
-void matvec_bf16_f32_cuda(cublasHandle_t handle,
-                          const uint16_t* mat_bf16_dev,
+void matvec_f32_f32_cuda(cublasHandle_t handle,
+                          const float* mat_f32_dev,
                           const float* vec_f32_dev,
                           float* out_f32_dev,
                           int rows,
@@ -107,12 +95,7 @@ void softmax_vector_cuda(const std::vector<float>& x_host,
                          int n);
 
 // Device-pointer RoPE wrapper (UPDATED SIGNATURE)
-void rope_cuda(float* x_dev, 
-               int num_heads, 
-               int head_dim, 
-               const float* all_freqs_cis_dev_base, // Changed from freqs_dev
-               int pos, // Added pos parameter
-               cudaStream_t stream = 0);
+void rope_cuda(float* vec, int num_heads, int head_dim, const float* freqs_cis_dev, int pos, cudaStream_t stream); // Modified signature
 
 /**
  * @brief CUDA Attention kernel wrapper (Reads directly from flat K/V Cache)
@@ -202,12 +185,39 @@ void swiglu_cuda(const float* gate_dev, const float* up_dev, float* out_dev, int
 // NEW KERNEL DECLARATION (MODIFIED SIGNATURE)
 void lookup_embedding_bf16_f32_cuda(const uint16_t* embedding_table_dev,
                                     float* output_vector_dev,
-                                    int token_id,
-                                    int hidden_size,
+                                    int token_id, 
+                                    int hidden_size, 
                                     int vocab_size,
                                     cudaStream_t stream = 0);
 
 void matvec_f32_f32_cuda(cublasHandle_t handle, const float * mat_f32_dev, const float * vec_f32_dev, float * out_f32_dev, int rows, int cols, cudaStream_t stream);
+
+// --- ADDED START ---
+// Performs embedding lookup directly on the GPU.
+// Reads from either a BF16 or FP32 embedding table on the device.
+// table_dev: Pointer to the embedding table on the device (either const uint16_t* or const float*).
+// output_dev: Pointer to the output buffer on the device (float*).
+// token_id: The ID of the token to look up.
+// hidden_size: The dimension of the embedding vector.
+// vocab_size: Total size of the vocabulary (for bounds checking).
+// is_bf16: True if table_dev points to BF16 data, False if it points to FP32 data.
+// stream: The CUDA stream to use.
+void lookup_embedding_cuda(const void* table_dev,
+                           float* output_dev,
+                           int token_id,
+                           int hidden_size,
+                           int vocab_size, // Added for bounds check
+                           bool is_bf16,
+                           cudaStream_t stream);
+// --- ADDED END ---
+
+void matvec_bf16_f32_cuda(cublasHandle_t handle,
+                          const uint16_t* mat_bf16_dev,
+                          const float* vec_f32_dev,
+                          float* out_f32_dev,
+                          int rows,
+                          int cols,
+                          cudaStream_t stream = 0);
 
 #endif // HAS_CUDA
 

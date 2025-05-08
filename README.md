@@ -69,8 +69,20 @@ mkdir build
 cd build
 
 # Configure with CMake
-# (CMake should automatically detect CUDA if available)
+# Default: CMake will try to automatically detect CUDA if available 
+# and if found, it will enable CUDA support (HAS_CUDA=ON).
 cmake ..
+
+# --- Compiling WITH CUDA (Optional) ---
+# If CUDA is installed but you want to be explicit or if auto-detection fails:
+# cmake .. -DHAS_CUDA=ON
+# Ensure your CUDA Toolkit is installed and visible to CMake (e.g., in your PATH).
+
+# --- Compiling WITHOUT CUDA --- 
+# If you have CUDA installed but want to force a CPU-only build:
+# cmake .. -DHAS_CUDA=OFF
+
+# If you do NOT have CUDA installed, CMake will automatically set HAS_CUDA=OFF.
 
 # Build the executables
 # On Linux/macOS:
@@ -114,23 +126,29 @@ The main way to use this project is via the web server:
     ```bash
     ./build/bin/tinyllama_api_example ./data 
     ```
+*   **`gguf_loader`:** Command-line interface specifically for loading `.gguf` model files.
+    ```bash
+    ./build/bin/tinyllama_gguf path/to/your/model.gguf
+    ```
 
 ## Project Structure
 
 *   `CMakeLists.txt`: Defines the build process, dependencies, and targets.
 *   `*.cpp`, `*.h`, `*.cu`: C++ source, header, and CUDA kernel files.
+    *   `main_gguf.cpp`: Main entry point for GGUF model loading and generation tests.
     *   `api.cpp`/`api.h`: Defines the `TinyLlamaSession` class for easier interaction.
     *   `model.cpp`/`model.h`: Core model logic (transformer layers, attention, etc.).
     *   `tokenizer.cpp`/`tokenizer.h`: Tokenizer loading and BPE logic wrapper.
-    *   `safetensors_loader.cpp`/`safetensors_loader.h`: Handles loading weights.
+    *   `safetensors_loader.cpp`/`safetensors_loader.h`: Handles loading weights from `.safetensors` files.
+    *   `gguf_parser.cpp`/`gguf_parser.h`: Handles loading metadata and weights from `.gguf` files.
     *   `server.cpp`: Implements the HTTP server using `cpp-httplib`.
     *   `cuda_kernels.cu`: Contains CUDA kernels for GPU acceleration.
     *   `logger.cpp`/`logger.h`: Simple logging utility.
+    *   `quantization.h`: Contains structures and functions for quantized types (Q4_K, Q6_K, Q8_0 etc.).
 *   `www/`: Contains the static files (HTML, CSS, JavaScript) for the web chat UI.
 *   `data/` (Example): You need to create this directory and place your model files inside it.
 
 ## Future Enhancements
-
-*   Support for other model weight formats like GGUF.
-*   More sophisticated sampling methods.
 *   Streaming responses in the web UI. 
+*   A Unified API for both safetensors and GGUF format models
+*   Configuration options for running inference programs

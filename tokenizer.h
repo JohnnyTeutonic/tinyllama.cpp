@@ -4,6 +4,14 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <utility> // For std::pair
+#include <map> // <<< ADDED for potential merge map later
+#include <limits> // <<< ADDED for numeric limits
+#include <unordered_set>
+// --- ADDED GGUF INCLUDES ---
+#include "gguf_structs.h" // Need GGUFData definition
+#include "logger.h"       // For logging
+#include "model.h" // <<< ADDED
 
 /**
  * A simple tokenizer class that doesn't rely on OpenNMT or any external libraries.
@@ -12,12 +20,25 @@
  */
 class Tokenizer {
 public:
+    // --- ADDED: Pre-tokenization method enum ---
+    enum PreTokenizeMethod {
+        DEFAULT, // Use the tokenizer's configured default
+        WHITESPACE, // Force whitespace splitting before BPE
+        LLAMA_REGEX // Force llama.cpp regex before BPE
+    };
+    // --- END ADDED ---
+
     /**
      * Constructor: Load tokenizer from vocab file
      * @param model_path Ignored for now (placeholder for future SentencePiece support)
      * @param vocab_path Path to the JSON file containing token vocabulary
      */
     Tokenizer(const std::string& model_path, const std::string& vocab_path);
+    
+    // --- ADDED: Constructor from GGUF Data ---
+    // This constructor prioritizes loading tokenizer info from GGUF metadata
+    explicit Tokenizer(const GGUFData& gguf_data);
+    // --- END: Added Constructor ---
     
     /**
      * Tokenize text into token strings
@@ -48,8 +69,23 @@ public:
     std::string detokenize(const std::vector<std::string>& tokens) const;
     
     // Encode/decode methods with option to add special tokens
-    std::vector<int> encode(const std::string& text, bool add_special_tokens = true) const;
+    std::vector<int> encode(const std::string& text, 
+                            bool add_bos = true, 
+                            bool add_eos = false, // <<< Default add_eos to false
+                            PreTokenizeMethod pre_tok_override = PreTokenizeMethod::DEFAULT) const;
     std::string decode(const std::vector<int>& ids, bool skip_special_tokens = true) const;
+    
+    // Apply Chat Template
+    std::string apply_chat_template(const std::string& user_prompt, 
+                                     const std::string& system_message,
+                                     const ModelConfig& config) const;
+    
+    // GGUF Vocab Size
+    int vocab_size() const;
+    
+    // --- ADDED: Check if an ID is an added special token ---
+    bool is_added_token(int id) const;
+    // --- END ADDED ---
     
     // Special token accessors
     int bos_token_id() const { return bos_token_id_; }
@@ -57,10 +93,13 @@ public:
     int pad_token_id() const { return pad_token_id_; }
     int unk_token_id() const { return unk_token_id_; }
 
+    std::vector<std::string> space_tokenize(const std::string& text) const;
+    std::vector<std::string> bpe_tokenize(const std::string& text) const; // For JSON/merges (Backup Version)
+    std::vector<std::string> regex_tokenize(const std::string& text) const; // Added based on test usage
+
 private:
     // Tokenization implementations
-    std::vector<std::string> space_tokenize(const std::string& text) const;
-    std::vector<std::string> bpe_tokenize(const std::string& text) const;
+    std::vector<std::string> bpe_tokenize_from_scores(const std::string& text) const; // For GGUF/scores
     std::vector<std::string> sentencepiece_tokenize(const std::string& text) const;
     
     // Loading functions
@@ -74,8 +113,18 @@ private:
     std::unordered_map<std::string, int> token_to_id_;
     std::vector<std::string> id_to_token_;
     
-    // BPE merges (pair -> rank)
+    // BPE merges (pair -> rank) - Loaded from JSON
     std::unordered_map<std::string, int> bpe_merges_;
+    
+    // --- ADDED: GGUF-specific tokenizer data ---
+    std::vector<float> token_scores_;       // Loaded from tokenizer.ggml.scores
+    std::vector<int32_t> token_types_;      // Loaded from tokenizer.ggml.token_type (use int32_t as per GGUF spec)
+    bool initialized_from_gguf_ = false; // Flag to indicate initialization source
+    // --- END ADDED ---
+    
+    // --- ADDED: Redeclare added_tokens_ member ---
+    std::unordered_map<std::string, int> added_tokens_; // Map from token string to ID
+    // --- END ADDED ---
     
     // Special token handling
     std::string unk_token_;
@@ -90,4 +139,16 @@ private:
     
     // SentencePiece model state
     bool sentencepiece_model_loaded_ = false;
+
+    // --- ADDED: Store pre-tokenization type ---
+    std::string pre_tok_type_ = "unknown"; // e.g., "llama", "default"
+    // --- END ADDED ---
+
+    // --- ADDED: Added tokens: ID -> Token string (reverse map) ---
+    std::unordered_map<int, std::string> id_to_added_token_;
+    // --- END ADDED ---
+
+    std::unordered_set<std::string> chat_template_special_tokens;
+
+    std::unordered_map<char, int> byte_char_to_id_;
 }; 

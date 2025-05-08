@@ -1,0 +1,297 @@
+diff --git a/model.cpp b/model.cpp
+index e1231cc..99e3d2d 100644
+--- a/model.cpp
++++ b/model.cpp
+@@ -146,7 +146,10 @@ static void matvec_q4k_f32_vector_cpu(const std::vector<block_q4_K>& mat_q4k,
+         for (size_t block_col_idx = 0; block_col_idx < num_blocks_per_row; ++block_col_idx) {
+             // Dequantize the current block
+             const block_q4_K* qblock = &mat_q4k[block_row_offset + block_col_idx];
+-            dequantize_q4_k_m(qblock, dequantized_block, GGML_QK_K); // Dequantize into the thread-local buffer
++            // --- MODIFIED: Enable logging for the first block --- 
++            // bool enable_dequant_log = (block_col_idx == 0); // REMOVED
++            dequantize_q4_k_m(qblock, dequantized_block, GGML_QK_K); // Dequantize // REMOVED Log Flag arg
++            // --- END MODIFICATION ---
+ 
+             // Calculate dot product for this block
+             size_t vec_offset = block_col_idx * GGML_QK_K;
+@@ -419,8 +422,8 @@ void KVCache::initialize(int num_layers, int max_seq_len, int num_kv_heads, int
+     layers.resize(num_layers); // Resize the vector of layers
+     seq_len = 0; // Reset sequence length
+ 
+-    // --- ALWAYS Allocate CPU Host Vectors --- 
+-    // Calculate the size needed for each layer's K and V cache (host vectors)
++    // --- REVERT: Always Allocate CPU Host Vectors --- 
++    Logger::info("Allocating KVCache host vectors..."); // Simplified message
+     size_t cache_size_per_layer = static_cast<size_t>(max_seq_len) * 
+                                  static_cast<size_t>(num_kv_heads) * 
+                                  static_cast<size_t>(head_dim);
+@@ -429,7 +432,6 @@ void KVCache::initialize(int num_layers, int max_seq_len, int num_kv_heads, int
+         throw std::runtime_error("KVCache (CPU): Calculated cache size is zero. Check parameters.");
+     }
+     
+-    // Allocate and zero-initialize all host cache vectors
+     for (int l = 0; l < num_layers; ++l) {
+         try {
+             layers[l].k.assign(cache_size_per_layer, 0.0f); // Use assign for resize + fill
+@@ -442,7 +444,7 @@ void KVCache::initialize(int num_layers, int max_seq_len, int num_kv_heads, int
+     Logger::info("KVCache (CPU) vectors allocated for " + std::to_string(num_layers) + " layers.");
+ 
+ #ifdef HAS_CUDA
+-    // --- CUDA Path --- 
++    // --- CUDA Path (Allocate GPU memory) --- 
+     // Store allocation parameters for destructor and indexing
+     allocated_num_layers = num_layers;
+     allocated_max_seq_len = max_seq_len;
+@@ -478,12 +480,8 @@ void KVCache::initialize(int num_layers, int max_seq_len, int num_kv_heads, int
+     Logger::info("KVCache GPU allocation complete.");
+ 
+ #else 
+-    // --- CPU Path --- 
+-    // REMOVE the CPU allocation from here, it's done above now.
+-    // size_t cache_size_per_layer = ... (removed)
+-    // if (cache_size_per_layer == 0) { ... } (removed)
+-    // for (int l = 0; l < num_layers; ++l) { ... } (removed)
+-     Logger::info("KVCache (CPU-only build) initialized with dimensions: " + // Adjusted log message
++    // --- CPU Path Log (No allocation here if #ifndef above was removed) ---
++     Logger::info("KVCache (CPU-only build) initialized with dimensions: " + 
+                    std::to_string(num_layers) + " layers, " +
+                    std::to_string(max_seq_len) + " seq len, " +
+                    std::to_string(num_kv_heads) + " KV heads, " +
+@@ -505,9 +503,9 @@ static std::vector<float> bf16vec_to_float_vec(const std::vector<uint16_t>& v_bf
+ // --- START: C++ Vector MatVec BF16 * F32 -> F32 CPU Implementation ---
+ // Renamed from matvec_bf16_f32_vector, removed internal #ifdef
+ static void matvec_bf16_f32_vector_cpu(const std::vector<uint16_t>& mat_bf16,
+-                                       const std::vector<float>& vec_f32,
+-                                       std::vector<float>& out_f32,
+-                                       int rows, int cols) {
++                                   const std::vector<float>& vec_f32,
++                                   std::vector<float>& out_f32,
++                                   int rows, int cols) {
+     // Logger::info("Using CPU MatVec (BF16*F32->F32, OpenMP+Kahan)"); // Optional log
+     // Original OpenMP + Kahan implementation
+     if (mat_bf16.size() != (size_t)rows * cols || vec_f32.size() != (size_t)cols) {
+@@ -1190,7 +1188,7 @@ std::vector<float> TinyLlamaModel::lookup_embedding(int token_id) {
+         Logger::error("Token ID out of bounds in lookup_embedding: " + std::to_string(token_id) + " (Vocab size: " + std::to_string(vs) + ")");
+         return std::vector<float>(hs, 0.0f); 
+     }
+-
++    
+     size_t offset = (size_t)token_id * hs;
+     std::vector<float> embedding_vec(hs, 0.0f); // Initialize output vector
+ 
+@@ -1203,13 +1201,13 @@ std::vector<float> TinyLlamaModel::lookup_embedding(int token_id) {
+         // Logger::info("Using F32 embedding table for token: " + std::to_string(token_id));
+         std::copy(embed_tokens_f32.begin() + offset, embed_tokens_f32.begin() + offset + hs, embedding_vec.begin());
+     } else if (!embed_tokens.empty()) { // Check BF16 next
+-         if (offset + hs > embed_tokens.size()) {
++    if (offset + hs > embed_tokens.size()) {
+             Logger::error("Embedding offset out of bounds for BF16 embeddings. Token: " + std::to_string(token_id));
+             return embedding_vec; // Return zero vec
+-        }
++    }
+         // Logger::info("Using BF16 embedding table for token: " + std::to_string(token_id));
+         // Convert the bfloat16 vector slice to a float32 vector
+-        std::vector<uint16_t> token_embedding_bf16(embed_tokens.begin() + offset, embed_tokens.begin() + offset + hs);
++    std::vector<uint16_t> token_embedding_bf16(embed_tokens.begin() + offset, embed_tokens.begin() + offset + hs);
+         embedding_vec = bf16vec_to_float_vec(token_embedding_bf16);
+     } else if (!embed_tokens_q6k.empty()) {
+         Logger::error("Q6_K embedding dequantization not yet implemented in lookup_embedding. Token: " + std::to_string(token_id));
+@@ -1234,14 +1232,21 @@ std::vector<float> TinyLlamaModel::lookup_embedding(int token_id) {
+         float dequantized_block[GGML_QK_K]; // Temp buffer for one block
+         for (size_t block_idx = 0; block_idx < num_blocks_per_row; ++block_idx) {
+             const block_q4_K* qblock = &embed_tokens_q4k[start_block_index + block_idx];
+-            dequantize_q4_k_m(qblock, dequantized_block, GGML_QK_K); // Dequantize
++            // --- MODIFIED: Enable logging for the first block --- 
++            bool enable_dequant_log = (block_idx == 0); 
++            dequantize_q4_k_m(qblock, dequantized_block, GGML_QK_K, enable_dequant_log); // Dequantize // ADDED Log Flag arg back
++            // --- END MODIFICATION ---
+             
+             // Copy dequantized floats into the output vector
+             size_t output_offset = block_idx * GGML_QK_K;
+             if (output_offset + GGML_QK_K > embedding_vec.size()) {
+                  throw std::runtime_error("Internal error: Output offset exceeds embedding vector size during Q4_K dequantization.");
+             }
++            // --- REMOVED Logging around memcpy ---
++            // if (enable_dequant_log) { ... log BEFORE ... }
+             std::memcpy(&embedding_vec[output_offset], dequantized_block, GGML_QK_K * sizeof(float));
++            // if (enable_dequant_log) { ... log AFTER ... }
++            // --- END REMOVED ---
+         }
+         // --- END: Implement Q4_K Lookup --- 
+     } else {
+@@ -1301,6 +1306,9 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, K
+ 
+     // --- Layer Loop (CPU Path) ---
+     for (int l = 0; l < nhl; ++l) {
++        // --- REMOVED Layer 0 Logging ---
++        // if (l == 0 && log_initial) { ... }
++
+         const auto& lw = layers[l];
+         std::vector<float> x_resid1_vec = x_vec; // Residual 1
+ 
+@@ -1370,7 +1378,7 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, K
+              if (write_offset + head_dim <= cache->layers[l].k.size()) {
+                  std::memcpy(&cache->layers[l].k[write_offset], k_current_ptr + current_k_offset, head_dim * sizeof(float));
+                  std::memcpy(&cache->layers[l].v[write_offset], v_current_ptr + current_v_offset, head_dim * sizeof(float));
+-             } else {
++        } else {
+                  Logger::error("KVCache write out of bounds: layer=" + std::to_string(l) + ", pos=" + std::to_string(pos) + ", kv_head=" + std::to_string(kvh));
+              }
+          }
+@@ -1421,10 +1429,22 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, K
+             throw std::runtime_error("Layer " + std::to_string(l) + ": No valid O projection weights found!");
+         }
+ 
++        // +++ START LAYER 0 LOGGING +++
++        if (l == 0 && log_initial) {
++            log_vector_summary("Layer 0 Attn Proj Out (attn_proj_vec)", attn_proj_vec);
++        }
++        // +++ END LAYER 0 LOGGING +++
++
+         #pragma omp parallel for
+         for(size_t i=0; i<hs; ++i) {
+             x_vec[i] = x_resid1_vec[i] + attn_proj_vec[i]; 
+         }
++
++        // +++ START LAYER 0 LOGGING +++
++        if (l == 0 && log_initial) {
++            log_vector_summary("Layer 0 After Attn Residual (x_vec)", x_vec);
++        }
++        // +++ END LAYER 0 LOGGING +++
+         
+         // --- MLP Block --- 
+         std::vector<float> x_resid2_vec = x_vec; 
+@@ -1489,6 +1509,18 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, K
+             x_vec[i] = x_resid2_vec[i] + mlp_out_vec[i]; 
+         }
+ 
++        // +++ START LAYER 0 LOGGING +++
++        if (l == 0 && log_initial) {
++            log_vector_summary("Layer 0 MLP Down Proj Out (mlp_out_vec)", mlp_out_vec);
++        }
++        // +++ END LAYER 0 LOGGING +++
++
++        // +++ START LAYER 0 LOGGING +++
++        if (l == 0 && log_initial) {
++            log_vector_summary("Layer 0 End (After MLP Residual) (x_vec)", x_vec);
++        }
++        // +++ END LAYER 0 LOGGING +++
++
+     } // End layer loop
+ 
+     // --- Final Steps (Outside Layer Loop) ---
+@@ -1500,7 +1532,7 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& x_vec, int pos, K
+         log_vector_summary("Output of Final CPU RMSNorm (P0)", x_final_norm_vec); // Updated log msg
+     }
+ 
+-    std::vector<float> logits(vs);
++    std::vector<float> logits(vs); 
+     // Conditional LM Head MatVec (CPU)
+     if (!lm_head_q6k.empty()) {
+         Logger::info("Using Q6_K LM Head for CPU MatVec.");
+@@ -1853,6 +1885,49 @@ void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
+                 assign_vec_f32(model.embed_tokens_f32, tinfo);
+                 Logger::info("Mapped GGUF tensor '" + name + "' (FP32) to model.embed_tokens_f32");
+             } else if (tinfo.type == GGMLType::GGML_TYPE_Q4_K) { // Use .type and correct enum name
++                // --- ADD DETAILED LOGGING FOR Q4_K EMBEDDING MAPPING ---
++                size_t num_blocks = 0;
++                uintptr_t src_addr = 0;
++                uintptr_t src_end_addr_calc = 0;
++                uintptr_t data_start_addr = reinterpret_cast<uintptr_t>(gguf.tensor_data.data());
++                uintptr_t data_end_addr = data_start_addr + gguf.tensor_data.size();
++                const block_q4_K* first_block_ptr = nullptr;
++                uint16_t raw_d = 0, raw_dmin = 0;
++                float converted_d = NAN, converted_dmin = NAN;
++
++                try {
++                    if (GGML_QK_K != 0 && tinfo.num_elements % GGML_QK_K == 0) {
++                        num_blocks = tinfo.num_elements / GGML_QK_K;
++                        src_addr = reinterpret_cast<uintptr_t>(gguf.tensor_data.data()) + tinfo.offset;
++                        src_end_addr_calc = src_addr + num_blocks * sizeof(block_q4_K);
++                        if (num_blocks > 0 && src_addr >= data_start_addr && (src_addr + sizeof(block_q4_K)) <= data_end_addr) {
++                             first_block_ptr = reinterpret_cast<const block_q4_K*>(src_addr);
++                             raw_d = first_block_ptr->d;
++                             raw_dmin = first_block_ptr->dmin;
++                             converted_d = fp16_to_fp32(raw_d);
++                             converted_dmin = fp16_to_fp32(raw_dmin);
++                        }
++                    }
++                    std::stringstream log_map;
++                    log_map << "[MAP GGUF Q4_K EMBEDDING]: Tensor='" << tinfo.name << "', Offset=" << tinfo.offset
++                           << ", NumElem=" << tinfo.num_elements << ", NumBlocks=" << num_blocks
++                           << ", SizeBytes=" << tinfo.size_in_bytes << ", CalcSize=" << (num_blocks * sizeof(block_q4_K)) << "\n"
++                           << "    DataBuffer: [" << data_start_addr << " - " << data_end_addr << "] (Size: " << gguf.tensor_data.size() << ")\n"
++                           << "    SrcPtrAddr: " << src_addr << " (RelOffset: " << (src_addr - data_start_addr) << ")\n"
++                           << "    CalcEndPtr: " << src_end_addr_calc << "\n"
++                           << "    ReadRangeOK: " << (src_addr >= data_start_addr && src_end_addr_calc <= data_end_addr ? "YES" : "NO!") << "\n";
++                    if (first_block_ptr) {
++                         log_map << "    First Block @ " << reinterpret_cast<uintptr_t>(first_block_ptr) << ":\n"
++                                << "      Raw d=0x" << std::hex << raw_d << std::dec << " -> fp32=" << converted_d << "\n"
++                                << "      Raw dmin=0x" << std::hex << raw_dmin << std::dec << " -> fp32=" << converted_dmin;
++                    } else {
++                         log_map << "    First Block: Could not read (invalid ptr or num_blocks=0).";
++                    }
++                    Logger::info(log_map.str());
++                } catch (const std::exception& log_ex) {
++                     Logger::error("Exception during Q4_K embedding mapping log generation: " + std::string(log_ex.what()));
++                }
++                // --- END LOGGING ---
+                 assign_vec_q4k(model.embed_tokens_q4k, tinfo);
+                 Logger::info("Mapped GGUF tensor '" + name + "' (Q4_K) to model.embed_tokens_q4k");
+             } else if (tinfo.type == GGMLType::GGML_TYPE_Q6_K) { // Use .type and correct enum name
+@@ -2099,7 +2174,7 @@ ModelConfig parse_model_config_from_gguf(const GGUFData& gguf) {
+                 if constexpr (std::is_same_v<StoredType, TargetType>) {
+                     result_value = stored_val;
+                     conversion_ok = true;
+-                }
++            }
+                 // Allow conversion from any integer/float to float/double target
+                 else if constexpr (std::is_floating_point_v<TargetType> && (std::is_integral_v<StoredType> || std::is_floating_point_v<StoredType>)) {
+                     result_value = static_cast<TargetType>(stored_val);
+@@ -2114,7 +2189,7 @@ ModelConfig parse_model_config_from_gguf(const GGUFData& gguf) {
+                         static_cast<long long>(stored_val) <= static_cast<long long>(std::numeric_limits<TargetType>::max())) {
+                          result_value = static_cast<TargetType>(stored_val);
+                          conversion_ok = true;
+-                     } else {
++    } else {
+                          Logger::warning("Metadata value for key '" + key + "' ('" + std::to_string(stored_val) + "') out of range for target type. Using default."); // FIXED typo: '' -> "')"
+                      }
+                 }
+@@ -2127,7 +2202,7 @@ ModelConfig parse_model_config_from_gguf(const GGUFData& gguf) {
+                          conversion_ok = true;
+                     } catch (const std::exception& e) {
+                         Logger::warning("Metadata string-to-numeric conversion failed for key '" + key + "', value: '" + stored_val + "': " + e.what());
+-                    }
++}
+                  }
+                 // else { // Optional: Log if no specific conversion path was taken but types differ
+                 //     if constexpr (!std::is_same_v<StoredType, TargetType>) {
+@@ -2189,12 +2264,12 @@ ModelConfig parse_model_config_from_gguf(const GGUFData& gguf) {
+          if (std::holds_alternative<uint32_t>(file_type_it->second)) { // FIXED: Removed .value
+              uint32_t file_type_enum = std::get<uint32_t>(file_type_it->second); // FIXED: Removed .value
+              Logger::info("Found general.file_type enum: " + std::to_string(file_type_enum));
+-         } else {
++                    } else {
+               Logger::warning("Metadata 'general.file_type' exists but is not a uint32_t.");
+-         }
+-    } else {
++                    }
++                } else {
+         Logger::warning("Metadata key 'general.file_type' not found.");
+-    }
++                }
+ 
+     // --- torch_dtype equivalent ---
+     std::string inferred_dtype = "unknown";
+@@ -2220,9 +2295,9 @@ ModelConfig parse_model_config_from_gguf(const GGUFData& gguf) {
+             // else if (embed_type == GGML_TYPE_BF16) inferred_dtype = "bfloat16";
+        }
+         Logger::info("Inferred model dtype '" + inferred_dtype + "' from tensor '" + norm_weight_key + "' or embedding.");
+-    } else {
++            } else {
+          Logger::warning("Could not find a norm weight or embedding tensor to infer model dtype.");
+-    }
++        }
+     cfg.torch_dtype = inferred_dtype;
+ 
+ 

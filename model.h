@@ -13,6 +13,33 @@
 #include <cublas_v2.h>    // <<< INCLUDE CUBLAS >>>
 #include "cuda_kernels.h" // Needed for gpuErrchk
 #endif
+#include "quantization.h" // For block_q4_K, block_q6_K, block_q8_0, GGML_QK8_0
+#include <memory>
+
+// --- ADDED: TensorName Enum and Helper ---
+enum class TensorName {
+    Q_PROJ, K_PROJ, V_PROJ, O_PROJ,
+    GATE_PROJ, UP_PROJ, DOWN_PROJ,
+    TOKEN_EMBD, LM_HEAD,
+    UNKNOWN
+};
+
+// Helper to convert TensorName to string (optional, for logging)
+static std::string tensor_name_to_string(TensorName tn) {
+    switch (tn) {
+        case TensorName::Q_PROJ: return "Q_PROJ";
+        case TensorName::K_PROJ: return "K_PROJ";
+        case TensorName::V_PROJ: return "V_PROJ";
+        case TensorName::O_PROJ: return "O_PROJ";
+        case TensorName::GATE_PROJ: return "GATE_PROJ";
+        case TensorName::UP_PROJ: return "UP_PROJ";
+        case TensorName::DOWN_PROJ: return "DOWN_PROJ";
+        case TensorName::TOKEN_EMBD: return "TOKEN_EMBD";
+        case TensorName::LM_HEAD: return "LM_HEAD";
+        default: return "UNKNOWN";
+    }
+}
+// --- END ADDED ---
 
 struct ModelConfig {
     int hidden_size;
@@ -28,16 +55,29 @@ struct ModelConfig {
     std::string torch_dtype;
     int bos_token_id;
     int eos_token_id;
+    // --- ADDED: Model Type Identification ---
+    std::string architecture = "unknown"; // e.g., "llama", "tinyllama"
+    std::string model_name = "unknown";   // e.g., "LLaMA v2", "TinyLlama-1.1B-Chat-v1.0"
+    std::string chat_template_type = "unknown"; // e.g., "llama2", "tinyllama"
+    std::string pre_tokenizer_type = "unknown"; // e.g., "llama", "default"
+    std::string chat_template_string; // <<< ADDED: Stores template from metadata
+    // --- END ADDED ---
 };
+
+struct GGUFData; // Forward declaration
+struct ModelConfig; // Forward declaration needed for the parse function
+ModelConfig parse_model_config_from_gguf(const GGUFData& gguf); // Forward declaration
 
 // KVCache for autoregressive inference
 struct KVCacheLayer {
-#ifdef HAS_CUDA
-    float* k_dev = nullptr; // Device pointer for K cache of this layer
-    float* v_dev = nullptr; // Device pointer for V cache of this layer
-#else
+    // --- ALWAYS define host vectors --- 
     std::vector<float> k; // Host vector for K cache (CPU path)
     std::vector<float> v; // Host vector for V cache (CPU path)
+
+#ifdef HAS_CUDA
+    // --- Conditionally define device pointers --- 
+    float* k_dev = nullptr; // Device pointer for K cache of this layer
+    float* v_dev = nullptr; // Device pointer for V cache of this layer
 #endif
 };
 
@@ -92,6 +132,20 @@ struct LayerWeights {
     std::vector<uint16_t> up_proj;   // [intermediate_size, hidden_size]
     std::vector<uint16_t> down_proj; // [hidden_size, intermediate_size]
 
+    // --- ADDED: FP32 and Quantized fields ---
+    std::vector<float> input_layernorm_f32;
+    std::vector<float> post_attention_layernorm_f32;
+    std::vector<float> q_proj_f32, k_proj_f32, v_proj_f32, o_proj_f32;
+    std::vector<float> gate_proj_f32, up_proj_f32, down_proj_f32;
+    std::vector<block_q4_K> q_proj_q4k, k_proj_q4k, v_proj_q4k, o_proj_q4k;
+    std::vector<block_q4_K> gate_proj_q4k, up_proj_q4k, down_proj_q4k;
+    std::vector<block_q6_K> q_proj_q6k, k_proj_q6k, v_proj_q6k, o_proj_q6k;
+    std::vector<block_q6_K> gate_proj_q6k, up_proj_q6k, down_proj_q6k;
+    // --- ADDED: Q8_0 fields for LayerWeights ---
+    std::vector<block_q8_0> q_proj_q8_0, k_proj_q8_0, v_proj_q8_0, o_proj_q8_0;
+    std::vector<block_q8_0> gate_proj_q8_0, up_proj_q8_0, down_proj_q8_0;
+    // --- END ADDED ---
+
 #ifdef HAS_CUDA
     // Device pointers for RMSNorm weights
     float* input_layernorm_dev = nullptr;
@@ -103,13 +157,17 @@ class TinyLlamaModel {
 public:
     // Construct from config and safetensors loader
     TinyLlamaModel(const ModelConfig& config, const SafeTensorsLoader& loader);
+    // New: Construct from config and weights file path (auto-detect GGUF or safetensors)
+    TinyLlamaModel(const ModelConfig& config, const std::string& weights_path);
     ~TinyLlamaModel(); // ADD Destructor declaration
 
     // --- Forward Pass (NOW uses std::vector<float>) --- 
     std::vector<float> forward(std::vector<float>& x_vec, int pos, KVCache* cache = nullptr, const std::vector<int>* attention_mask = nullptr);
 
+#ifdef HAS_CUDA
     // New: Device-only forward pass for incremental GPU pipeline
     std::vector<float> forward_device(int token_id, int pos, KVCache* cache, const std::vector<int>* attention_mask = nullptr, cudaStream_t stream = 0);
+#endif
 
     // Get model config
     const ModelConfig& get_config() const { return config_; }
@@ -121,12 +179,16 @@ public:
     const std::vector<uint16_t>& get_embed_tokens() const { return embed_tokens; }
 
     // Getter for layers (for debugging)
-    const std::vector<LayerWeights>& get_layers() const { return layers; }
+    std::vector<LayerWeights>& get_layers() { return layers; } // Return mutable reference
 
     // Lookup embedding for a token (returns std::vector<float>)
     std::vector<float> lookup_embedding(int token_id);
 
     int get_vocab_size() const;
+
+    const GGUFData* get_gguf_data() const { return gguf_data_ ? gguf_data_.get() : nullptr; }
+
+    friend void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model); // Declare friend
 
 private:
     ModelConfig config_;
@@ -135,6 +197,14 @@ private:
     std::vector<uint16_t> embed_tokens; // [vocab_size, hidden_size]
     std::vector<uint16_t> lm_head;      // [vocab_size, hidden_size]
     std::vector<uint16_t> final_norm;   // [hidden_size]
+
+    // --- ADDED: FP32 and Quantized fields ---
+    std::vector<float> embed_tokens_f32, lm_head_f32, final_norm_f32;
+    std::vector<block_q4_K> embed_tokens_q4k, lm_head_q4k, final_norm_q4k;
+    std::vector<block_q6_K> embed_tokens_q6k, lm_head_q6k, final_norm_q6k;
+    // --- ADDED: Q8_0 fields for TinyLlamaModel ---
+    std::vector<block_q8_0> embed_tokens_q8_0, lm_head_q8_0;
+    // --- END ADDED ---
 
     std::vector<LayerWeights> layers; // num_hidden_layers
 
@@ -165,19 +235,44 @@ private:
     float* lm_head_f32_dev_ = nullptr;
     // --- END Persistent Device Weights (FP32) ---
     cublasHandle_t cublas_handle_ = nullptr; // <<< ADD CUBLAS HANDLE >>>
+    
+
+    // --- START: Added Persistent Workspace Buffers ---
+    float* x_dev_ = nullptr;           // Input/State vector
+    float* x_norm_dev_ = nullptr;      // Output of RMSNorm
+    float* x_resid1_dev_ = nullptr;    // Residual connection 1 (before attention)
+    float* x_resid2_dev_ = nullptr;    // Residual connection 2 (before MLP)
+    float* q_dev_ = nullptr;           // Q projection output
+    float* k_dev_ = nullptr;           // K projection output (current token)
+    float* v_dev_ = nullptr;           // V projection output (current token)
+    float* attn_out_dev_ = nullptr;    // Attention output (weighted sum of V)
+    float* attn_proj_dev_ = nullptr;   // Attention projection (O proj)
+    float* gate_vec_dev_ = nullptr;    // MLP gate projection
+    float* up_vec_dev_ = nullptr;      // MLP up projection
+    float* swiglu_vec_dev_ = nullptr;  // Output of SwiGLU
+    float* mlp_down_dev_ = nullptr;    // MLP down projection
+    float* logits_dev_ = nullptr;      // Final logits output
+    // --- END: Added Persistent Workspace Buffers ---
 #endif
 
     // Precomputed RoPE cos/sin values
     std::vector<std::pair<float, float>> precomputed_freqs_cis_;
 
-    std::vector<float> forward_from_qkv_host(
-        const std::vector<float>& x_resid1_vec, // Input embedding for residual 1
+    // Internal helper for attention calculation (if still needed)
+    /*std::vector<float> forward_from_qkv_host(
+        const std::vector<float>& x_resid1_vec, 
         std::vector<float>& q_vec,
         std::vector<float>& k_vec,
         std::vector<float>& v_vec,
         int pos,
         KVCache* cache,
-        const std::vector<int>* attention_mask);
+        const std::vector<int>* attention_mask);*/ // Commented out if unused
+
+    std::unique_ptr<GGUFData> gguf_data_; // Only set if loaded from GGUF
+
+    // --- ADDED: Private Helper Declarations ---
+    void initialize_weights(const SafeTensorsLoader* loader, const GGUFData* gguf);
+    void initialize_gpu_and_rope();
 };
 
 // Utility: parse ModelConfig from nlohmann::json
