@@ -198,6 +198,19 @@ int main(int argc, char** argv) {
         // Model weight loading example
         try {
             ModelConfig mcfg = parse_model_config(config);
+            Logger::info("[main.cpp] Config - rope_theta: " + std::to_string(mcfg.rope_theta) + ", rms_norm_eps: " + std::to_string(mcfg.rms_norm_eps));
+            Logger::info("[main.cpp] Full Config: hidden_size=" + std::to_string(mcfg.hidden_size) +
+                         ", intermediate_size=" + std::to_string(mcfg.intermediate_size) +
+                         ", num_attention_heads=" + std::to_string(mcfg.num_attention_heads) +
+                         ", num_key_value_heads=" + std::to_string(mcfg.num_key_value_heads) +
+                         ", num_hidden_layers=" + std::to_string(mcfg.num_hidden_layers) +
+                         ", vocab_size=" + std::to_string(mcfg.vocab_size) +
+                         ", max_position_embeddings=" + std::to_string(mcfg.max_position_embeddings) +
+                         ", rms_norm_eps=" + std::to_string(mcfg.rms_norm_eps) +
+                         ", rope_theta=" + std::to_string(mcfg.rope_theta) +
+                         ", bos_token_id=" + std::to_string(mcfg.bos_token_id) +
+                         ", eos_token_id=" + std::to_string(mcfg.eos_token_id)
+                         );
             TinyLlamaModel model(mcfg, st_loader);
             Logger::info("TinyLlamaModel weights loaded successfully.");
 
@@ -244,11 +257,15 @@ int main(int argc, char** argv) {
             }
 
             // Use only the PyTorch prompt template
-            std::string prompt = "Q: What is the capital of France?\nA:";
-            // Option 1: Use the low-level API as before
-            std::vector<std::string> prompt_tokens = tokenizer.tokenize(prompt);
-            std::vector<int> prompt_ids = tokenizer.tokens_to_ids(prompt_tokens);
+            std::string raw_prompt_query = "What color is the sky?"; // Standardized spelling
+            std::string prompt_to_tokenize = "Q: " + raw_prompt_query + "\nA:";
+            Logger::info("[main.cpp] Raw Prompt Query: '" + raw_prompt_query + "'");
+            Logger::info("[main.cpp] Prompt to Tokenize: '" + prompt_to_tokenize + "'");
 
+            // Option 1: Use the low-level API as before
+            std::vector<std::string> prompt_tokens = tokenizer.tokenize(prompt_to_tokenize);
+            std::vector<int> prompt_ids = tokenizer.tokens_to_ids(prompt_tokens);
+            
             Logger::info("Tokenizing prompt...");
             // +++ START TOKEN LOGGING +++
             std::stringstream ptk_ss;
@@ -375,53 +392,54 @@ int main(int argc, char** argv) {
                 // 3. Sample Next Token (Only during Generation Phase)
                 if (pos >= num_prompt_tokens - 1) {
                     if (logits.empty()) {
-                        Logger::error("model.forward_device returned empty logits at pos " + std::to_string(pos));
+                        Logger::error("model.forward (or device) returned empty logits at pos " + std::to_string(pos));
                         break;
                     }
-                    
-                    // +++ START GEN STEP 0 LOGGING +++
-                    bool log_first_gen_step = (generated_count == 0);
-                    if (log_first_gen_step) {
-                        log_vector_summary("Output Logits (step=0, pos=" + std::to_string(pos) + ")", logits, 10);
-                    }
-                    // +++ END GEN STEP 0 LOGGING +++
-                    
-                    // --- MODIFIED: Use Greedy Sampling (argmax) --- 
-                    // Apply sampling (e.g., top-k, top-p, temperature) - REMOVED
-                    // float temperature = 0.8f; 
-                    // int top_k = 50; 
-                    // float top_p = 0.9f; 
-                    // std::vector<float> probabilities(logits.size()); 
-                    // softmax_vector_cpu(logits, probabilities); 
-                    // next_token_id = sample_multinomial(probabilities); 
-                    // Greedy sampling - ADDED
-                    next_token_id = argmax(logits); 
-                    // --- END MODIFICATION ---
 
-                    generated_only_ids.push_back(next_token_id); // Store only generated tokens
-                    generated_ids.push_back(next_token_id); // Store full sequence
+                    // <<< START TOP-K LOGGING >>>
+                    if (generated_count < 10) { // Log for first 10 generated tokens
+                        std::vector<std::pair<float, int>> logits_pairs;
+                        for (size_t i = 0; i < logits.size(); ++i) {
+                            logits_pairs.push_back({logits[i], static_cast<int>(i)});
+                        }
+                        std::partial_sort(logits_pairs.begin(), logits_pairs.begin() + 5, logits_pairs.end(), std::greater<std::pair<float, int>>());
+                        std::stringstream top_k_ss;
+                        top_k_ss << "[main.cpp] Gen Step " << generated_count << " (Pos " << pos << ") Top-5 logits: ";
+                        for (int k_idx = 0; k_idx < 5 && k_idx < logits_pairs.size(); ++k_idx) {
+                            std::string token_str = "<INVALID_TOPK>";
+                            if (logits_pairs[k_idx].second >= 0 && static_cast<size_t>(logits_pairs[k_idx].second) < tokenizer.vocab_size()) {
+                                 std::vector<std::string> t_vec = tokenizer.ids_to_tokens({logits_pairs[k_idx].second});
+                                 if(!t_vec.empty()) token_str = t_vec[0];
+                            }
+                            top_k_ss << "(" << logits_pairs[k_idx].second << ": '" << token_str << "', " << logits_pairs[k_idx].first << ") ";
+                        }
+                        Logger::info(top_k_ss.str());
+                    }
+                    // <<< END TOP-K LOGGING >>>
                     
-                    // Decode for logging
+                    next_token_id = argmax(logits);
+                    Logger::info("[main.cpp] Gen Step " + std::to_string(generated_count) + " (Pos " + std::to_string(pos) + ") PREDICTED ID: " + std::to_string(next_token_id));
+
+                    generated_only_ids.push_back(next_token_id);
+                    generated_ids.push_back(next_token_id); 
+                    
                     std::string next_token_str = "<INVALID>";
                     if (next_token_id >= 0 && static_cast<size_t>(next_token_id) < tokenizer.vocab_size()) {
                          std::vector<std::string> token_vec_str = tokenizer.ids_to_tokens({next_token_id});
                          if (!token_vec_str.empty()) { next_token_str = token_vec_str[0]; }
                     }
-                    // +++ START GEN STEP LOGGING +++
-                    Logger::info("Gen Step " + std::to_string(generated_count) + " (Pos " + std::to_string(pos + 1) + "): Generated token ID: " + std::to_string(next_token_id) + " ('" + next_token_str + "')");
-                    // +++ END GEN STEP LOGGING +++
+                    Logger::info("[main.cpp] Gen Step " + std::to_string(generated_count) + " (Pos " + std::to_string(pos) + ") DECODED: '" + next_token_str + "'");
+                    std::cout << next_token_str << std::flush; // Print token immediately
 
                     generated_count++;
 
-                    // Print the token as it's generated
-                    Logger::info("Step " + std::to_string(generated_count+1) + ": Predicted token ID: " + std::to_string(next_token_id) + " ('" + next_token_str + "')");
-                    std::cout << next_token_str << std::flush; // Print token immediately, with flush
-
-                    // --- Use eos_id from tokenizer --- 
-                    if (next_token_id == eos_id || generated_count >= max_new_tokens) {
-                        if (next_token_id == eos_id) Logger::info("EOS token (" + std::to_string(eos_id) + ") generated. Stopping generation.");
-                        else Logger::info("Max new tokens reached. Stopping generation.");
+                    if (next_token_id == eos_id) {
+                        Logger::info("[main.cpp] Gen Step " + std::to_string(generated_count -1) + ": EOS token (ID: " + std::to_string(eos_id) + ") generated. Stopping generation.");
                         break; 
+                    }
+                    if (generated_count >= max_new_tokens) {
+                        Logger::info("[main.cpp] Gen Step " + std::to_string(generated_count -1) + ": Max new tokens (" + std::to_string(max_new_tokens) + ") reached. Stopping generation.");
+                        break;
                     }
                 } else {
                      // The state `current_x_tensor` is updated in-place by model.forward_device().

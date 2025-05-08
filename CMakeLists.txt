@@ -26,18 +26,30 @@ find_package(Boost REQUIRED COMPONENTS regex)
 # Handle CUDA
 find_package(CUDA)
 # Modern CMake approach to find specific CUDA components
-find_package(CUDAToolkit REQUIRED COMPONENTS cublas) 
-
-set(CUDA_SOURCES cuda_kernels.cu) # Define CUDA source file
 if(CUDA_FOUND)
-    message(STATUS "Found CUDA toolkit version: ${CUDA_VERSION}")
-    message(STATUS "Found CUDAToolkit including cuBLAS: ${CUDAToolkit_FOUND}") # Log if found
-    set(CMAKE_CUDA_ARCHITECTURES 60 61 70 75 80 86 CACHE STRING "CUDA architectures") 
-    message(STATUS "CUDA Found. Will define HAS_CUDA for tinyllama_core library.")
-    set(CUDA_ENABLED TRUE)
+    find_package(CUDAToolkit COMPONENTS cublas) 
+endif()
+
+# --- USER OPTION TO CONTROL CUDA --- 
+OPTION(HAS_CUDA "Enable CUDA support (requires CUDA Toolkit and cuBLAS)" ON) # Default to ON, user can override with -DHAS_CUDA=OFF
+
+set(CUDA_ENABLED FALSE) # Default to disabled
+set(CUDA_SOURCES "")   # Default to no CUDA sources
+
+if(HAS_CUDA)
+    if(CUDA_FOUND AND CUDAToolkit_FOUND)
+        message(STATUS "CUDA toolkit and cuBLAS found, and HAS_CUDA option is ON.")
+        message(STATUS "Found CUDA toolkit version: ${CUDA_VERSION}")
+        set(CMAKE_CUDA_ARCHITECTURES 60 61 70 75 80 86 CACHE STRING "CUDA architectures") 
+        message(STATUS "CUDA Enabled. Will define HAS_CUDA for tinyllama_core library.")
+        set(CUDA_ENABLED TRUE)
+        set(CUDA_SOURCES cuda_kernels.cu) # Only include CUDA source if enabled
+    else()
+        message(WARNING "HAS_CUDA option is ON, but CUDA Toolkit or cuBLAS not found. Disabling CUDA support.")
+        set(HAS_CUDA FALSE) # Force the option OFF if prerequisites are missing
+    endif()
 else()
-    message(WARNING "CUDA Toolkit not found. Building CPU-only version.")
-    set(CUDA_ENABLED FALSE)
+    message(STATUS "HAS_CUDA option is OFF. Building CPU-only version.")
 endif()
 
 # --- Core Library Definition ---
@@ -50,7 +62,7 @@ add_library(tinyllama_core STATIC
     vocab_loader.cpp
     gguf_parser.cpp
     quantization.cpp # ADDED QUANTIZATION SOURCE
-    ${CUDA_SOURCES} # Include CUDA source file here
+    ${CUDA_SOURCES} # Conditionally include CUDA source file
 )
 
 # Set properties for the core library
@@ -72,6 +84,8 @@ target_link_libraries(tinyllama_core PRIVATE # Dependencies needed to BUILD the 
 # Conditionally add CUDA definition and link CUDA libs for the library
 if(CUDA_ENABLED)
     target_compile_definitions(tinyllama_core PUBLIC HAS_CUDA)
+    # Also add CUDA include dirs if needed specifically here, though PUBLIC in previous block is okay
+    target_include_directories(tinyllama_core PRIVATE ${CUDA_INCLUDE_DIRS}) # Add includes needed to *build* the lib if CUDA is on
     # Link core CUDA runtime and the cuBLAS library
     target_link_libraries(tinyllama_core PRIVATE ${CUDA_LIBRARIES} CUDA::cublas)
 endif()
@@ -119,6 +133,7 @@ target_link_libraries(test_tokenizer PRIVATE tinyllama_core Boost::regex)
 if(OPENSSL_FOUND)
     message(STATUS "Found OpenSSL, linking ssl and crypto libraries to server.")
     target_link_libraries(tinyllama_server PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+    target_link_libraries(tinyllama_core PRIVATE OpenSSL::Crypto)
 else()
     message(WARNING "OpenSSL not found. HTTPS support in server will likely fail to link if enabled via CPPHTTPLIB_OPENSSL_SUPPORT.")
 endif()

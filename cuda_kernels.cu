@@ -12,10 +12,6 @@
 #include <stdint.h>     // For uint16_t
 #include <stdio.h>      // For printf in kernel (debugging)
 
-// <<< UTILITY KERNELS / DEVICE FUNCTIONS >>>
-
-// Simple __device__ function to convert bfloat16 (stored as uint16_t) to float
-// This assumes the uint16_t holds the raw bfloat16 bits.
 __device__ inline float bf16_to_float32_device(uint16_t bf16_raw) {
     // Use CUDA's intrinsic if available (requires compute capability >= 80)
     #if __CUDA_ARCH__ >= 800
@@ -134,23 +130,6 @@ void rmsnorm_vector_cuda(const std::vector<float>& x_in_host,
 }
 
 
-// <<< MATVEC (BF16 * F32 -> F32) KERNELS >>>
-
-// --- REMOVED BF16 to FP32 conversion kernel ---
-/*
-__global__ void convert_bf16_to_fp32_kernel(const uint16_t* __restrict__ bf16_input,
-                                           float* __restrict__ fp32_output,
-                                           size_t size) { 
-    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < size) {
-        // Convert BF16 raw bits to FP32 using helper
-        fp32_output[i] = bf16_to_float32_device(bf16_input[i]);
-    }
-}
-*/
-
-// --- MatVec C++ Wrapper (Device/Device/Device - FP32 ONLY - USING CUBLAS) ---
-// --- RENAMED and MODIFIED SIGNATURE ---
 void matvec_f32_f32_cuda(cublasHandle_t handle,       
                           const float* mat_f32_dev, // Changed from uint16_t*
                           const float* vec_f32_dev,
@@ -159,21 +138,7 @@ void matvec_f32_f32_cuda(cublasHandle_t handle,
                           int cols, // K dimension (input size)
                           cudaStream_t stream) 
 {
-    // --- REMOVED BF16->FP32 conversion --- 
-    /* 
-    float* mat_fp32_dev = nullptr;
-    size_t mat_size = (size_t)rows * cols;
-    gpuErrchk(cudaMallocAsync(&mat_fp32_dev, mat_size * sizeof(float), stream));
     
-    // Convert weights from BF16 to FP32
-    int threads_per_block = 256;
-    int num_blocks = (mat_size + threads_per_block - 1) / threads_per_block;
-    convert_bf16_to_fp32_kernel<<<num_blocks, threads_per_block, 0, stream>>>(
-        mat_bf16_dev, mat_fp32_dev, mat_size);
-    gpuErrchk(cudaGetLastError());
-    */
-    
-    // Now use the passed-in mat_f32_dev directly
     const float alpha = 1.0f;
     const float beta = 0.0f;
     int M = rows;
@@ -211,11 +176,8 @@ void matvec_f32_f32_cuda(cublasHandle_t handle,
         throw std::runtime_error("cublasSgemm (FP32) failed");
     }
 
-    // --- REMOVED Free temporary memory --- 
-    // gpuErrchk(cudaFreeAsync(mat_fp32_dev, stream));
 }
 
-// --- BF16 Fallback Implementation (Kept for forward_device compatibility) --- 
 // This version still does the inefficient internal conversion
 void matvec_bf16_f32_cuda(cublasHandle_t handle,      
                           const uint16_t* mat_bf16_dev,
@@ -230,18 +192,7 @@ void matvec_bf16_f32_cuda(cublasHandle_t handle,
     size_t mat_size = (size_t)rows * cols;
     // Use synchronous alloc/free here for simplicity as this path is less critical
     gpuErrchk(cudaMalloc(&mat_fp32_dev, mat_size * sizeof(float))); 
-    
-    // Convert weights from BF16 to FP32 (Kernel needs to be defined if this path is used)
-    // *** IMPORTANT: If this fallback is ever actually hit, convert_bf16_to_fp32_kernel needs to exist! ***
-    // *** Currently it is REMOVED. Add it back if necessary. ***
-    /* 
-    int threads_per_block = 256;
-    int num_blocks = (mat_size + threads_per_block - 1) / threads_per_block;
-    convert_bf16_to_fp32_kernel<<<num_blocks, threads_per_block, 0, stream>>>(
-        mat_bf16_dev, mat_fp32_dev, mat_size);
-    gpuErrchk(cudaGetLastError());
-    */
-   // TEMPORARY HACK: Zero the output if conversion kernel is missing, log error
+    // TEMPORARY HACK: Zero the output if conversion kernel is missing, log error
    Logger::error("matvec_bf16_f32_cuda fallback was called, but conversion kernel is removed! Zeroing output.");
    gpuErrchk(cudaMemsetAsync(out_f32_dev, 0, (size_t)rows * sizeof(float), stream));
    gpuErrchk(cudaFree(mat_fp32_dev)); // Free the temp buffer
@@ -272,39 +223,6 @@ void matvec_bf16_f32_cuda(cublasHandle_t handle,
 }
 
 
-// --- START: REMOVE REDUNDANT Host/Device overload --- 
-/*
-// Allocates temp device matrix, copies host matrix, calls device-pointer kernel/wrapper
-void matvec_f32_f32_cuda(cublasHandle_t handle, 
-                          const std::vector<float>& mat_f32_host, // Changed to f32
-                          const float* vec_f32_dev,                
-                          float* out_f32_dev,                       
-                          int rows,
-                          int cols,
-                          cudaStream_t stream)
-{
-    if (mat_f32_host.size() != (size_t)rows * cols) {
-        throw std::runtime_error("matvec_f32_f32_cuda (mixed): mat size mismatch.");
-    }
-    
-    float* mat_f32_dev = nullptr; // Need temp device matrix
-    
-    // Allocate temporary device buffer *only* for the matrix
-    gpuErrchk(cudaMallocAsync(&mat_f32_dev, mat_f32_host.size() * sizeof(float), stream));
-    
-    // Copy host matrix data to device
-    gpuErrchk(cudaMemcpyAsync(mat_f32_dev, mat_f32_host.data(), mat_f32_host.size() * sizeof(float), cudaMemcpyHostToDevice, stream));
-    
-    // Call the *all-device-pointer* version of the wrapper
-    matvec_f32_f32_cuda(handle, mat_f32_dev, vec_f32_dev, out_f32_dev, rows, cols, stream); 
-    
-    // Free the temporary device matrix
-    gpuErrchk(cudaFreeAsync(mat_f32_dev, stream));
-}
-*/
-// --- END: REMOVE REDUNDANT Host/Device overload --- 
-
-// --- KEEP Host/Host/Host overload implementation --- 
 // Allocates temp device matrix AND vectors, copies data, calls device-pointer version, copies result back
 void matvec_f32_f32_cuda(cublasHandle_t handle, 
                           const std::vector<float>& mat_f32_host, // Changed to f32
@@ -349,7 +267,6 @@ void matvec_f32_f32_cuda(cublasHandle_t handle,
     gpuErrchk(cudaFree(vec_f32_dev));
     gpuErrchk(cudaFree(out_f32_dev));
 }
-// --- END: Host/Host/Host overload ---
 
 // <<< SILU KERNEL >>>
 
@@ -395,8 +312,6 @@ void silu_cuda(const std::vector<float>& x_host,
     gpuErrchk(cudaFree(out_dev));
 }
 
-
-// <<< SOFTMAX KERNELS >>>
 
 // Kernel 1: Find max element in the vector (Reduction)
 __global__ void softmax_find_max_kernel(const float* x, float* partial_max, int n) {
@@ -455,7 +370,6 @@ __global__ void softmax_normalize_kernel(const float* x, float* out, int n, floa
     }
 }
 
-// --- Softmax C++ Wrapper ---
 void softmax_vector_cuda(const std::vector<float>& x_host,
                          std::vector<float>& out_host,
                          int n)
@@ -589,7 +503,6 @@ void swiglu_cuda(const float* gate_dev, const float* up_dev, float* out_dev, int
     gpuErrchk(cudaGetLastError());
 }
 
-// <<< ROPE KERNEL (UPDATED) >>>
 __global__ void rope_kernel(float* x, 
                             int num_heads, 
                             int head_dim, 
@@ -623,7 +536,6 @@ __global__ void rope_kernel(float* x,
     x[base_x1] = x0 * sin_val + x1 * cos_val;
 }
 
-// --- DEVICE-POINTER ROPE WRAPPER (UPDATED) ---
 void rope_cuda(float* x_dev, 
                int num_heads, 
                int head_dim, 
@@ -646,7 +558,6 @@ void rope_cuda(float* x_dev,
     gpuErrchk(cudaGetLastError());
 }
 
-// <<< ATTENTION KERNEL (Reads directly from Cache) >>>
 __global__ void attention_kernel(const float* Q_current, // Shape [num_heads * head_dim]
                                const float* K_layer_cache_base, // Base ptr for layer's K cache
                                const float* V_layer_cache_base, // Base ptr for layer's V cache
@@ -666,21 +577,14 @@ __global__ void attention_kernel(const float* Q_current, // Shape [num_heads * h
     int heads_per_kv = num_q_heads / cache_num_kv_heads; 
     int kv_head_idx = q_head / heads_per_kv;
 
-    // Use shared memory for scores and probabilities for this q_head
-    // Size needs to accommodate current_seq_len
     extern __shared__ float shared_scores[]; 
     float* scores = shared_scores; // [current_seq_len]
-    // If not enough shared memory, this will fail kernel launch or cause errors.
-    // Ensure max_seq_len isn't too large for available shared memory.
 
     // 1. Compute attention scores for the current q_head against all keys in its group
     float max_score = -INFINITY;
     const float* q_head_ptr = Q_current + q_head * head_dim;
     
     for (int k_pos = 0; k_pos < current_seq_len; ++k_pos) { // Iterate up to current timestep
-        // Calculate offset into the FLAT K cache for the specific key vector
-        // Layout: [max_seq_len, num_kv_heads, head_dim] <-- This was WRONG assumption before. Model uses [pos, kv_head, dim]
-        // Correct Layout used in update kernel: [pos * num_kv_heads * head_dim + kv_head_idx * head_dim + d]
         size_t k_cache_base_offset = (size_t)k_pos * cache_num_kv_heads * head_dim + 
                                      (size_t)kv_head_idx * head_dim;
         const float* k_vec_ptr = K_layer_cache_base + k_cache_base_offset;
@@ -747,9 +651,6 @@ void attention_cuda(const float* Q_current_dev,
     
     // Shared memory per block: need space for scores/probs for current_seq_len
     size_t shared_mem_bytes = current_seq_len * sizeof(float); 
-    // TODO: Add check against device shared memory limits if max_seq_len is large
-    // cudaDeviceGetAttribute(&sharedMemPerBlock, cudaDevAttrMaxSharedMemoryPerBlock, devId);
-    // if (shared_mem_bytes > sharedMemPerBlock) { /* error or use different kernel strategy */ }
 
     attention_kernel<<<grid, block, shared_mem_bytes, stream>>>(
         Q_current_dev, 
@@ -765,7 +666,6 @@ void attention_cuda(const float* Q_current_dev,
     gpuErrchk(cudaGetLastError());
 }
 
-// <<< VECTOR ADDITION KERNEL >>>
 
 __global__ void add_vectors_kernel(const float* a, const float* b, float* result, int n) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -816,7 +716,6 @@ void add_residual_cuda(const float* matvec_out_dev,
     gpuErrchk(cudaGetLastError()); // Check for errors after kernel launch
 }
 
-// <<< K/V CACHE UPDATE KERNEL >>>
 
 __global__ void update_kv_cache_kernel(float* cache_base_ptr,
                                      const float* current_kv_vector,
@@ -842,9 +741,6 @@ __global__ void update_kv_cache_kernel(float* cache_base_ptr,
     // Add bounds checking for cache_offset against total cache size
     size_t total_cache_size = (size_t)max_seq_len * num_kv_heads * head_dim;
     if (cache_offset >= total_cache_size) {
-        // This indicates an error in parameters (pos, kv_head_idx) or logic
-        // printf("ERROR: Cache write out of bounds! Offset: %llu, MaxSize: %llu, pos: %d, kv_head: %d, d: %d\\n",
-        //        (unsigned long long)cache_offset, (unsigned long long)total_cache_size, pos, kv_head_idx, d);
         return;
     }
 
@@ -939,8 +835,6 @@ __global__ void rope_and_update_kv_cache_kernel(
     // Add bounds check for cache write
     size_t total_cache_size = (size_t)max_seq_len * num_kv_heads * head_dim;
     if (cache_offset_0 >= total_cache_size || cache_offset_1 >= total_cache_size) {
-        // printf("ERROR: Fused RoPE Cache write out of bounds! Offset0: %llu, Offset1: %llu MaxSize: %llu, pos: %d, kv_head: %d, pair_idx: %d\\n",
-        //        (unsigned long long)cache_offset_0, (unsigned long long)cache_offset_1, (unsigned long long)total_cache_size, pos, kv_head_idx, pair_idx);
          return;
     }
     
@@ -996,7 +890,6 @@ void rope_and_update_kv_cache_cuda(
 }
 
 
-// --- START: NEW GENERIC EMBEDDING LOOKUP KERNEL ---
 // Handles both BF16 and FP32 tables
 __global__ void lookup_embedding_kernel(const void* __restrict__ table_dev,
                                         float* __restrict__ output_dev,
@@ -1019,9 +912,6 @@ __global__ void lookup_embedding_kernel(const void* __restrict__ table_dev,
         output_dev[idx] = 0.0f;
         return;
     }
-
-    // Calculate the offset into the embedding table
-    // IMPORTANT: Use size_t for large offsets to prevent overflow
     size_t offset = (size_t)token_id * hidden_size + idx;
 
     // Read from the correct table type and write to output
@@ -1037,10 +927,6 @@ __global__ void lookup_embedding_kernel(const void* __restrict__ table_dev,
         output_dev[idx] = table_f32[offset];
     }
 }
-// --- END: NEW GENERIC EMBEDDING LOOKUP KERNEL ---
-
-
-// --- START: NEW GENERIC EMBEDDING LOOKUP WRAPPER ---
 // Host wrapper function matching the signature in cuda_kernels.h
 void lookup_embedding_cuda(const void* table_dev,
                            float* output_dev,
@@ -1076,6 +962,5 @@ void lookup_embedding_cuda(const void* table_dev,
     // Check for kernel launch errors (optional but recommended for debugging)
     gpuErrchk(cudaGetLastError());
     }
-// --- END: NEW GENERIC EMBEDDING LOOKUP WRAPPER ---
 
 #endif // HAS_CUDA

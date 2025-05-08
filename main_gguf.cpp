@@ -125,12 +125,13 @@ void run_generation_experiment(TinyLlamaModel& model,
         Logger::info("Using EOS token ID: " + std::to_string(eos_token_id));
         Logger::info("Max new tokens: " + std::to_string(max_new_tokens));
 
-        // Initialize KVCache (needs to be fresh for each run)
-        KVCache kv_cache;
-        kv_cache.initialize(config.num_hidden_layers, config.max_position_embeddings,
-                            config.num_key_value_heads, config.hidden_size / config.num_attention_heads);
-        // kv_cache.seq_len = 0; // Implicitly 0 after initialization
+        int head_dim = model.get_config().hidden_size / model.get_config().num_attention_heads;
 
+        // Initialize KVCache
+        KVCache kv_cache;
+        Logger::info("[main_gguf] Initializing KVCache with max_pos_emb: " + std::to_string(config.max_position_embeddings));
+        kv_cache.initialize(config.num_hidden_layers, config.max_position_embeddings,
+                            config.num_key_value_heads, head_dim);
         Logger::info("KVCache initialized for this run.");
 
         // --- Unified Generation Loop (mirrors main.cpp) ---
@@ -204,7 +205,7 @@ void run_generation_experiment(TinyLlamaModel& model,
              // 4. Sample Next Token (Only during Generation Phase)
              if (pos >= num_prompt_tokens - 1) {
                   // Log Top-K before sampling (only for first few generation steps)
-                  if (generated_count < 4) {
+                  if (generated_count < 10 && attempt_label.find("GGUF") != std::string::npos) { // MODIFIED: Log more steps
                         std::vector<std::pair<int, float>> idx_logit_pairs;
                         idx_logit_pairs.reserve(logits.size());
                         for (int i = 0; i < (int)logits.size(); ++i) {
@@ -231,6 +232,7 @@ void run_generation_experiment(TinyLlamaModel& model,
 
                   // Use Greedy Sampling (argmax)
                   next_token_id = argmax(logits);
+                  Logger::info("[" + attempt_label + "] Gen Step " + std::to_string(generated_count) + " (Pos " + std::to_string(pos) + ") PREDICTED ID: " + std::to_string(next_token_id)); // DETAILED LOG
 
              // Decode for logging
              std::string next_token_str = "<INVALID>";
@@ -238,22 +240,27 @@ void run_generation_experiment(TinyLlamaModel& model,
                  std::vector<std::string> token_vec_str = tokenizer.ids_to_tokens({next_token_id});
                  if (!token_vec_str.empty()) { next_token_str = token_vec_str[0]; }
              }
+             Logger::info("[" + attempt_label + "] Gen Step " + std::to_string(generated_count) + " (Pos " + std::to_string(pos) + ") DECODED: '" + next_token_str + "'"); // DETAILED LOG
 
                   generated_only_ids.push_back(next_token_id); // Store only generated tokens
                   generated_ids.push_back(next_token_id); // Store full sequence
 
-                  Logger::info("Gen Step " + std::to_string(generated_count) + " (Pos " + std::to_string(pos + 1) + "): Generated token ID: " + std::to_string(next_token_id) + " ('" + next_token_str + "')");
-                  generated_count++;
+                  // Logger::info("Gen Step " + std::to_string(generated_count) + " (Pos " + std::to_string(pos + 1) + "): Generated token ID: " + std::to_string(next_token_id) + " ('" + next_token_str + "')"); // Original log, can be redundant now
+                  // generated_count++; // MOVED DOWN
 
                   // Check stopping conditions
              if (next_token_id == eos_token_id) {
-                      Logger::info("EOS token generated. Stopping generation.");
+                      Logger::info("[" + attempt_label + "] Gen Step " + std::to_string(generated_count) + ": EOS token (ID: " + std::to_string(eos_token_id) + ") generated. Stopping generation."); // DETAILED LOG
+                      generated_count++; // Increment before break if EOS
                       break;
                   }
-                  if (generated_count >= max_new_tokens) {
-                      Logger::info("Max new tokens reached. Stopping generation.");
-                 break;
+                  // generated_count++; // MOVED to after EOS check or before max_tokens check
+                  if (generated_count >= max_new_tokens) { // Check before incrementing if it's for the NEXT token
+                      Logger::info("[" + attempt_label + "] Gen Step " + std::to_string(generated_count) + ": Max new tokens (" + std::to_string(max_new_tokens) + ") reached. Stopping generation."); // DETAILED LOG
+                      // generated_count++; // Already counted this token if not EOS
+                      break;
                   }
+                  generated_count++; // Increment for the next token to be generated
              } else {
                   // Processing prompt token, no sampling needed. Logits are discarded.
                   // Need to set `next_token_id` for the next iteration if this was the last prompt token
@@ -311,11 +318,6 @@ int main(int argc, char **argv) {
         {"TinyLlama", "data/tiny_llama_q8_requantised.gguf"} // Updated to quantized model
     };
 
-    // Configuration for Special Token Sources - REMOVED (using external JSON)
-
-    // Configuration for Pre-tokenization Methods - REMOVED (using tokenizer's default)
-
-    // Configuration for Prompt Variations
     struct PromptAttempt {
         std::string name;
         std::string prompt;
@@ -363,60 +365,67 @@ int main(int argc, char **argv) {
         Logger::info("Testing Model: " + model_config_item.model_name);
         Logger::info("############################################");
 
-        // --- REMOVED: Explicit GGUF parsing and config creation ---
-        // GGUFData gguf_data; // Load only metadata initially
-        // ModelConfig config; // Define config here to be accessible in the outer scope of try
         try {
-            // --- Instantiate Tokenizer ---
-            std::string tokenizer_path = "data/tiny-llama-pure/tokenizer.json"; // Using presumed main.cpp path
-            Tokenizer tokenizer(tokenizer_path, tokenizer_path); // model_path = vocab_path for merges in tokenizer.json
-            Logger::info("INITIALIZED TOKENIZER FROM EXTERNAL JSON: " + tokenizer_path);
-
-            // --- GGUF Based Tokenizer (Commented out for now) ---
-            // Tokenizer tokenizer(gguf_data); // USE GGUF constructor
-
             // Construct Model using the parsed config and path
             TinyLlamaModel model(ModelConfig{}, model_config_item.gguf_path);
             Logger::info("Model constructed successfully.");
 
-            // --- Loop through prompt attempts (Removed const from attempt) ---
-            for (auto& attempt : prompt_attempts) {
-                std::string experiment_label = "[Model:" + model_config_item.model_name +
-                                               "_Tokenizer:JSON_Pmt:" + std::to_string(&attempt - &prompt_attempts[0] + 1) + // Calculate index
-                                               "(" + attempt.name + ")]";
-                Logger::info("------- Prompt Attempt: " + std::to_string(&attempt - &prompt_attempts[0] + 1) + " (" + attempt.name + ") -------");
+            // --- Instantiate Tokenizer using EXTERNAL HF tokenizer.json ---
+            std::string tokenizer_path = "data/tokenizer.json"; // Path to the known-good HF tokenizer
+            Tokenizer tokenizer(tokenizer_path, tokenizer_path); // model_path = vocab_path for merges
+            Logger::info("Tokenizer constructed with: " + tokenizer_path);
+            
+            ModelConfig config = model.get_config(); // <<< ENSURE THIS IS BEFORE LOGGING
 
-                try {
-                    // Modify the prompt string (now allowed)
-                    std::string current_prompt = attempt.prompt; // Work with a copy if original shouldn't change globally?
-                                                              // Or keep modifying 'attempt.prompt' if that's intended for this loop structure.
-                    if (attempt.add_bos) {
-                        // Note: Modifying attempt.prompt directly here
-                        attempt.prompt = "<s>" + attempt.prompt; // Assuming <s> is the BOS token string 
-                    }
-                    if (attempt.add_eos) {
-                        // Note: Modifying attempt.prompt directly here
-                        attempt.prompt += "</s>"; // Assuming </s> is the EOS token string
-                    }
-                    Logger::info("Using Processed Prompt: '" + attempt.prompt + "'");
-                    
-                    // --- MODIFIED: Tokenize using tokenize() + tokens_to_ids() ---
-                    std::vector<std::string> prompt_tokens_str = tokenizer.tokenize(attempt.prompt);
-                    std::vector<int> prompt_ids = tokenizer.tokens_to_ids(prompt_tokens_str);
-                    Logger::info("Tokenized prompt using tokenize() + tokens_to_ids(). Count: " + std::to_string(prompt_ids.size()));
-                    // --- END MODIFICATION ---
+            // --- START: ADDED CODE TO OVERRIDE CONTEXT LENGTH ---
+            const int OVERRIDE_MAX_CTX = 512; // Set desired smaller context length (e.g., 512 or 256)
+            if (config.max_position_embeddings > OVERRIDE_MAX_CTX) {
+                Logger::warning("[main_gguf.cpp] Overriding max_position_embeddings from GGUF value " +
+                                std::to_string(config.max_position_embeddings) +
+                                " to " + std::to_string(OVERRIDE_MAX_CTX));
+                config.max_position_embeddings = OVERRIDE_MAX_CTX;
+            } else {
+                Logger::info("[main_gguf.cpp] Using max_position_embeddings from GGUF: " + std::to_string(config.max_position_embeddings) +
+                               " (not exceeding override " + std::to_string(OVERRIDE_MAX_CTX) + ")");
+            }
+            // --- END: ADDED CODE TO OVERRIDE CONTEXT LENGTH ---
 
-                    // Use model.get_config() for config
-                    run_generation_experiment(model, tokenizer, prompt_ids, max_new_tokens, temperature, model.get_config(), experiment_label);
+            Logger::info("[main_gguf.cpp] Config - rope_theta: " + std::to_string(config.rope_theta) + ", rms_norm_eps: " + std::to_string(config.rms_norm_eps));
+            Logger::info("[main_gguf.cpp] Full Config: hidden_size=" + std::to_string(config.hidden_size) +
+                         ", intermediate_size=" + std::to_string(config.intermediate_size) +
+                         ", num_attention_heads=" + std::to_string(config.num_attention_heads) +
+                         ", num_key_value_heads=" + std::to_string(config.num_key_value_heads) +
+                         ", num_hidden_layers=" + std::to_string(config.num_hidden_layers) +
+                         ", vocab_size=" + std::to_string(config.vocab_size) +
+                         ", max_position_embeddings=" + std::to_string(config.max_position_embeddings) +
+                         ", rms_norm_eps=" + std::to_string(config.rms_norm_eps) +
+                         ", rope_theta=" + std::to_string(config.rope_theta) +
+                         ", bos_token_id=" + std::to_string(config.bos_token_id) +
+                         ", eos_token_id=" + std::to_string(config.eos_token_id)
+                         ); // <<< ADDED THIS BLOCK
 
-                    // Optional: Restore original prompt if modifications should not persist across model tests?
-                    // attempt.prompt = current_prompt; // Uncomment if needed
+            std::string raw_prompt_query_gguf = "What color is the sky?";
+            std::string prompt_to_tokenize_gguf = "Q: " + raw_prompt_query_gguf + "\nA:"; 
+            Logger::info("[main_gguf.cpp] Raw Prompt Query: '" + raw_prompt_query_gguf + "'");
+            Logger::info("[main_gguf.cpp] Prompt to Tokenize (Simple Q:A): '" + prompt_to_tokenize_gguf + "'");
 
-                } catch (const std::exception& e) {
-                    Logger::error("Error during inner experiment " + experiment_label + ": " + e.what());
-                }
+            // Tokenize using the external HF tokenizer, mirroring main.cpp's SafeTensors path tokenization
+            std::vector<std::string> token_strings_gguf = tokenizer.tokenize(prompt_to_tokenize_gguf);
+            std::vector<int> initial_prompt_ids_gguf = tokenizer.tokens_to_ids(token_strings_gguf);
 
-            } // End prompt attempt loop
+            std::stringstream ss_ids_gguf;
+            ss_ids_gguf << "[main_gguf.cpp] Token IDs (HF Tokenizer, Simple Q:A, No BOS): [";
+            for(size_t i = 0; i < initial_prompt_ids_gguf.size(); ++i) {
+                ss_ids_gguf << initial_prompt_ids_gguf[i] << (i == initial_prompt_ids_gguf.size() - 1 ? "" : ", ");
+            }
+            ss_ids_gguf << "]";
+            Logger::info(ss_ids_gguf.str());
+            Logger::info("[main_gguf.cpp] BOS ID (from HF tokenizer): " + std::to_string(tokenizer.bos_token_id()) + ", EOS ID (from HF tokenizer): " + std::to_string(tokenizer.eos_token_id()));
+
+            int current_max_new_tokens = 30; // Align with main.cpp for this test
+            float current_temperature = temperature; // Use the globally set temperature (0.0f)
+
+            run_generation_experiment(model, tokenizer, initial_prompt_ids_gguf, current_max_new_tokens, current_temperature, config, "GGUF_SimpleQA_HFTokenizer_NoBOS_Test");
 
         } catch (const std::exception& e) {
             // Catch errors during model construction or config retrieval
@@ -426,5 +435,6 @@ int main(int argc, char **argv) {
     } // End model loop
 
     Logger::info("\n===== All experiments completed. =====\n");
+
     return 0;
 } 

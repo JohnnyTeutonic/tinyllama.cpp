@@ -164,8 +164,10 @@ public:
     // --- Forward Pass (NOW uses std::vector<float>) --- 
     std::vector<float> forward(std::vector<float>& x_vec, int pos, KVCache* cache = nullptr, const std::vector<int>* attention_mask = nullptr);
 
+#ifdef HAS_CUDA
     // New: Device-only forward pass for incremental GPU pipeline
     std::vector<float> forward_device(int token_id, int pos, KVCache* cache, const std::vector<int>* attention_mask = nullptr, cudaStream_t stream = 0);
+#endif
 
     // Get model config
     const ModelConfig& get_config() const { return config_; }
@@ -234,31 +236,6 @@ private:
     // --- END Persistent Device Weights (FP32) ---
     cublasHandle_t cublas_handle_ = nullptr; // <<< ADD CUBLAS HANDLE >>>
     
-    // --- START: REMOVE DUPLICATE DECLARATIONS ---
-    /*
-    // GPU device pointers for persistent weights (BF16)
-    uint16_t* token_embedding_table_dev_ = nullptr;
-    uint16_t* lm_head_dev_ = nullptr;
-    uint16_t* w_q_dev_ = nullptr;
-    // ... (other BF16 weights)
-    uint16_t* w_down_dev_ = nullptr;
-
-    // GPU device pointers for persistent weights (FP32)
-    float* token_embedding_table_f32_dev_ = nullptr;
-    float* lm_head_f32_dev_ = nullptr;
-    float* w_q_f32_dev_ = nullptr;
-    // ... (other FP32 weights)
-    float* w_down_f32_dev_ = nullptr;
-
-    // GPU device pointers for layer norm weights
-    // (Managed within LayerWeights struct for layers, plus final_norm_dev)
-    float* final_norm_dev = nullptr;
-    // NOTE: Layer norm weights are stored in LayerWeights::*_dev
-
-    // GPU device pointer for RoPE frequencies
-    float* all_freqs_cis_dev = nullptr;
-    */
-    // --- END: REMOVE DUPLICATE DECLARATIONS ---
 
     // --- START: Added Persistent Workspace Buffers ---
     float* x_dev_ = nullptr;           // Input/State vector
