@@ -98,13 +98,6 @@ add_executable(tinyllama
 # Link tinyllama executable against the core library
 target_link_libraries(tinyllama PRIVATE tinyllama_core)
 
-# --- New API Example Executable ---
-add_executable(tinyllama_api_example
-    main_api_example.cpp # File exists now
-)
-# Link the example against the core library
-target_link_libraries(tinyllama_api_example PRIVATE tinyllama_core)
-
 # --- New Chat Server Executable ---
 add_executable(tinyllama_server
     server.cpp
@@ -113,13 +106,12 @@ add_executable(tinyllama_server
 target_link_libraries(tinyllama_server PRIVATE tinyllama_core)
 
 # --- New GGUF Loader Executable ---
-add_executable(gguf_loader
+add_executable(tinyllamagguf
     main_gguf.cpp
-    gguf_parser.cpp # Keep parser source if main_gguf uses it directly? (Can likely remove too)
 )
 
 # Link GGUF loader against the core library (inherits CUDA/OpenMP/etc links)
-target_link_libraries(gguf_loader PRIVATE tinyllama_core)
+target_link_libraries(tinyllamagguf PRIVATE tinyllama_core)
 
 # --- ADDED: Tokenizer Test Executable ---
 add_executable(test_tokenizer

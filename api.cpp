@@ -129,74 +129,87 @@ static int sample_top_k_top_p_temperature(
 }
 
 // Define the implementation struct (PImpl)
-struct TinyLlamaSession::SessionImpl {
-    ModelConfig config;
-    std::unique_ptr<Tokenizer> tokenizer;
-    std::unique_ptr<TinyLlamaModel> model;
-    std::unique_ptr<KVCache> kv_cache;
-    std::mt19937 rng; // Random number generator for sampling
+/* struct TinyLlamaSession::SessionImpl { ... }; */
 
-    SessionImpl() : rng(std::random_device{}()) {} // Seed RNG
-};
+// --- UNIFIED CONSTRUCTOR --- 
+TinyLlamaSession::TinyLlamaSession(const std::string& model_path) {
+    Logger::info("TinyLlamaSession: Initializing with path: " + model_path);
 
-// --- TinyLlamaSession Constructor --- 
-TinyLlamaSession::TinyLlamaSession(const std::string& model_dir) 
-    : pimpl_(std::make_unique<SessionImpl>()) 
-{
-    Logger::info("TinyLlamaSession: Initializing...");
-    std::filesystem::path dir_path(model_dir);
-
-    if (!std::filesystem::exists(dir_path) || !std::filesystem::is_directory(dir_path)) {
-        throw std::runtime_error("Model directory does not exist or is not a directory: " + model_dir);
+    std::filesystem::path path_obj(model_path);
+    std::filesystem::path base_dir;
+    
+    // Determine base directory and attempt to load tokenizer first
+    std::string tokenizer_path_str;
+    if (std::filesystem::is_directory(path_obj)) {
+        base_dir = path_obj;
+        tokenizer_path_str = (base_dir / "tokenizer.json").string();
+    } else if (std::filesystem::is_regular_file(path_obj) && path_obj.extension() == ".gguf") {
+        base_dir = path_obj.parent_path();
+        tokenizer_path_str = (base_dir / "tokenizer.json").string();
+    } else {
+        throw std::runtime_error("Invalid model_path: Must be a directory or a .gguf file. Path: " + model_path);
     }
+    Logger::info("Base directory: " + base_dir.string());
+    Logger::info("Attempting tokenizer: " + tokenizer_path_str);
 
-    // Construct paths
-    std::string config_path = (dir_path / "config.json").string();
-    std::string tokenizer_path = (dir_path / "tokenizer.json").string();
-    std::string safetensors_path = (dir_path / "model.safetensors").string();
-
-    // 1. Load Config
-    Logger::info("Loading config: " + config_path);
-    nlohmann::json config_json;
     try {
-        std::string config_str = read_file_api(config_path);
-        config_json = nlohmann::json::parse(config_str);
-        pimpl_->config = parse_model_config(config_json); // Use helper from model.h/cpp
+        tokenizer_ = std::make_unique<Tokenizer>(tokenizer_path_str, tokenizer_path_str); 
+        Logger::info("Tokenizer loaded successfully.");
     } catch (const std::exception& e) {
-        throw std::runtime_error(std::string("Error loading/parsing config.json: ") + e.what());
+        throw std::runtime_error("Failed to load tokenizer from " + tokenizer_path_str + ": " + e.what());
     }
 
-    // 2. Load Tokenizer
-    Logger::info("Loading tokenizer: " + tokenizer_path);
-    try {
-        pimpl_->tokenizer = std::make_unique<Tokenizer>(tokenizer_path, tokenizer_path); // Use tokenizer path also for vocab path
-    } catch (const std::exception& e) {
-        throw std::runtime_error(std::string("Error loading tokenizer: ") + e.what());
+    // Now load the model based on path type
+    if (std::filesystem::is_directory(path_obj)) {
+        Logger::info("Loading SafeTensors model from directory: " + model_path);
+        std::string config_path_str = (base_dir / "config.json").string();
+        std::string safetensors_path_str = (base_dir / "model.safetensors").string();
+
+        if (!std::filesystem::exists(config_path_str)) {
+            throw std::runtime_error("config.json not found in directory: " + model_path);
+        }
+        if (!std::filesystem::exists(safetensors_path_str)) {
+             throw std::runtime_error("model.safetensors not found in directory: " + model_path);
+        }
+
+        try {
+            // 1. Load Config
+            Logger::info("Loading config: " + config_path_str);
+            nlohmann::json config_json = nlohmann::json::parse(read_file_api(config_path_str));
+            ModelConfig loaded_config = parse_model_config(config_json); // Use helper from model.h/cpp
+
+            // 2. Load Model Weights via SafeTensorsLoader
+            Logger::info("Loading model weights: " + safetensors_path_str);
+            SafeTensorsLoader st_loader(safetensors_path_str);
+            
+            // 3. Construct Model using loaded config and loader
+            model_ = std::make_unique<TinyLlamaModel>(loaded_config, st_loader); 
+            Logger::info("SafeTensors Model loaded successfully.");
+
+        } catch (const std::exception& e) {
+            throw std::runtime_error("Failed during SafeTensors model loading from directory " + model_path + ": " + e.what());
+        }
+
+    } else { // Must be GGUF file path based on earlier check
+        Logger::info("Loading GGUF model from file: " + model_path);
+        try {
+            // Let TinyLlamaModel constructor handle GGUF loading and config parsing
+            model_ = std::make_unique<TinyLlamaModel>(ModelConfig{}, model_path); 
+            Logger::info("GGUF Model loaded successfully.");
+        } catch (const std::exception& e) {
+            throw std::runtime_error("Failed to load GGUF model from " + model_path + ": " + e.what());
+        }
     }
 
-    // 3. Load Model Weights
-    Logger::info("Loading model weights: " + safetensors_path);
-    try {
-        SafeTensorsLoader st_loader(safetensors_path);
-        pimpl_->model = std::make_unique<TinyLlamaModel>(pimpl_->config, st_loader);
-    } catch (const std::exception& e) {
-        throw std::runtime_error(std::string("Error loading model weights: ") + e.what());
-    }
-
-    // 4. Initialize KVCache
-    Logger::info("Initializing KVCache...");
-    try {
-        pimpl_->kv_cache = std::make_unique<KVCache>();
-        int nhl = pimpl_->config.num_hidden_layers;
-        int n_kv_heads = pimpl_->config.num_key_value_heads;
-        int max_seq_len = pimpl_->config.max_position_embeddings;
-        int head_dim = pimpl_->config.hidden_size / pimpl_->config.num_attention_heads;
-        pimpl_->kv_cache->initialize(nhl, max_seq_len, n_kv_heads, head_dim);
-    } catch (const std::exception& e) {
-        throw std::runtime_error(std::string("Failed to initialize KVCache: ") + e.what());
-    }
-
-    Logger::info("TinyLlamaSession: Initialization complete.");
+    // Store final config and initialize KVCache
+    config_ = model_->get_config(); // Get config (parsed by model constructor for GGUF, or loaded here for safetensors)
+    eos_token_id_ = config_.eos_token_id;
+    int head_dim = config_.hidden_size / config_.num_attention_heads;
+    
+    Logger::info("Initializing KVCache with max_pos_emb: " + std::to_string(config_.max_position_embeddings));
+    kv_cache_.initialize(config_.num_hidden_layers, config_.max_position_embeddings,
+                         config_.num_key_value_heads, head_dim);
+    Logger::info("TinyLlamaSession initialization complete.");
 }
 
 // --- TinyLlamaSession Destructor --- 
@@ -205,134 +218,96 @@ TinyLlamaSession::~TinyLlamaSession() {
     Logger::info("TinyLlamaSession: Destroyed.");
 }
 
-// --- TinyLlamaSession Generate Method --- 
-std::string TinyLlamaSession::generate(
-    const std::string& prompt, 
-    int max_new_tokens, 
-    float temperature, // Parameter remains but won't be used if using argmax
-    int top_k,         // Parameter remains but won't be used if using argmax
-    float top_p)       // Parameter remains but won't be used if using argmax
+// --- GENERATE METHOD --- 
+std::string TinyLlamaSession::generate(const std::string& prompt,
+                                     int steps,
+                                     float temperature,
+                                     const std::string& system_prompt) 
 {
-    Logger::info("Generate called. Max new tokens: " + std::to_string(max_new_tokens));
-    if (!pimpl_ || !pimpl_->model || !pimpl_->tokenizer || !pimpl_->kv_cache) {
-        throw std::runtime_error("TinyLlamaSession is not properly initialized.");
+    Logger::info("Generate called. Prompt: \"" + prompt + "\", Steps: " + std::to_string(steps));
+
+    // Apply the Q: prompt\nA: format
+    std::string formatted_prompt = "Q: " + prompt + "\nA:"; 
+
+    // Tokenize
+    std::vector<std::string> token_strs = tokenizer_->tokenize(formatted_prompt);
+    std::vector<int> token_ids = tokenizer_->tokens_to_ids(token_strs);
+    
+    if (token_ids.empty()) {
+        Logger::warning("Tokenization resulted in empty ID list for prompt: " + prompt);
+        return "";
     }
 
-    // Get references for convenience
-    TinyLlamaModel& model = *pimpl_->model;
-    const Tokenizer& tokenizer = *pimpl_->tokenizer;
-    KVCache& cache = *pimpl_->kv_cache;
-    const ModelConfig& mcfg = pimpl_->config;
-    std::mt19937& rng = pimpl_->rng;
-
-    // Reset KVCache sequence length for new generation
-    cache.seq_len = 0;
-
-    // Tokenize prompt
-    std::vector<int> prompt_ids = tokenizer.encode(prompt, false); // Don't add special tokens here
-    Logger::info("Prompt tokenized. Num tokens: " + std::to_string(prompt_ids.size()));
-
-    // Get EOS token ID
-    int eos_id = tokenizer.eos_token_id();
-    if (eos_id < 0) eos_id = 2; // Fallback
-
-    // --- Generation Loop --- 
-    int next_token_id = -1;
-    int num_prompt_tokens = prompt_ids.size();
-    std::vector<int> generated_only_ids;
+    int num_prompt_tokens = token_ids.size();
+    int total_steps = num_prompt_tokens + steps -1; // Max steps
     int generated_count = 0;
-    int total_steps = num_prompt_tokens + max_new_tokens - 1; // Max steps allowed
+    int next_token_id = -1;
+    
+    kv_cache_.seq_len = 0; // Reset cache length for new generation
 
     for (int pos = 0; pos < total_steps; ++pos) {
-        Logger::info("--- Generate loop: START pos=" + std::to_string(pos) + " ---");
-        if (pos >= mcfg.max_position_embeddings) {
-            Logger::info("Reached max sequence length (" + std::to_string(mcfg.max_position_embeddings) + "). Stopping.");
+        if (pos >= config_.max_position_embeddings) {
+            Logger::warning("Reached max sequence length (" + std::to_string(config_.max_position_embeddings) + "). Stopping.");
             break;
         }
 
-        // Determine input token
-        int input_token_id = (pos < num_prompt_tokens) ? prompt_ids[pos] : next_token_id;
-        Logger::info("Input token ID: " + std::to_string(input_token_id));
-
-        // Select forward pass
+        int input_token_id = (pos < num_prompt_tokens) ? token_ids[pos] : next_token_id;
         std::vector<float> logits;
-#ifdef HAS_CUDA
-        Logger::info("Calling forward_device...");
-        logits = model.forward_device(input_token_id, pos, &cache, nullptr);
-        Logger::info("Returned from forward_device.");
-#else
-        Logger::info("Calling forward (CPU)...");
-        std::vector<float> current_x = model.lookup_embedding(input_token_id);
-        logits = model.forward(current_x, pos, &cache, nullptr);
-        Logger::info("Returned from forward (CPU).");
-#endif
 
-        // Check for errors from forward pass
-        if (logits.empty()) {
-            Logger::error("Forward pass returned empty logits at pos " + std::to_string(pos) + ". Stopping generation.");
+#ifdef HAS_CUDA
+        // --- CUDA Forward Path ---
+        // Logger::info("API: Calling forward_device for pos " + std::to_string(pos)); // Optional detailed log
+        logits = model_->forward_device(input_token_id, pos, &kv_cache_, nullptr);
+#else
+        // --- CPU Forward Path ---
+        // Logger::info("API: Calling forward (CPU) for pos " + std::to_string(pos)); // Optional detailed log
+        std::vector<float> input_embedding = model_->lookup_embedding(input_token_id);
+        if (input_embedding.empty()) {
+            Logger::error("Failed to get embedding for token " + std::to_string(input_token_id));
             break; 
         }
+        logits = model_->forward(input_embedding, pos, &kv_cache_, nullptr);
+#endif // HAS_CUDA
+
+        // --- Common logic after forward pass ---
+        kv_cache_.seq_len = pos + 1; // Update cache length
+
+        if (logits.empty()) {
+             #ifdef HAS_CUDA
+                 Logger::error("Model forward_device returned empty logits at pos " + std::to_string(pos));
+             #else
+                 Logger::error("Model forward (CPU) returned empty logits at pos " + std::to_string(pos));
+             #endif
+             break;
+        }
         
-        // --- IMPORTANT: Increment cache sequence length *AFTER* the forward call for position `pos` --- 
-        cache.seq_len = pos + 1; 
-
-        // Sample next token (only during generation phase)
+        // Process logits and sample (only after prompt)
         if (pos >= num_prompt_tokens - 1) {
-            // Use greedy sampling (argmax)
-            next_token_id = argmax(logits);
-            // next_token_id = sample_top_k_top_p_temperature(logits, temperature, top_k, top_p, rng);
-            Logger::info("Greedy sampled token ID: " + std::to_string(next_token_id));
+            // TODO: Implement temperature sampling, top-k, top-p if needed
+            // For now, using simple greedy sampling (argmax)
+            // Consider adding the sample_top_k_top_p_temperature function back if needed
+            next_token_id = argmax(logits); 
 
-            // Check for EOS *before* adding the token
-            if (next_token_id == eos_id) {
-                Logger::info("EOS token generated. Stopping generation.");
-                break; 
+            if (next_token_id == eos_token_id_) {
+                Logger::info("EOS token generated. Stopping.");
+                break;
             }
 
-            generated_only_ids.push_back(next_token_id);
+            token_ids.push_back(next_token_id); // Add generated token
             generated_count++;
 
-            // Check for max tokens reached (already checked EOS)
-            if (generated_count >= max_new_tokens) {
-                 Logger::info("Max new tokens reached. Stopping generation.");
-                 break; 
+            if (generated_count >= steps) {
+                Logger::info("Max steps reached. Stopping.");
+                break;
             }
-        } else {
-            // Processing prompt, no sampling needed
-             Logger::info("Processed prompt token at pos " + std::to_string(pos));
         }
-        Logger::info("--- Generate loop: END pos=" + std::to_string(pos) + " ---");
-    } // End generation loop
-
-    // +++ LOGGING: Print the generated token IDs before decoding +++
-    std::string ids_str = "Generated token IDs: [";
-    for(size_t i = 0; i < generated_only_ids.size(); ++i) {
-        ids_str += std::to_string(generated_only_ids[i]) + (i == generated_only_ids.size() - 1 ? "" : ", ");
     }
-    ids_str += "]";
-    Logger::info(ids_str);
-    // +++ END LOGGING +++
 
-    // Decode the generated IDs
-    std::string generated_text = tokenizer.decode(generated_only_ids, true); 
-    Logger::info("Decoding complete (skip_special_tokens=true). Generated text length: " + std::to_string(generated_text.length()));
-
-    // +++ START MANUAL CLEANUP +++
-    // Remove known garbage prefix (specific emoji bytes)
-    const std::string garbage_prefix = "<0xF0><0x9F><0x98><0x8A>";
-    if (generated_text.rfind(garbage_prefix, 0) == 0) { // Check if string starts with the prefix
-        generated_text = generated_text.substr(garbage_prefix.length());
-        Logger::info("Removed garbage prefix.");
-    }
-    // Remove </s> and anything after it
-    size_t eos_pos = generated_text.find("</s>");
-    if (eos_pos != std::string::npos) {
-        generated_text = generated_text.substr(0, eos_pos);
-        Logger::info("Truncated text at first EOS marker.");
-    }
-    // +++ END MANUAL CLEANUP +++
-
-    return generated_text;
+    // Decode the generated part
+    std::vector<int> generated_only_ids(token_ids.begin() + num_prompt_tokens, token_ids.end());
+    std::string result = tokenizer_->decode(generated_only_ids, true); // Skip special tokens
+    Logger::info("Generated response: " + result);
+    return result;
 }
 
 } // namespace tinyllama 
