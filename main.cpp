@@ -8,54 +8,69 @@
 #include <sstream>
 #include <iomanip> // Include for std::setw, std::fixed, std::setprecision
 #include "api.h"
+#include <algorithm> // For std::find_if_not
+#include <cctype>    // For std::isspace
+
+// Helper function to trim leading/trailing whitespace
+std::string trim_whitespace(const std::string &s) {
+    auto start = std::find_if_not(s.begin(), s.end(), [](unsigned char c){ return std::isspace(c); });
+    auto end = std::find_if_not(s.rbegin(), s.rend(), [](unsigned char c){ return std::isspace(c); }).base();
+    return (start < end ? std::string(start, end) : std::string());
+}
 
 int main(int argc, char** argv) {
     // Accept data directory as argument (default: "data")
     std::string model_path_or_dir = "data"; // Changed variable name for clarity
-    std::string prompt = "Hello, world!";
-    int steps = 64;
-    float temperature = 0.7f; // Default temperature
+    std::string prompt = "Hello, world!"; // Default prompt
+    int steps = 64;             // Default max new tokens
+    float temperature = 0.7f;   // Default temperature
 
     if (argc > 1) {
         model_path_or_dir = argv[1];
     }
+    // --- Read prompt from argv (with trimming) --- 
     if (argc > 2) {
-        prompt = argv[2];
+        std::string raw_prompt_from_argv = argv[2];
+        prompt = trim_whitespace(raw_prompt_from_argv); // Trim whitespace
     }
+    // --- Read steps from argv --- 
     if (argc > 3) {
         try {
             steps = std::stoi(argv[3]);
-        } catch (const std::exception& e) {
-            Logger::error(std::string("Invalid steps argument: ") + argv[3] + ". Using default: " + std::to_string(steps));
+    } catch (const std::exception& e) {
+            Logger::error("Invalid steps argument: " + std::string(argv[3]) + ". Using default: " + std::to_string(steps));
         }
     }
-    if (argc > 4) {
+    // --------------------------
+    if (argc > 4) { // Keep temperature from argv if provided
         try {
             temperature = std::stof(argv[4]);
-        } catch (const std::exception& e) {
-            Logger::error(std::string("Invalid temperature argument: ") + argv[4] + ". Using default: " + std::to_string(temperature));
+            } catch (const std::exception& e) {
+            Logger::error("Invalid temperature argument: " + std::string(argv[4]) + ". Using default: " + std::to_string(temperature));
         }
     }
 
+    // --- Remove forced values --- 
+    // prompt = "What is the capital of France?"; 
+    // steps = 30;
+    // ----------------------------
+
+    // Log inputs
     Logger::info("Using model path/directory: " + model_path_or_dir);
-    Logger::info("Prompt: \"" + prompt + "\"");
-    Logger::info("Steps: " + std::to_string(steps));
-    Logger::info("Temperature: " + std::to_string(temperature));
+    Logger::info("Raw Prompt (from argv, trimmed): \"" + prompt + "\"");
+    Logger::info("Steps (from argv): " + std::to_string(steps));
+    Logger::info("Temperature Used (currently ignored by API sampling): " + std::to_string(temperature));
 
     try {
         // 1. Create TinyLlamaSession
-        // The constructor will handle loading model, tokenizer, etc.
-        // It will also detect if model_path_or_dir is a directory or a .gguf file.
         tinyllama::TinyLlamaSession session(model_path_or_dir);
         Logger::info("TinyLlamaSession initialized successfully.");
 
-        // 2. Generate text
+        // 2. Generate text using prompt and steps from argv
         std::string generated_text = session.generate(prompt, steps, temperature);
 
         // 3. Print the generated text
-        // The prompt is not included in the output of session.generate by default design.
-        // If you want to print the prompt, do it here.
-        std::cout << "Prompt: " << prompt << std::endl;
+        std::cout << "Prompt: " + prompt << std::endl;
         std::cout << "Generated: " << generated_text << std::endl;
 
     } catch (const std::exception& e) {
