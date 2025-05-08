@@ -113,13 +113,13 @@ add_executable(tinyllamagguf
 # Link GGUF loader against the core library (inherits CUDA/OpenMP/etc links)
 target_link_libraries(tinyllamagguf PRIVATE tinyllama_core)
 
-# --- ADDED: Tokenizer Test Executable ---
-add_executable(test_tokenizer
-    test_tokenizer.cpp
-)
-# Link the test executable against the core library
-target_link_libraries(test_tokenizer PRIVATE tinyllama_core Boost::regex)
-# --- END ADDED ---
+# --- ADDED: Tokenizer Test Executable --- REMOVED
+# add_executable(test_tokenizer
+#     test_tokenizer.cpp
+# )
+# Link the test executable against the core library REMOVED
+# target_link_libraries(test_tokenizer PRIVATE tinyllama_core Boost::regex)
+# --- END ADDED --- REMOVED
 
 # Link OpenSSL if found (needed by httplib if SSL support is enabled)
 if(OPENSSL_FOUND)
@@ -160,11 +160,11 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 
 message(STATUS "Project source directory: ${CMAKE_CURRENT_SOURCE_DIR}")
 
-add_executable(dequantize_roundtrip dequantize_roundtrip.cpp)
-target_link_libraries(dequantize_roundtrip PRIVATE tinyllama_core)
+# add_executable(dequantize_roundtrip dequantize_roundtrip.cpp) # REMOVED
+# target_link_libraries(dequantize_roundtrip PRIVATE tinyllama_core) # REMOVED
 
-add_executable(matvec_test matvec_test.cpp)
-target_link_libraries(matvec_test PRIVATE tinyllama_core)
+# add_executable(matvec_test matvec_test.cpp) # REMOVED
+# target_link_libraries(matvec_test PRIVATE tinyllama_core) # REMOVED
 
-add_executable(compare_quant_fp16 compare_quant_fp16.cpp)
-target_link_libraries(compare_quant_fp16 PRIVATE tinyllama_core)
+# add_executable(compare_quant_fp16 compare_quant_fp16.cpp) # REMOVED
+# target_link_libraries(compare_quant_fp16 PRIVATE tinyllama_core) # REMOVED
