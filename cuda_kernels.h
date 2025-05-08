@@ -192,7 +192,6 @@ void lookup_embedding_bf16_f32_cuda(const uint16_t* embedding_table_dev,
 
 void matvec_f32_f32_cuda(cublasHandle_t handle, const float * mat_f32_dev, const float * vec_f32_dev, float * out_f32_dev, int rows, int cols, cudaStream_t stream);
 
-// --- ADDED START ---
 // Performs embedding lookup directly on the GPU.
 // Reads from either a BF16 or FP32 embedding table on the device.
 // table_dev: Pointer to the embedding table on the device (either const uint16_t* or const float*).
@@ -206,10 +205,9 @@ void lookup_embedding_cuda(const void* table_dev,
                            float* output_dev,
                            int token_id,
                            int hidden_size,
-                           int vocab_size, // Added for bounds check
+                           int vocab_size,
                            bool is_bf16,
                            cudaStream_t stream);
-// --- ADDED END ---
 
 void matvec_bf16_f32_cuda(cublasHandle_t handle,
                           const uint16_t* mat_bf16_dev,

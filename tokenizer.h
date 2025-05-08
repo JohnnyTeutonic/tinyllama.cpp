@@ -5,13 +5,12 @@
 #include <vector>
 #include <unordered_map>
 #include <utility> // For std::pair
-#include <map> // <<< ADDED for potential merge map later
-#include <limits> // <<< ADDED for numeric limits
+#include <map>
+#include <limits>
 #include <unordered_set>
-// --- ADDED GGUF INCLUDES ---
 #include "gguf_structs.h" // Need GGUFData definition
 #include "logger.h"       // For logging
-#include "model.h" // <<< ADDED
+#include "model.h" 
 
 /**
  * A simple tokenizer class that doesn't rely on OpenNMT or any external libraries.
@@ -20,13 +19,11 @@
  */
 class Tokenizer {
 public:
-    // --- ADDED: Pre-tokenization method enum ---
     enum PreTokenizeMethod {
         DEFAULT, // Use the tokenizer's configured default
         WHITESPACE, // Force whitespace splitting before BPE
         LLAMA_REGEX // Force llama.cpp regex before BPE
     };
-    // --- END ADDED ---
 
     /**
      * Constructor: Load tokenizer from vocab file
@@ -35,10 +32,8 @@ public:
      */
     Tokenizer(const std::string& model_path, const std::string& vocab_path);
     
-    // --- ADDED: Constructor from GGUF Data ---
     // This constructor prioritizes loading tokenizer info from GGUF metadata
     explicit Tokenizer(const GGUFData& gguf_data);
-    // --- END: Added Constructor ---
     
     /**
      * Tokenize text into token strings
@@ -83,9 +78,7 @@ public:
     // GGUF Vocab Size
     int vocab_size() const;
     
-    // --- ADDED: Check if an ID is an added special token ---
     bool is_added_token(int id) const;
-    // --- END ADDED ---
     
     // Special token accessors
     int bos_token_id() const { return bos_token_id_; }
@@ -95,7 +88,7 @@ public:
 
     std::vector<std::string> space_tokenize(const std::string& text) const;
     std::vector<std::string> bpe_tokenize(const std::string& text) const; // For JSON/merges (Backup Version)
-    std::vector<std::string> regex_tokenize(const std::string& text) const; // Added based on test usage
+    std::vector<std::string> regex_tokenize(const std::string& text) const;
 
 private:
     // Tokenization implementations
@@ -116,16 +109,12 @@ private:
     // BPE merges (pair -> rank) - Loaded from JSON
     std::unordered_map<std::string, int> bpe_merges_;
     
-    // --- ADDED: GGUF-specific tokenizer data ---
     std::vector<float> token_scores_;       // Loaded from tokenizer.ggml.scores
     std::vector<int32_t> token_types_;      // Loaded from tokenizer.ggml.token_type (use int32_t as per GGUF spec)
     bool initialized_from_gguf_ = false; // Flag to indicate initialization source
-    // --- END ADDED ---
     
-    // --- ADDED: Redeclare added_tokens_ member ---
     std::unordered_map<std::string, int> added_tokens_; // Map from token string to ID
-    // --- END ADDED ---
-    
+        
     // Special token handling
     std::string unk_token_;
     std::string bos_token_;
@@ -140,13 +129,8 @@ private:
     // SentencePiece model state
     bool sentencepiece_model_loaded_ = false;
 
-    // --- ADDED: Store pre-tokenization type ---
-    std::string pre_tok_type_ = "unknown"; // e.g., "llama", "default"
-    // --- END ADDED ---
-
-    // --- ADDED: Added tokens: ID -> Token string (reverse map) ---
+    std::string pre_tok_type_ = "unknown";
     std::unordered_map<int, std::string> id_to_added_token_;
-    // --- END ADDED ---
 
     std::unordered_set<std::string> chat_template_special_tokens;
 

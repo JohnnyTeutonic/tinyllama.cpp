@@ -1,6 +1,6 @@
 #include "gguf_parser.h"
 #include "quantization.h" // For ggml_type_size/block_size/name
-#include "logger.h"       // <<< ADDED LOGGER INCLUDE
+#include "logger.h"
 #include <iostream>       // For std::cout, std::cerr // Keep for potential future debugging?
 #include <stdexcept>      // For std::runtime_error
 #include <vector>         // For intermediate buffers
@@ -136,10 +136,6 @@ GGUFData load_gguf_meta(const std::string& filename) {
                      // Store GGUFArray metadata (type and count) regardless of loading content
                      GGUFArray array_obj; array_obj.type = array_type_enum; array_obj.len = count;
                      result.metadata[key] = array_obj;
-                     // Logger::info("Found ARRAY metadata for key '" + key + "' (Type: "
-                     //              + std::to_string(static_cast<uint32_t>(array_type_enum)) + ", Count: " + std::to_string(count) + ")");
-
-                     // --- START: Load Specific Tokenizer Arrays --- 
                      bool skipped_data = false;
                      if (key == "tokenizer.ggml.tokens" && array_type_enum == GGUFValueType::STRING) {
                         Logger::info("Loading STRING array data ('" + key + "') with " + std::to_string(count) + " elements...");
@@ -171,9 +167,7 @@ GGUFData load_gguf_meta(const std::string& filename) {
                         }
                         Logger::info("Loaded tokenizer_merges. Size: " + std::to_string(result.tokenizer_merges.size()));
                      }
-                     // --- END: Load Specific Tokenizer Arrays --- 
                      else { 
-                        // --- START: Skip OTHER array data (Existing Logic) --- 
                         skipped_data = true; 
                         Logger::info("Skipping unhandled/non-tokenizer ARRAY data for key '" + key + "' (Type: "
                                     + std::to_string(static_cast<uint32_t>(array_type_enum)) + ", Count: " + std::to_string(count) + ")");
@@ -183,7 +177,6 @@ GGUFData load_gguf_meta(const std::string& filename) {
                                try {
                                   std::string discarded_str = read_gguf_string(file); // Read and discard
                                } catch (const std::exception& e) {
-                                  // Log error but re-throw to signal failure
                                   Logger::error("Error skipping string element " + std::to_string(arr_i) + " for key '" + key + "': " + e.what());
                                   throw;
                                }
@@ -205,7 +198,6 @@ GGUFData load_gguf_meta(const std::string& filename) {
                                }
                            } // else: skipping 0 bytes is fine
                         }
-                        // --- END: Skip OTHER array data ---
                      }
                     break;
                 }
@@ -247,19 +239,15 @@ GGUFData load_gguf_meta(const std::string& filename) {
             read_raw(file, ggml_type_u32);
             info.type = static_cast<GGMLType>(ggml_type_u32);
             
-            // --- ADDED: Log file position BEFORE reading offset ---
             uint64_t pos_before_offset_read = file.tellg();
-            // --- END: Log file position ---
 
             read_raw(file, info.offset);
 
-            // --- ADDED: Detailed offset logging ---
             std::stringstream ss_offset_log;
             ss_offset_log << "[GGUF_TENSOR_INFO] Tensor " << i << " ('" << info.name << "'):"
                           << "\n  Raw offset from file: " << info.offset
                           << "\n  File pos before offset read: " << pos_before_offset_read
                           << "\n  Calculated accumulated_offset_debug (before this tensor): " << accumulated_offset_debug;
-            // --- END: Detailed offset logging ---
 
             // Calculate num_elements and size_in_bytes
             info.num_elements = 1;
@@ -294,14 +282,11 @@ GGUFData load_gguf_meta(const std::string& filename) {
                  info.size_in_bytes = static_cast<size_t>(info.num_elements * type_size);
             }
             
-            // --- ADDED: Update and log accumulated_offset_debug ---
             ss_offset_log << "\n  Calculated size_in_bytes for this tensor: " << info.size_in_bytes;
             Logger::info(ss_offset_log.str()); // Log all offset info
             accumulated_offset_debug += info.size_in_bytes;
-            // --- END: Update and log ---
 
             result.tensor_infos.push_back(info);
-            // Keep existing summary log for tensor info, but it's less detailed for offset debugging
             {
                  std::stringstream ss_tensor;
                  ss_tensor << "Tensor " << i << ": Name='" << info.name << "', Type=" << ggml_type_name(info.type)
@@ -318,7 +303,6 @@ GGUFData load_gguf_meta(const std::string& filename) {
     }
     Logger::info("Finished reading tensor info.");
 
-    // --- ADDED: Populate the tensor_infos_map ---
     Logger::info("Populating tensor_infos_map...");
     for (const auto& tinfo : result.tensor_infos) {
         if (result.tensor_infos_map.count(tinfo.name)) {
@@ -327,7 +311,6 @@ GGUFData load_gguf_meta(const std::string& filename) {
         result.tensor_infos_map[tinfo.name] = tinfo;
     }
     Logger::info("Finished populating tensor_infos_map. Map size: " + std::to_string(result.tensor_infos_map.size()));
-    // --- END: Populate the tensor_infos_map ---
 
     // Determine data alignment (read from metadata if available, default otherwise)
     uint64_t alignment = 32; // Default alignment
@@ -361,8 +344,6 @@ GGUFData load_gguf_meta(const std::string& filename) {
     }
     uint64_t data_start_pos = file.tellg(); // This is the actual start of the tensor data blob in the file
     Logger::info("[GGUF_LOAD] File position after padding seek (data_start_pos): " + std::to_string(data_start_pos));
-
-    // --- START: Targeted read debug for blk.0.ffn_down.weight's d field ---
     std::string target_tensor_name_debug = "blk.0.ffn_down.weight";
     uint64_t offset_of_d_in_block_q6k = 208;
     if (result.tensor_infos_map.count(target_tensor_name_debug)) {
@@ -396,7 +377,6 @@ GGUFData load_gguf_meta(const std::string& filename) {
                     for(int k=0; k < file.gcount(); ++k) ss_debug_bytes << "0x" << std::hex << (int)debug_buffer[k] << " ";
                     Logger::info(ss_debug_bytes.str());
                 }
-                // CRUCIAL: Seek back to data_start_pos to not mess up the main read
                 file.clear(); // Clear any EOF/fail flags from small read
                 file.seekg(original_file_pos_before_debug_read, std::ios::beg);
                 Logger::info("[GGUF_DEBUG_READ] Seeked back to original_file_pos_before_debug_read: " + std::to_string(file.tellg()));
@@ -407,7 +387,6 @@ GGUFData load_gguf_meta(const std::string& filename) {
     } else {
         Logger::warning("[GGUF_DEBUG_READ] Target tensor '" + target_tensor_name_debug + "' not found for debug read.");
     }
-    // --- END: Targeted read debug ---
 
     // 6. Read Tensor Data Block (Main logic)
     file.seekg(0, std::ios::end); // This was already here, to get file_end_pos
@@ -419,9 +398,7 @@ GGUFData load_gguf_meta(const std::string& filename) {
     }
 
     uint64_t data_size = file_end_pos - data_start_pos;
-    // --- Log calculated data size (already present, keep) ---
     Logger::info("[GGUF_LOAD] Calculated tensor data block size: " + std::to_string(data_size) + " bytes.");
-    // --- End Log ---
 
     if (data_size > 0) {
         // Resize the vector in the result struct

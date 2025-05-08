@@ -663,7 +663,6 @@ static void weighted_sum_probs_v(const std::vector<float>& probs,
 }
 // --- END: C++ Weighted Sum (Probs * V) ---
 
-// --- START: C++ Attention Scores (Q * K^T) ---
 // Calculates attention scores: scores = (Q @ K^T) * scale
 // Q shape: [head_dim], K shape: [seq_len, head_dim], scores shape: [seq_len]
 static void calculate_attention_scores(const std::vector<float>& Q, 
@@ -957,7 +956,6 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
         }
     Logger::info("Finished precomputing RoPE cos/sin frequencies.");
 
-    // --- ADDED LOG --- 
     Logger::info("RoPE Params Check: max_seq_len=" + std::to_string(config_.max_position_embeddings) + ", head_dim=" + std::to_string(head_dim));
 
 #ifdef HAS_CUDA
@@ -1088,7 +1086,7 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
     int num_layers = nhl;
 
     // Helper lambda to concatenate and upload
-    auto upload_layer_f32 = [&](const std::vector<std::vector<float>>& src, float*& dev_ptr, size_t elem_size, const std::string& weight_name) { // Added weight_name
+    auto upload_layer_f32 = [&](const std::vector<std::vector<float>>& src, float*& dev_ptr, size_t elem_size, const std::string& weight_name) {
         std::vector<float> concat;
         for (const auto& v : src) concat.insert(concat.end(), v.begin(), v.end());
         if (!concat.empty()) {
@@ -1099,7 +1097,7 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
             gpuErrchk(cudaMemcpy(dev_ptr, concat.data(), concat.size() * sizeof(float), cudaMemcpyHostToDevice));
         }
     };
-    auto upload_layer_bf16 = [&](const std::vector<std::vector<uint16_t>>& src, float*& dev_ptr, size_t elem_size, const std::string& weight_name) { // Added weight_name
+    auto upload_layer_bf16 = [&](const std::vector<std::vector<uint16_t>>& src, float*& dev_ptr, size_t elem_size, const std::string& weight_name) {
         std::vector<float> concat;
         for (const auto& v : src) {
             std::vector<float> tmp = bf16vec_to_float_vec(v);
@@ -1399,7 +1397,6 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& config_in, const std::string& 
     Logger::info("TinyLlamaModel construction from path complete.");
 }
 
-// --- START: TinyLlamaModel Destructor Definition ---
 TinyLlamaModel::~TinyLlamaModel() {
 #ifdef HAS_CUDA
     Logger::info("Freeing TinyLlamaModel CUDA resources...");
@@ -2149,7 +2146,7 @@ std::vector<float> TinyLlamaModel::forward_device(int token_id, int pos, KVCache
     int nhl = config_.num_hidden_layers;
     int is = config_.intermediate_size;
     float eps = config_.rms_norm_eps;
-    int max_seq_len = config_.max_position_embeddings; // Added for cache size
+    int max_seq_len = config_.max_position_embeddings;
     bool log_this_pos = (pos == 13); // Target pos 13
 
     if (log_this_pos) {

@@ -507,7 +507,7 @@ __global__ void rope_kernel(float* x,
                             int num_heads, 
                             int head_dim, 
                             const float* all_freqs_cis_base, // Use base pointer
-                            int pos) // Added pos
+                            int pos)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int total_pairs = num_heads * (head_dim / 2);
@@ -540,7 +540,7 @@ void rope_cuda(float* x_dev,
                int num_heads, 
                int head_dim, 
                const float* all_freqs_cis_dev_base, // Changed parameter name
-               int pos, // Added pos
+               int pos,
                cudaStream_t stream)
 {
     int total_pairs = num_heads * (head_dim / 2);
