@@ -5,11 +5,8 @@
 #include <iomanip> // For std::setw, std::fixed, std::setprecision
 
 #include "logger.h"
-#include "api.h" // <-- ADDED: Include the new API header
+#include "api.h"
 
-// --- REMOVED: Helper Functions (Sampling & Softmax) ---
-// --- REMOVED: run_generation_experiment function ---
-// --- REMOVED: Old includes like model.h, gguf_parser.h, tokenizer.h etc. ---
 
 int main(int argc, char** argv) {
     if (argc < 2) {

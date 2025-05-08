@@ -98,13 +98,6 @@ add_executable(tinyllama
 # Link tinyllama executable against the core library
 target_link_libraries(tinyllama PRIVATE tinyllama_core)
 
-# --- New API Example Executable ---
-add_executable(tinyllama_api_example
-    main_api_example.cpp # File exists now
-)
-# Link the example against the core library
-target_link_libraries(tinyllama_api_example PRIVATE tinyllama_core)
-
 # --- New Chat Server Executable ---
 add_executable(tinyllama_server
     server.cpp
