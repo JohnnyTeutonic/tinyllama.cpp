@@ -2,15 +2,12 @@
 
 #include <cstdint>
 
-
-
 enum GGMLType {
   GGML_TYPE_F32 = 0,
   GGML_TYPE_F16 = 1,
   GGML_TYPE_Q4_0 = 2,
   GGML_TYPE_Q4_1 = 3,
-  
-  
+
   GGML_TYPE_Q5_0 = 6,
   GGML_TYPE_Q5_1 = 7,
   GGML_TYPE_Q8_0 = 8,
@@ -25,10 +22,8 @@ enum GGMLType {
   GGML_TYPE_I16 = 17,
   GGML_TYPE_I32 = 18,
   GGML_TYPE_BF16 = 30,
-  GGML_TYPE_COUNT,  
+  GGML_TYPE_COUNT,
 };
-
-
 
 enum class GGUFValueType : uint32_t {
   UINT8 = 0,

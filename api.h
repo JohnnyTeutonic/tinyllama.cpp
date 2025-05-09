@@ -1,20 +1,15 @@
 #ifndef TINYLLAMA_API_H
 #define TINYLLAMA_API_H
 
-#include <memory>     
-#include <stdexcept>  
+#include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
 #include "model.h"
 #include "tokenizer.h"
 
-
-
-
-
-struct KVCache;  
-                 
+struct KVCache;
 
 namespace tinyllama {
 
@@ -55,27 +50,20 @@ class TinyLlamaSession {
                        const std::string& system_prompt = "",
                        bool apply_q_a_format = false);
 
-  
   const Tokenizer* get_tokenizer() const { return tokenizer_.get(); }
   const ModelConfig& get_config() const { return config_; }
 
  private:
-  
-  
-  
-
-  
   TinyLlamaSession(const TinyLlamaSession&) = delete;
   TinyLlamaSession& operator=(const TinyLlamaSession&) = delete;
 
-  
-  std::unique_ptr<TinyLlamaModel> model_;  
+  std::unique_ptr<TinyLlamaModel> model_;
   std::unique_ptr<Tokenizer> tokenizer_;
   ModelConfig config_;
   KVCache kv_cache_;
   int eos_token_id_;
 };
 
-}  
+}  // namespace tinyllama
 
-#endif  
+#endif

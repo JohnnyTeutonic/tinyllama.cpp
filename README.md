@@ -1,12 +1,12 @@
 # TinyLlama.cpp - Minimal C++ Chat Inference
 
-This codebase supports inference for Llama 2 architecture models (including TinyLlama variants) using GGUF files, as well as TinyLlama models from SafeTensors.
+This codebase supports inference for Llama 2 architecture models (including TinyLlama variants) using Safetensors models, as well as TinyLlama models using the GGUF format.
 
 The GGUF format support includes loading models with various tensor types such as BF16, FP16, FP32, and Q8_0. Nominal support for Q4_K and Q6_K quantization types is also present, though Q8_0 is the most extensively tested quantized format in this project.
 
 ## Purpose
 
-This project provides a streamlined, end-to-end C++ inference pipeline for running TinyLlama-based models for chat applications. The primary goal is to achieve this with minimal dependencies, allowing for deployment without requiring Python or large frameworks like LibTorch at runtime (unless using the optional CUDA backend which requires the CUDA Toolkit).
+This project provides a streamlined, end-to-end C++ inference pipeline for running Llama-2 models for chat applications. The primary goal is to achieve this with minimal dependencies, allowing for deployment without requiring Python or large frameworks like LibTorch at runtime (unless using the optional CUDA backend which requires the CUDA Toolkit).
 
 It includes a simple web server and UI for interactive chatting.
 
@@ -53,7 +53,36 @@ sudo apt install libomp-dev
 *   **Other Distributions:** For non-Debian/Ubuntu systems, please use your distribution's package manager ...
 
 ##### CUDA Toolkit (Optional - For GPU Acceleration)
-# ... (CUDA section remains the same) ...
+
+There are two main ways to install the CUDA Toolkit:
+
+**1. General Method (Recommended for latest versions or specific version requirements):**
+
+*   **NVIDIA Drivers:** First, ensure you have the proprietary NVIDIA drivers installed for your GPU. These are often available through your distribution's package manager (e.g., `nvidia-driver` package on Debian/Ubuntu) or directly from the [NVIDIA website](https://www.nvidia.com/Download/index.aspx).
+*   **CUDA Toolkit Download:** Download and install the CUDA Toolkit from the [NVIDIA CUDA Toolkit Archive](https://developer.nvidia.com/cuda-toolkit-archive). It's generally recommended to install a version that is compatible with your NVIDIA driver.
+    *   Follow the official NVIDIA installation guide for your operating system meticulously.
+    *   Ensure that `nvcc` (the CUDA compiler) is in your `PATH` after installation, and that CMake can find the toolkit (often helped by setting `CUDA_TOOLKIT_ROOT_DIR` or ensuring standard installation paths are used).
+
+**2. Using Debian/Ubuntu Package Manager (`apt` - for convenience, may not be the latest version):**
+
+For Debian/Ubuntu systems, you can install CUDA components using `apt`. This method is often simpler but might provide an older version of the CUDA Toolkit than available directly from NVIDIA.
+
+```bash
+# Ensure your NVIDIA drivers are installed first.
+# You might have done this via "Additional Drivers" or by installing a package like 'nvidia-driver-XXX'.
+
+# Install the CUDA Toolkit and development libraries (cuBLAS is crucial for this project)
+sudo apt update
+sudo apt install nvidia-cuda-toolkit libcublas-dev
+
+# Other potentially useful CUDA development libraries (optional, depending on broader needs):
+# sudo apt install libcufft-dev libcurand-dev libcusolver-dev libcusparse-dev
+```
+*   After installation via `apt`, `nvcc` and other tools should generally be in the system `PATH`.
+
+**CMake Detection:**
+
+Regardless of the installation method, CMake will attempt to find the CUDA Toolkit. If `HAS_CUDA` is `ON` (either by default due to detection or set explicitly by you with `-DHAS_CUDA=ON`) and the toolkit is not found or key components like `nvcc` or `cublas` are missing, the CMake configuration step will fail with an error message.
 
 ### Python Setup Dependencies
 
@@ -121,7 +150,30 @@ make -j$(nproc)
 
 This will create several executables in the `build/` directory (or `build/bin/` or `build/Release/` depending on your system and generator), including `tinyllama_server` (for SafeTensors models) and `tinyllama` (general purpose CLI).
 
-For detailed insight into the operations performed by the executables (e.g., `tinyllama`, `tinyllama_server`, `tinyllamagguf`), you can inspect the `debugging.log` file generated in the application's working directory. This log provides a step-by-step account of model loading, tokenization, and generation processes.
+For detailed insight into the operations performed by the executables (e.g., `tinyllama`, `tinyllama_server`), you can inspect the `debugging.log` file generated in the application's working directory. This log provides a step-by-step account of model loading, tokenization, and generation processes.
+
+### Using the Management Script (manage.sh)
+
+For ease of use, a comprehensive shell script `manage.sh` is provided in the project root to automate common development and project tasks. This script simplifies building, cleaning, running the applications, formatting code, generating documentation, and packaging releases.
+
+**First, make the script executable:**
+
+```bash
+chmod +x manage.sh
+```
+
+**Available Commands:**
+
+*   `./manage.sh build`: Compiles the project with configurable options for build type and CUDA support.
+*   `./manage.sh clean`: Removes build artifacts and generated documentation.
+*   `./manage.sh run-server`: Starts the chat server with configurable model directory, host, and port.
+*   `./manage.sh run-chat`: Starts the command-line chat client with a configurable model directory.
+*   `./manage.sh format`: Formats C++/CUDA source code using `clang-format` (requires `.clang-format` in project root for custom styles).
+*   `./manage.sh docs`: Generates API documentation using Doxygen (requires `Doxyfile` in project root).
+*   `./manage.sh package`: Creates a release tarball (`.tar.gz`) of the project, including executables and documentation.
+*   `./manage.sh help`: Displays detailed help and options for all commands.
+
+It is recommended to use this script for most routine operations. For detailed options for each command, please run `./manage.sh help` or `./manage.sh <command> --help` (though the primary help is via `./manage.sh help`).
 
 ### 3. Run the Chat Server (Primary Example)
 
@@ -142,7 +194,7 @@ The main way to use this project is via the web server:
 *   Replace `./data` with the actual path to the directory containing your `config.json`, `tokenizer.json`, and `model.safetensors`.
 *   The server will start, load the model, and listen on `http://localhost:8080` by default.
 *   Open your web browser and navigate to `http://localhost:8080`.
-*   You should see a chat interface where you can interact with the model.
+*   You should see a basic chat interface where you can interact with the model.
 
 ### 4. Other Executables / Command-Line Usage
 

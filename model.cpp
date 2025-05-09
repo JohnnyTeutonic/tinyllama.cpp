@@ -2,28 +2,28 @@
 
 #include "logger.h"
 #ifdef HAS_CUDA
-#include "cuda_kernels.h"  
+#include "cuda_kernels.h"
 #endif
 #include <algorithm>
 #include <cmath>
 #include <cstring>
-#include <fstream>  
+#include <fstream>
 #include <iomanip>
-#include <limits>  
-#include <memory>  
+#include <limits>
+#include <memory>
 #include <sstream>
 #include <stdexcept>
 #ifdef _WIN32
 #include <windows.h>
 #endif
-#include <cassert>   
-#include <cstdint>   
-#include <iostream>  
-#include <numeric>   
-#include <variant>   
+#include <cassert>
+#include <cstdint>
+#include <iostream>
+#include <numeric>
+#include <variant>
 
 #include "gguf_parser.h"
-#include "quantization.h"  
+#include "quantization.h"
 
 static void matvec_q6k_f32_vector_cpu(const std::vector<block_q6_K>& mat_q6k,
                                       const std::vector<float>& vec_f32,
@@ -52,15 +52,14 @@ static void log_vector_summary_detailed(const std::string& name,
 inline uint16_t float32_to_bfloat16(float val) {
   uint32_t bits;
   std::memcpy(&bits, &val, sizeof(float));
-  
-  
-  bits += 0x7FFF + ((bits >> 16) & 1);  
+
+  bits += 0x7FFF + ((bits >> 16) & 1);
   return static_cast<uint16_t>(bits >> 16);
 }
-static void matvec_q6k_f32_vector_cpu(
-    const std::vector<block_q6_K>& mat_q6k, const std::vector<float>& vec_f32,
-    std::vector<float>& out_f32, int rows, int cols,
-    bool log_first_block) {  
+static void matvec_q6k_f32_vector_cpu(const std::vector<block_q6_K>& mat_q6k,
+                                      const std::vector<float>& vec_f32,
+                                      std::vector<float>& out_f32, int rows,
+                                      int cols, bool log_first_block) {
   if (cols % GGML_QK_K != 0) {
     throw std::runtime_error(
         "matvec_q6k_f32_vector_cpu: cols (" + std::to_string(cols) +
@@ -81,14 +80,12 @@ static void matvec_q6k_f32_vector_cpu(
   }
 
   out_f32.resize(rows);
-  float dequantized_block[GGML_QK_K];  
-                                       
+  float dequantized_block[GGML_QK_K];
 
-#pragma omp parallel for private( \
-        dequantized_block)  
+#pragma omp parallel for private(dequantized_block)
   for (int r = 0; r < rows; ++r) {
     double row_sum = 0.0;
-    double kahan_c = 0.0;  
+    double kahan_c = 0.0;
 
     size_t block_row_offset = r * num_blocks_per_row;
 
@@ -97,15 +94,13 @@ static void matvec_q6k_f32_vector_cpu(
       const block_q6_K* qblock = &mat_q6k[block_row_offset + block_col_idx];
       bool enable_dequant_log =
           log_first_block && (r == 0 && block_col_idx == 0);
-      dequantize_q6_k(qblock, dequantized_block,
-                      GGML_QK_K);  
+      dequantize_q6_k(qblock, dequantized_block, GGML_QK_K);
 
-      
       size_t vec_offset = block_col_idx * GGML_QK_K;
       for (int i = 0; i < GGML_QK_K; ++i) {
         double term = static_cast<double>(dequantized_block[i]) *
                       static_cast<double>(vec_f32[vec_offset + i]);
-        
+
         double y = term - kahan_c;
         double t = row_sum + y;
         kahan_c = (t - row_sum) - y;
@@ -115,10 +110,10 @@ static void matvec_q6k_f32_vector_cpu(
     out_f32[r] = static_cast<float>(row_sum);
   }
 }
-static void matvec_q4k_f32_vector_cpu(
-    const std::vector<block_q4_K>& mat_q4k, const std::vector<float>& vec_f32,
-    std::vector<float>& out_f32, int rows, int cols,
-    bool log_first_block) {  
+static void matvec_q4k_f32_vector_cpu(const std::vector<block_q4_K>& mat_q4k,
+                                      const std::vector<float>& vec_f32,
+                                      std::vector<float>& out_f32, int rows,
+                                      int cols, bool log_first_block) {
   if (cols % GGML_QK_K != 0) {
     throw std::runtime_error(
         "matvec_q4k_f32_vector_cpu: cols (" + std::to_string(cols) +
@@ -139,14 +134,12 @@ static void matvec_q4k_f32_vector_cpu(
   }
 
   out_f32.resize(rows);
-  float dequantized_block[GGML_QK_K];  
-                                       
+  float dequantized_block[GGML_QK_K];
 
-#pragma omp parallel for private( \
-        dequantized_block)  
+#pragma omp parallel for private(dequantized_block)
   for (int r = 0; r < rows; ++r) {
     double row_sum = 0.0;
-    double kahan_c = 0.0;  
+    double kahan_c = 0.0;
 
     size_t block_row_offset = r * num_blocks_per_row;
 
@@ -158,12 +151,11 @@ static void matvec_q4k_f32_vector_cpu(
       dequantize_q4_k_m(qblock, dequantized_block, GGML_QK_K,
                         enable_dequant_log);
 
-      
       size_t vec_offset = block_col_idx * GGML_QK_K;
       for (int i = 0; i < GGML_QK_K; ++i) {
         double term = static_cast<double>(dequantized_block[i]) *
                       static_cast<double>(vec_f32[vec_offset + i]);
-        
+
         double y = term - kahan_c;
         double t = row_sum + y;
         kahan_c = (t - row_sum) - y;
@@ -177,11 +169,10 @@ static void matvec_f32_f32_vector_cpu(const std::vector<float>& mat_f32,
                                       const std::vector<float>& vec_f32,
                                       std::vector<float>& out_f32, int rows,
                                       int cols) {
-  
   if (mat_f32.empty() || vec_f32.empty()) {
     Logger::error(
         "matvec_f32_f32_vector_cpu: Input matrix or vector is empty.");
-    out_f32.assign(rows, 0.0f);  
+    out_f32.assign(rows, 0.0f);
     return;
   }
   if (mat_f32.size() != (size_t)rows * cols) {
@@ -200,14 +191,13 @@ static void matvec_f32_f32_vector_cpu(const std::vector<float>& mat_f32,
     return;
   }
 
-  out_f32.resize(rows);  
+  out_f32.resize(rows);
 
-#pragma omp parallel for schedule( \
-        static)  
+#pragma omp parallel for schedule(static)
   for (int r = 0; r < rows; ++r) {
     float sum = 0.0f;
     size_t row_offset = (size_t)r * cols;
-    
+
     const float* mat_row_ptr = mat_f32.data() + row_offset;
     const float* vec_ptr = vec_f32.data();
 
@@ -227,7 +217,7 @@ void log_vector_summary(const std::string& name, const std::vector<float>& v,
   size_t actual_head_count = std::min((size_t)head_count, v.size());
 
   ss << name << ": size=" << v.size();
-  
+
   if (actual_head_count > 0) {
     ss << ", first " << actual_head_count << ": [";
     for (size_t i = 0; i < actual_head_count; ++i) {
@@ -246,7 +236,6 @@ void log_vector_summary(const std::string& name, const std::vector<float>& v,
   Logger::info(ss.str());
 }
 
-
 void log_vector_summary_with_tail(const std::string& name,
                                   const std::vector<float>& v, int head_count,
                                   int tail_count) {
@@ -255,29 +244,24 @@ void log_vector_summary_with_tail(const std::string& name,
     return;
   }
   std::stringstream ss;
-  
+
   size_t actual_head_count = std::min((size_t)head_count, v.size());
   size_t actual_tail_count = std::min((size_t)tail_count, v.size());
   size_t total_shown = actual_head_count + actual_tail_count;
   bool overlap = total_shown > v.size();
   if (overlap) {
-    actual_tail_count =
-        v.size() - actual_head_count;  
-    if (actual_tail_count >
-        std::min((size_t)tail_count,
-                 v.size())) {  
+    actual_tail_count = v.size() - actual_head_count;
+    if (actual_tail_count > std::min((size_t)tail_count, v.size())) {
       actual_tail_count = std::min((size_t)tail_count, v.size());
     }
-    if (tail_count > 0 &&
-        actual_head_count ==
-            v.size()) {  
+    if (tail_count > 0 && actual_head_count == v.size()) {
       actual_tail_count = 0;
     }
   }
   size_t tail_start_index = v.size() - actual_tail_count;
 
   ss << name << ": size=" << v.size();
-  
+
   if (actual_head_count > 0) {
     ss << ", first " << actual_head_count << ": [";
     for (size_t i = 0; i < actual_head_count; ++i) {
@@ -285,9 +269,8 @@ void log_vector_summary_with_tail(const std::string& name,
     }
     ss << "]";
   }
-  
-  if (actual_tail_count > 0 &&
-      tail_start_index >= actual_head_count) {  
+
+  if (actual_tail_count > 0 && tail_start_index >= actual_head_count) {
     ss << ", last " << actual_tail_count << ": [";
     for (size_t i = 0; i < actual_tail_count; ++i) {
       ss << (i > 0 ? " " : "") << std::fixed << std::setprecision(4)
@@ -309,31 +292,24 @@ void log_vector_summary_with_tail(const std::string& name,
   Logger::info(ss.str());
 }
 
-
-
 float bfloat16_to_float32(uint16_t bf16) {
-  
-  if (bf16 == 0) return 0.0f;        
-  if (bf16 == 0x8000) return -0.0f;  
+  if (bf16 == 0) return 0.0f;
+  if (bf16 == 0x8000) return -0.0f;
 
-  
   bool is_nan = ((bf16 & 0x7F80) == 0x7F80) && ((bf16 & 0x007F) != 0);
   if (is_nan) return std::numeric_limits<float>::quiet_NaN();
 
-  
   if ((bf16 & 0x7F80) == 0x7F80 && (bf16 & 0x007F) == 0) {
     return (bf16 & 0x8000) ? -std::numeric_limits<float>::infinity()
                            : std::numeric_limits<float>::infinity();
   }
 
-  
   uint32_t bits = static_cast<uint32_t>(bf16) << 16;
   float result;
   std::memcpy(&result, &bits, sizeof(float));
 
   return result;
 }
-
 
 std::vector<float> bfloat16_vector_to_float32(
     const std::vector<uint16_t>& bf16_vec) {
@@ -347,7 +323,6 @@ std::vector<float> bfloat16_vector_to_float32(
   return f32_vec;
 }
 
-
 std::vector<uint16_t> uint8_vector_to_uint16_vector(
     const std::vector<uint8_t>& bytes, size_t numel) {
   if (bytes.size() != numel * 2) {
@@ -355,26 +330,22 @@ std::vector<uint16_t> uint8_vector_to_uint16_vector(
         "Byte vector size mismatch for uint16_t conversion");
   }
   std::vector<uint16_t> out(numel);
-  
+
   std::memcpy(out.data(), bytes.data(), bytes.size());
   return out;
 }
 
-
-
 int argmax(const std::vector<float>& v) {
   if (v.empty()) {
-    
-    Logger::error(
-        "Cannot perform argmax on empty vector");  
-    return -1;                                     
+    Logger::error("Cannot perform argmax on empty vector");
+    return -1;
   }
   auto max_it = std::max_element(v.begin(), v.end());
   float max_val = *max_it;
   int max_idx = std::distance(v.begin(), max_it);
   Logger::debug("[ARGMAX HELPER] Max value found: " + std::to_string(max_val) +
                 " at index: " + std::to_string(max_idx));
-  return max_idx;  
+  return max_idx;
 }
 
 static void rmsnorm_vector_cpu(const std::vector<float>& x,
@@ -382,13 +353,12 @@ static void rmsnorm_vector_cpu(const std::vector<float>& x,
                                std::vector<float>& out, float eps) {
   if (x.empty() || x.size() != weight.size()) {
     Logger::error("RMSNorm vector size mismatch or empty input.");
-    out.assign(x.size(), 0.0f);  
+    out.assign(x.size(), 0.0f);
     return;
   }
   out.resize(x.size());
   size_t n = x.size();
 
-  
   double ssq = 0.0;
 #pragma omp parallel for reduction(+ : ssq)
   for (size_t i = 0; i < n; ++i) {
@@ -396,9 +366,7 @@ static void rmsnorm_vector_cpu(const std::vector<float>& x,
   }
   ssq /= n;
 
-  
   float norm_factor = 1.0f / std::sqrt(static_cast<float>(ssq) + eps);
-
 
 #pragma omp parallel for
   for (size_t i = 0; i < n; ++i) {
@@ -411,14 +379,12 @@ static void softmax_vector_cpu(const std::vector<float>& x,
   out.resize(x.size());
   size_t n = x.size();
 
-  
   float max_val = x[0];
 #pragma omp parallel for reduction(max : max_val)
   for (size_t i = 1; i < n; ++i) {
     if (x[i] > max_val) max_val = x[i];
   }
 
-  
   float exp_sum = 0.0f;
 #pragma omp parallel for reduction(+ : exp_sum)
   for (size_t i = 0; i < n; ++i) {
@@ -426,7 +392,6 @@ static void softmax_vector_cpu(const std::vector<float>& x,
     exp_sum += out[i];
   }
 
-  
   float inv_sum = 1.0f / exp_sum;
 #pragma omp parallel for
   for (size_t i = 0; i < n; ++i) {
@@ -434,16 +399,13 @@ static void softmax_vector_cpu(const std::vector<float>& x,
   }
 }
 static void silu_cpu(const std::vector<float>& x, std::vector<float>& out) {
-  if (x.size() != out.size())
-    out.resize(x.size());  
+  if (x.size() != out.size()) out.resize(x.size());
 #pragma omp parallel for
   for (size_t i = 0; i < x.size(); ++i) {
-    float sigmoid_x =
-        1.0f / (1.0f + std::exp(-x[i]));  
-    out[i] = x[i] * sigmoid_x;            
+    float sigmoid_x = 1.0f / (1.0f + std::exp(-x[i]));
+    out[i] = x[i] * sigmoid_x;
   }
 }
-
 
 static void log_vec_stats(const std::string& name,
                           const std::vector<float>& v) {
@@ -460,7 +422,6 @@ static void log_vec_stats(const std::string& name,
                std::to_string(maxv) + ", mean=" + std::to_string(mean) +
                ", all_finite=" + (all_finite ? "yes" : "no"));
 }
-
 
 static bool write_vector_to_file(const std::string& filename,
                                  const std::vector<float>& vec) {
@@ -497,14 +458,13 @@ static std::vector<std::vector<float>> load_rmsnorm_bin(
     throw std::runtime_error("Failed to read all data from " + filename);
   std::vector<std::vector<float>> result(num_tokens,
                                          std::vector<float>(hidden_size));
-  for (int t = 0; t < num_tokens; ++t) {  
+  for (int t = 0; t < num_tokens; ++t) {
     for (int h = 0; h < hidden_size; ++h) {
       result[t][h] = flat[t * hidden_size + h];
     }
   }
   return result;
 }
-
 
 ModelConfig parse_model_config(const nlohmann::json& json) {
   ModelConfig cfg;
@@ -524,7 +484,6 @@ ModelConfig parse_model_config(const nlohmann::json& json) {
   return cfg;
 }
 
-
 static void log_raw_float_pointer(const std::string& name, const float* ptr,
                                   size_t count = 5) {
   if (!ptr) {
@@ -540,46 +499,40 @@ static void log_raw_float_pointer(const std::string& name, const float* ptr,
   Logger::info(ss.str());
 }
 
-
 void KVCache::initialize(int num_layers, int max_seq_len, int num_kv_heads,
                          int head_dim) {
-  layers.resize(num_layers);  
-  seq_len = 0;                
-  Logger::info("Allocating KVCache host vectors...");  
+  layers.resize(num_layers);
+  seq_len = 0;
+  Logger::info("Allocating KVCache host vectors...");
   size_t cache_size_per_layer = static_cast<size_t>(max_seq_len) *
                                 static_cast<size_t>(num_kv_heads) *
                                 static_cast<size_t>(head_dim);
 
-  if (cache_size_per_layer == 0 &&
-      max_seq_len > 0) {  
+  if (cache_size_per_layer == 0 && max_seq_len > 0) {
     throw std::runtime_error(
         "KVCache (CPU): Calculated cache size is zero. Check parameters.");
   }
 
   for (int l = 0; l < num_layers; ++l) {
     try {
-      layers[l].k.assign(cache_size_per_layer,
-                         0.0f);  
+      layers[l].k.assign(cache_size_per_layer, 0.0f);
       layers[l].v.assign(cache_size_per_layer, 0.0f);
     } catch (const std::bad_alloc& e) {
       Logger::error("Failed to allocate CPU KVCache for layer " +
                     std::to_string(l) + ": " + e.what());
-      throw;  
+      throw;
     }
   }
   Logger::info("KVCache (CPU) vectors allocated for " +
                std::to_string(num_layers) + " layers.");
 
 #ifdef HAS_CUDA
-  
-  
+
   allocated_num_layers = num_layers;
   allocated_max_seq_len = max_seq_len;
   allocated_num_kv_heads = num_kv_heads;
   allocated_head_dim = head_dim;
 
-  
-  
   size_t cache_elems_per_layer = static_cast<size_t>(max_seq_len) *
                                  static_cast<size_t>(num_kv_heads) *
                                  static_cast<size_t>(head_dim);
@@ -596,10 +549,7 @@ void KVCache::initialize(int num_layers, int max_seq_len, int num_kv_heads,
                std::to_string(cache_bytes_per_layer / (1024.0 * 1024.0)) +
                " MB");
 
-  
   for (int l = 0; l < num_layers; ++l) {
-    
-    
     if (layers[l].k_dev) {
       Logger::info(
           "Re-initializing KVCache layer K dev pointer without proper "
@@ -615,14 +565,14 @@ void KVCache::initialize(int num_layers, int max_seq_len, int num_kv_heads,
 
     gpuErrchk(cudaMalloc(&layers[l].k_dev, cache_bytes_per_layer));
     gpuErrchk(cudaMalloc(&layers[l].v_dev, cache_bytes_per_layer));
-    
+
     gpuErrchk(cudaMemset(layers[l].k_dev, 0, cache_bytes_per_layer));
     gpuErrchk(cudaMemset(layers[l].v_dev, 0, cache_bytes_per_layer));
   }
   Logger::info("KVCache GPU allocation complete.");
 
 #else
-  
+
   Logger::info("KVCache (CPU-only build) initialized with dimensions: " +
                std::to_string(num_layers) + " layers, " +
                std::to_string(max_seq_len) + " seq len, " +
@@ -630,7 +580,6 @@ void KVCache::initialize(int num_layers, int max_seq_len, int num_kv_heads,
                std::to_string(head_dim) + " head dim");
 #endif
 }
-
 
 static std::vector<float> bf16vec_to_float_vec(
     const std::vector<uint16_t>& v_bf16) {
@@ -642,14 +591,10 @@ static std::vector<float> bf16vec_to_float_vec(
   return v_f32;
 }
 
-
-
 static void matvec_bf16_f32_vector_cpu(const std::vector<uint16_t>& mat_bf16,
                                        const std::vector<float>& vec_f32,
                                        std::vector<float>& out_f32, int rows,
                                        int cols) {
-  
-  
   if (mat_bf16.size() != (size_t)rows * cols ||
       vec_f32.size() != (size_t)cols) {
     Logger::error("matvec_bf16_f32_vector_cpu: Size mismatch. Mat: " +
@@ -657,37 +602,30 @@ static void matvec_bf16_f32_vector_cpu(const std::vector<uint16_t>& mat_bf16,
                   std::to_string(rows * cols) +
                   "), Vec: " + std::to_string(vec_f32.size()) + " (Expected " +
                   std::to_string(cols) + ")");
-    out_f32.assign(rows, 0.0f);  
+    out_f32.assign(rows, 0.0f);
     return;
   }
   out_f32.resize(rows);
 
 #pragma omp parallel for
   for (int r = 0; r < rows; ++r) {
-    double sum = 0.0;  
-    double c = 0.0;    
+    double sum = 0.0;
+    double c = 0.0;
     size_t row_offset = r * cols;
 
     for (int c_idx = 0; c_idx < cols; ++c_idx) {
-      
       float weight = bfloat16_to_float32(mat_bf16[row_offset + c_idx]);
       double term =
           static_cast<double>(weight) * static_cast<double>(vec_f32[c_idx]);
 
-      
       double y = term - c;
       double t = sum + y;
       c = (t - sum) - y;
       sum = t;
     }
-    out_f32[r] =
-        static_cast<float>(sum);  
+    out_f32[r] = static_cast<float>(sum);
   }
 }
-
-
-
-
 
 static void weighted_sum_probs_v(const std::vector<float>& probs,
                                  const std::vector<float>& V,
@@ -707,11 +645,11 @@ static void weighted_sum_probs_v(const std::vector<float>& probs,
 #pragma omp parallel for
   for (int j = 0; j < head_dim; ++j) {
     double sum = 0.0;
-    double c_kahan = 0.0;  
+    double c_kahan = 0.0;
     for (int i = 0; i < seq_len; ++i) {
       double term = static_cast<double>(probs[i]) *
                     static_cast<double>(V[i * head_dim + j]);
-      
+
       double y = term - c_kahan;
       double t = sum + y;
       c_kahan = (t - sum) - y;
@@ -720,9 +658,6 @@ static void weighted_sum_probs_v(const std::vector<float>& probs,
     out[j] = static_cast<float>(sum);
   }
 }
-
-
-
 
 static void calculate_attention_scores(const std::vector<float>& Q,
                                        const std::vector<float>& K,
@@ -740,21 +675,21 @@ static void calculate_attention_scores(const std::vector<float>& Q,
   scores.resize(seq_len);
 
 #pragma omp parallel for
-  for (int t = 0; t < seq_len; ++t) {  
+  for (int t = 0; t < seq_len; ++t) {
     double dot_product = 0.0;
-    double c_kahan = 0.0;  
+    double c_kahan = 0.0;
     size_t k_offset = t * head_dim;
 
-    for (int i = 0; i < head_dim; ++i) {  
+    for (int i = 0; i < head_dim; ++i) {
       double term =
           static_cast<double>(Q[i]) * static_cast<double>(K[k_offset + i]);
-      
+
       double y = term - c_kahan;
       double t_sum = dot_product + y;
       c_kahan = (t_sum - dot_product) - y;
       dot_product = t_sum;
     }
-    scores[t] = static_cast<float>(dot_product) * scale;  
+    scores[t] = static_cast<float>(dot_product) * scale;
   }
 }
 
@@ -776,40 +711,31 @@ static void apply_rope_vector(
 
   const int dim_half = head_dim / 2;
 
-#pragma omp parallel for  
+#pragma omp parallel for
   for (int h = 0; h < num_heads; ++h) {
     size_t head_offset = h * head_dim;
-    for (int i = 0; i < dim_half; ++i) {  
-      
-      double x0 =
-          static_cast<double>(x[head_offset + i]);  
-      double x1 = static_cast<double>(
-          x[head_offset + i + dim_half]);  
+    for (int i = 0; i < dim_half; ++i) {
+      double x0 = static_cast<double>(x[head_offset + i]);
+      double x1 = static_cast<double>(x[head_offset + i + dim_half]);
 
-      
       double cos_val = static_cast<double>(freqs_cis[i].first);
       double sin_val = static_cast<double>(freqs_cis[i].second);
 
-      
-      double rotated_x0 =
-          x0 * cos_val - x1 * sin_val;  
-      double rotated_x1 =
-          x0 * sin_val + x1 * cos_val;  
+      double rotated_x0 = x0 * cos_val - x1 * sin_val;
+      double rotated_x1 = x0 * sin_val + x1 * cos_val;
 
-      
       x[head_offset + i] = static_cast<float>(rotated_x0);
       x[head_offset + i + dim_half] = static_cast<float>(rotated_x1);
     }
   }
 }
 
-/* 
+/*
 void apply_rope(torch::Tensor& x, int num_heads, int head_dim, int pos,
                 const std::vector<std::pair<float, float>>& freqs_cis) {
-    
+
 }
 */
-
 
 void TinyLlamaModel::initialize_weights(const SafeTensorsLoader* loader,
                                         const GGUFData* gguf) {
@@ -822,25 +748,30 @@ void TinyLlamaModel::initialize_weights(const SafeTensorsLoader* loader,
   int n_kv_heads = config_.num_key_value_heads;
   int kv_dim = (hs / n_heads) * n_kv_heads;
 
-  layers.resize(nhl);  
+  layers.resize(nhl);
 
   if (gguf) {
     Logger::info("Mapping weights from GGUF data...");
-    
+
     map_gguf_weights(*gguf, *this);
   } else if (loader) {
-    Logger::info("Loading weights from SafeTensors data using parallel loader...");
-    
+    Logger::info(
+        "Loading weights from SafeTensors data using parallel loader...");
+
     std::map<std::string, std::vector<uint8_t>> all_tensors;
     try {
       all_tensors = loader->load_all_tensors_parallel();
-      Logger::info("All SafeTensors tensors loaded in parallel. Total tensors: " + std::to_string(all_tensors.size()));
+      Logger::info(
+          "All SafeTensors tensors loaded in parallel. Total tensors: " +
+          std::to_string(all_tensors.size()));
     } catch (const std::exception& e) {
-      Logger::error("Failed to load all tensors in parallel: " + std::string(e.what()));
-      throw; 
+      Logger::error("Failed to load all tensors in parallel: " +
+                    std::string(e.what()));
+      throw;
     }
 
-    auto get_tensor_data = [&](const std::string& name) -> const std::vector<uint8_t>& {
+    auto get_tensor_data =
+        [&](const std::string& name) -> const std::vector<uint8_t>& {
       auto it = all_tensors.find(name);
       if (it == all_tensors.end()) {
         throw std::runtime_error("Tensor not found in preloaded map: " + name);
@@ -870,7 +801,7 @@ void TinyLlamaModel::initialize_weights(const SafeTensorsLoader* loader,
 
     for (int i = 0; i < nhl; ++i) {
       std::string prefix = "model.layers." + std::to_string(i) + ".";
-      auto& lw = layers[i];  
+      auto& lw = layers[i];
       try {
         lw.q_proj = uint8_vector_to_uint16_vector(
             loader->get_tensor_bytes(prefix + "self_attn.q_proj.weight"),
@@ -942,8 +873,6 @@ void TinyLlamaModel::initialize_weights(const SafeTensorsLoader* loader,
             "post_attention_layernorm.weight: " + std::string(e.what()));
       }
 
-      
-      
       lw.input_layernorm_f32 = bf16vec_to_float_vec(lw.input_layernorm);
       lw.post_attention_layernorm_f32 =
           bf16vec_to_float_vec(lw.post_attention_layernorm);
@@ -955,7 +884,7 @@ void TinyLlamaModel::initialize_weights(const SafeTensorsLoader* loader,
       lw.up_proj_f32 = bf16vec_to_float_vec(lw.up_proj);
       lw.down_proj_f32 = bf16vec_to_float_vec(lw.down_proj);
     }
-    
+
     embed_tokens_f32 = bf16vec_to_float_vec(embed_tokens);
     lm_head_f32 = bf16vec_to_float_vec(lm_head);
     final_norm_f32 = bf16vec_to_float_vec(final_norm);
@@ -968,8 +897,6 @@ void TinyLlamaModel::initialize_weights(const SafeTensorsLoader* loader,
   Logger::info("Finished initializing model weights.");
 }
 
-
-
 void TinyLlamaModel::initialize_gpu_and_rope() {
   Logger::info("Initializing GPU resources and RoPE...");
   int hs = config_.hidden_size;
@@ -979,7 +906,6 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
   int n_heads = config_.num_attention_heads;
   int n_kv_heads = config_.num_key_value_heads;
 
-  
   if (hs <= 0)
     throw std::runtime_error(
         "Invalid model configuration: hidden_size must be positive. Check GGUF "
@@ -1000,7 +926,6 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
     throw std::runtime_error(
         "Invalid model configuration: hidden_size must be divisible by "
         "num_attention_heads.");
-  
 
   int kv_dim = (hs / n_heads) * n_kv_heads;
   int head_dim = hs / n_heads;
@@ -1161,7 +1086,6 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
 
   Logger::info("Finished initializing CUDA weights.");
 
-  
   Logger::info("Precomputing RoPE frequencies...");
 #endif
 
@@ -1233,7 +1157,6 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
   Logger::info("Finished allocating persistent GPU workspace buffers.");
   Logger::info("Finished initializing GPU resources and RoPE.");
 
-  
   if (!token_embedding_table_f32_dev_) {
     if (!embed_tokens_f32.empty()) {
       gpuErrchk(cudaMalloc(&token_embedding_table_f32_dev_,
@@ -1243,7 +1166,6 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
           embed_tokens_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
       Logger::info("Copied token_embedding_table (fp32) to GPU.");
     } else if (!embed_tokens.empty()) {
-      
       std::vector<float> embed_tokens_f32_tmp =
           bf16vec_to_float_vec(embed_tokens);
       gpuErrchk(cudaMalloc(&token_embedding_table_f32_dev_,
@@ -1263,7 +1185,7 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
       }
     }
   }
-  
+
   if (!lm_head_f32_dev_) {
     if (!lm_head_f32.empty()) {
       gpuErrchk(
@@ -1347,7 +1269,6 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
     Logger::info("Dequantized and copied lm_head (Q4_K->fp32) to GPU.");
   }
 
-  
   size_t layer_q_size = (size_t)hs * hs;
   size_t layer_k_size = (size_t)kv_dim * hs;
   size_t layer_v_size = (size_t)kv_dim * hs;
@@ -1357,7 +1278,6 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
   size_t layer_down_size = (size_t)hs * is;
   int num_layers = nhl;
 
-  
   auto upload_layer_f32 = [&](const std::vector<std::vector<float>>& src,
                               float*& dev_ptr, size_t elem_size,
                               const std::string& weight_name) {
@@ -1387,7 +1307,6 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
     }
   };
 
-  
   if (!w_q_f32_dev_) {
     std::vector<std::vector<float>> src_f32(num_layers);
     std::vector<std::vector<uint16_t>> src_bf16(num_layers);
@@ -1400,7 +1319,7 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
     else if (!src_bf16[0].empty())
       upload_layer_bf16(src_bf16, w_q_f32_dev_, layer_q_size, "W_Q_BF16");
   }
-  
+
   if (!w_k_f32_dev_) {
     std::vector<std::vector<float>> src_f32(num_layers);
     std::vector<std::vector<uint16_t>> src_bf16(num_layers);
@@ -1413,7 +1332,7 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
     else if (!src_bf16[0].empty())
       upload_layer_bf16(src_bf16, w_k_f32_dev_, layer_k_size, "W_K_BF16");
   }
-  
+
   if (!w_v_f32_dev_) {
     std::vector<std::vector<float>> src_f32(num_layers);
     std::vector<std::vector<uint16_t>> src_bf16(num_layers);
@@ -1426,7 +1345,7 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
     else if (!src_bf16[0].empty())
       upload_layer_bf16(src_bf16, w_v_f32_dev_, layer_v_size, "W_V_BF16");
   }
-  
+
   if (!w_o_f32_dev_) {
     std::vector<std::vector<float>> src_f32(num_layers);
     std::vector<std::vector<uint16_t>> src_bf16(num_layers);
@@ -1439,7 +1358,7 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
     else if (!src_bf16[0].empty())
       upload_layer_bf16(src_bf16, w_o_f32_dev_, layer_o_size, "W_O_BF16");
   }
-  
+
   if (!w_gate_f32_dev_) {
     std::vector<std::vector<float>> src_f32(num_layers);
     std::vector<std::vector<uint16_t>> src_bf16(num_layers);
@@ -1453,7 +1372,7 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
       upload_layer_bf16(src_bf16, w_gate_f32_dev_, layer_gate_size,
                         "W_GATE_BF16");
   }
-  
+
   if (!w_up_f32_dev_) {
     std::vector<std::vector<float>> src_f32(num_layers);
     std::vector<std::vector<uint16_t>> src_bf16(num_layers);
@@ -1466,7 +1385,7 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
     else if (!src_bf16[0].empty())
       upload_layer_bf16(src_bf16, w_up_f32_dev_, layer_up_size, "W_UP_BF16");
   }
-  
+
   if (!w_down_f32_dev_) {
     std::vector<std::vector<float>> src_f32(num_layers);
     std::vector<std::vector<uint16_t>> src_bf16(num_layers);
@@ -1481,7 +1400,6 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
                         "W_DOWN_BF16");
   }
 
-  
   if (!w_q_f32_dev_) {
     bool all_have_q8_0 = true;
     for (int i = 0; i < num_layers; ++i) {
@@ -1506,7 +1424,7 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
       Logger::info("Dequantized and copied Q projection (Q8_0->fp32) to GPU.");
     }
   }
-  
+
   if (!w_k_f32_dev_) {
     bool all_have_q8_0 = true;
     for (int i = 0; i < num_layers; ++i) {
@@ -1532,7 +1450,6 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
     }
   }
 
-  
   if (!w_v_f32_dev_) {
     bool all_have_q8_0 = true;
     for (int i = 0; i < num_layers; ++i) {
@@ -1557,7 +1474,7 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
       Logger::info("Dequantized and copied V projection (Q8_0->fp32) to GPU.");
     }
   }
-  
+
   if (!w_o_f32_dev_) {
     bool all_have_q8_0 = true;
     for (int i = 0; i < num_layers; ++i) {
@@ -1582,7 +1499,7 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
       Logger::info("Dequantized and copied O projection (Q8_0->fp32) to GPU.");
     }
   }
-  
+
   if (!w_gate_f32_dev_) {
     bool all_have_q8_0 = true;
     for (int i = 0; i < num_layers; ++i) {
@@ -1608,7 +1525,7 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
           "Dequantized and copied Gate projection (Q8_0->fp32) to GPU.");
     }
   }
-  
+
   if (!w_up_f32_dev_) {
     bool all_have_q8_0 = true;
     for (int i = 0; i < num_layers; ++i) {
@@ -1633,7 +1550,7 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
       Logger::info("Dequantized and copied Up projection (Q8_0->fp32) to GPU.");
     }
   }
-  
+
   if (!w_down_f32_dev_) {
     bool all_have_q8_0 = true;
     for (int i = 0; i < num_layers; ++i) {
@@ -1664,12 +1581,11 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
 
 TinyLlamaModel::TinyLlamaModel(const ModelConfig& config,
                                const SafeTensorsLoader& loader)
-    : config_(config)  
-{
+    : config_(config) {
   Logger::info("Constructing TinyLlamaModel from SafeTensorsLoader.");
-  initialize_weights(&loader, nullptr);  
+  initialize_weights(&loader, nullptr);
 #ifdef HAS_CUDA
-  initialize_gpu_and_rope();  
+  initialize_gpu_and_rope();
 #endif
   Logger::info("TinyLlamaModel construction from SafeTensorsLoader complete.");
 }
@@ -1691,7 +1607,7 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& config_in,
       if (magic == GGUF_MAGIC) {
         is_gguf_detected_runtime = true;
       }
-      file.close(); 
+      file.close();
     } else {
       Logger::warning("Could not open weights file to check magic number: " +
                       weights_path);
@@ -1701,30 +1617,24 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& config_in,
   if (is_gguf_detected_runtime) {
     Logger::info("Detected GGUF file. Loading metadata and mapping weights...");
     gguf_data_ = std::make_unique<GGUFData>(load_gguf_meta(weights_path));
-    config_ = parse_model_config_from_gguf(
-        *gguf_data_);  
-    config_.is_gguf_file_loaded = true; 
+    config_ = parse_model_config_from_gguf(*gguf_data_);
+    config_.is_gguf_file_loaded = true;
 
-    
     if (config_in.max_position_embeddings > 0 &&
         config_in.max_position_embeddings != config_.max_position_embeddings) {
       Logger::warning("Overriding GGUF max_position_embeddings (" +
                       std::to_string(config_.max_position_embeddings) +
                       ") with value from main: " +
                       std::to_string(config_in.max_position_embeddings));
-      config_.max_position_embeddings =
-          config_in.max_position_embeddings;  
-                                              
+      config_.max_position_embeddings = config_in.max_position_embeddings;
     }
-    
 
     initialize_weights(nullptr, gguf_data_.get());
     Logger::info("GGUF weights mapped.");
 
   } else {
-    
     config_ = config_in;
-    config_.is_gguf_file_loaded = false; 
+    config_.is_gguf_file_loaded = false;
     Logger::info(
         "Detected non-GGUF file. Using provided config and loading with "
         "SafeTensors loader...");
@@ -1733,7 +1643,7 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& config_in,
     Logger::info("SafeTensors weights loaded.");
   }
 
-  initialize_gpu_and_rope();  
+  initialize_gpu_and_rope();
   Logger::info("TinyLlamaModel construction from path complete.");
 }
 
@@ -1745,19 +1655,17 @@ TinyLlamaModel::~TinyLlamaModel() {
     if (cublas_status != CUBLAS_STATUS_SUCCESS) {
       Logger::error("cuBLAS handle destruction failed with error code: " +
                     std::to_string(cublas_status));
-      
     }
     cublas_handle_ = nullptr;
     Logger::info("cuBLAS handle destroyed.");
   }
 
-  
   if (final_norm_dev) {
     gpuErrchk(cudaFree(final_norm_dev));
-    final_norm_dev = nullptr;  
+    final_norm_dev = nullptr;
   }
-  
-  for (auto& layer : layers) {  
+
+  for (auto& layer : layers) {
     if (layer.input_layernorm_dev) {
       gpuErrchk(cudaFree(layer.input_layernorm_dev));
       layer.input_layernorm_dev = nullptr;
@@ -1767,7 +1675,7 @@ TinyLlamaModel::~TinyLlamaModel() {
       layer.post_attention_layernorm_dev = nullptr;
     }
   }
-  
+
   if (all_freqs_cis_dev) {
     gpuErrchk(cudaFree(all_freqs_cis_dev));
     all_freqs_cis_dev = nullptr;
@@ -1844,7 +1752,7 @@ TinyLlamaModel::~TinyLlamaModel() {
     gpuErrchk(cudaFree(w_down_f32_dev_));
     w_down_f32_dev_ = nullptr;
   }
-  
+
   if (x_dev_) {
     gpuErrchk(cudaFree(x_dev_));
     x_dev_ = nullptr;
@@ -1910,25 +1818,22 @@ TinyLlamaModel::~TinyLlamaModel() {
 std::vector<float> TinyLlamaModel::lookup_embedding(int token_id) {
   int hs = config_.hidden_size;
   int vs = config_.vocab_size;
-  bool log_initial =
-      (token_id ==
-       config_.bos_token_id);  
+  bool log_initial = (token_id == config_.bos_token_id);
 
   if (token_id < 0 || token_id >= vs) {
     Logger::error("Token ID out of bounds in lookup_embedding: " +
                   std::to_string(token_id));
-    return std::vector<float>(hs, 0.0f);  
+    return std::vector<float>(hs, 0.0f);
   }
 
-  std::vector<float> embedding_vec(hs, 0.0f);  
+  std::vector<float> embedding_vec(hs, 0.0f);
 
-  
   if (!embed_tokens_q4k.empty()) {
     if (hs % GGML_QK_K != 0) {
       Logger::error("Hidden size (" + std::to_string(hs) +
                     ") is not divisible by GGML_QK_K (" +
                     std::to_string(GGML_QK_K) + ") for Q4_K embedding lookup.");
-      return embedding_vec;  
+      return embedding_vec;
     }
 
     size_t blocks_per_row = hs / GGML_QK_K;
@@ -1943,17 +1848,16 @@ std::vector<float> TinyLlamaModel::lookup_embedding(int token_id) {
           ", StartBlock: " + std::to_string(start_block_idx) +
           ", EndBlock: " + std::to_string(end_block_idx) +
           ", TableSize: " + std::to_string(embed_tokens_q4k.size()));
-      return embedding_vec;  
+      return embedding_vec;
     }
 
-    float dequantized_block[GGML_QK_K];  
+    float dequantized_block[GGML_QK_K];
     for (size_t block_n = 0; block_n < blocks_per_row; ++block_n) {
       dequantize_q4_k_m(&embed_tokens_q4k[start_block_idx + block_n],
                         dequantized_block, GGML_QK_K, false);
-      
-      
+
       size_t dest_offset = block_n * GGML_QK_K;
-      
+
       size_t elements_to_copy =
           std::min((size_t)GGML_QK_K, (size_t)hs - dest_offset);
       std::memcpy(&embedding_vec[dest_offset], dequantized_block,
@@ -1966,16 +1870,14 @@ std::vector<float> TinyLlamaModel::lookup_embedding(int token_id) {
     }
     return embedding_vec;
   }
-  
+
   else if (!embed_tokens_q8_0.empty()) {
-    
-    
     if (hs % GGML_QK8_0 != 0) {
       Logger::error("Hidden size (" + std::to_string(hs) +
                     ") is not divisible by GGML_QK8_0 (" +
                     std::to_string(GGML_QK8_0) +
                     ") for Q8_0 embedding lookup.");
-      return embedding_vec;  
+      return embedding_vec;
     }
     size_t blocks_per_row = hs / GGML_QK8_0;
     size_t start_block_idx = (size_t)token_id * blocks_per_row;
@@ -1989,10 +1891,10 @@ std::vector<float> TinyLlamaModel::lookup_embedding(int token_id) {
           ", StartBlock: " + std::to_string(start_block_idx) +
           ", EndBlock: " + std::to_string(end_block_idx) +
           ", TableSize: " + std::to_string(embed_tokens_q8_0.size()));
-      return embedding_vec;  
+      return embedding_vec;
     }
 
-    float dequantized_block[GGML_QK8_0];  
+    float dequantized_block[GGML_QK8_0];
     for (size_t block_n = 0; block_n < blocks_per_row; ++block_n) {
       dequantize_q8_0_block(&embed_tokens_q8_0[start_block_idx + block_n],
                             dequantized_block);
@@ -2009,15 +1911,15 @@ std::vector<float> TinyLlamaModel::lookup_embedding(int token_id) {
     }
     return embedding_vec;
   }
-  
+
   else if (!embed_tokens_f32.empty()) {
     size_t offset = (size_t)token_id * hs;
     if (offset + hs > embed_tokens_f32.size()) {
       Logger::error("Embedding offset out of bounds in F32 lookup for token: " +
                     std::to_string(token_id));
-      return embedding_vec;  
+      return embedding_vec;
     }
-    
+
     std::copy(embed_tokens_f32.begin() + offset,
               embed_tokens_f32.begin() + offset + hs, embedding_vec.begin());
     if (log_initial) {
@@ -2027,21 +1929,17 @@ std::vector<float> TinyLlamaModel::lookup_embedding(int token_id) {
     }
     return embedding_vec;
 
-    
   } else if (!embed_tokens.empty()) {
-    
-    
     size_t offset = (size_t)token_id * hs;
     if (offset + hs > embed_tokens.size()) {
       Logger::error(
           "Embedding offset out of bounds in BF16 lookup for token: " +
           std::to_string(token_id));
-      return embedding_vec;  
+      return embedding_vec;
     }
     std::vector<uint16_t> token_embedding_bf16(
         embed_tokens.begin() + offset, embed_tokens.begin() + offset + hs);
-    
-    
+
     embedding_vec = bf16vec_to_float_vec(token_embedding_bf16);
     if (log_initial) {
       log_vector_summary("[CPU_EMBED BF16] Output Embedding (Token " +
@@ -2050,24 +1948,21 @@ std::vector<float> TinyLlamaModel::lookup_embedding(int token_id) {
     }
     return embedding_vec;
 
-    
   } else {
     Logger::error(
         "No valid embedding table found (Q4_K, F32, BF16) for token: " +
         std::to_string(token_id));
-    
+
     return embedding_vec;
   }
 }
 
-
 std::vector<float> TinyLlamaModel::forward(std::vector<float>& input,
                                            int n_tokens, KVCache* kv_cache,
                                            const std::vector<int>* input_ids) {
-  
   bool log_this_step = (n_tokens == 0);
   bool log_first_gen_step = (n_tokens == 23);
-  
+
   int hs = config_.hidden_size;
   int is = config_.intermediate_size;
   int nhl = config_.num_hidden_layers;
@@ -2082,7 +1977,6 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& input,
   if (log_first_gen_step)
     Logger::info("[CPU_FWD STEP 23] Entered forward function.");
 
-  
   if (log_this_step || log_first_gen_step) {
     Logger::info("[CPU_FWD] forward called. n_tokens=" +
                  std::to_string(n_tokens));
@@ -2133,11 +2027,10 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& input,
       Logger::info("[CPU_FWD] ------ START Layer " + std::to_string(l) +
                    " (pos=" + std::to_string(n_tokens) + ") ------");
 
-    const auto& lw = layers[l];  
-                                 
+    const auto& lw = layers[l];
+
     std::vector<float> x_resid1_vec = input;
 
-    
     const std::vector<float>& w_norm1_vec =
         lw.input_layernorm_f32.empty()
             ? bf16vec_to_float_vec(lw.input_layernorm)
@@ -2153,7 +2046,6 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& input,
                    "] Before QKV projections in Layer " + std::to_string(l) +
                    ".");
 
-    
     if (!lw.q_proj_q8_0.empty()) {
       if (log_this_layer)
         Logger::info("[CPU_FWD L" + std::to_string(l) +
@@ -2205,7 +2097,6 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& input,
     }
     if (log_this_layer) log_vector_summary("  Output (q_vec)", q_vec);
 
-    
     size_t k_proj_dim0 = n_kv_heads * head_dim;
     if (!lw.k_proj_q8_0.empty()) {
       if (log_this_layer)
@@ -2263,7 +2154,6 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& input,
       log_vector_summary("  [K-Proj L" + std::to_string(l) + "] Output (k_vec)",
                          k_vec);
 
-    
     size_t v_proj_dim0 = n_kv_heads * head_dim;
     if (log_this_layer)
       log_vector_summary(
@@ -2311,7 +2201,7 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& input,
                      "] MatVec: V_Proj (F32)");
       matvec_f32_f32_vector_cpu(lw.v_proj_f32, x_norm_vec1, v_vec, v_proj_dim0,
                                 hs);
-    } else if (!lw.v_proj.empty()) {  
+    } else if (!lw.v_proj.empty()) {
       if (log_this_layer)
         Logger::warning("[CPU_FWD L" + std::to_string(l) +
                         "] MatVec: V_Proj (BF16 Fallback)");
@@ -2325,7 +2215,6 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& input,
       log_vector_summary("  [V-Proj L" + std::to_string(l) + "] Output (v_vec)",
                          v_vec);
 
-    
     size_t freqs_offset = (size_t)n_tokens * head_dim / 2;
     if (freqs_offset + head_dim / 2 > precomputed_freqs_cis_.size()) {
       throw std::runtime_error("RoPE freqs_cis access out of bounds. pos: " +
@@ -2342,7 +2231,6 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& input,
           "  [K-Proj L" + std::to_string(l) + "] Output After RoPE (k_vec)",
           k_vec, head_dim);
 
-    
     float* k_current_ptr = k_vec.data();
     float* v_current_ptr = v_vec.data();
     for (int kvh = 0; kvh < n_kv_heads; ++kvh) {
@@ -2363,7 +2251,6 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& input,
     }
     kv_cache->seq_len = n_tokens + 1;
 
-    
     std::fill(attn_out_vec.begin(), attn_out_vec.end(), 0.0f);
     int current_seq_len = n_tokens + 1;
     float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
@@ -2425,12 +2312,12 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& input,
       for (int i_val = 0; i_val < head_dim; ++i_val)
         attn_out_vec[out_offset + i_val] += head_attn_out_vec[i_val];
     }
-    
-    if (!lw.o_proj_q8_0.empty()) {  
+
+    if (!lw.o_proj_q8_0.empty()) {
       if (log_this_layer)
         Logger::info("[CPU_FWD L" + std::to_string(l) +
                      "] MatVec: O_Proj (Q8_0)");
-      std::vector<float> o_proj_f32(hs * hs);  
+      std::vector<float> o_proj_f32(hs * hs);
       size_t num_q8_blocks_o = (hs * hs) / GGML_QK8_0;
       if (lw.o_proj_q8_0.size() != num_q8_blocks_o) {
         Logger::error("O_Proj Q8_0 block count mismatch. Expected " +
@@ -2473,13 +2360,13 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& input,
       dequantize_q8_k(attn_out_q8k, attn_out_q8k_f32, hs, false);
       matvec_f32_f32_vector_cpu(o_proj_f32, attn_out_q8k_f32, attn_proj_vec, hs,
                                 hs);
-    } else if (!lw.o_proj_f32.empty()) {  
+    } else if (!lw.o_proj_f32.empty()) {
       if (log_this_layer)
         Logger::info("[CPU_FWD L" + std::to_string(l) +
                      "] MatVec: O_Proj (F32)");
       matvec_f32_f32_vector_cpu(lw.o_proj_f32, attn_out_vec, attn_proj_vec, hs,
-                                hs);  
-    } else if (!lw.o_proj.empty()) {  
+                                hs);
+    } else if (!lw.o_proj.empty()) {
       if (log_this_layer)
         Logger::warning("[CPU_FWD L" + std::to_string(l) +
                         "] MatVec: O_Proj (BF16 Fallback)");
@@ -2490,7 +2377,7 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& input,
                                ": No valid O projection weights found!");
     }
 
-    if (l == 0 ) {
+    if (l == 0) {
       log_vector_summary("Layer 0 Attn Proj Out (attn_proj_vec)",
                          attn_proj_vec);
     }
@@ -2500,22 +2387,19 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& input,
       input[i] = x_resid1_vec[i] + attn_proj_vec[i];
     }
 
-    if (l == 0 ) {
-      log_vector_summary("Layer 0 After Attn Residual (input)",
-                         input);  
+    if (l == 0) {
+      log_vector_summary("Layer 0 After Attn Residual (input)", input);
     }
 
-    
     std::vector<float> x_resid2_vec = input;
-    
+
     const std::vector<float>& w_norm2_vec =
         lw.post_attention_layernorm_f32.empty()
             ? bf16vec_to_float_vec(lw.post_attention_layernorm)
             : lw.post_attention_layernorm_f32;
     rmsnorm_vector_cpu(input, w_norm2_vec, x_norm_vec2, eps);
-    
-    
-    if (!lw.gate_proj_q8_0.empty()) {  
+
+    if (!lw.gate_proj_q8_0.empty()) {
       if (log_this_layer)
         Logger::info("[CPU_FWD L" + std::to_string(l) +
                      "] MatVec: Gate_Proj (Q8_0)");
@@ -2537,26 +2421,26 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& input,
       if (log_this_layer)
         Logger::info("[CPU_FWD L" + std::to_string(l) +
                      "] MatVec: Gate_Proj (Q6_K)");
-      
+
       std::vector<float> gate_proj_f32(is * hs);
       for (size_t i = 0; i < lw.gate_proj_q6k.size(); ++i)
         dequantize_q6_k(&lw.gate_proj_q6k[i], &gate_proj_f32[i * GGML_QK_K],
                         GGML_QK_K);
       if (log_this_layer)
         log_vector_summary("Layer 0 Gate Proj Weights (FP32)", gate_proj_f32,
-                           10);  
+                           10);
       std::vector<float> x_norm2_q8k_f32(hs);
       std::vector<block_q8_K> x_norm2_q8k = quantize_fp32_to_q8_K(x_norm_vec2);
       dequantize_q8_k(x_norm2_q8k, x_norm2_q8k_f32, hs, false);
       matvec_f32_f32_vector_cpu(gate_proj_f32, x_norm2_q8k_f32, gate_vec, is,
                                 hs);
-    } else if (!lw.gate_proj_f32.empty()) {  
+    } else if (!lw.gate_proj_f32.empty()) {
       if (log_this_layer)
         Logger::info("[CPU_FWD L" + std::to_string(l) +
                      "] MatVec: Gate_Proj (F32)");
       matvec_f32_f32_vector_cpu(lw.gate_proj_f32, x_norm_vec2, gate_vec, is,
-                                hs);     
-    } else if (!lw.gate_proj.empty()) {  
+                                hs);
+    } else if (!lw.gate_proj.empty()) {
       if (log_this_layer)
         Logger::warning("[CPU_FWD L" + std::to_string(l) +
                         "] MatVec: Gate_Proj (BF16 Fallback)");
@@ -2566,8 +2450,8 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& input,
                                ": No valid Gate projection weights found!");
     }
     if (log_this_layer) log_vector_summary("Layer 0 Gate Vec", gate_vec);
-    
-    if (!lw.up_proj_q8_0.empty()) {  
+
+    if (!lw.up_proj_q8_0.empty()) {
       if (log_this_layer)
         Logger::info("[CPU_FWD L" + std::to_string(l) +
                      "] MatVec: Up_Proj (Q8_0)");
@@ -2589,7 +2473,7 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& input,
       if (log_this_layer)
         Logger::info("[CPU_FWD L" + std::to_string(l) +
                      "] MatVec: Up_Proj (Q6_K)");
-      
+
       std::vector<float> up_proj_f32(is * hs);
       for (size_t i = 0; i < lw.up_proj_q6k.size(); ++i)
         dequantize_q6_k(&lw.up_proj_q6k[i], &up_proj_f32[i * GGML_QK_K],
@@ -2598,13 +2482,12 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& input,
       std::vector<float> x_norm2_q8k_f32(hs);
       dequantize_q8_k(x_norm2_q8k, x_norm2_q8k_f32, hs, false);
       matvec_f32_f32_vector_cpu(up_proj_f32, x_norm2_q8k_f32, up_vec, is, hs);
-    } else if (!lw.up_proj_f32.empty()) {  
+    } else if (!lw.up_proj_f32.empty()) {
       if (log_this_layer)
         Logger::info("[CPU_FWD L" + std::to_string(l) +
                      "] MatVec: Up_Proj (F32)");
-      matvec_f32_f32_vector_cpu(lw.up_proj_f32, x_norm_vec2, up_vec, is,
-                                hs);   
-    } else if (!lw.up_proj.empty()) {  
+      matvec_f32_f32_vector_cpu(lw.up_proj_f32, x_norm_vec2, up_vec, is, hs);
+    } else if (!lw.up_proj.empty()) {
       if (log_this_layer)
         Logger::warning("[CPU_FWD L" + std::to_string(l) +
                         "] MatVec: Up_Proj (BF16 Fallback)");
@@ -2615,7 +2498,6 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& input,
     }
     if (log_this_layer) log_vector_summary("Layer 0 Up Vec", up_vec);
 
-    
     silu_cpu(gate_vec, silu_out_vec);
 
 #pragma omp parallel for
@@ -2624,8 +2506,8 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& input,
     }
     if (log_this_layer)
       log_vector_summary("Layer 0 SwiGLU Result Vec", swiglu_result_vec);
-    
-    if (!lw.down_proj_q8_0.empty()) {  
+
+    if (!lw.down_proj_q8_0.empty()) {
       if (log_this_layer)
         Logger::info("[CPU_FWD L" + std::to_string(l) +
                      "] MatVec: Down_Proj (Q8_0)");
@@ -2636,7 +2518,7 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& input,
                       std::to_string(num_blocks) + " got " +
                       std::to_string(lw.down_proj_q8_0.size()) +
                       " for tensor 'DOWN_PROJ'");
-        mlp_out_vec.assign(hs, 0.0f);  
+        mlp_out_vec.assign(hs, 0.0f);
       } else {
         for (size_t i = 0; i < lw.down_proj_q8_0.size(); ++i) {
           dequantize_q8_0_block(&lw.down_proj_q8_0[i],
@@ -2649,7 +2531,7 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& input,
       if (log_this_layer)
         Logger::info("[CPU_FWD L" + std::to_string(l) +
                      "] MatVec: Down_Proj (Q6_K)");
-      
+
       std::vector<float> down_proj_f32(hs * is);
       for (size_t i = 0; i < lw.down_proj_q6k.size(); ++i)
         dequantize_q6_k(&lw.down_proj_q6k[i], &down_proj_f32[i * GGML_QK_K],
@@ -2674,13 +2556,13 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& input,
       dequantize_q8_k(swiglu_q8k, swiglu_q8k_f32, is, false);
       matvec_f32_f32_vector_cpu(down_proj_f32, swiglu_q8k_f32, mlp_out_vec, hs,
                                 is);
-    } else if (!lw.down_proj_f32.empty()) {  
+    } else if (!lw.down_proj_f32.empty()) {
       if (log_this_layer)
         Logger::info("[CPU_FWD L" + std::to_string(l) +
                      "] MatVec: Down_Proj (F32)");
       matvec_f32_f32_vector_cpu(lw.down_proj_f32, swiglu_result_vec,
-                                mlp_out_vec, hs, is);  
-    } else if (!lw.down_proj.empty()) {                
+                                mlp_out_vec, hs, is);
+    } else if (!lw.down_proj.empty()) {
       if (log_this_layer)
         Logger::warning("[CPU_FWD L" + std::to_string(l) +
                         "] MatVec: Down_Proj (BF16 Fallback)");
@@ -2691,35 +2573,30 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& input,
                                ": No valid Down projection weights found!");
     }
 
-
 #pragma omp parallel for
     for (size_t i = 0; i < hs; ++i) {
       input[i] = x_resid2_vec[i] + mlp_out_vec[i];
     }
 
-    if (l == 0 ) {
+    if (l == 0) {
       log_vector_summary("Layer 0 MLP Down Proj Out (mlp_out_vec)",
                          mlp_out_vec);
     }
 
-    if (l == 0 ) {
-      log_vector_summary("Layer 0 End (After MLP Residual) (input)",
-                         input);  
+    if (l == 0) {
+      log_vector_summary("Layer 0 End (After MLP Residual) (input)", input);
     }
-    
 
     if (log_this_layer) {
       Logger::info("[CPU_FWD] ------ END Layer " + std::to_string(l) +
                    " (pos=" + std::to_string(n_tokens) + ") ------");
     }
-  }  
+  }
 
-  
   if (log_this_step || log_first_gen_step)
     Logger::info("[CPU_FWD STEP " + std::to_string(n_tokens) +
-                 "] After layer loop, before final RMSNorm.");  
+                 "] After layer loop, before final RMSNorm.");
 
-  
   const std::vector<float>& w_final_norm_vec =
       final_norm_f32.empty() ? bf16vec_to_float_vec(final_norm)
                              : final_norm_f32;
@@ -2732,7 +2609,7 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& input,
 
   std::vector<float> logits(vs);
   bool lm_head_logged = false;
-  if (!lm_head_q8_0.empty()) {  
+  if (!lm_head_q8_0.empty()) {
     if (log_this_step) Logger::info("[CPU_FWD] Using Q8_0 LM Head");
     std::vector<float> lm_head_f32(vs * hs);
     size_t num_blocks = (size_t)(vs * hs) / GGML_QK8_0;
@@ -2746,7 +2623,7 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& input,
         dequantize_q8_0_block(&lm_head_q8_0[i], &lm_head_f32[i * GGML_QK8_0]);
       }
       matvec_f32_f32_vector_cpu(lm_head_f32, x_final_norm_vec, logits, vs, hs);
-      lm_head_logged = true;  
+      lm_head_logged = true;
     }
   } else if (!lm_head_q6k.empty()) {
     if (log_this_step) Logger::info("[CPU_FWD] Using Q6_K LM Head");
@@ -2775,7 +2652,7 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& input,
     matvec_bf16_f32_vector_cpu(lm_head, x_final_norm_vec, logits, vs, hs);
     lm_head_logged = true;
   }
-  
+
   if (!lm_head_logged) {
     Logger::fatal(
         "No valid LM Head weights found or processed (Q8_0, Q6_K, Q4_K, F32, "
@@ -2792,7 +2669,6 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& input,
     Logger::info("[CPU_FWD] forward complete. pos=" + std::to_string(n_tokens));
   }
 
-  
   if (nhl > 0 && (n_tokens == 12 || n_tokens == 13)) {
     log_vector_summary_detailed("[CPU] Layer 0 Output (after layer 0, pos=" +
                                     std::to_string(n_tokens) + ")",
@@ -2800,45 +2676,40 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& input,
   }
 
   return logits;
-
-}  
-
+}
 
 int TinyLlamaModel::get_vocab_size() const { return config_.vocab_size; }
-
-
 
 #ifdef HAS_CUDA
 std::vector<float> TinyLlamaModel::forward_device(
     int token_id, int pos, KVCache* kv_cache,
     const std::vector<int>* attention_mask, cudaStream_t stream) {
   int hs = config_.hidden_size;
-  int vs = config_.vocab_size;  
+  int vs = config_.vocab_size;
   int n_heads = config_.num_attention_heads;
   int n_kv_heads = config_.num_key_value_heads;
-  if (n_heads == 0) {  
+  if (n_heads == 0) {
     Logger::fatal("Number of attention heads is zero during forward_device.");
     throw std::runtime_error("Division by zero: n_heads is zero.");
   }
-  int head_dim = hs / n_heads;  
+  int head_dim = hs / n_heads;
   int nhl = config_.num_hidden_layers;
   int is = config_.intermediate_size;
   float eps = config_.rms_norm_eps;
   int max_seq_len = config_.max_position_embeddings;
-  bool log_this_pos = (pos == 13);  
+  bool log_this_pos = (pos == 13);
 
   if (log_this_pos) {
     Logger::info("[TM::fw_dev pos=" + std::to_string(pos) +
                  "] Entered. Token ID: " + std::to_string(token_id));
   }
 
-  
   cublasStatus_t stream_status = cublasSetStream(cublas_handle_, stream);
   if (stream_status != CUBLAS_STATUS_SUCCESS) {
     Logger::error("cublasSetStream failed in forward_device");
     return {};
   }
-  
+
   const void* embed_table_dev_ptr = nullptr;
   bool is_bf16_embedding = false;
   if (token_embedding_table_f32_dev_) {
@@ -2850,7 +2721,7 @@ std::vector<float> TinyLlamaModel::forward_device(
   } else {
     Logger::error(
         "No embedding table found on GPU (FP32 or BF16) in forward_device.");
-    return {};  
+    return {};
   }
   lookup_embedding_cuda(embed_table_dev_ptr, x_dev_, token_id, hs, vs,
                         is_bf16_embedding, stream);
@@ -2862,20 +2733,17 @@ std::vector<float> TinyLlamaModel::forward_device(
                                     "] x_dev_ after embedding lookup",
                                 x_host_after_embed, pos, -2, 8);
   }
-  
 
-  
   for (int l = 0; l < nhl; ++l) {
     if (log_this_pos) {
       Logger::info("[TM::fw_dev pos=" + std::to_string(pos) + "] Layer " +
                    std::to_string(l) + ": Calling layer.forward_device");
     }
-    const auto& lw = layers[l];  
-    
-    
+    const auto& lw = layers[l];
+
     size_t layer_q_size = (size_t)hs * hs;
-    size_t layer_k_size = (size_t)n_kv_heads * head_dim * hs;  
-    size_t layer_v_size = (size_t)n_kv_heads * head_dim * hs;  
+    size_t layer_k_size = (size_t)n_kv_heads * head_dim * hs;
+    size_t layer_v_size = (size_t)n_kv_heads * head_dim * hs;
     size_t layer_o_size = (size_t)hs * hs;
     size_t layer_gate_size = (size_t)is * hs;
     size_t layer_up_size = (size_t)is * hs;
@@ -2894,7 +2762,7 @@ std::vector<float> TinyLlamaModel::forward_device(
         w_up_dev_ ? w_up_dev_ + (size_t)l * layer_up_size : nullptr;
     const uint16_t* lw_down_proj_bf16_dev =
         w_down_dev_ ? w_down_dev_ + (size_t)l * layer_down_size : nullptr;
-    
+
     const float* lw_q_proj_f32_dev =
         w_q_f32_dev_ ? w_q_f32_dev_ + (size_t)l * layer_q_size : nullptr;
     const float* lw_k_proj_f32_dev =
@@ -2914,16 +2782,12 @@ std::vector<float> TinyLlamaModel::forward_device(
     const float* lw_in_norm_dev = layers[l].input_layernorm_dev;
     const float* lw_post_norm_dev = layers[l].post_attention_layernorm_dev;
 
-    
     gpuErrchk(cudaMemcpyAsync(x_resid1_dev_, x_dev_, hs * sizeof(float),
                               cudaMemcpyDeviceToDevice, stream));
 
-    
     rmsnorm_vector_cuda(x_dev_, layers[l].input_layernorm_dev, x_norm_dev_, hs,
                         eps, stream);
 
-    
-    
     if (lw_q_proj_f32_dev && lw_k_proj_f32_dev && lw_v_proj_f32_dev) {
       matvec_f32_f32_cuda(cublas_handle_, lw_q_proj_f32_dev, x_norm_dev_,
                           q_dev_, hs, hs, stream);
@@ -2931,9 +2795,7 @@ std::vector<float> TinyLlamaModel::forward_device(
                           k_dev_, n_kv_heads * head_dim, hs, stream);
       matvec_f32_f32_cuda(cublas_handle_, lw_v_proj_f32_dev, x_norm_dev_,
                           v_dev_, n_kv_heads * head_dim, hs, stream);
-    } else if (lw_q_proj_bf16_dev && lw_k_proj_bf16_dev &&
-               lw_v_proj_bf16_dev) {  
-                                      
+    } else if (lw_q_proj_bf16_dev && lw_k_proj_bf16_dev && lw_v_proj_bf16_dev) {
       Logger::warning("Layer " + std::to_string(l) +
                       ": Using BF16 matvec path (less efficient) for QKV.");
       matvec_bf16_f32_cuda(cublas_handle_, lw_q_proj_bf16_dev, x_norm_dev_,
@@ -2950,7 +2812,7 @@ std::vector<float> TinyLlamaModel::forward_device(
     }
 
     if (log_this_pos) {
-      std::vector<float> temp_q_host(hs);  
+      std::vector<float> temp_q_host(hs);
       gpuErrchk(cudaMemcpy(temp_q_host.data(), q_dev_, hs * sizeof(float),
                            cudaMemcpyDeviceToHost));
       log_vector_summary_detailed("[TM::fw_dev pos=" + std::to_string(pos) +
@@ -2966,13 +2828,11 @@ std::vector<float> TinyLlamaModel::forward_device(
                                       " L" + std::to_string(l) +
                                       "] q_dev_ after RoPE",
                                   temp_q_host_rope, pos, l, 8);
-      
     }
-    
+
     rope_cuda(q_dev_, n_heads, head_dim, all_freqs_cis_dev, pos, stream);
     rope_cuda(k_dev_, n_kv_heads, head_dim, all_freqs_cis_dev, pos, stream);
 
-    
     for (int kvh = 0; kvh < n_kv_heads; ++kvh) {
       const float* current_k_head_ptr = k_dev_ + kvh * head_dim;
       const float* current_v_head_ptr = v_dev_ + kvh * head_dim;
@@ -2988,14 +2848,13 @@ std::vector<float> TinyLlamaModel::forward_device(
                            kv_cache->allocated_head_dim, stream);
     }
 
-    
     float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
     attention_cuda(q_dev_, kv_cache->layers[l].k_dev, kv_cache->layers[l].v_dev,
                    attn_out_dev_, n_heads, pos + 1, head_dim, scale,
                    kv_cache->allocated_max_seq_len,
                    kv_cache->allocated_num_kv_heads, stream);
     if (log_this_pos) {
-      std::vector<float> temp_attn_out_host(hs);  
+      std::vector<float> temp_attn_out_host(hs);
       gpuErrchk(cudaMemcpy(temp_attn_out_host.data(), attn_out_dev_,
                            hs * sizeof(float), cudaMemcpyDeviceToHost));
       log_vector_summary_detailed("[TM::fw_dev pos=" + std::to_string(pos) +
@@ -3003,7 +2862,7 @@ std::vector<float> TinyLlamaModel::forward_device(
                                       "] attn_out_dev_ after Attention",
                                   temp_attn_out_host, pos, l, 8);
     }
-    
+
     if (lw_o_proj_f32_dev) {
       matvec_f32_f32_cuda(cublas_handle_, lw_o_proj_f32_dev, attn_out_dev_,
                           attn_proj_dev_, hs, hs, stream);
@@ -3027,15 +2886,12 @@ std::vector<float> TinyLlamaModel::forward_device(
                                       "] attn_proj_dev_ after O-Proj",
                                   temp_attn_proj_host, pos, l, 8);
     }
-    
+
     add_residual_cuda(attn_proj_dev_, x_resid1_dev_, x_dev_, hs, stream);
 
-    
-    
     gpuErrchk(cudaMemcpyAsync(x_resid2_dev_, x_dev_, hs * sizeof(float),
                               cudaMemcpyDeviceToDevice, stream));
 
-    
     rmsnorm_vector_cuda(x_dev_, layers[l].post_attention_layernorm_dev,
                         x_norm_dev_, hs, eps, stream);
     if (log_this_pos) {
@@ -3047,7 +2903,7 @@ std::vector<float> TinyLlamaModel::forward_device(
                                       "] x_norm_dev_ after Input RMSNorm",
                                   temp_x_host, pos, l, 8);
     }
-    
+
     if (lw_gate_proj_f32_dev && lw_up_proj_f32_dev) {
       matvec_f32_f32_cuda(cublas_handle_, lw_gate_proj_f32_dev, x_norm_dev_,
                           gate_vec_dev_, is, hs, stream);
@@ -3068,17 +2924,15 @@ std::vector<float> TinyLlamaModel::forward_device(
       return {};
     }
     if (log_this_pos) {
-      std::vector<float> temp_gate_host(
-          is);  
+      std::vector<float> temp_gate_host(is);
       gpuErrchk(cudaMemcpy(temp_gate_host.data(), gate_vec_dev_,
                            is * sizeof(float), cudaMemcpyDeviceToHost));
       log_vector_summary_detailed("[TM::fw_dev pos=" + std::to_string(pos) +
                                       " L" + std::to_string(l) +
                                       "] gate_vec_dev_ after Proj",
                                   temp_gate_host, pos, l, 8);
-      
     }
-    
+
     swiglu_cuda(gate_vec_dev_, up_vec_dev_, swiglu_vec_dev_, is, stream);
     if (log_this_pos) {
       std::vector<float> temp_swiglu_host(is);
@@ -3089,7 +2943,7 @@ std::vector<float> TinyLlamaModel::forward_device(
                                       "] swiglu_vec_dev_ after SwiGLU",
                                   temp_swiglu_host, pos, l, 8);
     }
-    
+
     if (lw_down_proj_f32_dev) {
       matvec_f32_f32_cuda(cublas_handle_, lw_down_proj_f32_dev, swiglu_vec_dev_,
                           mlp_down_dev_, hs, is, stream);
@@ -3107,8 +2961,7 @@ std::vector<float> TinyLlamaModel::forward_device(
     }
 
     if (log_this_pos) {
-      std::vector<float> temp_mlp_down_host(
-          hs);  
+      std::vector<float> temp_mlp_down_host(hs);
       gpuErrchk(cudaMemcpy(temp_mlp_down_host.data(), mlp_down_dev_,
                            hs * sizeof(float), cudaMemcpyDeviceToHost));
       log_vector_summary_detailed("[TM::fw_dev pos=" + std::to_string(pos) +
@@ -3116,20 +2969,18 @@ std::vector<float> TinyLlamaModel::forward_device(
                                       "] mlp_down_dev_ after Down Proj",
                                   temp_mlp_down_host, pos, l, 8);
     }
-    
+
     add_residual_cuda(mlp_down_dev_, x_resid2_dev_, x_dev_, hs, stream);
     if (l == 0 && (pos == 12 || pos == 13)) {
-      std::vector<float> x_host_layer0_output(
-          hs);  
+      std::vector<float> x_host_layer0_output(hs);
       gpuErrchk(cudaMemcpy(x_host_layer0_output.data(), x_dev_,
-                           hs * sizeof(float),
-                           cudaMemcpyDeviceToHost));  
+                           hs * sizeof(float), cudaMemcpyDeviceToHost));
       log_vector_summary_detailed("[CUDA] Layer 0 Output (INSIDE LOOP, pos=" +
                                       std::to_string(pos) + ")",
                                   x_host_layer0_output, pos, 0, 8);
     }
     if (l == (config_.num_hidden_layers - 1) && (pos == 12 || pos == 13)) {
-      std::vector<float> x_host_last_layer_output(hs);  
+      std::vector<float> x_host_last_layer_output(hs);
       gpuErrchk(cudaMemcpy(x_host_last_layer_output.data(), x_dev_,
                            hs * sizeof(float), cudaMemcpyDeviceToHost));
       log_vector_summary_detailed(
@@ -3138,7 +2989,7 @@ std::vector<float> TinyLlamaModel::forward_device(
           x_host_last_layer_output, pos, l, 8);
     }
     if (l == (config_.num_hidden_layers - 1) && (pos == 12 || pos == 13)) {
-      std::vector<float> x_host_last_layer_output(hs);  
+      std::vector<float> x_host_last_layer_output(hs);
       gpuErrchk(cudaMemcpy(x_host_last_layer_output.data(), x_dev_,
                            hs * sizeof(float), cudaMemcpyDeviceToHost));
       log_vector_summary_detailed(
@@ -3146,17 +2997,17 @@ std::vector<float> TinyLlamaModel::forward_device(
               ") Output (INSIDE LOOP, pos=" + std::to_string(pos) + ")",
           x_host_last_layer_output, pos, l, 8);
     }
-  }  
+  }
 
   if (log_this_pos)
     Logger::info("[TM::fw_dev pos=" + std::to_string(pos) +
                  "] Processing final RMSNorm.");
-  
+
   rmsnorm_vector_cuda(x_dev_, final_norm_dev, x_norm_dev_, hs, eps, stream);
   if (log_this_pos)
     Logger::info("[TM::fw_dev pos=" + std::to_string(pos) +
                  "] Processing LM Head.");
-  
+
   if (lm_head_f32_dev_) {
     matvec_f32_f32_cuda(cublas_handle_, lm_head_f32_dev_, x_norm_dev_,
                         logits_dev_, vs, hs, stream);
@@ -3169,19 +3020,16 @@ std::vector<float> TinyLlamaModel::forward_device(
     return {};
   }
 
-  
   gpuErrchk(cudaStreamSynchronize(stream));
 
-  
   std::vector<float> logits(vs);
   gpuErrchk(cudaMemcpy(logits.data(), logits_dev_, vs * sizeof(float),
                        cudaMemcpyDeviceToHost));
   if (log_this_pos)
     Logger::info("[TM::fw_dev pos=" + std::to_string(pos) + "] Exiting.");
   return logits;
-
-}  
-#endif  
+}
+#endif
 
 void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
   Logger::info("Mapping GGUF weights to model fields...");
@@ -3195,7 +3043,7 @@ void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
                std::to_string(gguf.tensor_data.size()) + " bytes.");
 
   for (const auto& pair : gguf.tensor_infos_map) {
-    std::stringstream ss_map;  
+    std::stringstream ss_map;
     const std::string& target_field = pair.first;
     const GGUFTensorInfo& info = pair.second;
     const uint8_t* tensor_data_ptr = data_buffer_start + info.offset;
@@ -3210,13 +3058,12 @@ void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
            << ", DataBuffer: [" << static_cast<const void*>(data_buffer_start)
            << " - " << static_cast<const void*>(data_buffer_end) << "]";
 
-    
     if (tensor_data_ptr < data_buffer_start ||
         tensor_data_end > data_buffer_end) {
       ss_map << ", InBounds: NO";
       Logger::error(ss_map.str());
       Logger::error("Tensor data out of bounds for: " + info.name);
-      continue;  
+      continue;
     } else {
       ss_map << ", InBounds: YES";
       Logger::info(ss_map.str());
@@ -3226,7 +3073,6 @@ void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
       std::vector<float> dest_f32(num_elements);
       std::memcpy(dest_f32.data(), tensor_data_ptr, info.size_in_bytes);
 
-      
       if (target_field == "token_embd.weight")
         model.embed_tokens_f32 = std::move(dest_f32);
       else if (target_field == "output.weight")
@@ -3279,16 +3125,15 @@ void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
       const uint16_t* src_f16 =
           reinterpret_cast<const uint16_t*>(tensor_data_ptr);
       for (size_t i = 0; i < num_elements; ++i) {
-        dest_f32[i] = fp16_to_fp32(src_f16[i]);  
+        dest_f32[i] = fp16_to_fp32(src_f16[i]);
       }
-      
+
       if (target_field == "token_embd.weight")
         model.embed_tokens_f32 = std::move(dest_f32);
       else if (target_field == "output.weight")
         model.lm_head_f32 = std::move(dest_f32);
       else if (target_field == "output_norm.weight")
-        model.final_norm_f32 =
-            std::move(dest_f32);  
+        model.final_norm_f32 = std::move(dest_f32);
       else if (target_field.find("blk.") == 0) {
         size_t start = 4;
         size_t end = target_field.find('.', start);
@@ -3309,7 +3154,7 @@ void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
             model.layers[layer_idx].up_proj_f32 = std::move(dest_f32);
           else if (sub_field == "ffn_down.weight")
             model.layers[layer_idx].down_proj_f32 = std::move(dest_f32);
-          
+
           else if (sub_field == "attn_norm.weight")
             model.layers[layer_idx].input_layernorm_f32 = std::move(dest_f32);
           else if (sub_field == "ffn_norm.weight")
@@ -3336,14 +3181,11 @@ void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
       const uint16_t* src_bf16 =
           reinterpret_cast<const uint16_t*>(tensor_data_ptr);
 
-
-
-#pragma omp parallel for  
+#pragma omp parallel for
       for (size_t i = 0; i < num_elements; ++i) {
-        dest_f32[i] = bfloat16_to_float32(src_bf16[i]);  
+        dest_f32[i] = bfloat16_to_float32(src_bf16[i]);
       }
 
-      
       if (target_field == "token_embd.weight") {
         model.embed_tokens_f32 = std::move(dest_f32);
         Logger::info("Mapped GGUF tensor '" + info.name +
@@ -3353,8 +3195,7 @@ void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
         Logger::info("Mapped GGUF tensor '" + info.name +
                      "' (BF16) to model.lm_head_f32");
       } else if (target_field == "output_norm.weight") {
-        model.final_norm_f32 =
-            std::move(dest_f32);  
+        model.final_norm_f32 = std::move(dest_f32);
         Logger::info("Mapped GGUF tensor '" + info.name +
                      "' (BF16) to model.final_norm_f32");
       } else if (target_field.find("blk.") == 0) {
@@ -3508,7 +3349,6 @@ void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
         Logger::warning("Unhandled target field (Q6_K): " + target_field);
       }
     } else if (info.type == GGMLType::GGML_TYPE_Q8_0) {
-      
       auto assign_vec_q8_0 = [&](std::vector<block_q8_0>& vec,
                                  const GGUFTensorInfo& info_local) {
         if (info_local.num_elements == 0) {
@@ -3529,7 +3369,6 @@ void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
         const block_q8_0* src = reinterpret_cast<const block_q8_0*>(
             gguf.tensor_data.data() + info_local.offset);
 
-        
         if (reinterpret_cast<const uint8_t*>(src) < data_buffer_start ||
             reinterpret_cast<const uint8_t*>(src + num_blocks) >
                 data_buffer_end) {
@@ -3609,7 +3448,6 @@ void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
 ModelConfig parse_model_config_from_gguf(const GGUFData& gguf) {
   ModelConfig config;
 
-  
   auto get_meta_string = [&](const std::string& key,
                              const std::string& default_val) -> std::string {
     auto it = gguf.metadata.find(key);
@@ -3620,20 +3458,16 @@ ModelConfig parse_model_config_from_gguf(const GGUFData& gguf) {
     return default_val;
   };
 
-  
   auto get_meta_value = [&](const std::string& key, auto default_value) {
     using TargetType = typename std::decay<decltype(default_value)>::type;
     auto it = gguf.metadata.find(key);
     if (it != gguf.metadata.end()) {
-      
       return std::visit(
           [&](const auto& val) -> TargetType {
             using T = std::decay_t<decltype(val)>;
 
-            
             if constexpr (std::is_integral_v<TargetType>) {
               if constexpr (std::is_integral_v<T> && !std::is_same_v<T, bool>) {
-                
                 if constexpr (std::is_unsigned_v<T> &&
                               std::is_signed_v<TargetType>) {
                   if (val > static_cast<std::make_unsigned_t<TargetType>>(
@@ -3644,8 +3478,7 @@ ModelConfig parse_model_config_from_gguf(const GGUFData& gguf) {
                     return default_value;
                   }
                 }
-                
-                
+
                 else if constexpr (std::is_signed_v<T> &&
                                    std::is_signed_v<TargetType> &&
                                    sizeof(T) > sizeof(TargetType)) {
@@ -3659,13 +3492,11 @@ ModelConfig parse_model_config_from_gguf(const GGUFData& gguf) {
                     return default_value;
                   }
                 }
-                return static_cast<TargetType>(
-                    val);  
+                return static_cast<TargetType>(val);
               }
             } else if constexpr (std::is_floating_point_v<TargetType>) {
               if constexpr (std::is_floating_point_v<T>) {
-                return static_cast<TargetType>(
-                    val);  
+                return static_cast<TargetType>(val);
               }
             } else if constexpr (std::is_same_v<TargetType, bool>) {
               if constexpr (std::is_same_v<T, bool>) {
@@ -3687,16 +3518,14 @@ ModelConfig parse_model_config_from_gguf(const GGUFData& gguf) {
     }
   };
 
-  config.vocab_size = get_meta_value(
-      "tokenizer.ggml.vocab_size",
-      get_meta_value("llama.vocab_size", 32000));  
+  config.vocab_size = get_meta_value("tokenizer.ggml.vocab_size",
+                                     get_meta_value("llama.vocab_size", 32000));
   config.hidden_size = get_meta_value("llama.embedding_length", 4096);
   config.intermediate_size = get_meta_value("llama.feed_forward_length", 11008);
   config.num_attention_heads = get_meta_value("llama.attention.head_count", 32);
   config.num_hidden_layers = get_meta_value("llama.block_count", 32);
-  config.num_key_value_heads = get_meta_value(
-      "llama.attention.head_count_kv",
-      config.num_attention_heads);  
+  config.num_key_value_heads = get_meta_value("llama.attention.head_count_kv",
+                                              config.num_attention_heads);
   config.max_position_embeddings = get_meta_value("llama.context_length", 4096);
   if (config.max_position_embeddings == 0 ||
       config.max_position_embeddings > 8192) {
@@ -3707,9 +3536,8 @@ ModelConfig parse_model_config_from_gguf(const GGUFData& gguf) {
   }
   config.rms_norm_eps =
       get_meta_value("llama.attention.layer_norm_rms_epsilon", 1e-5f);
-  config.rope_theta = get_meta_value("llama.rope.freq_base",
-                                     10000.0f);  
-  config.hidden_act = "silu";  
+  config.rope_theta = get_meta_value("llama.rope.freq_base", 10000.0f);
+  config.hidden_act = "silu";
   config.bos_token_id = get_meta_value("tokenizer.ggml.bos_token_id", 1);
   config.eos_token_id = get_meta_value("tokenizer.ggml.eos_token_id", 2);
 
@@ -3717,14 +3545,13 @@ ModelConfig parse_model_config_from_gguf(const GGUFData& gguf) {
   config.model_name = get_meta_string("general.name", "unknown");
   bool has_pre_key = gguf.metadata.count("tokenizer.ggml.pre");
 
-  
   if (config.model_name.find("TinyLlama") != std::string::npos ||
       (config.architecture == "llama" && has_pre_key)) {
     config.chat_template_type = "tinyllama";
   } else if (config.architecture == "llama" && !has_pre_key) {
     config.chat_template_type = "llama2";
   } else {
-    config.chat_template_type = "unknown";  
+    config.chat_template_type = "unknown";
     Logger::warning("Could not determine chat template type for arch='" +
                     config.architecture + "', name='" + config.model_name +
                     "'.");
@@ -3734,8 +3561,7 @@ ModelConfig parse_model_config_from_gguf(const GGUFData& gguf) {
     config.pre_tokenizer_type =
         get_meta_string("tokenizer.ggml.pre", "unknown");
   } else if (config.architecture == "llama") {
-    config.pre_tokenizer_type =
-        "llama";  
+    config.pre_tokenizer_type = "llama";
   } else {
     config.pre_tokenizer_type = "unknown";
   }
@@ -3749,28 +3575,22 @@ ModelConfig parse_model_config_from_gguf(const GGUFData& gguf) {
     Logger::info(
         "Inferred chat_template_type='llama2' based on model_type and "
         "missing/different pre_tokenizer_type.");
-  }  
+  }
 
-  
   auto template_it = gguf.metadata.find("tokenizer.chat_template");
   if (template_it != gguf.metadata.end() &&
       std::holds_alternative<std::string>(template_it->second)) {
     config.chat_template_string = std::get<std::string>(template_it->second);
     Logger::info("Found tokenizer.chat_template in metadata.");
-    
-    
+
   } else {
     Logger::info(
         "tokenizer.chat_template not found or not a string in metadata. Will "
         "use fallback logic.");
-    config.chat_template_string = "";  
+    config.chat_template_string = "";
   }
   if (config.chat_template_type == "unknown") {
-    
-    
-    if (config.model_name == "llama" &&
-        config.pre_tokenizer_type !=
-            "llama") {  
+    if (config.model_name == "llama" && config.pre_tokenizer_type != "llama") {
       config.chat_template_type = "llama2";
       Logger::info(
           "Inferred chat_template_type='llama2' based on model name and "

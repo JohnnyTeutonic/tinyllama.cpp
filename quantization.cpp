@@ -1,24 +1,21 @@
 #include "quantization.h"
 
-#include <algorithm>  
-#include <atomic>     
+#include <algorithm>
+#include <atomic>
 #include <cassert>
-#include <cmath>      
-#include <cmath>      
-#include <cstdint>    
-#include <cstring>    
-#include <iomanip>    
-#include <iostream>   
-#include <limits>     
-#include <numeric>    
-#include <sstream>    
-#include <stdexcept>  
-#include <string>     
-#include <vector>     
+#include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <iomanip>
+#include <iostream>
+#include <limits>
+#include <numeric>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <vector>
 
 #include "logger.h"
-
-
 
 static const float K_SCALE_VALUES[64] = {
     1.0f,  1.0625f, 1.125f, 1.1875f, 1.25f, 1.3125f, 1.375f, 1.4375f,
@@ -42,41 +39,27 @@ static const float K_MIN_VALUES[64] = {
     -1.25f,     -1.3125f,    -1.375f,    -1.4375f,    -1.5f,      -1.5625f,
     -1.625f,    -1.6875f,    -1.75f,     -1.8125f};
 
-
-
 static std::atomic<int> g_vec_dot_q4_k_q8_k_log_count{0};
 
-
-
-
-
-float fp16_to_fp32(
-    uint16_t h,
-    bool is_gguf_scale_field) {  
+float fp16_to_fp32(uint16_t h, bool is_gguf_scale_field) {
   uint16_t h_to_convert = h;
   bool original_sign_bit_was_set = (h & 0x8000);
 
   if (is_gguf_scale_field && original_sign_bit_was_set) {
-    
-    
-    
-    
-    
-    h_to_convert = h & 0x7FFF;  
+    h_to_convert = h & 0x7FFF;
   }
 
-  uint32_t sign = (h_to_convert >> 15) &
-                  1;  
+  uint32_t sign = (h_to_convert >> 15) & 1;
   uint32_t exp_fp16 = (h_to_convert >> 10) & 0x1f;
   uint32_t mant_fp16 = h_to_convert & 0x3ff;
 
   uint32_t x;
 
-  if (exp_fp16 == 0) {     
-    if (mant_fp16 == 0) {  
-      x = (sign << 31);  
-                         
-    } else {             
+  if (exp_fp16 == 0) {
+    if (mant_fp16 == 0) {
+      x = (sign << 31);
+
+    } else {
       exp_fp16 = 1;
       while ((mant_fp16 & 0x400) == 0) {
         mant_fp16 <<= 1;
@@ -87,14 +70,9 @@ float fp16_to_fp32(
       uint32_t mant_fp32 = mant_fp16 << 13;
       x = (sign << 31) | (exp_fp32 << 23) | mant_fp32;
     }
-  } else if (exp_fp16 == 0x1f) {  
-    
-    
-    
-    
-    
+  } else if (exp_fp16 == 0x1f) {
     x = (sign << 31) | (0xff << 23) | (mant_fp16 << 13);
-  } else {  
+  } else {
     uint32_t exp_fp32 = (exp_fp16 - 15 + 127);
     uint32_t mant_fp32 = mant_fp16 << 13;
     x = (sign << 31) | (exp_fp32 << 23) | mant_fp32;
@@ -103,27 +81,16 @@ float fp16_to_fp32(
   float f;
   std::memcpy(&f, &x, sizeof(float));
 
-  
-  
-  
-  
-  
   if (is_gguf_scale_field && f < 0.0f && !(std::isnan(f) || std::isinf(f))) {
-    
-    
-    
-    
     f = std::abs(f);
   }
 
   return f;
 }
 
-
-
 uint16_t fp32_to_fp16(float f) {
   uint32_t x;
-  std::memcpy(&x, &f, sizeof(float));  
+  std::memcpy(&x, &f, sizeof(float));
 
   uint32_t sign = (x >> 31) & 1;
   uint32_t exp_fp32 = (x >> 23) & 0xff;
@@ -131,34 +98,31 @@ uint16_t fp32_to_fp16(float f) {
 
   uint16_t u;
 
-  if (exp_fp32 == 0xff) {  
-    u = (sign << 15) | 0x7c00 |
-        (mant_fp32 != 0 ? 0x200 : 0);         
-  } else {                                    
-    int exp_fp16 = (int)exp_fp32 - 127 + 15;  
+  if (exp_fp32 == 0xff) {
+    u = (sign << 15) | 0x7c00 | (mant_fp32 != 0 ? 0x200 : 0);
+  } else {
+    int exp_fp16 = (int)exp_fp32 - 127 + 15;
 
-    if (exp_fp16 >= 0x1f) {  
+    if (exp_fp16 >= 0x1f) {
       u = (sign << 15) | 0x7c00;
-    } else if (exp_fp16 <= 0) {  
-      if (exp_fp16 < -10) {      
+    } else if (exp_fp16 <= 0) {
+      if (exp_fp16 < -10) {
         u = (sign << 15);
-      } else {  
+      } else {
         mant_fp32 = (mant_fp32 | 0x800000) >> (1 - exp_fp16);
-        
+
         if ((mant_fp32 >> 13) & 1) {
           mant_fp32 += (1 << 13);
         }
         u = (sign << 15) | (mant_fp32 >> 13);
       }
-    } else {  
-      
+    } else {
       if ((mant_fp32 >> 13) & 1) {
         mant_fp32 += (1 << 13);
-        if ((mant_fp32 >> 23) == 1) {  
+        if ((mant_fp32 >> 23) == 1) {
           mant_fp32 = 0;
           exp_fp16++;
-          if (exp_fp16 >=
-              0x1f) {  
+          if (exp_fp16 >= 0x1f) {
             u = (sign << 15) | 0x7c00;
             return u;
           }
@@ -170,75 +134,47 @@ uint16_t fp32_to_fp16(float f) {
   return u;
 }
 
-namespace {  
-             
-
-
-
+namespace {
 
 std::vector<float> k_lookup_table_scale;
 std::vector<float> k_lookup_table_min;
 
-}  
+}  // namespace
 
-
-static inline void get_scale_min_indices_q4_K(
-    int j,                  
-    const uint8_t* scales,  
-    uint8_t* scale_index,   
-    uint8_t* min_index      
-) {
+static inline void get_scale_min_indices_q4_K(int j, const uint8_t* scales,
+                                              uint8_t* scale_index,
+                                              uint8_t* min_index) {
   assert(j >= 0 && j < 16);
 
-  
-  
-  
-
-  
-  
   *scale_index = scales[j % 8] >> (4 * (j / 8));
-  *scale_index &= 0x0F;  
+  *scale_index &= 0x0F;
 
-  
-  
-  
   *min_index = scales[j % 4 + 8] >> (4 * (j / 4));
-  *min_index &= 0x0F;  
+  *min_index &= 0x0F;
 }
-
 
 /* --- OLD INCORRECT HELPER ---
 static inline void get_scale_min_indices_q4_K(
-    int j,                   
-    const uint8_t* scales,   
-block_q4_K uint8_t* scale_index,    
-min_index       
-    int scale_byte_index = j / 2; 
-LOGIC int min_byte_index = j / 2 + 6; 
+    int j,
+    const uint8_t* scales,
+block_q4_K uint8_t* scale_index,
+min_index
+    int scale_byte_index = j / 2;
+LOGIC int min_byte_index = j / 2 + 6;
 WRONG LOGIC
 
-    if (j % 2 == 0) { 
+    if (j % 2 == 0) {
         *scale_index = scales[scale_byte_index] & 0x0F;
         *min_index   = scales[min_byte_index] & 0x0F;
-    } else {          
+    } else {
         *scale_index = scales[scale_byte_index] >> 4;
         *min_index   = scales[min_byte_index] >> 4;
     }
 }
 */
 
-
-
-
-
-
-
-void dequantize_q4_k_m(
-    const block_q4_K* qblock,
-    float* output,             
-    int num_weights_in_block,  
-    bool log_this_block        
-) {
+void dequantize_q4_k_m(const block_q4_K* qblock, float* output,
+                       int num_weights_in_block, bool log_this_block) {
   if (num_weights_in_block != GGML_QK_K) {
     std::cout
         << "Warning: dequantize_q4_k_m called with num_weights != GGML_QK_K ("
@@ -247,17 +183,17 @@ void dequantize_q4_k_m(
     return;
   }
 
-  const float d = fp16_to_fp32(qblock->d, true);        
-  const float dmin = fp16_to_fp32(qblock->dmin, true);  
+  const float d = fp16_to_fp32(qblock->d, true);
+  const float dmin = fp16_to_fp32(qblock->dmin, true);
   const uint8_t* scales_u8 = qblock->scales;
   const uint8_t* qs_ptr = qblock->qs;
 
-  for (int j = 0; j < GGML_QK_K / 16; ++j) {  
+  for (int j = 0; j < GGML_QK_K / 16; ++j) {
     const float sub_scale_factor_normalized =
         static_cast<float>(scales_u8[j]) / 4.0f;
     const float final_sub_block_scale = d * sub_scale_factor_normalized;
     const size_t qs_offset = j * 8;
-    for (int k = 0; k < 8; ++k) {  
+    for (int k = 0; k < 8; ++k) {
       const uint8_t q_byte = qs_ptr[qs_offset + k];
       const int8_t q_low = ((q_byte & 0x0F) - 8);
       output[j * 16 + k] = final_sub_block_scale * q_low + dmin;
@@ -266,7 +202,6 @@ void dequantize_q4_k_m(
     }
   }
 }
-
 
 void dequantize_q6_k(const block_q6_K* qblock, float* output,
                      int num_weights_in_block, bool log_this_block) {
@@ -278,89 +213,36 @@ void dequantize_q6_k(const block_q6_K* qblock, float* output,
     return;
   }
 
-  const float d_super = fp16_to_fp32(qblock->d, true);  
+  const float d_super = fp16_to_fp32(qblock->d, true);
   const uint8_t* ql_ptr = qblock->ql;
   const uint8_t* qh_ptr = qblock->qh;
   const int8_t* scales_ptr = qblock->scales;
 
-  
-  
-  
-  
-  
-  
+  for (int sub_block_idx = 0; sub_block_idx < GGML_QK_K / 16; ++sub_block_idx) {
+    const float s_sub_block = static_cast<float>(scales_ptr[sub_block_idx]);
 
-  for (int sub_block_idx = 0; sub_block_idx < GGML_QK_K / 16;
-       ++sub_block_idx) {  
-    const float s_sub_block = static_cast<float>(
-        scales_ptr[sub_block_idx]);  
-                                     
-    const float effective_scale =
-        d_super * s_sub_block;  
+    const float effective_scale = d_super * s_sub_block;
 
-    
-    const uint8_t* current_ql =
-        ql_ptr +
-        sub_block_idx * 8;  
-    const uint8_t* current_qh =
-        qh_ptr +
-        sub_block_idx * 4;  
+    const uint8_t* current_ql = ql_ptr + sub_block_idx * 8;
+    const uint8_t* current_qh = qh_ptr + sub_block_idx * 4;
     float* current_output_ptr = output + sub_block_idx * 16;
 
-    for (int N_in_subblock = 0; N_in_subblock < 16;
-         ++N_in_subblock) {  
-      
-      
+    for (int N_in_subblock = 0; N_in_subblock < 16; ++N_in_subblock) {
       uint8_t q_low_byte = current_ql[N_in_subblock / 2];
       int q_low =
           (N_in_subblock % 2 == 0) ? (q_low_byte & 0x0F) : (q_low_byte >> 4);
 
-      
-      
       uint8_t q_high_byte = current_qh[N_in_subblock / 4];
-      int q_high_shift = (N_in_subblock % 4) * 2;  
+      int q_high_shift = (N_in_subblock % 4) * 2;
       int q_high = (q_high_byte >> q_high_shift) & 0x03;
 
-      int quant_val =
-          (q_high << 4) | q_low;  
+      int quant_val = (q_high << 4) | q_low;
 
       current_output_ptr[N_in_subblock] =
           effective_scale * (static_cast<float>(quant_val) - 32.0f);
-
-      
-      
-      
-      
-      
-      
-      
-      
-      
-      
-      
-      
-      
-      
-      
-      
-      
-      
-      
-      
-      
-      
-      
-      
-      
-      
     }
   }
-  
-  
 }
-
-
-
 
 void handle_i8_tensor(const void* input_data, float* output_data,
                       size_t num_elements) {
@@ -370,10 +252,6 @@ void handle_i8_tensor(const void* input_data, float* output_data,
   }
 }
 
-
-
-
-
 void quantize_q4_k_m(const float* input, void* output_qblock_void,
                      int num_elements) {
   if (num_elements != GGML_QK_K) {
@@ -382,15 +260,11 @@ void quantize_q4_k_m(const float* input, void* output_qblock_void,
         std::to_string(GGML_QK_K));
   }
 
-  
   block_q4_K* output_qblock = static_cast<block_q4_K*>(output_qblock_void);
 
-  
   std::memset(output_qblock->scales, 0, sizeof(output_qblock->scales));
   std::memset(output_qblock->qs, 0, sizeof(output_qblock->qs));
 
-  
-  
   float block_min_val = std::numeric_limits<float>::max();
   float block_max_val = std::numeric_limits<float>::lowest();
   for (int i = 0; i < num_elements; ++i) {
@@ -398,35 +272,25 @@ void quantize_q4_k_m(const float* input, void* output_qblock_void,
     block_max_val = std::max(block_max_val, input[i]);
   }
 
-  
   if (block_max_val == block_min_val) {
-    block_max_val = block_min_val + 1e-6f;  
+    block_max_val = block_min_val + 1e-6f;
   }
   if (block_max_val < 1e-10f && block_max_val > -1e-10f) {
-    
     block_max_val = 1e-6f;
     block_min_val = 0.0f;
   }
 
-  
-  
-  
-  
-  const float d_super_scale_candidate =
-      (block_max_val - block_min_val) / 15.0f;  
+  const float d_super_scale_candidate = (block_max_val - block_min_val) / 15.0f;
   const float d_super =
       d_super_scale_candidate > 1e-10f ? d_super_scale_candidate : 1e-10f;
-  const float min_super = block_min_val;  
+  const float min_super = block_min_val;
 
-  
   output_qblock->d = fp32_to_fp16(d_super);
   output_qblock->dmin = fp32_to_fp16(min_super);
 
-  
-  for (int j = 0; j < GGML_QK_K / 16; ++j) {  
+  for (int j = 0; j < GGML_QK_K / 16; ++j) {
     const float* sub_block_input = input + j * 16;
 
-    
     float sub_min_val = sub_block_input[0];
     float sub_max_val = sub_block_input[0];
     for (int i = 1; i < 16; ++i) {
@@ -434,19 +298,15 @@ void quantize_q4_k_m(const float* input, void* output_qblock_void,
       sub_max_val = std::max(sub_max_val, sub_block_input[i]);
     }
 
-    
     float ideal_scale = 0.0f;
-    if (sub_max_val >
-        sub_min_val +
-            1e-10f) {  
+    if (sub_max_val > sub_min_val + 1e-10f) {
       ideal_scale = (sub_max_val - sub_min_val) / 15.0f;
     }
     float ideal_min = sub_min_val;
 
-    
     uint8_t best_scale_idx = 0;
     float min_scale_err = std::numeric_limits<float>::max();
-    if (d_super > 1e-10f) {  
+    if (d_super > 1e-10f) {
       for (uint8_t k = 0; k < 16; ++k) {
         float candidate_scale = d_super * K_SCALE_VALUES[k];
         float err = std::abs(candidate_scale - ideal_scale);
@@ -457,11 +317,9 @@ void quantize_q4_k_m(const float* input, void* output_qblock_void,
       }
     }
 
-    
     uint8_t best_min_idx = 0;
     float min_min_err = std::numeric_limits<float>::max();
-    
-    
+
     for (uint8_t l = 0; l < 16; ++l) {
       float candidate_min = min_super * K_MIN_VALUES[l];
       float err = std::abs(candidate_min - ideal_min);
@@ -471,64 +329,50 @@ void quantize_q4_k_m(const float* input, void* output_qblock_void,
       }
     }
 
-    
-    
     int scale_byte_idx = j % 8;
-    int scale_shift = 4 * (j / 8);  
+    int scale_shift = 4 * (j / 8);
     output_qblock->scales[scale_byte_idx] |= (best_scale_idx << scale_shift);
 
     int min_byte_idx = (j % 4) + 8;
-    int min_shift = 4 * (j / 4);  
+    int min_shift = 4 * (j / 4);
     output_qblock->scales[min_byte_idx] |= (best_min_idx << min_shift);
 
-    
     float actual_scale = d_super * K_SCALE_VALUES[best_scale_idx];
     float actual_min = min_super * K_MIN_VALUES[best_min_idx];
     float inv_actual_scale = (actual_scale > 1e-10f || actual_scale < -1e-10f)
                                  ? (1.0f / actual_scale)
                                  : 0.0f;
 
-    uint8_t packed_qs[8];  
-                           
+    uint8_t packed_qs[8];
+
     std::memset(packed_qs, 0, sizeof(packed_qs));
 
     for (int i = 0; i < 16; ++i) {
       float val = sub_block_input[i];
 
-      
       int quant_val = 0;
-      if (inv_actual_scale != 0.0f) {  
+      if (inv_actual_scale != 0.0f) {
         quant_val =
             static_cast<int>(std::round((val - actual_min) * inv_actual_scale));
       }
-      quant_val = std::max(0, std::min(15, quant_val));  
+      quant_val = std::max(0, std::min(15, quant_val));
 
-      
-      int byte_idx_qs = i / 2;     
-      int shift_qs = (i % 2) * 4;  
+      int byte_idx_qs = i / 2;
+      int shift_qs = (i % 2) * 4;
       packed_qs[byte_idx_qs] |= (static_cast<uint8_t>(quant_val) << shift_qs);
     }
 
-    
-    
-    
     uint8_t* qs_target = output_qblock->qs + j * 8;
     for (int i = 0; i < 8; ++i) {
       uint8_t low_nibble_val = packed_qs[i] & 0x0F;
       uint8_t high_nibble_val = (packed_qs[i] >> 4) & 0x0F;
-      qs_target[i] =
-          low_nibble_val |
-          (high_nibble_val << 4);  
+      qs_target[i] = low_nibble_val | (high_nibble_val << 4);
     }
   }
 }
 
-
-
-void dequantize_q2_k(const void* qblock_void,
-                     float* output,  
-                     int num_weights_in_block  
-) {
+void dequantize_q2_k(const void* qblock_void, float* output,
+                     int num_weights_in_block) {
   if (num_weights_in_block != GGML_QK_K) {
     throw std::invalid_argument(
         "dequantize_q2_k currently only supports block size " +
@@ -540,65 +384,49 @@ void dequantize_q2_k(const void* qblock_void,
   const float d_float_raw = fp16_to_fp32(qblock->d);
   const float dmin_float_raw = fp16_to_fp32(qblock->dmin);
 
-  
   const float d_float = (!std::isfinite(d_float_raw)) ? 0.0f : d_float_raw;
   const float dmin_float =
       (!std::isfinite(dmin_float_raw)) ? 0.0f : dmin_float_raw;
 
-  
   const float d_float_clamped = std::min(std::max(d_float, -1000.0f), 1000.0f);
   const float dmin_float_clamped =
       std::min(std::max(dmin_float, -1000.0f), 1000.0f);
 
-  const uint8_t* scales_ptr =
-      qblock->scales;  
-  const uint8_t* qs_ptr =
-      qblock->qs;  
+  const uint8_t* scales_ptr = qblock->scales;
+  const uint8_t* qs_ptr = qblock->qs;
   int weight_index = 0;
-  float dequantized_scales[16];  
+  float dequantized_scales[16];
 
-  
-  for (int i = 0; i < 8; ++i) {  
+  for (int i = 0; i < 8; ++i) {
     uint8_t packed_scales = scales_ptr[i];
     uint8_t scale_low = packed_scales & 0x0F;
     uint8_t scale_high = packed_scales >> 4;
 
-    
-    
     dequantized_scales[i * 2 + 0] =
         d_float_clamped * static_cast<float>(scale_low);
     dequantized_scales[i * 2 + 1] =
         d_float_clamped * static_cast<float>(scale_high);
 
-    
     dequantized_scales[i * 2 + 0] =
         std::min(std::max(dequantized_scales[i * 2 + 0], -1000.0f), 1000.0f);
     dequantized_scales[i * 2 + 1] =
         std::min(std::max(dequantized_scales[i * 2 + 1], -1000.0f), 1000.0f);
   }
 
-  
-  
   weight_index = 0;
-  for (int j = 0; j < GGML_QK_K / 16; ++j) {  
-    
+  for (int j = 0; j < GGML_QK_K / 16; ++j) {
     float sub_block_scale = dequantized_scales[j];
 
-    
     const uint8_t* qs_subblock_ptr = qs_ptr + j * 4;
 
-    
-    for (int i = 0; i < 4; ++i) {  
+    for (int i = 0; i < 4; ++i) {
       uint8_t packed_weights = qs_subblock_ptr[i];
 
-      
       uint8_t q0 = (packed_weights >> 0) & 0x03;
       uint8_t q1 = (packed_weights >> 2) & 0x03;
       uint8_t q2 = (packed_weights >> 4) & 0x03;
       uint8_t q3 = (packed_weights >> 6) & 0x03;
 
-      
-      
       float val0 =
           sub_block_scale * static_cast<float>(q0) + dmin_float_clamped;
       float val1 =
@@ -608,7 +436,6 @@ void dequantize_q2_k(const void* qblock_void,
       float val3 =
           sub_block_scale * static_cast<float>(q3) + dmin_float_clamped;
 
-      
       val0 = std::min(std::max(val0, -1000.0f), 1000.0f);
       val1 = std::min(std::max(val1, -1000.0f), 1000.0f);
       val2 = std::min(std::max(val2, -1000.0f), 1000.0f);
@@ -626,7 +453,6 @@ void dequantize_q2_k(const void* qblock_void,
   assert(weight_index == GGML_QK_K);
 }
 
-
 void dequantize_q3_k(const void* qblock_void, float* output,
                      int num_weights_in_block) {
   if (num_weights_in_block != GGML_QK_K) {
@@ -637,11 +463,9 @@ void dequantize_q3_k(const void* qblock_void, float* output,
 
   const block_q3_K* qblock = static_cast<const block_q3_K*>(qblock_void);
 
-  
   const float d_float_raw = fp16_to_fp32(qblock->d);
   const float dmin_float_raw = fp16_to_fp32(qblock->dmin);
 
-  
   const float d_float = (!std::isfinite(d_float_raw)) ? 0.0f : d_float_raw;
   const float dmin_float =
       (!std::isfinite(dmin_float_raw)) ? 0.0f : dmin_float_raw;
@@ -652,63 +476,39 @@ void dequantize_q3_k(const void* qblock_void, float* output,
 
   int weight_index = 0;
 
-  
-  for (int j = 0; j < GGML_QK_K / 16; ++j) {  
-
-    
-    
-    
-    
-
+  for (int j = 0; j < GGML_QK_K / 16; ++j) {
     uint8_t scale_idx;
-    
+
     if (j < 8) {
-      scale_idx = scales_ptr[j] & 0x3F;  
+      scale_idx = scales_ptr[j] & 0x3F;
     } else {
-      scale_idx =
-          scales_ptr[j + 4] & 0x3F;  
+      scale_idx = scales_ptr[j + 4] & 0x3F;
     }
 
-    
     assert(scale_idx < 64 && "Scale index out of bounds for Q3_K lookup");
     const float sub_block_scale_factor = K_SCALE_VALUES[scale_idx];
 
-    
-    
-    
-    
     const float final_sub_block_scale = d_float * sub_block_scale_factor;
-    const float final_sub_block_min =
-        dmin_float;  
-    
+    const float final_sub_block_min = dmin_float;
 
-    
-    
-    for (int i = 0; i < 4; ++i) {  
+    for (int i = 0; i < 4; ++i) {
       uint8_t qs_byte = qs_ptr[j * 4 + i];
-      uint8_t hmask_byte = hmask_ptr[j];  
+      uint8_t hmask_byte = hmask_ptr[j];
 
-      
       for (int bit_pos = 0; bit_pos < 8; bit_pos += 2) {
-        
         uint8_t lower_bits = (qs_byte >> bit_pos) & 0x3;
 
-        
         int hmask_bit_idx = (i * 4) + (bit_pos / 2);
 
-        
         uint8_t high_bit = (hmask_byte >> hmask_bit_idx) & 0x1;
 
-        
         uint8_t q_val = (high_bit << 2) | lower_bits;
 
-        
         float val = final_sub_block_scale * static_cast<float>(q_val) +
                     final_sub_block_min;
 
-        
         if (!std::isfinite(val)) {
-          val = 0.0f;  
+          val = 0.0f;
         }
 
         output[weight_index++] = val;
@@ -716,18 +516,15 @@ void dequantize_q3_k(const void* qblock_void, float* output,
     }
   }
 
-  
   if (weight_index != GGML_QK_K) {
     std::cout << "ERROR: Processed " << weight_index << " weights instead of "
               << GGML_QK_K << std::endl;
-    
+
     while (weight_index < GGML_QK_K) {
       output[weight_index++] = 0.0f;
     }
   }
 }
-
-
 
 void quantize_q6_k(const float* input, void* output_qblock_void,
                    int num_elements) {
@@ -745,34 +542,31 @@ void quantize_q6_k(const float* input, void* output_qblock_void,
   std::memset(ql, 0, GGML_QK_K / 2);
   std::memset(qh, 0, GGML_QK_K / 4);
 
-  
   float amax = 0.0f;
   for (int i = 0; i < num_elements; ++i) {
     amax = std::max(amax, std::abs(input[i]));
   }
 
-  
   const float d_float = (amax > 1e-10f) ? (amax / 31.0f) : 1e-10f;
   output_qblock->d = fp32_to_fp16(d_float);
 
-  
   for (int sub = 0; sub < GGML_QK_K / 16; ++sub) {
     const float* sub_in = input + sub * 16;
-    
+
     float sub_amax = 0.0f;
     for (int i = 0; i < 16; ++i) {
       sub_amax = std::max(sub_amax, std::abs(sub_in[i]));
     }
-    
+
     int8_t scale = (d_float > 0.0f) ? std::round(sub_amax / d_float) : 1;
     if (scale == 0) scale = 1;
     scales[sub] = scale;
-    
+
     for (int i = 0; i < 16; ++i) {
       float val = sub_in[i];
       int q = static_cast<int>(std::round(val / (d_float * scale))) + 32;
       q = std::max(0, std::min(63, q));
-      
+
       int idx = sub * 16 + i;
       int ql_idx = idx / 2;
       int ql_shift = (idx % 2) * 4;
@@ -783,9 +577,6 @@ void quantize_q6_k(const float* input, void* output_qblock_void,
     }
   }
 }
-
-
-
 
 const char* ggml_type_name(GGMLType type) {
   switch (type) {
@@ -826,7 +617,7 @@ const char* ggml_type_name(GGMLType type) {
     case GGMLType::GGML_TYPE_BF16:
       return "BF16";
     case GGMLType::GGML_TYPE_COUNT:
-      return "COUNT";  
+      return "COUNT";
     default:
       return "Unknown";
   }
@@ -837,9 +628,9 @@ size_t ggml_type_size(GGMLType type) {
     case GGMLType::GGML_TYPE_F32:
       return sizeof(float);
     case GGMLType::GGML_TYPE_F16:
-      return sizeof(uint16_t);  
+      return sizeof(uint16_t);
     case GGMLType::GGML_TYPE_I8:
-      return sizeof(int8_t);  
+      return sizeof(int8_t);
     case GGMLType::GGML_TYPE_Q4_K:
       return sizeof(block_q4_K);
     case GGMLType::GGML_TYPE_Q2_K:
@@ -850,22 +641,22 @@ size_t ggml_type_size(GGMLType type) {
       return sizeof(block_q6_K);
     case GGMLType::GGML_TYPE_Q4_0:
       return 18;
-    
+
     case GGMLType::GGML_TYPE_Q8_0:
-      return 34;  
+      return 34;
     case GGMLType::GGML_TYPE_Q8_1:
-      return 40;  
+      return 40;
     case GGMLType::GGML_TYPE_Q5_K:
-      return 116;  
+      return 116;
     case GGMLType::GGML_TYPE_Q8_K:
-      return 290;  
+      return 290;
     case GGMLType::GGML_TYPE_I16:
       return sizeof(int16_t);
     case GGMLType::GGML_TYPE_I32:
       return sizeof(int32_t);
     case GGMLType::GGML_TYPE_BF16:
-      return sizeof(uint16_t);       
-    case GGMLType::GGML_TYPE_COUNT:  
+      return sizeof(uint16_t);
+    case GGMLType::GGML_TYPE_COUNT:
     default:
       std::cout << "  UNKNOWN GGML TYPE: " << static_cast<int>(type)
                 << std::endl;
@@ -876,41 +667,34 @@ size_t ggml_type_size(GGMLType type) {
 
 size_t ggml_type_block_size(GGMLType type) {
   switch (type) {
-    
     case GGMLType::GGML_TYPE_Q2_K:
     case GGMLType::GGML_TYPE_Q3_K:
     case GGMLType::GGML_TYPE_Q4_K:
     case GGMLType::GGML_TYPE_Q6_K:
-      
-      return GGML_QK_K;  
+
+      return GGML_QK_K;
 
     case GGMLType::GGML_TYPE_Q4_0:
     case GGMLType::GGML_TYPE_Q8_0:
-      
+
       return 32;
 
-    
     case GGMLType::GGML_TYPE_F32:
     case GGMLType::GGML_TYPE_F16:
     case GGMLType::GGML_TYPE_I8:
     case GGMLType::GGML_TYPE_I16:
     case GGMLType::GGML_TYPE_I32:
-    case GGMLType::GGML_TYPE_BF16:  
+    case GGMLType::GGML_TYPE_BF16:
       return 1;
-      
 
     default:
       std::cout << "Warning: Unknown GGMLType in ggml_type_block_size: "
                 << static_cast<int>(type) << std::endl;
       return 0;
-      
   }
-  
+
   return 0;
 }
-
-
-
 
 std::vector<block_q8_K> quantize_fp32_to_q8_K(
     const std::vector<float>& f_data) {
@@ -925,26 +709,19 @@ std::vector<block_q8_K> quantize_fp32_to_q8_K(
   const float* x = f_data.data();
   block_q8_K* y = q_data.data();
 
-  
   static std::atomic<int> log_count_q8k_quant_scales = 0;
-  
 
   for (size_t i = 0; i < num_blocks; ++i) {
-    
     float amax = 0.0f;
     for (int j = 0; j < GGML_QK_K; ++j) {
       amax = std::max(amax, std::abs(x[j]));
     }
 
-    
-    const float d_fp32 =
-        amax / 127.0f;  
+    const float d_fp32 = amax / 127.0f;
     const float id = (d_fp32 != 0.f) ? 1.0f / d_fp32 : 0.0f;
-    y[i].d = fp32_to_fp16(d_fp32);  
+    y[i].d = fp32_to_fp16(d_fp32);
 
-    
-    if (log_count_q8k_quant_scales <
-        10) {  
+    if (log_count_q8k_quant_scales < 10) {
       std::stringstream q8k_scale_log_ss;
       q8k_scale_log_ss << "[Q8K_QUANT_SCALES] Block #" << i
                        << " Input amax=" << amax << " -> d_fp32=" << d_fp32
@@ -953,37 +730,28 @@ std::vector<block_q8_K> quantize_fp32_to_q8_K(
       Logger::debug(q8k_scale_log_ss.str());
       log_count_q8k_quant_scales++;
     }
-    
 
-    
-    int16_t block_sum[16] = {0};  
+    int16_t block_sum[16] = {0};
     for (int j = 0; j < GGML_QK_K; ++j) {
       const float val_scaled = x[j] * id;
-      
+
       int8_t q_val = static_cast<int8_t>(
           std::max(-128.0f, std::min(127.0f, std::round(val_scaled))));
       y[i].qs[j] = q_val;
-      block_sum[j / 16] +=
-          q_val;  
+      block_sum[j / 16] += q_val;
     }
 
-    
     std::memcpy(y[i].bsums, block_sum, sizeof(block_sum));
 
-    x += GGML_QK_K;  
+    x += GGML_QK_K;
   }
 
   return q_data;
 }
 
-
-
-float vec_dot_q6_k_q8_k_cpu(
-    int n,                                 
-    const std::vector<block_q6_K>& x_vec,  
-    const std::vector<block_q8_K>& y_vec,  
-    bool log_this_call                     
-) {
+float vec_dot_q6_k_q8_k_cpu(int n, const std::vector<block_q6_K>& x_vec,
+                            const std::vector<block_q8_K>& y_vec,
+                            bool log_this_call) {
   if (n % GGML_QK_K != 0) {
     throw std::runtime_error("vec_dot_q6_k_q8_k: n must be multiple of QK_K");
   }
@@ -1045,7 +813,6 @@ float vec_dot_q6_k_q8_k_cpu(
       a += 8;
     }
 
-    
     int32_t sumi_mins = 0;
     for (int j = 0; j < GGML_QK_K / 16; ++j) {
       sumi_mins += static_cast<int32_t>(y[i].bsums[j]) *
@@ -1058,14 +825,11 @@ float vec_dot_q6_k_q8_k_cpu(
 
     float block_contribution = 0.0f;
     for (int l = 0; l < 8; ++l) {
-      float term =
-          d * (aux32[l] -
-               32 * sumi_mins / 8);  
+      float term = d * (aux32[l] - 32 * sumi_mins / 8);
       sums[l] += term;
       block_contribution += term;
     }
 
-    
     if (i == 0 && should_log_this_block) {
       std::stringstream ss_log;
       ss_log << "[DOT_Q6K_Q8K] Call #" << (log_count_dot.load() + 1)
@@ -1113,8 +877,7 @@ float vec_dot_q6_k_q8_k_cpu(
 void matvec_q6k_q8k_cpu(const std::vector<block_q6_K>& mat_q6k,
                         const std::vector<block_q8_K>& vec_q8k,
                         std::vector<float>& out_f32, int rows, int cols,
-                        bool log_calls  
-) {
+                        bool log_calls) {
   if (cols % GGML_QK_K != 0) {
     throw std::runtime_error(
         "matvec_q6k_q8k_cpu: cols must be divisible by GGML_QK_K");
@@ -1128,24 +891,17 @@ void matvec_q6k_q8k_cpu(const std::vector<block_q6_K>& mat_q6k,
   }
   out_f32.resize(rows);
   for (int r = 0; r < rows; ++r) {
-    
     const std::vector<block_q6_K> row_q6k(
         mat_q6k.begin() + r * blocks_per_row,
         mat_q6k.begin() + (r + 1) * blocks_per_row);
-    
+
     out_f32[r] = vec_dot_q6_k_q8_k_cpu(cols, row_q6k, vec_q8k, log_calls);
   }
 }
 
-
-
-
-float vec_dot_q4_k_q8_k_cpu(
-    int n, const std::vector<block_q4_K>& x_vec,
-    const std::vector<block_q8_K>& y_vec,
-    bool log_this_call  
-) {
-  
+float vec_dot_q4_k_q8_k_cpu(int n, const std::vector<block_q4_K>& x_vec,
+                            const std::vector<block_q8_K>& y_vec,
+                            bool log_this_call) {
   int log_count_now = g_vec_dot_q4_k_q8_k_log_count.fetch_add(1);
   if (log_count_now >= 5) log_this_call = false;
 
@@ -1162,17 +918,15 @@ float vec_dot_q4_k_q8_k_cpu(
 
   float sumf = 0.0f;
   for (size_t i = 0; i < nb; ++i) {
-    
     int8_t q4_vals[GGML_QK_K];
     const uint8_t* q4 = x[i].qs;
     for (int j = 0; j < GGML_QK_K / 2; ++j) {
       q4_vals[2 * j + 0] = static_cast<int8_t>(q4[j] & 0xF);
       q4_vals[2 * j + 1] = static_cast<int8_t>(q4[j] >> 4);
     }
-    
+
     const int8_t* q8 = y[i].qs;
 
-    
     for (int sub = 0; sub < 16; ++sub) {
       uint8_t scale_idx, min_idx;
       get_scale_min_indices_q4_K(sub, x[i].scales, &scale_idx, &min_idx);
@@ -1185,7 +939,7 @@ float vec_dot_q4_k_q8_k_cpu(
         sumf += (scale * q4_val + minv) * q8_val;
       }
     }
-    
+
     if (i == 0 && log_this_call) {
       std::stringstream ss;
       ss << "[Q4K_Q8K] Block #0: d: " << fp16_to_fp32(x[i].d)
@@ -1205,13 +959,10 @@ float vec_dot_q4_k_q8_k_cpu(
   return sumf;
 }
 
-
-void matvec_q4k_q8k_cpu(
-    const std::vector<block_q4_K>& mat_q4k,
-    const std::vector<block_q8_K>& vec_q8k, std::vector<float>& out_f32,
-    int rows, int cols,
-    bool log_calls  
-) {
+void matvec_q4k_q8k_cpu(const std::vector<block_q4_K>& mat_q4k,
+                        const std::vector<block_q8_K>& vec_q8k,
+                        std::vector<float>& out_f32, int rows, int cols,
+                        bool log_calls) {
   if (cols % GGML_QK_K != 0) {
     throw std::runtime_error(
         "matvec_q4k_q8k_cpu: cols must be divisible by GGML_QK_K");
@@ -1227,17 +978,13 @@ void matvec_q4k_q8k_cpu(
 
 #pragma omp parallel for
   for (int r = 0; r < rows; ++r) {
-    
     const std::vector<block_q4_K> row_q4k(
         mat_q4k.begin() + r * blocks_per_row,
         mat_q4k.begin() + (r + 1) * blocks_per_row);
-    
+
     out_f32[r] = vec_dot_q4_k_q8_k_cpu(cols, row_q4k, vec_q8k, log_calls);
   }
 }
-
-
-
 
 void dequantize_q8_k(const std::vector<block_q8_K>& q_data,
                      std::vector<float>& x, int n, bool log_this_block) {
@@ -1253,18 +1000,15 @@ void dequantize_q8_k(const std::vector<block_q8_K>& q_data,
               << std::endl;
     return;
   }
-  
+
   static std::atomic<int> log_count_q8k_dequant_scales = 0;
-  
 
   for (size_t i = 0; i < num_blocks; ++i) {
     const block_q8_K* qblock = &q_data[i];
     float* x_block = &x[i * GGML_QK_K];
 
-    const float d = fp16_to_fp32(
-        qblock->d, true);  
+    const float d = fp16_to_fp32(qblock->d, true);
 
-    
     if (log_this_block && log_count_q8k_dequant_scales < 10) {
       std::stringstream scale_log_ss;
       scale_log_ss << "[Q8K_DEQUANT_SCALES] Block #"
@@ -1273,7 +1017,6 @@ void dequantize_q8_k(const std::vector<block_q8_K>& q_data,
       Logger::debug(scale_log_ss.str());
       log_count_q8k_dequant_scales++;
     }
-    
 
     for (int j = 0; j < GGML_QK_K; ++j) {
       x_block[j] = d * static_cast<float>(qblock->qs[j]);
@@ -1281,12 +1024,9 @@ void dequantize_q8_k(const std::vector<block_q8_K>& q_data,
   }
 }
 
-
-
 void dequantize_q8_0_block(const block_q8_0* qblock, float* output) {
-  const float d_fp32 =
-      fp16_to_fp32(qblock->d, true);      
-  for (int i = 0; i < GGML_QK8_0; ++i) {  
+  const float d_fp32 = fp16_to_fp32(qblock->d, true);
+  for (int i = 0; i < GGML_QK8_0; ++i) {
     output[i] = d_fp32 * static_cast<float>(qblock->qs[i]);
   }
 }

@@ -1,7 +1,7 @@
 #ifndef MODEL_H
 #define MODEL_H
 
-#include <cstdint>  
+#include <cstdint>
 #include <functional>
 #include <nlohmann/json.hpp>
 #include <string>
@@ -11,13 +11,13 @@
 #include "safetensors_loader.h"
 #ifdef HAS_CUDA
 #include <cublas_v2.h>
-#include <cuda_runtime.h>  
+#include <cuda_runtime.h>
 
-#include "cuda_kernels.h"  
+#include "cuda_kernels.h"
 #endif
 #include <memory>
 
-#include "quantization.h"  
+#include "quantization.h"
 
 enum class TensorName {
   Q_PROJ,
@@ -71,47 +71,42 @@ struct ModelConfig {
   std::string torch_dtype;
   int bos_token_id;
   int eos_token_id;
-  std::string architecture = "unknown";  
-  std::string model_name =
-      "unknown";  
-  std::string chat_template_type = "unknown";  
-  std::string pre_tokenizer_type = "unknown";  
+  std::string architecture = "unknown";
+  std::string model_name = "unknown";
+  std::string chat_template_type = "unknown";
+  std::string pre_tokenizer_type = "unknown";
   std::string chat_template_string;
   bool is_gguf_file_loaded = false;
 };
 
-struct GGUFData;     
-struct ModelConfig;  
-ModelConfig parse_model_config_from_gguf(
-    const GGUFData& gguf);  
-
+struct GGUFData;
+struct ModelConfig;
+ModelConfig parse_model_config_from_gguf(const GGUFData& gguf);
 
 struct KVCacheLayer {
-  
-  std::vector<float> k;  
-  std::vector<float> v;  
+  std::vector<float> k;
+  std::vector<float> v;
 
 #ifdef HAS_CUDA
-  
-  float* k_dev = nullptr;  
-  float* v_dev = nullptr;  
+
+  float* k_dev = nullptr;
+  float* v_dev = nullptr;
 #endif
 };
 
 struct KVCache {
-  std::vector<KVCacheLayer> layers;  
-  int seq_len = 0;  
+  std::vector<KVCacheLayer> layers;
+  int seq_len = 0;
 
 #ifdef HAS_CUDA
-  
+
   int allocated_num_layers = 0;
   int allocated_max_seq_len = 0;
   int allocated_num_kv_heads = 0;
   int allocated_head_dim = 0;
 
-  
   ~KVCache() {
-    if (allocated_num_layers > 0) {  
+    if (allocated_num_layers > 0) {
       Logger::info("Freeing KVCache CUDA memory...");
       for (int l = 0; l < allocated_num_layers; ++l) {
         if (layers[l].k_dev) {
@@ -128,28 +123,25 @@ struct KVCache {
   }
 #endif
 
-  
   void initialize(int num_layers, int max_seq_len, int num_kv_heads,
                   int head_dim);
 };
 
-
 using ForwardDiagCallback = std::function<void(
     int layer, const std::string& name, const std::vector<float>& v)>;
 
-
 struct LayerWeights {
-  std::vector<uint16_t> input_layernorm;           
-  std::vector<uint16_t> post_attention_layernorm;  
-  
-  std::vector<uint16_t> q_proj;  
-  std::vector<uint16_t> k_proj;  
-  std::vector<uint16_t> v_proj;  
-  std::vector<uint16_t> o_proj;  
-  
-  std::vector<uint16_t> gate_proj;  
-  std::vector<uint16_t> up_proj;    
-  std::vector<uint16_t> down_proj;  
+  std::vector<uint16_t> input_layernorm;
+  std::vector<uint16_t> post_attention_layernorm;
+
+  std::vector<uint16_t> q_proj;
+  std::vector<uint16_t> k_proj;
+  std::vector<uint16_t> v_proj;
+  std::vector<uint16_t> o_proj;
+
+  std::vector<uint16_t> gate_proj;
+  std::vector<uint16_t> up_proj;
+  std::vector<uint16_t> down_proj;
 
   std::vector<float> input_layernorm_f32;
   std::vector<float> post_attention_layernorm_f32;
@@ -163,7 +155,7 @@ struct LayerWeights {
   std::vector<block_q8_0> gate_proj_q8_0, up_proj_q8_0, down_proj_q8_0;
 
 #ifdef HAS_CUDA
-  
+
   float* input_layernorm_dev = nullptr;
   float* post_attention_layernorm_dev = nullptr;
 #endif
@@ -171,7 +163,6 @@ struct LayerWeights {
 
 class TinyLlamaModel {
  public:
-  
   TinyLlamaModel(const ModelConfig& config, const SafeTensorsLoader& loader);
   TinyLlamaModel(const ModelConfig& config, const std::string& weights_path);
   ~TinyLlamaModel();
@@ -181,28 +172,21 @@ class TinyLlamaModel {
                              const std::vector<int>* attention_mask = nullptr);
 
 #ifdef HAS_CUDA
-  
+
   std::vector<float> forward_device(
       int token_id, int pos, KVCache* cache,
       const std::vector<int>* attention_mask = nullptr,
       cudaStream_t stream = 0);
 #endif
 
-  
   const ModelConfig& get_config() const { return config_; }
 
-  
   const std::vector<uint16_t>& get_lm_head() const { return lm_head; }
 
-  
   const std::vector<uint16_t>& get_embed_tokens() const { return embed_tokens; }
 
-  
-  std::vector<LayerWeights>& get_layers() {
-    return layers;
-  }  
+  std::vector<LayerWeights>& get_layers() { return layers; }
 
-  
   std::vector<float> lookup_embedding(int token_id);
 
   int get_vocab_size() const;
@@ -211,21 +195,19 @@ class TinyLlamaModel {
     return gguf_data_ ? gguf_data_.get() : nullptr;
   }
 
-  friend void map_gguf_weights(const GGUFData& gguf,
-                               TinyLlamaModel& model);  
+  friend void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model);
 
  private:
   ModelConfig config_;
 
-  
-  std::vector<uint16_t> embed_tokens;  
-  std::vector<uint16_t> lm_head;       
-  std::vector<uint16_t> final_norm;    
+  std::vector<uint16_t> embed_tokens;
+  std::vector<uint16_t> lm_head;
+  std::vector<uint16_t> final_norm;
   std::vector<float> embed_tokens_f32, lm_head_f32, final_norm_f32;
   std::vector<block_q4_K> embed_tokens_q4k, lm_head_q4k, final_norm_q4k;
   std::vector<block_q6_K> embed_tokens_q6k, lm_head_q6k, final_norm_q6k;
   std::vector<block_q8_0> embed_tokens_q8_0, lm_head_q8_0;
-  std::vector<LayerWeights> layers;  
+  std::vector<LayerWeights> layers;
 
 #ifdef HAS_CUDA
   float* final_norm_dev = nullptr;
@@ -250,56 +232,47 @@ class TinyLlamaModel {
   float* lm_head_f32_dev_ = nullptr;
   cublasHandle_t cublas_handle_ = nullptr;
 
-  float* x_dev_ = nullptr;           
-  float* x_norm_dev_ = nullptr;      
-  float* x_resid1_dev_ = nullptr;    
-  float* x_resid2_dev_ = nullptr;    
-  float* q_dev_ = nullptr;           
-  float* k_dev_ = nullptr;           
-  float* v_dev_ = nullptr;           
-  float* attn_out_dev_ = nullptr;    
-  float* attn_proj_dev_ = nullptr;   
-  float* gate_vec_dev_ = nullptr;    
-  float* up_vec_dev_ = nullptr;      
-  float* swiglu_vec_dev_ = nullptr;  
-  float* mlp_down_dev_ = nullptr;    
-  float* logits_dev_ = nullptr;      
+  float* x_dev_ = nullptr;
+  float* x_norm_dev_ = nullptr;
+  float* x_resid1_dev_ = nullptr;
+  float* x_resid2_dev_ = nullptr;
+  float* q_dev_ = nullptr;
+  float* k_dev_ = nullptr;
+  float* v_dev_ = nullptr;
+  float* attn_out_dev_ = nullptr;
+  float* attn_proj_dev_ = nullptr;
+  float* gate_vec_dev_ = nullptr;
+  float* up_vec_dev_ = nullptr;
+  float* swiglu_vec_dev_ = nullptr;
+  float* mlp_down_dev_ = nullptr;
+  float* logits_dev_ = nullptr;
 #endif
 
-  
   std::vector<std::pair<float, float>> precomputed_freqs_cis_;
 
-  std::unique_ptr<GGUFData> gguf_data_;  
+  std::unique_ptr<GGUFData> gguf_data_;
 
   void initialize_weights(const SafeTensorsLoader* loader,
                           const GGUFData* gguf);
   void initialize_gpu_and_rope();
 };
 
-
 ModelConfig parse_model_config(const nlohmann::json& json);
-
 
 int argmax(const std::vector<float>& v);
 
-
 float bfloat16_to_float32(uint16_t b16);
-
 
 void rmsnorm(const std::vector<float>& x, const std::vector<uint16_t>& weight,
              float eps, std::vector<float>& out);
-
 
 void matvec_bf16_f32(const std::vector<uint16_t>& mat,
                      const std::vector<float>& vec, std::vector<float>& out,
                      int M, int N);
 
-
 void softmax(std::vector<float>& x);
 
-
 struct KVCache;
-
 
 float bfloat16_to_float32(uint16_t b16);
 std::vector<uint16_t> uint8_vector_to_uint16_vector(
@@ -308,4 +281,4 @@ std::vector<uint16_t> uint8_vector_to_uint16_vector(
 void log_vector_summary(const std::string& name, const std::vector<float>& v,
                         int head_count = 5);
 
-#endif  
+#endif

@@ -1,21 +1,16 @@
 #include "gguf_parser.h"
 
-#include <iomanip>  
-#include <iostream>  
-#include <numeric>    
-#include <sstream>    
-#include <stdexcept>  
-#include <vector>     
+#include <iomanip>
+#include <iostream>
+#include <numeric>
+#include <sstream>
+#include <stdexcept>
+#include <vector>
 
 #include "logger.h"
-#include "quantization.h"  
+#include "quantization.h"
 
-
-const uint32_t GGUF_MAGIC = 0x46554747;  
-
-
-
-
+const uint32_t GGUF_MAGIC = 0x46554747;
 
 size_t gguf_value_type_size(GGUFValueType type) {
   switch (type) {
@@ -34,7 +29,7 @@ size_t gguf_value_type_size(GGUFValueType type) {
     case GGUFValueType::FLOAT32:
       return sizeof(float);
     case GGUFValueType::BOOL:
-      return sizeof(uint8_t);  
+      return sizeof(uint8_t);
     case GGUFValueType::UINT64:
       return sizeof(uint64_t);
     case GGUFValueType::INT64:
@@ -42,11 +37,11 @@ size_t gguf_value_type_size(GGUFValueType type) {
     case GGUFValueType::FLOAT64:
       return sizeof(double);
     case GGUFValueType::STRING:
-      return 0;  
+      return 0;
     case GGUFValueType::ARRAY:
-      return 0;  
+      return 0;
     default:
-      return 0;  
+      return 0;
   }
 }
 
@@ -75,8 +70,7 @@ std::string read_gguf_string(std::ifstream& file) {
   uint64_t len;
   read_raw(file, len);
   if (len > 0) {
-    
-    if (len > (1ull << 30)) {  
+    if (len > (1ull << 30)) {
       throw std::runtime_error(
           "GGUF Error: String length exceeds sanity limit: " +
           std::to_string(len));
@@ -92,8 +86,6 @@ std::string read_gguf_string(std::ifstream& file) {
   }
 }
 
-
-
 GGUFData load_gguf_meta(const std::string& filename) {
   Logger::info("Attempting to load GGUF file: " + filename);
   std::ifstream file(filename, std::ios::binary);
@@ -103,7 +95,6 @@ GGUFData load_gguf_meta(const std::string& filename) {
 
   GGUFData result;
 
-  
   read_raw(file, result.header.magic);
   read_raw(file, result.header.version);
   read_raw(file, result.header.tensor_count);
@@ -119,14 +110,10 @@ GGUFData load_gguf_meta(const std::string& filename) {
     Logger::info(ss.str());
   }
 
-  
   if (result.header.magic != GGUF_MAGIC) {
     throw std::runtime_error("Not a valid GGUF file (magic number mismatch).");
   }
 
-  
-
-  
   Logger::info("Reading Metadata (" +
                std::to_string(result.header.metadata_kv_count) + " pairs)...");
   for (uint64_t i = 0; i < result.header.metadata_kv_count; ++i) {
@@ -214,8 +201,6 @@ GGUFData load_gguf_meta(const std::string& filename) {
           read_raw(file, array_type_enum);
           read_raw(file, count);
 
-          
-          
           GGUFArray array_obj;
           array_obj.type = array_type_enum;
           array_obj.len = count;
@@ -279,8 +264,7 @@ GGUFData load_gguf_meta(const std::string& filename) {
             if (array_type_enum == GGUFValueType::STRING) {
               for (uint64_t arr_i = 0; arr_i < count; ++arr_i) {
                 try {
-                  std::string discarded_str =
-                      read_gguf_string(file);  
+                  std::string discarded_str = read_gguf_string(file);
                 } catch (const std::exception& e) {
                   Logger::error("Error skipping string element " +
                                 std::to_string(arr_i) + " for key '" + key +
@@ -312,14 +296,12 @@ GGUFData load_gguf_meta(const std::string& filename) {
                       "GGUF Error: Failed to seek past array data for key '" +
                       key + "'");
                 }
-              }  
+              }
             }
           }
           break;
         }
         default: {
-          
-          
           throw std::runtime_error(
               "Unknown metadata type encountered: " +
               std::to_string(static_cast<uint32_t>(value_type_enum)) +
@@ -327,7 +309,6 @@ GGUFData load_gguf_meta(const std::string& filename) {
         }
       }
     } catch (const std::exception& e) {
-      
       std::string error_key =
           key.empty() ? "(unknown key, error during key read)" : key;
       Logger::error(
@@ -339,11 +320,10 @@ GGUFData load_gguf_meta(const std::string& filename) {
   }
   Logger::info("Finished reading metadata.");
 
-  
   result.tensor_infos.reserve(static_cast<size_t>(result.header.tensor_count));
   Logger::info("Reading Tensor Info (" +
                std::to_string(result.header.tensor_count) + " tensors)...");
-  uint64_t accumulated_offset_debug = 0;  
+  uint64_t accumulated_offset_debug = 0;
   for (uint64_t i = 0; i < result.header.tensor_count; ++i) {
     GGUFTensorInfo info;
     try {
@@ -351,7 +331,7 @@ GGUFData load_gguf_meta(const std::string& filename) {
 
       uint32_t n_dims;
       read_raw(file, n_dims);
-      if (n_dims > 4) {  
+      if (n_dims > 4) {
         throw std::runtime_error("Tensor '" + info.name +
                                  "' has unsupported number of dimensions: " +
                                  std::to_string(n_dims));
@@ -377,7 +357,6 @@ GGUFData load_gguf_meta(const std::string& filename) {
           << "\n  Calculated accumulated_offset_debug (before this tensor): "
           << accumulated_offset_debug;
 
-      
       info.num_elements = 1;
       for (uint64_t dim : info.shape) {
         if (dim > 0 &&
@@ -399,7 +378,7 @@ GGUFData load_gguf_meta(const std::string& filename) {
             "' has unknown or unsupported type: " + std::to_string(info.type));
       }
 
-      if (block_size > 1) {  
+      if (block_size > 1) {
         if (info.num_elements % block_size != 0) {
           throw std::runtime_error("Tensor '" + info.name + "' num_elements (" +
                                    std::to_string(info.num_elements) +
@@ -415,7 +394,7 @@ GGUFData load_gguf_meta(const std::string& filename) {
               info.name + "'");
         }
         info.size_in_bytes = static_cast<size_t>(num_blocks * type_size);
-      } else {  
+      } else {
         if (type_size > 0 &&
             info.num_elements >
                 std::numeric_limits<uint64_t>::max() / type_size) {
@@ -428,7 +407,7 @@ GGUFData load_gguf_meta(const std::string& filename) {
 
       ss_offset_log << "\n  Calculated size_in_bytes for this tensor: "
                     << info.size_in_bytes;
-      Logger::info(ss_offset_log.str());  
+      Logger::info(ss_offset_log.str());
       accumulated_offset_debug += info.size_in_bytes;
 
       result.tensor_infos.push_back(info);
@@ -441,7 +420,7 @@ GGUFData load_gguf_meta(const std::string& filename) {
                     << (d == info.shape.size() - 1 ? "" : ", ");
         ss_tensor << " ], Offset=" << info.offset
                   << ", Size=" << info.size_in_bytes << " bytes";
-        Logger::info(ss_tensor.str());  
+        Logger::info(ss_tensor.str());
       }
     } catch (const std::exception& e) {
       std::string tensor_name =
@@ -449,7 +428,7 @@ GGUFData load_gguf_meta(const std::string& filename) {
                             : info.name;
       Logger::error("Error reading tensor info for tensor " + tensor_name +
                     ": " + e.what());
-      throw;  
+      throw;
     }
   }
   Logger::info("Finished reading tensor info.");
@@ -465,12 +444,9 @@ GGUFData load_gguf_meta(const std::string& filename) {
   Logger::info("Finished populating tensor_infos_map. Map size: " +
                std::to_string(result.tensor_infos_map.size()));
 
-  
-  
-  uint64_t alignment = 32;  
+  uint64_t alignment = 32;
   try {
     if (result.metadata.count("general.alignment")) {
-      
       uint32_t align_val =
           std::get<uint32_t>(result.metadata["general.alignment"]);
       if (align_val > 0) {
@@ -510,8 +486,8 @@ GGUFData load_gguf_meta(const std::string& filename) {
           "GGUF Error: Failed to seek past padding before tensor data.");
     }
   }
-  uint64_t data_start_pos = file.tellg();  
-                                           
+  uint64_t data_start_pos = file.tellg();
+
   Logger::info(
       "[GGUF_LOAD] File position after padding seek (data_start_pos): " +
       std::to_string(data_start_pos));
@@ -520,10 +496,8 @@ GGUFData load_gguf_meta(const std::string& filename) {
   if (result.tensor_infos_map.count(target_tensor_name_debug)) {
     const GGUFTensorInfo& t_info_debug =
         result.tensor_infos_map.at(target_tensor_name_debug);
-    if (t_info_debug.type == GGML_TYPE_Q6_K) {  
-      uint64_t tensor_relative_offset =
-          t_info_debug
-              .offset;  
+    if (t_info_debug.type == GGML_TYPE_Q6_K) {
+      uint64_t tensor_relative_offset = t_info_debug.offset;
       uint64_t d_field_abs_file_offset =
           data_start_pos + tensor_relative_offset + offset_of_d_in_block_q6k;
 
@@ -538,13 +512,11 @@ GGUFData load_gguf_meta(const std::string& filename) {
       Logger::info("[GGUF_DEBUG_READ]   Calculated d_field_abs_file_offset: " +
                    std::to_string(d_field_abs_file_offset));
 
-      uint64_t seek_pos_debug =
-          d_field_abs_file_offset - 4;  
-      int bytes_to_read_debug = 8;      
+      uint64_t seek_pos_debug = d_field_abs_file_offset - 4;
+      int bytes_to_read_debug = 8;
       std::vector<uint8_t> debug_buffer(bytes_to_read_debug);
 
-      uint64_t original_file_pos_before_debug_read =
-          file.tellg();  
+      uint64_t original_file_pos_before_debug_read = file.tellg();
       file.seekg(seek_pos_debug, std::ios::beg);
       if (!file) {
         Logger::error("[GGUF_DEBUG_READ] Failed to seek to debug position: " +
@@ -565,7 +537,7 @@ GGUFData load_gguf_meta(const std::string& filename) {
             ss_debug_bytes << "0x" << std::hex << (int)debug_buffer[k] << " ";
           Logger::info(ss_debug_bytes.str());
         }
-        file.clear();  
+        file.clear();
         file.seekg(original_file_pos_before_debug_read, std::ios::beg);
         Logger::info(
             "[GGUF_DEBUG_READ] Seeked back to "
@@ -582,10 +554,9 @@ GGUFData load_gguf_meta(const std::string& filename) {
                     target_tensor_name_debug + "' not found for debug read.");
   }
 
-  
-  file.seekg(0, std::ios::end);  
+  file.seekg(0, std::ios::end);
   uint64_t file_end_pos = file.tellg();
-  file.seekg(data_start_pos, std::ios::beg);  
+  file.seekg(data_start_pos, std::ios::beg);
 
   if (file_end_pos < data_start_pos) {
     throw std::runtime_error(
@@ -598,7 +569,6 @@ GGUFData load_gguf_meta(const std::string& filename) {
                std::to_string(data_size) + " bytes.");
 
   if (data_size > 0) {
-    
     try {
       result.tensor_data.resize(static_cast<size_t>(data_size));
     } catch (const std::bad_alloc& e) {
@@ -607,26 +577,22 @@ GGUFData load_gguf_meta(const std::string& filename) {
                                e.what());
     }
 
-    
     Logger::info("[GGUF_LOAD] Reading " + std::to_string(data_size) +
                  " bytes into tensor_data vector...");
     file.read(reinterpret_cast<char*>(result.tensor_data.data()),
               static_cast<std::streamsize>(data_size));
-    uint64_t pos_after_read = file.tellg();      
-    std::streamsize bytes_read = file.gcount();  
+    uint64_t pos_after_read = file.tellg();
+    std::streamsize bytes_read = file.gcount();
     Logger::info("[GGUF_LOAD] File position after read: " +
-                 std::to_string(pos_after_read));  
+                 std::to_string(pos_after_read));
     Logger::info("[GGUF_LOAD] Bytes reported read by gcount(): " +
-                 std::to_string(bytes_read));  
+                 std::to_string(bytes_read));
     Logger::info("[GGUF_LOAD] Stream state after read: good=" +
                  std::to_string(file.good()) +
                  ", eof=" + std::to_string(file.eof()) +
-                 ", fail=" + std::to_string(file.fail()));  
+                 ", fail=" + std::to_string(file.fail()));
 
-    if (!file ||
-        bytes_read != static_cast<std::streamsize>(
-                          data_size)) {  
-      
+    if (!file || bytes_read != static_cast<std::streamsize>(data_size)) {
       if (file.eof()) {
         throw std::runtime_error(
             "GGUF Error: Reached EOF prematurely while reading tensor data. "
@@ -640,7 +606,7 @@ GGUFData load_gguf_meta(const std::string& filename) {
       }
     }
     Logger::info("[GGUF_LOAD] Successfully read tensor data block.");
-    
+
     if (data_size >= 16) {
       std::stringstream ss_bytes;
       ss_bytes << "[GGUF_LOAD] First 16 bytes of tensor_data buffer: ";

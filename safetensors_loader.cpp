@@ -1,29 +1,27 @@
 #include "safetensors_loader.h"
-#include <fstream>
-#include <algorithm>
 
+#include <algorithm>
+#include <fstream>
 
 #ifdef __AVX2__
 #include <immintrin.h>
 #endif
 
-SafeTensorsLoader::SafeTensorsLoader(const std::string& path) : file_path_(path) {
+SafeTensorsLoader::SafeTensorsLoader(const std::string& path)
+    : file_path_(path) {
   std::ifstream file(path, std::ios::binary);
   if (!file)
     throw std::runtime_error("Failed to open safetensors file: " + path);
 
-  
   file.seekg(0, std::ios::end);
   file_size_ = file.tellg();
   file.seekg(0, std::ios::beg);
 
-  
   uint64_t header_len = 0;
   file.read(reinterpret_cast<char*>(&header_len), sizeof(header_len));
   if (file.gcount() != sizeof(header_len))
     throw std::runtime_error("Failed to read safetensors header length");
 
-  
   std::vector<char> header_buf(header_len);
   file.read(header_buf.data(), header_len);
   if (file.gcount() != static_cast<std::streamsize>(header_len))
@@ -31,7 +29,6 @@ SafeTensorsLoader::SafeTensorsLoader(const std::string& path) : file_path_(path)
   std::string header_json(header_buf.begin(), header_buf.end());
   nlohmann::json header = nlohmann::json::parse(header_json);
 
-  
   for (auto it = header.begin(); it != header.end(); ++it) {
     const std::string& key = it.key();
     if (key == "__metadata__") continue;
@@ -48,18 +45,16 @@ SafeTensorsLoader::SafeTensorsLoader(const std::string& path) : file_path_(path)
   data_start_ = 8 + header_len;
   file.close();
 
-  
   initialize_memory_mapping();
 }
 
-SafeTensorsLoader::~SafeTensorsLoader() {
-  cleanup_memory_mapping();
-}
+SafeTensorsLoader::~SafeTensorsLoader() { cleanup_memory_mapping(); }
 
 void SafeTensorsLoader::initialize_memory_mapping() {
   fd_ = open(file_path_.c_str(), O_RDONLY);
   if (fd_ == -1) {
-    throw std::runtime_error("Failed to open file for memory mapping: " + file_path_);
+    throw std::runtime_error("Failed to open file for memory mapping: " +
+                             file_path_);
   }
 
   mapped_data_ = mmap(nullptr, file_size_, PROT_READ, MAP_PRIVATE, fd_, 0);
@@ -86,92 +81,92 @@ std::vector<std::string> SafeTensorsLoader::tensor_names() const {
   return names;
 }
 
-std::vector<uint8_t> SafeTensorsLoader::get_tensor_bytes(const std::string& name) const {
+std::vector<uint8_t> SafeTensorsLoader::get_tensor_bytes(
+    const std::string& name) const {
   auto it = tensors_.find(name);
   if (it == tensors_.end())
     throw std::runtime_error("Tensor not found: " + name);
 
   const auto& info = it->second;
-  const uint8_t* data = static_cast<const uint8_t*>(mapped_data_) + data_start_ + info.data_offset;
+  const uint8_t* data = static_cast<const uint8_t*>(mapped_data_) +
+                        data_start_ + info.data_offset;
   return convert_tensor_data(data, info.nbytes, info.dtype);
 }
 
-std::vector<uint8_t> SafeTensorsLoader::get_tensor_bytes_parallel(const std::string& name) const {
-  return get_tensor_bytes(name); 
+std::vector<uint8_t> SafeTensorsLoader::get_tensor_bytes_parallel(
+    const std::string& name) const {
+  return get_tensor_bytes(name);
 }
 
-std::map<std::string, std::vector<uint8_t>> SafeTensorsLoader::load_all_tensors_parallel() const {
+std::map<std::string, std::vector<uint8_t>>
+SafeTensorsLoader::load_all_tensors_parallel() const {
   std::map<std::string, std::vector<uint8_t>> result;
-  std::vector<std::future<std::pair<std::string, std::vector<uint8_t>>>> futures;
-  
-  
+  std::vector<std::future<std::pair<std::string, std::vector<uint8_t>>>>
+      futures;
+
   unsigned int num_threads = std::thread::hardware_concurrency();
-  if (num_threads == 0) num_threads = 4; 
-  
-  
+  if (num_threads == 0) num_threads = 4;
+
   ThreadPool pool(num_threads);
-  
-  
+
   for (const auto& kv : tensors_) {
     futures.push_back(pool.submit([this, &kv]() {
       return std::make_pair(kv.first, get_tensor_bytes(kv.first));
     }));
   }
-  
-  
+
   for (auto& future : futures) {
     auto [name, data] = future.get();
     result[name] = std::move(data);
   }
-  
+
   return result;
 }
 
-const SafeTensorsLoader::TensorInfo& SafeTensorsLoader::get_tensor_info(const std::string& name) const {
+const SafeTensorsLoader::TensorInfo& SafeTensorsLoader::get_tensor_info(
+    const std::string& name) const {
   auto it = tensors_.find(name);
   if (it == tensors_.end())
     throw std::runtime_error("Tensor not found: " + name);
   return it->second;
 }
 
-std::vector<uint8_t> SafeTensorsLoader::convert_tensor_data(const uint8_t* data, size_t size, const std::string& dtype) const {
+std::vector<uint8_t> SafeTensorsLoader::convert_tensor_data(
+    const uint8_t* data, size_t size, const std::string& dtype) const {
   std::vector<uint8_t> result(size);
-  
-  
+
   if (dtype == "F16") {
 #ifdef __AVX2__
-    
+
     if (__builtin_cpu_supports("avx2")) {
-      const size_t simd_size = 16; 
+      const size_t simd_size = 16;
       size_t i = 0;
       for (; i + simd_size <= size; i += simd_size) {
-        __m256i src = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(data + i));
-        __m256i dst = _mm256_shuffle_epi8(src, _mm256_set_epi8(
-          1, 0, 3, 2, 5, 4, 7, 6, 9, 8, 11, 10, 13, 12, 15, 14,
-          1, 0, 3, 2, 5, 4, 7, 6, 9, 8, 11, 10, 13, 12, 15, 14
-        ));
+        __m256i src =
+            _mm256_loadu_si256(reinterpret_cast<const __m256i*>(data + i));
+        __m256i dst = _mm256_shuffle_epi8(
+            src, _mm256_set_epi8(1, 0, 3, 2, 5, 4, 7, 6, 9, 8, 11, 10, 13, 12,
+                                 15, 14, 1, 0, 3, 2, 5, 4, 7, 6, 9, 8, 11, 10,
+                                 13, 12, 15, 14));
         _mm256_storeu_si256(reinterpret_cast<__m256i*>(result.data() + i), dst);
       }
-      
+
       for (; i < size; i++) {
         result[i] = data[i];
       }
     } else {
-      
       std::copy(data, data + size, result.begin());
     }
 #else
-    
+
     std::copy(data, data + size, result.begin());
 #endif
   } else {
-    
     std::copy(data, data + size, result.begin());
   }
-  
+
   return result;
 }
-
 
 ThreadPool::ThreadPool(size_t num_threads) {
   for (size_t i = 0; i < num_threads; ++i) {
@@ -202,12 +197,12 @@ ThreadPool::~ThreadPool() {
   }
 }
 
-template<class F, class... Args>
-std::future<typename std::result_of<F(Args...)>::type> ThreadPool::submit(F&& f, Args&&... args) {
+template <class F, class... Args>
+std::future<typename std::result_of<F(Args...)>::type> ThreadPool::submit(
+    F&& f, Args&&... args) {
   using return_type = typename std::result_of<F(Args...)>::type;
   auto task = std::make_shared<std::packaged_task<return_type()>>(
-    std::bind(std::forward<F>(f), std::forward<Args>(args)...)
-  );
+      std::bind(std::forward<F>(f), std::forward<Args>(args)...));
   std::future<return_type> res = task->get_future();
   {
     std::unique_lock<std::mutex> lock(queue_mutex_);

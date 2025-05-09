@@ -18,7 +18,7 @@ void ensure_log_truncated() {
     truncated = true;
   }
 }
-}  
+}  // namespace
 
 void Logger::info(const std::string& message) {
   ensure_log_truncated();
@@ -45,16 +45,14 @@ void Logger::debug(const std::string& message) {
 }
 
 void Logger::fatal(const std::string& message) {
-  ensure_log_truncated();  
-  
+  ensure_log_truncated();
+
   std::ofstream log("debugging.log", std::ios::app);
   log << "[FATAL] " << message << std::endl;
-  log.close();  
+  log.close();
 
-  
   std::cerr << "[FATAL] " << message << std::endl;
 
-  
   std::exit(EXIT_FAILURE);
 }
 

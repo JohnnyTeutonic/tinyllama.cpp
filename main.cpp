@@ -1,7 +1,7 @@
-#include <algorithm>  
-#include <cctype>     
-#include <cstdio>     
-#include <iomanip>    
+#include <algorithm>
+#include <cctype>
+#include <cstdio>
+#include <iomanip>
 #include <iostream>
 #include <memory>
 #include <sstream>
@@ -11,7 +11,6 @@
 
 #include "api.h"
 #include "logger.h"
-
 
 std::string trim_whitespace(const std::string& s) {
   auto start = std::find_if_not(
@@ -23,21 +22,20 @@ std::string trim_whitespace(const std::string& s) {
 }
 
 int main(int argc, char** argv) {
-  
-  std::string model_path_or_dir = "data";  
-  std::string prompt = "Hello, world!";    
-  int steps = 64;                          
-  float temperature = 0.7f;                
+  std::string model_path_or_dir = "data";
+  std::string prompt = "Hello, world!";
+  int steps = 64;
+  float temperature = 0.7f;
 
   if (argc > 1) {
     model_path_or_dir = argv[1];
   }
-  
+
   if (argc > 2) {
     std::string raw_prompt_from_argv = argv[2];
-    prompt = trim_whitespace(raw_prompt_from_argv);  
+    prompt = trim_whitespace(raw_prompt_from_argv);
   }
-  
+
   if (argc > 3) {
     try {
       steps = std::stoi(argv[3]);
@@ -46,8 +44,8 @@ int main(int argc, char** argv) {
                     ". Using default: " + std::to_string(steps));
     }
   }
-  
-  if (argc > 4) {  
+
+  if (argc > 4) {
     try {
       temperature = std::stof(argv[4]);
     } catch (const std::exception& e) {
@@ -55,7 +53,7 @@ int main(int argc, char** argv) {
                     ". Using default: " + std::to_string(temperature));
     }
   }
-  
+
   Logger::info("Using model path/directory: " + model_path_or_dir);
   Logger::info("Raw Prompt (from argv, trimmed): \"" + prompt + "\"");
   Logger::info("Steps (from argv): " + std::to_string(steps));
@@ -63,21 +61,18 @@ int main(int argc, char** argv) {
                std::to_string(temperature));
 
   try {
-    
     tinyllama::TinyLlamaSession session(model_path_or_dir);
     Logger::info("TinyLlamaSession initialized successfully.");
 
-    
-    
-    std::string generated_text = session.generate(prompt, steps, temperature, "", true);
+    std::string generated_text =
+        session.generate(prompt, steps, temperature, "", true);
 
-    
     std::cout << "Prompt: " + prompt << std::endl;
     std::cout << "Generated: " << generated_text << std::endl;
 
   } catch (const std::exception& e) {
     Logger::error(std::string("An error occurred: ") + e.what());
-    
+
     std::cerr << "Error: " << e.what() << std::endl;
     return 1;
   }
