@@ -118,6 +118,9 @@ find_package(OpenSSL QUIET) # Try to find OpenSSL for cpp-httplib to potentially
 if(OPENSSL_FOUND AND TARGET OpenSSL::SSL AND TARGET OpenSSL::Crypto)
     message(STATUS "Found OpenSSL. Enabling SSL support in cpp-httplib.")
     target_compile_definitions(tinyllama_server PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT)
+    # Add OpenSSL include directories
+    target_include_directories(tinyllama_server PRIVATE ${OpenSSL_INCLUDE_DIRS})
+    # target_link_libraries(tinyllama_server PRIVATE OpenSSL::SSL OpenSSL::Crypto) # This might be redundant if httplib links them
 else()
     message(STATUS "OpenSSL not found or targets not available. HTTPS support in server will be disabled.")
 endif()
