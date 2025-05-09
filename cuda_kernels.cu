@@ -15,6 +15,7 @@
  */
 
 #include "cuda_kernels.h"
+#include "model_macros.h"
 
 #ifdef HAS_CUDA
 
@@ -144,7 +145,7 @@ void rmsnorm_vector_cuda(const float* x_dev, const float* weight_dev,
     total_ssq += partial_sums_host[i];
   }
   total_ssq /= n;
-  float inv_norm_factor = 1.0f / std::sqrt(static_cast<float>(total_ssq) + eps);
+  float inv_norm_factor = 1.0f / SAFE_SQRT(static_cast<float>(total_ssq) + eps);
   delete[] partial_sums_host;
   gpuErrchk(cudaFree(partial_sums_dev));
 

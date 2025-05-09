@@ -1,5 +1,6 @@
 #include "api.h"
 #include "gguf_parser.h"
+#include "model_macros.h"
 
 #include <algorithm>
 #include <cmath>
@@ -55,12 +56,12 @@ static int sample_top_k_top_p_temperature(const std::vector<float>& logits,
 
   int vocab_size = logits.size();
 
-  top_k = std::min(top_k, vocab_size);
+  top_k = (std::min)(top_k, vocab_size);
   if (top_k <= 0) top_k = vocab_size;
 
   std::vector<float> scaled_logits(vocab_size);
   float max_logit = -std::numeric_limits<float>::infinity();
-  for (float logit : logits) max_logit = std::max(max_logit, logit);
+  for (float logit : logits) max_logit = (std::max)(max_logit, logit);
 
   // Scale logits to avoid numerical instability
   const float scale = 1.0f / temperature;

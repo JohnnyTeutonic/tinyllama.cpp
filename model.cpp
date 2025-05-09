@@ -25,6 +25,7 @@
 #include "gguf_parser.h"
 #include "quantization.h"
 #include "model_constants.h"  // Add this include
+#include "model_macros.h"
 
 static void matvec_q6k_f32_vector_cpu(const std::vector<block_q6_K>& mat_q6k,
                                       const std::vector<float>& vec_f32,
@@ -84,17 +85,15 @@ static void matvec_q6k_f32_vector_cpu(const std::vector<block_q6_K>& mat_q6k,
   float dequantized_block[GGML_QK_K];
 
 #pragma omp parallel for private(dequantized_block)
-  for (int r = 0; r < rows; ++r) {
+  for (int64_t r = 0; r < static_cast<int64_t>(rows); ++r) {
     double row_sum = 0.0;
     double kahan_c = 0.0;
 
     size_t block_row_offset = r * num_blocks_per_row;
 
-    for (size_t block_col_idx = 0; block_col_idx < num_blocks_per_row;
-         ++block_col_idx) {
+    for (size_t block_col_idx = 0; block_col_idx < num_blocks_per_row; ++block_col_idx) {
       const block_q6_K* qblock = &mat_q6k[block_row_offset + block_col_idx];
-      bool enable_dequant_log =
-          log_first_block && (r == 0 && block_col_idx == 0);
+      bool enable_dequant_log = log_first_block && (r == 0 && block_col_idx == 0);
       dequantize_q6_k(qblock, dequantized_block, GGML_QK_K);
 
       size_t vec_offset = block_col_idx * GGML_QK_K;
@@ -138,19 +137,16 @@ static void matvec_q4k_f32_vector_cpu(const std::vector<block_q4_K>& mat_q4k,
   float dequantized_block[GGML_QK_K];
 
 #pragma omp parallel for private(dequantized_block)
-  for (int r = 0; r < rows; ++r) {
+  for (int64_t r = 0; r < static_cast<int64_t>(rows); ++r) {
     double row_sum = 0.0;
     double kahan_c = 0.0;
 
     size_t block_row_offset = r * num_blocks_per_row;
 
-    for (size_t block_col_idx = 0; block_col_idx < num_blocks_per_row;
-         ++block_col_idx) {
+    for (size_t block_col_idx = 0; block_col_idx < num_blocks_per_row; ++block_col_idx) {
       const block_q4_K* qblock = &mat_q4k[block_row_offset + block_col_idx];
-      bool enable_dequant_log =
-          log_first_block && (r == 0 && block_col_idx == 0);
-      dequantize_q4_k_m(qblock, dequantized_block, GGML_QK_K,
-                        enable_dequant_log);
+      bool enable_dequant_log = log_first_block && (r == 0 && block_col_idx == 0);
+      dequantize_q4_k_m(qblock, dequantized_block, GGML_QK_K, enable_dequant_log);
 
       size_t vec_offset = block_col_idx * GGML_QK_K;
       for (int i = 0; i < GGML_QK_K; ++i) {
@@ -195,9 +191,9 @@ static void matvec_f32_f32_vector_cpu(const std::vector<float>& mat_f32,
   out_f32.resize(rows);
 
 #pragma omp parallel for schedule(static)
-  for (int r = 0; r < rows; ++r) {
+  for (int64_t r = 0; r < static_cast<int64_t>(rows); ++r) {
     float sum = 0.0f;
-    size_t row_offset = (size_t)r * cols;
+    size_t row_offset = static_cast<size_t>(r) * cols;
 
     const float* mat_row_ptr = mat_f32.data() + row_offset;
     const float* vec_ptr = vec_f32.data();
@@ -215,7 +211,7 @@ void log_vector_summary(const std::string& name, const std::vector<float>& v,
     return;
   }
   std::stringstream ss;
-  size_t actual_head_count = std::min((size_t)head_count, v.size());
+  size_t actual_head_count = SAFE_MIN(static_cast<size_t>(head_count), v.size());
 
   ss << name << ": size=" << v.size();
 
@@ -246,14 +242,14 @@ void log_vector_summary_with_tail(const std::string& name,
   }
   std::stringstream ss;
 
-  size_t actual_head_count = std::min((size_t)head_count, v.size());
-  size_t actual_tail_count = std::min((size_t)tail_count, v.size());
+  size_t actual_head_count = SAFE_MIN(static_cast<size_t>(head_count), v.size());
+  size_t actual_tail_count = SAFE_MIN(static_cast<size_t>(tail_count), v.size());
   size_t total_shown = actual_head_count + actual_tail_count;
   bool overlap = total_shown > v.size();
   if (overlap) {
     actual_tail_count = v.size() - actual_head_count;
-    if (actual_tail_count > std::min((size_t)tail_count, v.size())) {
-      actual_tail_count = std::min((size_t)tail_count, v.size());
+    if (actual_tail_count > SAFE_MIN(static_cast<size_t>(tail_count), v.size())) {
+      actual_tail_count = SAFE_MIN(static_cast<size_t>(tail_count), v.size());
     }
     if (tail_count > 0 && actual_head_count == v.size()) {
       actual_tail_count = 0;
@@ -319,7 +315,7 @@ std::vector<float> bfloat16_vector_to_float32(
   std::vector<float> f32_vec(bf16_vec.size());
 
 #pragma omp parallel for
-  for (size_t i = 0; i < bf16_vec.size(); ++i) {
+  for (int64_t i = 0; i < static_cast<int64_t>(bf16_vec.size()); ++i) {
     f32_vec[i] = bfloat16_to_float32(bf16_vec[i]);
   }
 
@@ -364,16 +360,16 @@ static void rmsnorm_vector_cpu(const std::vector<float>& x,
 
   double ssq = 0.0;
 #pragma omp parallel for reduction(+ : ssq)
-  for (size_t i = 0; i < n; ++i) {
+  for (int64_t i = 0; i < static_cast<int64_t>(n); ++i) {
     ssq += static_cast<double>(x[i]) * static_cast<double>(x[i]);
   }
   ssq /= n;
 
-  float norm_factor = 1.0f / std::sqrt(static_cast<float>(ssq) + 
-                     std::max(eps, numeric::MIN_NORM_EPS));
+  float norm_factor = 1.0f / SAFE_SQRT(static_cast<float>(ssq) + 
+                   SAFE_MAX(eps, numeric::MIN_NORM_EPS));
 
 #pragma omp parallel for
-  for (size_t i = 0; i < n; ++i) {
+  for (int64_t i = 0; i < static_cast<int64_t>(n); ++i) {
     out[i] = x[i] * norm_factor * weight[i];
   }
 }
@@ -385,27 +381,27 @@ static void softmax_vector_cpu(const std::vector<float>& x,
 
   float max_val = x[0];
 #pragma omp parallel for reduction(max : max_val)
-  for (size_t i = 1; i < n; ++i) {
+  for (int64_t i = 1; i < static_cast<int64_t>(n); ++i) {
     if (x[i] > max_val) max_val = x[i];
   }
 
   float exp_sum = 0.0f;
 #pragma omp parallel for reduction(+ : exp_sum)
-  for (size_t i = 0; i < n; ++i) {
+  for (int64_t i = 0; i < static_cast<int64_t>(n); ++i) {
     out[i] = std::exp(x[i] - max_val);
     exp_sum += out[i];
   }
 
   float inv_sum = 1.0f / exp_sum;
 #pragma omp parallel for
-  for (size_t i = 0; i < n; ++i) {
+  for (int64_t i = 0; i < static_cast<int64_t>(n); ++i) {
     out[i] *= inv_sum;
   }
 }
 static void silu_cpu(const std::vector<float>& x, std::vector<float>& out) {
   if (x.size() != out.size()) out.resize(x.size());
 #pragma omp parallel for
-  for (size_t i = 0; i < x.size(); ++i) {
+  for (int64_t i = 0; i < static_cast<int64_t>(x.size()); ++i) {
     float sigmoid_x = 1.0f / (1.0f + std::exp(-x[i]));
     out[i] = x[i] * sigmoid_x;
   }
@@ -430,7 +426,7 @@ static void log_vec_stats(const std::string& name,
 static bool write_vector_to_file(const std::string& filename,
                                  const std::vector<float>& vec) {
   std::string vec_writer_vals;
-  int N_log_writer = std::min(10, (int)vec.size());
+  int N_log_writer = (std::min)(10, (int)vec.size());
   for (int i = 0; i < N_log_writer; ++i)
     vec_writer_vals += (i ? " " : "") + std::to_string(vec[i]);
   Logger::info("write_vector_to_file Enter: Address of vec.data() on entry: " +
@@ -589,7 +585,7 @@ static std::vector<float> bf16vec_to_float_vec(
     const std::vector<uint16_t>& v_bf16) {
   std::vector<float> v_f32(v_bf16.size());
 #pragma omp parallel for
-  for (size_t i = 0; i < v_bf16.size(); ++i) {
+  for (int64_t i = 0; i < static_cast<int64_t>(v_bf16.size()); ++i) {
     v_f32[i] = bfloat16_to_float32(v_bf16[i]);
   }
   return v_f32;
@@ -612,7 +608,7 @@ static void matvec_bf16_f32_vector_cpu(const std::vector<uint16_t>& mat_bf16,
   out_f32.resize(rows);
 
 #pragma omp parallel for
-  for (int r = 0; r < rows; ++r) {
+  for (int64_t r = 0; r < static_cast<int64_t>(rows); ++r) {
     double sum = 0.0;
     double c = 0.0;
     size_t row_offset = r * cols;
@@ -647,7 +643,7 @@ static void weighted_sum_probs_v(const std::vector<float>& probs,
   out.resize(head_dim);
 
 #pragma omp parallel for
-  for (int j = 0; j < head_dim; ++j) {
+  for (int64_t j = 0; j < static_cast<int64_t>(head_dim); ++j) {
     double sum = 0.0;
     double c_kahan = 0.0;
     for (int i = 0; i < seq_len; ++i) {
@@ -674,7 +670,7 @@ static void calculate_attention_scores(const std::vector<float>& Q,
   float effective_scale = scale * attention::ATTENTION_SCALE_BASE;
 
 #pragma omp parallel for collapse(1)
-  for (int i = 0; i < seq_len; ++i) {
+  for (int64_t i = 0; i < static_cast<int64_t>(seq_len); ++i) {
     float score = 0.0f;
     for (int j = 0; j < head_dim; ++j) {
       score += Q[j] * K[i * head_dim + j];
@@ -696,7 +692,7 @@ static void apply_rope_vector(
   const int dim_half = head_dim / 2;
 
 #pragma omp parallel for
-  for (int h = 0; h < num_heads; ++h) {
+  for (int64_t h = 0; h < static_cast<int64_t>(num_heads); ++h) {
     size_t head_offset = h * head_dim;
     for (int i = 0; i < dim_half; ++i) {
       double x0 = static_cast<double>(x[head_offset + i]);
@@ -1842,8 +1838,7 @@ std::vector<float> TinyLlamaModel::lookup_embedding(int token_id) {
 
       size_t dest_offset = block_n * GGML_QK_K;
 
-      size_t elements_to_copy =
-          std::min((size_t)GGML_QK_K, (size_t)hs - dest_offset);
+      size_t elements_to_copy = SAFE_MIN((size_t)GGML_QK_K, (size_t)(hs - dest_offset));
       std::memcpy(&embedding_vec[dest_offset], dequantized_block,
                   elements_to_copy * sizeof(float));
     }
@@ -1883,8 +1878,7 @@ std::vector<float> TinyLlamaModel::lookup_embedding(int token_id) {
       dequantize_q8_0_block(&embed_tokens_q8_0[start_block_idx + block_n],
                             dequantized_block);
       size_t dest_offset = block_n * GGML_QK8_0;
-      size_t elements_to_copy =
-          std::min((size_t)GGML_QK8_0, (size_t)hs - dest_offset);
+      size_t elements_to_copy = SAFE_MIN(static_cast<size_t>(GGML_QK8_0), static_cast<size_t>(hs - dest_offset));
       std::memcpy(&embedding_vec[dest_offset], dequantized_block,
                   elements_to_copy * sizeof(float));
     }
@@ -2237,7 +2231,7 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& input,
 
     std::fill(attn_out_vec.begin(), attn_out_vec.end(), 0.0f);
     int current_seq_len = n_tokens + 1;
-    float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
+    float scale = 1.0f / SAFE_SQRT(static_cast<float>(head_dim));
     for (int h = 0; h < n_heads; ++h) {
       std::vector<float> q_head_rope_vec(q_vec.begin() + h * head_dim,
                                          q_vec.begin() + (h + 1) * head_dim);
@@ -2367,7 +2361,7 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& input,
     }
 
 #pragma omp parallel for
-    for (size_t i = 0; i < hs; ++i) {
+    for (int64_t i = 0; i < static_cast<int64_t>(hs); ++i) {
       input[i] = x_resid1_vec[i] + attn_proj_vec[i];
     }
 
@@ -2485,7 +2479,7 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& input,
     silu_cpu(gate_vec, silu_out_vec);
 
 #pragma omp parallel for
-    for (size_t i = 0; i < is; ++i) {
+    for (int64_t i = 0; i < static_cast<int64_t>(is); ++i) {
       swiglu_result_vec[i] = silu_out_vec[i] * up_vec[i];
     }
     if (log_this_layer)
@@ -2558,7 +2552,7 @@ std::vector<float> TinyLlamaModel::forward(std::vector<float>& input,
     }
 
 #pragma omp parallel for
-    for (size_t i = 0; i < hs; ++i) {
+    for (int64_t i = 0; i < static_cast<int64_t>(hs); ++i) {
       input[i] = x_resid2_vec[i] + mlp_out_vec[i];
     }
 
@@ -2832,7 +2826,7 @@ std::vector<float> TinyLlamaModel::forward_device(
                            kv_cache->allocated_head_dim, stream);
     }
 
-    float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
+    float scale = 1.0f / SAFE_SQRT(static_cast<float>(head_dim));
     attention_cuda(q_dev_, kv_cache->layers[l].k_dev, kv_cache->layers[l].v_dev,
                    attn_out_dev_, n_heads, pos + 1, head_dim, scale,
                    kv_cache->allocated_max_seq_len,
@@ -3166,7 +3160,7 @@ void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
           reinterpret_cast<const uint16_t*>(tensor_data_ptr);
 
 #pragma omp parallel for
-      for (size_t i = 0; i < num_elements; ++i) {
+      for (int64_t i = 0; i < static_cast<int64_t>(num_elements); ++i) {
         dest_f32[i] = bfloat16_to_float32(src_bf16[i]);
       }
 

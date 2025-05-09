@@ -35,7 +35,7 @@ namespace bfloat16 {
  * mechanism of the transformer architecture.
  */
 namespace attention {
-    constexpr float ATTENTION_SCALE_BASE = std::sqrt(1.0f / 8.0f);  /**< Base scaling factor for attention scores (1/sqrt(head_dim) for head_dim=8) */
+    constexpr float ATTENTION_SCALE_BASE = 0.3535533905932738f;  /**< Base scaling factor for attention scores (1/sqrt(head_dim) for head_dim=8) */
     constexpr float MIN_SCALE = 1e-4f;                              /**< Minimum allowed attention scale to prevent underflow */
     constexpr float MAX_SCALE = 1e4f;                               /**< Maximum allowed attention scale to prevent overflow */
 }

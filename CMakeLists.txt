@@ -137,6 +137,8 @@ if (MSVC)
   # Need to apply to tinyllama_core as well
   foreach(target tinyllama tinyllama_server tinyllama_core)
     set_property(TARGET ${target} PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug$>")
+    target_compile_options(${target} PRIVATE "/openmp:llvm" "/DNOMINMAX" "/D_USE_MATH_DEFINES")
+    target_compile_definitions(${target} PRIVATE NOMINMAX _USE_MATH_DEFINES)
   endforeach()
 endif()
 

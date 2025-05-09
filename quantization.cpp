@@ -1,4 +1,5 @@
 #include "quantization.h"
+#include "model_macros.h"
 
 #include <algorithm>
 #include <atomic>
@@ -270,8 +271,8 @@ void quantize_q4_k_m(const float* input, void* output_qblock_void,
   float block_min_val = std::numeric_limits<float>::max();
   float block_max_val = std::numeric_limits<float>::lowest();
   for (int i = 0; i < num_elements; ++i) {
-    block_min_val = std::min(block_min_val, input[i]);
-    block_max_val = std::max(block_max_val, input[i]);
+    block_min_val = SAFE_MIN(block_min_val, input[i]);
+    block_max_val = SAFE_MAX(block_max_val, input[i]);
   }
 
   if (block_max_val == block_min_val) {
@@ -296,8 +297,8 @@ void quantize_q4_k_m(const float* input, void* output_qblock_void,
     float sub_min_val = sub_block_input[0];
     float sub_max_val = sub_block_input[0];
     for (int i = 1; i < 16; ++i) {
-      sub_min_val = std::min(sub_min_val, sub_block_input[i]);
-      sub_max_val = std::max(sub_max_val, sub_block_input[i]);
+      sub_min_val = SAFE_MIN(sub_min_val, sub_block_input[i]);
+      sub_max_val = SAFE_MAX(sub_max_val, sub_block_input[i]);
     }
 
     float ideal_scale = 0.0f;
@@ -357,7 +358,7 @@ void quantize_q4_k_m(const float* input, void* output_qblock_void,
         quant_val =
             static_cast<int>(std::round((val - actual_min) * inv_actual_scale)) + Q4K_OFFSET;
       }
-      quant_val = std::max(0, std::min(15, quant_val));
+      quant_val = SAFE_MAX(0, SAFE_MIN(15, quant_val));
 
       int byte_idx_qs = i / 2;
       int shift_qs = (i % 2) * 4;
@@ -390,8 +391,8 @@ void dequantize_q2_k(const void* qblock_void, float* output,
   const float dmin_float =
       (!std::isfinite(dmin_float_raw)) ? 0.0f : dmin_float_raw;
 
-  const float d_float_clamped = std::min(std::max(d_float, TENSOR_SCALE_MIN), TENSOR_SCALE_MAX);
-  const float dmin_float_clamped = std::min(std::max(dmin_float, TENSOR_SCALE_MIN), TENSOR_SCALE_MAX);
+  const float d_float_clamped = SAFE_MIN(SAFE_MAX(d_float, TENSOR_SCALE_MIN), TENSOR_SCALE_MAX);
+  const float dmin_float_clamped = SAFE_MIN(SAFE_MAX(dmin_float, TENSOR_SCALE_MIN), TENSOR_SCALE_MAX);
 
   const uint8_t* scales_ptr = qblock->scales;
   const uint8_t* qs_ptr = qblock->qs;
@@ -409,9 +410,9 @@ void dequantize_q2_k(const void* qblock_void, float* output,
         d_float_clamped * static_cast<float>(scale_high);
 
     dequantized_scales[i * 2 + 0] =
-        std::min(std::max(dequantized_scales[i * 2 + 0], TENSOR_SCALE_MIN), TENSOR_SCALE_MAX);
+        SAFE_MIN(SAFE_MAX(dequantized_scales[i * 2 + 0], TENSOR_SCALE_MIN), TENSOR_SCALE_MAX);
     dequantized_scales[i * 2 + 1] =
-        std::min(std::max(dequantized_scales[i * 2 + 1], TENSOR_SCALE_MIN), TENSOR_SCALE_MAX);
+        SAFE_MIN(SAFE_MAX(dequantized_scales[i * 2 + 1], TENSOR_SCALE_MIN), TENSOR_SCALE_MAX);
   }
 
   weight_index = 0;
@@ -437,10 +438,10 @@ void dequantize_q2_k(const void* qblock_void, float* output,
       float val3 =
           sub_block_scale * static_cast<float>(q3) + dmin_float_clamped;
 
-      val0 = std::min(std::max(val0, TENSOR_SCALE_MIN), TENSOR_SCALE_MAX);
-      val1 = std::min(std::max(val1, TENSOR_SCALE_MIN), TENSOR_SCALE_MAX);
-      val2 = std::min(std::max(val2, TENSOR_SCALE_MIN), TENSOR_SCALE_MAX);
-      val3 = std::min(std::max(val3, TENSOR_SCALE_MIN), TENSOR_SCALE_MAX);
+      val0 = SAFE_MIN(SAFE_MAX(val0, TENSOR_SCALE_MIN), TENSOR_SCALE_MAX);
+      val1 = SAFE_MIN(SAFE_MAX(val1, TENSOR_SCALE_MIN), TENSOR_SCALE_MAX);
+      val2 = SAFE_MIN(SAFE_MAX(val2, TENSOR_SCALE_MIN), TENSOR_SCALE_MAX);
+      val3 = SAFE_MIN(SAFE_MAX(val3, TENSOR_SCALE_MIN), TENSOR_SCALE_MAX);
 
       output[weight_index++] = val0;
 
@@ -545,7 +546,7 @@ void quantize_q6_k(const float* input, void* output_qblock_void,
 
   float amax = 0.0f;
   for (int i = 0; i < num_elements; ++i) {
-    amax = std::max(amax, std::abs(input[i]));
+    amax = SAFE_MAX(amax, std::abs(input[i]));
   }
 
   const float d_float = (amax > GGUF_EPSILON) ? (amax / Q6K_SCALE_FACTOR) : GGUF_EPSILON;
@@ -556,7 +557,7 @@ void quantize_q6_k(const float* input, void* output_qblock_void,
 
     float sub_amax = 0.0f;
     for (int i = 0; i < 16; ++i) {
-      sub_amax = std::max(sub_amax, std::abs(sub_in[i]));
+      sub_amax = SAFE_MAX(sub_amax, std::abs(sub_in[i]));
     }
 
     int8_t scale = (d_float > 0.0f) ? std::round(sub_amax / d_float) : 1;
@@ -566,7 +567,7 @@ void quantize_q6_k(const float* input, void* output_qblock_void,
     for (int i = 0; i < 16; ++i) {
       float val = sub_in[i];
       int q = static_cast<int>(std::round(val / (d_float * scale))) + Q6K_OFFSET;
-      q = std::max(0, std::min(63, q));
+      q = SAFE_MAX(0, SAFE_MIN(63, q));
 
       int idx = sub * 16 + i;
       int ql_idx = idx / 2;
@@ -715,7 +716,7 @@ std::vector<block_q8_K> quantize_fp32_to_q8_K(
   for (size_t i = 0; i < num_blocks; ++i) {
     float amax = 0.0f;
     for (int j = 0; j < GGML_QK_K; ++j) {
-      amax = std::max(amax, std::abs(x[j]));
+      amax = SAFE_MAX(amax, std::abs(x[j]));
     }
 
     const float d_fp32 = amax / Q8K_SCALE_FACTOR;
@@ -737,7 +738,7 @@ std::vector<block_q8_K> quantize_fp32_to_q8_K(
       const float val_scaled = x[j] * id;
 
       int8_t q_val = static_cast<int8_t>(
-          std::max(-128.0f, std::min(127.0f, std::round(val_scaled))));
+          SAFE_MAX(-128.0f, SAFE_MIN(127.0f, std::round(val_scaled))));
       y[i].qs[j] = q_val;
       block_sum[j / 16] += q_val;
     }

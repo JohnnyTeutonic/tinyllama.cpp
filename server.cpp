@@ -49,6 +49,7 @@
 #include "api.h"
 #include "logger.h"
 #include "tokenizer.h"
+#include "model_macros.h"
 
 using json = nlohmann::json;
 
@@ -195,8 +196,7 @@ int main(int argc, char** argv) {
     res.status = 204;
   });
 
-  unsigned int num_threads =
-      std::max(1u, std::thread::hardware_concurrency() / 2);
+  unsigned int num_threads = SAFE_MAX(1u, std::thread::hardware_concurrency() / 2);
   Logger::info("Starting server on " + host + ":" + std::to_string(port) +
                " with " + std::to_string(num_threads) + " threads.");
 
