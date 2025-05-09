@@ -121,15 +121,14 @@ add_executable(tinyllama_server
 target_link_libraries(tinyllama_server PRIVATE tinyllama_core httplib)
 
 # Link OpenSSL if found (needed by httplib if SSL support is enabled)
-# cpp-httplib handles OpenSSL linking internally if its CMake options are set (e.g., LIBRESSL_FOUND, OPENSSL_FOUND)
-# We just need to ensure find_package(OpenSSL) is called if we want to influence its detection.
 find_package(OpenSSL QUIET) # Try to find OpenSSL for cpp-httplib to potentially use
 if(OPENSSL_FOUND AND TARGET OpenSSL::SSL AND TARGET OpenSSL::Crypto)
-    message(STATUS "Found OpenSSL. cpp-httplib may use it for HTTPS if compiled with SSL support.")
+    message(STATUS "Found OpenSSL. Enabling SSL support in cpp-httplib.")
+    target_compile_definitions(tinyllama_server PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT)
     # No explicit linking here as cpp-httplib should handle it.
     # If cpp-httplib is fetched as source, it will build with SSL if OpenSSL is found by its own CMake logic.
 else()
-    message(STATUS "OpenSSL not found or targets not available. HTTPS support in server might be disabled or use other SSL libs if cpp-httplib is configured for them.")
+    message(STATUS "OpenSSL not found or targets not available. HTTPS support in server will be disabled.")
 endif()
 
 # --- Common Settings --- 

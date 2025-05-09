@@ -7,9 +7,6 @@
 #pragma warning(disable : 4996)  
 #endif
 
-#define CPPHTTPLIB_OPENSSL_SUPPORT  
-                                    
-
 #include "httplib.h"
 
 #ifdef _MSC_VER

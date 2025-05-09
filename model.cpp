@@ -352,14 +352,11 @@ std::vector<uint16_t> uint8_vector_to_uint16_vector(
     const std::vector<uint8_t>& bytes, size_t numel) {
   if (bytes.size() != numel * 2) {
     throw std::runtime_error(
-        "Byte vector size mismatch for bfloat16 conversion");
+        "Byte vector size mismatch for uint16_t conversion");
   }
   std::vector<uint16_t> out(numel);
-  for (size_t i = 0; i < numel; ++i) {
-    
-    out[i] = (bytes[2 * i + 1] << 8) | bytes[2 * i];
-    
-  }
+  // Use memcpy for direct byte copying, assuming little-endian system and data
+  std::memcpy(out.data(), bytes.data(), bytes.size());
   return out;
 }
 
@@ -832,13 +829,28 @@ void TinyLlamaModel::initialize_weights(const SafeTensorsLoader* loader,
     
     map_gguf_weights(*gguf, *this);
   } else if (loader) {
-    Logger::info("Loading weights from SafeTensors data...");
+    Logger::info("Loading weights from SafeTensors data using parallel loader...");
     
-    
-    
+    std::map<std::string, std::vector<uint8_t>> all_tensors;
+    try {
+      all_tensors = loader->load_all_tensors_parallel();
+      Logger::info("All SafeTensors tensors loaded in parallel. Total tensors: " + std::to_string(all_tensors.size()));
+    } catch (const std::exception& e) {
+      Logger::error("Failed to load all tensors in parallel: " + std::string(e.what()));
+      throw; // Re-throw if parallel loading fails critically
+    }
+
+    auto get_tensor_data = [&](const std::string& name) -> const std::vector<uint8_t>& {
+      auto it = all_tensors.find(name);
+      if (it == all_tensors.end()) {
+        throw std::runtime_error("Tensor not found in preloaded map: " + name);
+      }
+      return it->second;
+    };
+
     try {
       embed_tokens = uint8_vector_to_uint16_vector(
-          loader->get_tensor_bytes("model.embed_tokens.weight"), vs * hs);
+          get_tensor_data("model.embed_tokens.weight"), vs * hs);
     } catch (const std::exception& e) {
       Logger::error("Missing model.embed_tokens.weight: " +
                     std::string(e.what()));
@@ -857,8 +869,6 @@ void TinyLlamaModel::initialize_weights(const SafeTensorsLoader* loader,
     }
 
     for (int i = 0; i < nhl; ++i) {
-      Logger::info("Loading SafeTensors weights for layer " +
-                   std::to_string(i));
       std::string prefix = "model.layers." + std::to_string(i) + ".";
       auto& lw = layers[i];  
       try {
