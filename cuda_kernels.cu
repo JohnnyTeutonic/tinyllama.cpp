@@ -1,4 +1,18 @@
-
+/**
+ * @file cuda_kernels.cu
+ * @brief CUDA kernel implementations for TinyLlama GPU operations
+ *
+ * This file contains the actual CUDA kernel implementations for the GPU-accelerated
+ * operations declared in cuda_kernels.h. The implementations are optimized for
+ * NVIDIA GPUs and use CUDA-specific features for maximum performance.
+ *
+ * Key implementation details:
+ * - Uses shared memory for efficient reduction operations
+ * - Implements parallel reduction patterns for normalization
+ * - Leverages cuBLAS for matrix operations
+ * - Supports both FP32 and BF16 formats
+ * - Includes error checking and memory management
+ */
 
 #include "cuda_kernels.h"
 
@@ -13,6 +27,16 @@
 #include <cmath>
 #include <iostream>
 
+/**
+ * @brief Converts BF16 to FP32 on the device
+ * 
+ * This device function converts Brain Floating Point (BF16) values to FP32.
+ * It uses CUDA's native BF16 support on architectures >= 800, and falls back
+ * to a manual conversion on older architectures.
+ * 
+ * @param bf16_raw Raw BF16 value as uint16_t
+ * @return Converted FP32 value
+ */
 __device__ inline float bf16_to_float32_device(uint16_t bf16_raw) {
 #if __CUDA_ARCH__ >= 800
   __nv_bfloat16 bf16_val;
@@ -28,6 +52,16 @@ __device__ inline float bf16_to_float32_device(uint16_t bf16_raw) {
 #endif
 }
 
+/**
+ * @brief Kernel for computing sum of squares in RMS normalization
+ * 
+ * This kernel computes the sum of squares of input elements using parallel
+ * reduction with shared memory. It's the first step in RMS normalization.
+ * 
+ * @param x Input tensor
+ * @param partial_sums Output array for partial sums
+ * @param n Size of input tensor
+ */
 __global__ void rmsnorm_sum_squares_kernel(const float* x, float* partial_sums,
                                            int n) {
   extern __shared__ float sdata[];
@@ -50,6 +84,18 @@ __global__ void rmsnorm_sum_squares_kernel(const float* x, float* partial_sums,
   }
 }
 
+/**
+ * @brief Kernel for applying RMS normalization
+ * 
+ * This kernel applies the normalization weights and scaling factor to the
+ * input tensor. It's the second step in RMS normalization.
+ * 
+ * @param x Input tensor
+ * @param weight Normalization weights
+ * @param out Output tensor
+ * @param n Size of tensors
+ * @param inv_norm_factor Inverse of the normalization factor
+ */
 __global__ void rmsnorm_apply_kernel(const float* x, const float* weight,
                                      float* out, int n, float inv_norm_factor) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -58,6 +104,21 @@ __global__ void rmsnorm_apply_kernel(const float* x, const float* weight,
   }
 }
 
+/**
+ * @brief Implementation of RMS normalization with device pointers
+ * 
+ * This function implements the complete RMS normalization process:
+ * 1. Computes sum of squares using parallel reduction
+ * 2. Calculates normalization factor
+ * 3. Applies normalization with weights
+ * 
+ * @param x_dev Input tensor (device pointer)
+ * @param weight_dev Normalization weights (device pointer)
+ * @param out_dev Output tensor (device pointer)
+ * @param n Size of tensors
+ * @param eps Epsilon for numerical stability
+ * @param stream CUDA stream for asynchronous execution
+ */
 void rmsnorm_vector_cuda(const float* x_dev, const float* weight_dev,
                          float* out_dev, int n, float eps,
                          cudaStream_t stream) {
@@ -114,6 +175,21 @@ void rmsnorm_vector_cuda(const std::vector<float>& x_in_host,
   gpuErrchk(cudaFree(out_dev));
 }
 
+/**
+ * @brief Implementation of matrix-vector multiplication with FP32
+ * 
+ * This function performs matrix-vector multiplication using cuBLAS,
+ * optimized for FP32 precision. It handles the cuBLAS setup and
+ * error checking.
+ * 
+ * @param handle cuBLAS handle
+ * @param mat_f32_dev Matrix in row-major format (device pointer)
+ * @param vec_f32_dev Vector to multiply (device pointer)
+ * @param out_f32_dev Output vector (device pointer)
+ * @param rows Number of matrix rows
+ * @param cols Number of matrix columns
+ * @param stream CUDA stream for asynchronous execution
+ */
 void matvec_f32_f32_cuda(cublasHandle_t handle, const float* mat_f32_dev,
                          const float* vec_f32_dev, float* out_f32_dev, int rows,
                          int cols, cudaStream_t stream) {
@@ -140,6 +216,21 @@ void matvec_f32_f32_cuda(cublasHandle_t handle, const float* mat_f32_dev,
   }
 }
 
+/**
+ * @brief Implementation of matrix-vector multiplication with BF16
+ * 
+ * This function performs matrix-vector multiplication using cuBLAS,
+ * with automatic conversion from BF16 to FP32. It's optimized for
+ * models using Brain Floating Point format.
+ * 
+ * @param handle cuBLAS handle
+ * @param mat_bf16_dev Matrix in BF16 format (device pointer)
+ * @param vec_f32_dev Vector in FP32 format (device pointer)
+ * @param out_f32_dev Output vector in FP32 format (device pointer)
+ * @param rows Number of matrix rows
+ * @param cols Number of matrix columns
+ * @param stream CUDA stream for asynchronous execution
+ */
 void matvec_bf16_f32_cuda(cublasHandle_t handle, const uint16_t* mat_bf16_dev,
                           const float* vec_f32_dev, float* out_f32_dev,
                           int rows, int cols, cudaStream_t stream) {

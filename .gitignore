@@ -10,3 +10,4 @@ myenv/
 */debugging.log
 deps/
 *.bak
+docs/
