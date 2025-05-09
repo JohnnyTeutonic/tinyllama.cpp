@@ -1,5 +1,9 @@
 # TinyLlama.cpp - Minimal C++ Chat Inference
 
+This codebase supports inference for Llama 2 architecture models (including TinyLlama variants) using GGUF files, as well as TinyLlama models from SafeTensors.
+
+The GGUF format support includes loading models with various tensor types such as BF16, FP16, FP32, and Q8_0. Nominal support for Q4_K and Q6_K quantization types is also present, though Q8_0 is the most extensively tested quantized format in this project.
+
 ## Purpose
 
 This project provides a streamlined, end-to-end C++ inference pipeline for running TinyLlama-based models for chat applications. The primary goal is to achieve this with minimal dependencies, allowing for deployment without requiring Python or large frameworks like LibTorch at runtime (unless using the optional CUDA backend which requires the CUDA Toolkit).
@@ -27,8 +31,7 @@ These are needed to **build and run** the C++ application:
 4.  **cpp-httplib:** For the web server backend. (Fetched automatically by CMake).
 5.  **OpenMP (Optional):** For multi-threading CPU acceleration. CMake will try to find it; performance will be lower without it.
 6.  **CUDA Toolkit (Optional):** Required **only** if you want GPU-accelerated inference. CMake will detect it if available and build the CUDA kernels. You'll need a compatible NVIDIA GPU and drivers.
-7.  **OpenSSL (Optional):** Required by `cpp-httplib` for HTTPS support in the web server (`tinyllama_server`). Not needed for core inference or the `tinyllama` CLI tool. Linked automatically if found by CMake.
-8.  **Boost.Regex (Optional):** Was required only for the now-removed `test_tokenizer` executable. No longer needed.
+7.  **Boost.Regex (Optional):** Was required only for the now-removed `test_tokenizer` executable. No longer needed.
 
 #### Installing C++ Dependencies on Linux (Debian/Ubuntu Example)
 
@@ -50,11 +53,7 @@ sudo apt install nlohmann-json3-dev
 #    Usually comes with modern g++, but can be installed explicitly if needed.
 sudo apt install libomp-dev
 
-# 5. OpenSSL (Optional: Only needed for HTTPS support in tinyllama_server)
-#    If you require HTTPS for the server, uncomment and run:
-# sudo apt install libssl-dev
-
-# 6. Boost.Regex (No longer needed as test_tokenizer was removed)
+# 5. Boost.Regex (No longer needed as test_tokenizer was removed)
 # sudo apt install libboost-regex-dev
 ```
 *   **cpp-httplib:** This library is fetched directly by CMake ...
@@ -127,7 +126,9 @@ make -j$(nproc)
 
 ```
 
-This will create several executables in the `build/bin/` directory (or directly in `build/` or `build/Release/` depending on your system and generator), including `tinyllama_server`.
+This will create several executables in the `build/` directory (or `build/bin/` or `build/Release/` depending on your system and generator), including `tinyllama_server` (for SafeTensors models) and `tinyllama` (general purpose CLI).
+
+For detailed insight into the operations performed by the executables (e.g., `tinyllama`, `tinyllama_server`, `tinyllamagguf`), you can inspect the `debugging.log` file generated in the application's working directory. This log provides a step-by-step account of model loading, tokenization, and generation processes.
 
 ### 3. Run the Chat Server (Primary Example)
 
@@ -136,7 +137,7 @@ The main way to use this project is via the web server:
 ```bash
 # Navigate back to the project root or ensure paths are correct
 # Run the server, pointing it to your model data directory
-./build/bin/tinyllama_server ./data 
+./build/tinyllama_server ./data 
 
 # Example if executable is directly in build:
 # ./build/tinyllama_server ./data
@@ -156,32 +157,32 @@ Besides the web server, you can interact with the models directly via command-li
 
 *   **`tinyllama`**:
     *   **Description**: Command-line interface for chat. Can load models from a SafeTensors model directory (containing `config.json`, `model.safetensors`, `tokenizer.json`) OR by providing a direct path to a `.gguf` model file.
-    *   **Usage**: `./build/bin/tinyllama <model_path_or_dir> [prompt] [steps] [temperature]`
+    *   **Usage**: `./build/tinyllama <model_path_or_dir> [prompt] [steps] [temperature]`
         *   `<model_path_or_dir>`: Path to model directory or `.gguf` file. (Default: `data`)
         *   `[prompt]`: The text prompt to send to the model. (Default: "Hello, world!")
         *   `[steps]`: Maximum number of new tokens to generate. (Default: `64`)
         *   `[temperature]`: Sampling temperature. (Default: `0.7`)
     *   **Example (SafeTensors directory)**:
         ```bash
-        ./build/bin/tinyllama ./data "Who is the prime minister of Australia?" 32 0.1
+        ./build/tinyllama ./data "Who is the prime minister of Australia?" 32 0.1
         ```
     *   **Example (GGUF file)**:
         ```bash
-        ./build/bin/tinyllama ./models/my_model.Q4_K_M.gguf "Explain black holes." 128 0.5
+        ./build/tinyllama ./models/my_model.Q4_K_M.gguf "Explain black holes." 128 0.5
         ```
 
-*   **`tinyllamagguf`**:
+*   **`tinyllamagguf`** (Specific GGUF CLI - consider using `tinyllama` which also supports GGUF):
     *   **Description**: Command-line interface specifically for loading `.gguf` model files for chat.
-    *   **Usage**: `./build/bin/tinyllamagguf <path_to_gguf_file> [prompt] [steps] [temperature]`
+    *   **Usage**: `./build/tinyllamagguf <path_to_gguf_file> [prompt] [steps] [temperature]`
         *   `<path_to_gguf_file>`: Direct path to the `.gguf` model file. (Required)
         *   `[prompt]`: The text prompt. (Default: "What is the capital of France?")
         *   `[steps]`: Maximum number of new tokens. (Default: `64`)
         *   `[temperature]`: Sampling temperature. (Default: `0.7`)
     *   **Example**:
         ```bash
-        ./build/bin/tinyllamagguf ./models/another_model.Q8_0.gguf "Tell me a story." 256 0.8
+        ./build/tinyllamagguf ./models/another_model.Q8_0.gguf "Tell me a story." 256 0.8
         ```
-        *(Note: Ensure `tokenizer.json` is present in the same directory as the `.gguf` file for `tinyllamagguf` and when using `.gguf` with `tinyllama`.)*
+        *(Note: Ensure `tokenizer.json` is present in the same directory as the `.gguf` file for `tinyllamagguf` and when using `.gguf` with `tinyllama` if the GGUF doesn't embed all necessary tokenizer info.)*
 
 ## PyTorch SafeTensors Inference
 
@@ -221,3 +222,17 @@ Please refer to the `pytorch/README.md` for detailed usage instructions for this
 
 ## Future Enhancements
 *   Streaming responses in the web UI. 
+*   More robust error handling.
+*   Python bindings.
+
+## Acknowledgements
+
+This project has drawn significant inspiration and architectural insights from the excellent `llama.cpp` project by Georgi Gerganov and its contributors. Many of the core concepts for GGUF parsing, quantization, and efficient inference are based on the pioneering work done in `llama.cpp`.
+
+Find `llama.cpp` on GitHub: [https://github.com/ggerganov/llama.cpp](https://github.com/ggerganov/llama.cpp) 
+
+## Known Limitations
+
+*   **SafeTensors Model Formats**: While the SafeTensors loading mechanism is in place, only BF16 (BFloat16) weight types have been extensively tested for these models. Other float types (like FP16 or FP32) in SafeTensors files may load but are not as thoroughly validated in this specific C++ implementation.
+*   **Windows Support**: Building and running on Windows is possible but is considered highly experimental. The primary development and testing focus has been on Linux. Users may encounter build issues or runtime instabilities on Windows that are not present on Linux.
+*   **Quantization Support (GGUF Path)**: The GGUF versions of tinyllama and Llama v2 have been tested using Q8_0 quants, but there is nominal support for Q4_K and Q6_K (along with their 'M' suffixes).

@@ -281,13 +281,8 @@ std::string TinyLlamaSession::generate(const std::string& prompt_input, int step
     std::vector<float> logits;
 
 #ifdef HAS_CUDA
-    
-    
-    
     logits = model_->forward_device(input_token_id, pos, &kv_cache_, nullptr);
 #else
-    
-    
     
     std::vector<float> input_embedding =
         model_->lookup_embedding(input_token_id);
@@ -315,10 +310,6 @@ std::string TinyLlamaSession::generate(const std::string& prompt_input, int step
 
     
     if (pos >= num_prompt_tokens - 1) {
-      
-      
-      
-      
       next_token_id = argmax(logits);
 
       if (next_token_id == eos_token_id_) {
