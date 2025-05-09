@@ -15,11 +15,32 @@
 
 /**
  * @file cuda_kernels.h
- * @brief CUDA kernel wrappers for GPU-accelerated tensor operations
+ * @brief CUDA kernel wrappers for GPU-accelerated tensor operations in TinyLlama
  *
  * This file provides C++ wrappers around CUDA kernels used in the TinyLlama
  * implementation. It includes functions for matrix operations, attention
  * mechanisms, and various tensor manipulations optimized for GPU execution.
+ * 
+ * Key features:
+ * - RMS normalization for transformer layers
+ * - Matrix-vector multiplication with FP32 and BF16 support
+ * - Attention mechanism with key-value caching
+ * - Rotary Position Embeddings (RoPE)
+ * - SiLU activation function
+ * - Softmax normalization
+ * - Residual connections
+ * 
+ * The implementation supports both FP32 and BF16 (Brain Floating Point) formats,
+ * with automatic conversion between formats when needed. All operations are
+ * optimized for GPU execution using CUDA and cuBLAS.
+ */
+
+/**
+ * @brief CUDA error checking and assertion utilities
+ * 
+ * These utilities provide robust error checking for CUDA operations.
+ * The gpuAssert function and gpuErrchk macro ensure proper error handling
+ * and reporting for CUDA operations.
  */
 
 /**
@@ -53,6 +74,14 @@ inline void gpuAssert(cudaError_t code, const char* file, int line,
     { gpuAssert((ans), __FILE__, __LINE__); }
 
 /**
+ * @brief RMS Normalization Operations
+ * 
+ * These functions implement Root Mean Square (RMS) normalization, which is
+ * a key component in transformer architectures. The implementation includes
+ * both device-side and host-side versions for flexibility.
+ */
+
+/**
  * @brief Performs RMS normalization on GPU with device pointers
  * 
  * Computes root mean square normalization of input tensor on GPU.
@@ -82,6 +111,16 @@ void rmsnorm_vector_cuda(const float* x_dev, const float* weight_dev,
 void rmsnorm_vector_cuda(const std::vector<float>& x_in_host,
                         const std::vector<float>& weight_host,
                         std::vector<float>& out_host, int n, float eps);
+
+/**
+ * @brief Matrix-Vector Multiplication Operations
+ * 
+ * These functions implement matrix-vector multiplication using cuBLAS,
+ * supporting both FP32 and BF16 formats. The implementation includes:
+ * - Direct device pointer operations
+ * - Host vector wrappers with automatic memory management
+ * - Support for different precisions (FP32, BF16)
+ */
 
 /**
  * @brief Matrix-vector multiplication on GPU with host vectors
@@ -119,6 +158,14 @@ void matvec_f32_f32_cuda(cublasHandle_t handle, const float* mat_f32_dev,
                         int rows, int cols, cudaStream_t stream = 0);
 
 /**
+ * @brief Activation Functions
+ * 
+ * GPU-accelerated implementations of common activation functions:
+ * - SiLU (Sigmoid Linear Unit)
+ * - Softmax
+ */
+
+/**
  * @brief SiLU activation function on GPU
  * 
  * Computes x * sigmoid(x) element-wise on GPU.
@@ -141,6 +188,16 @@ void silu_cuda(const std::vector<float>& x_host,
  */
 void softmax_vector_cuda(const std::vector<float>& x_host,
                         std::vector<float>& out_host, int n);
+
+/**
+ * @brief Attention Mechanism Operations
+ * 
+ * These functions implement the attention mechanism used in transformer
+ * architectures, including:
+ * - Key-Value caching for efficient inference
+ * - Rotary Position Embeddings (RoPE)
+ * - Multi-head attention computation
+ */
 
 /**
  * @brief Applies rotary position embeddings on GPU
@@ -177,6 +234,15 @@ void attention_cuda(const float* Q_current_dev, const float* K_layer_cache_base,
                    int num_heads, int current_seq_len, int head_dim,
                    float scale, int cache_max_seq_len, int cache_num_kv_heads,
                    cudaStream_t stream = 0);
+
+/**
+ * @brief Vector Operations
+ * 
+ * Basic vector operations optimized for GPU execution:
+ * - Element-wise addition
+ * - Residual connections
+ * - Embedding lookups
+ */
 
 /**
  * @brief Element-wise vector addition on GPU

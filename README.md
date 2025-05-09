@@ -1,6 +1,6 @@
 # TinyLlama.cpp - Minimal C++ Chat Inference
 
-This codebase supports inference for Llama 2 architecture models (including TinyLlama variants) using Safetensors models, as well as TinyLlama models using the GGUF format.
+This codebase supports inference for Llama 2 architecture models (including TinyLlama variants) using Safetensors model format as well as GGUF format.
 
 The GGUF format support includes loading models with various tensor types such as BF16, FP16, FP32, and Q8_0. Nominal support for Q4_K and Q6_K quantization types is also present, though Q8_0 is the most extensively tested quantized format in this project.
 
