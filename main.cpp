@@ -1,3 +1,31 @@
+/**
+ * @file main.cpp
+ * @brief Command-line interface for TinyLlama text generation.
+ *
+ * This program provides a command-line interface for generating text using
+ * TinyLlama models. It supports both GGUF and SafeTensors model formats.
+ * The program automatically applies Q:A formatting to prompts, which is
+ * required for proper model responses in both formats.
+ *
+ * Usage:
+ *   tinyllama [model_path] [prompt] [steps] [temperature] [top_k] [top_p]
+ *
+ * Arguments:
+ *   model_path: Path to model directory or .gguf file (default: data)
+ *   prompt: Input text (default: "Hello, world!")
+ *   steps: Number of tokens to generate (default: 64)
+ *   temperature: Sampling temperature, lower is more deterministic (default: 0.1)
+ *   top_k: Limit sampling to top K tokens (default: 40)
+ *   top_p: Limit sampling to top P probability mass (default: 0.9)
+ *
+ * Example:
+ *   ./tinyllama data "What is the capital of France?" 64 0.1 40 0.9
+ *
+ * Note:
+ *   The program always applies Q:A formatting to prompts ("Q: [prompt]\nA:")
+ *   as this is required for proper responses from both GGUF and SafeTensors models.
+ */
+
 #include <algorithm>
 #include <cctype>
 #include <cstdio>

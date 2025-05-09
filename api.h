@@ -17,6 +17,10 @@ namespace tinyllama {
 /**
  * @brief Represents an active TinyLlama session holding the loaded model and
  * tokenizer.
+ * 
+ * This class provides a high-level interface for text generation using TinyLlama models.
+ * It supports both GGUF and SafeTensors model formats, and handles model loading,
+ * tokenization, and text generation with various sampling strategies.
  */
 class TinyLlamaSession {
  public:
@@ -37,13 +41,20 @@ class TinyLlamaSession {
   /**
    * @brief Generates text based on a given prompt.
    *
+   * This method supports various text generation strategies through its sampling parameters.
+   * For temperatures close to 0, it approaches deterministic/greedy sampling.
+   * For higher temperatures with top-k and top-p, it produces more diverse outputs.
+   *
+   * The method can also apply Q:A formatting to the prompt, which is recommended for
+   * both GGUF and SafeTensors models when used via the command-line interface.
+   *
    * @param prompt The input prompt string.
-   * @param steps The number of steps to generate.
-   * @param temperature Sampling temperature. Lower values are more deterministic (default: 0.1).
-   * @param top_k Top-K sampling parameter. Limits sampling to K most likely tokens (default: 40).
-   * @param top_p Nucleus sampling parameter. Limits sampling to tokens comprising top P probability mass (default: 0.9).
+   * @param steps The number of tokens to generate.
+   * @param temperature Sampling temperature. Lower values (e.g., 0.1) make the output more focused and deterministic.
+   * @param top_k Top-K sampling parameter. Limits sampling to K most likely tokens. Set to 0 or vocab_size to disable.
+   * @param top_p Nucleus sampling parameter. Limits sampling to tokens comprising top P probability mass (0.0 to 1.0).
    * @param system_prompt Optional system prompt to guide the generation.
-   * @param apply_q_a_format Whether to apply Q&A format.
+   * @param apply_q_a_format Whether to apply Q:A format ("Q: [prompt]\nA:"). Recommended true for command-line use.
    * @return The generated text string (excluding the prompt).
    * @throws std::runtime_error if generation fails.
    */
@@ -66,7 +77,7 @@ class TinyLlamaSession {
   ModelConfig config_;
   KVCache kv_cache_;
   int eos_token_id_;
-  std::mt19937 rng_{std::random_device{}()};
+  std::mt19937 rng_{std::random_device{}()};  // RNG for sampling
 };
 
 }  // namespace tinyllama

@@ -1,3 +1,30 @@
+/**
+ * @file server.cpp
+ * @brief HTTP server implementation for TinyLlama chat interface.
+ *
+ * This server provides a REST API for interacting with TinyLlama models.
+ * It handles both GGUF and SafeTensors models, applying appropriate prompt
+ * formatting for each:
+ * - For GGUF models: Applies Q:A format
+ * - For SafeTensors models: Uses the tokenizer's chat template
+ *
+ * The server exposes a /chat endpoint that accepts POST requests with JSON body:
+ * {
+ *   "user_input": "string",      // Required: The prompt text
+ *   "temperature": float,        // Optional: Sampling temperature (default: 0.1)
+ *   "max_new_tokens": int,       // Optional: Max tokens to generate (default: 60)
+ *   "top_k": int,               // Optional: Top-K sampling parameter (default: 40)
+ *   "top_p": float              // Optional: Top-P sampling parameter (default: 0.9)
+ * }
+ *
+ * Usage:
+ *   tinyllama_server [model_path] [port] [host] [www_path]
+ *     model_path: Path to model directory or .gguf file (default: data)
+ *     port: Server port (default: 8080)
+ *     host: Host to bind to (default: localhost)
+ *     www_path: Path to static web files (default: ./www)
+ */
+
 #ifdef _MSC_VER
 #pragma warning(push)
 #pragma warning(disable : 4244)
