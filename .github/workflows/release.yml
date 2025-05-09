@@ -1,0 +1,154 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'  # Trigger on version tags
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    outputs:
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+    steps:
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref }}
+          release_name: Release ${{ github.ref }}
+          draft: false
+          prerelease: false
+
+  build-and-release:
+    needs: create-release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            artifact_name: tinyllama-linux
+            asset_name: tinyllama-linux.tar.gz
+          - os: windows-latest
+            artifact_name: tinyllama-windows
+            asset_name: tinyllama-windows.zip
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup CMake
+        uses: jwlawson/actions-setup-cmake@v1.14
+        with:
+          cmake-version: '3.27.0'
+
+      - name: Install Dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential doxygen graphviz
+
+      - name: Install Dependencies (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          choco install doxygen.install graphviz
+
+      - name: Configure CMake (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir build
+          cd build
+          cmake .. -DCMAKE_BUILD_TYPE=Release -DHAS_CUDA=OFF
+
+      - name: Configure CMake (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          mkdir build
+          cd build
+          cmake .. -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release -DHAS_CUDA=OFF
+
+      - name: Build
+        run: |
+          cd build
+          cmake --build . --config Release
+
+      - name: Generate Documentation
+        run: |
+          cd build
+          cmake --build . --target docs
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p ${{ matrix.artifact_name }}
+          cp build/tinyllama ${{ matrix.artifact_name }}/
+          cp build/tinyllama_server ${{ matrix.artifact_name }}/
+          cp -r docs/html ${{ matrix.artifact_name }}/docs
+          cp README.md LICENSE ${{ matrix.artifact_name }}/
+          tar czf ${{ matrix.asset_name }} ${{ matrix.artifact_name }}
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          mkdir ${{ matrix.artifact_name }}
+          cp build/Release/tinyllama.exe ${{ matrix.artifact_name }}/
+          cp build/Release/tinyllama_server.exe ${{ matrix.artifact_name }}/
+          cp -r docs/html ${{ matrix.artifact_name }}/docs
+          cp README.md LICENSE ${{ matrix.artifact_name }}/
+          7z a ${{ matrix.asset_name }} ${{ matrix.artifact_name }}
+
+      - name: Upload Release Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: ./${{ matrix.asset_name }}
+          asset_name: ${{ matrix.asset_name }}
+          asset_content_type: application/octet-stream
+
+  build-cuda:
+    needs: create-release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup CMake
+        uses: jwlawson/actions-setup-cmake@v1.14
+        with:
+          cmake-version: '3.27.0'
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential doxygen graphviz
+
+      - name: Build with CUDA
+        run: |
+          mkdir build
+          cd build
+          cmake .. -DCMAKE_BUILD_TYPE=Release -DHAS_CUDA=ON
+          cmake --build . --config Release
+
+      - name: Package CUDA Build
+        run: |
+          mkdir -p tinyllama-cuda
+          cp build/tinyllama tinyllama-cuda/
+          cp build/tinyllama_server tinyllama-cuda/
+          cp -r docs/html tinyllama-cuda/docs
+          cp README.md LICENSE tinyllama-cuda/
+          tar czf tinyllama-cuda.tar.gz tinyllama-cuda
+
+      - name: Upload CUDA Release Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: ./tinyllama-cuda.tar.gz
+          asset_name: tinyllama-cuda.tar.gz
+          asset_content_type: application/octet-stream 
