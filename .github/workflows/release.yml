@@ -98,9 +98,11 @@ jobs:
 
       - name: Configure CMake (Windows)
         if: runner.os == 'Windows'
-        uses: jwlawson/actions-setup-cmake@v1.14
-        with:
-          cmake-version: '3.27.0'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path build
+          Set-Location build
+          cmake .. -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release -DHAS_CUDA=OFF
 
       - name: Build
         run: |
@@ -124,24 +126,28 @@ jobs:
 
       - name: Build (Windows)
         if: runner.os == 'Windows'
+        shell: pwsh
         run: |
-          cd build
+          Set-Location build
           cmake --build . --config Release
 
       - name: Generate Documentation (Windows)
         if: runner.os == 'Windows'
+        shell: pwsh
         run: |
-          cd build
+          Set-Location build
           cmake --build . --target docs
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
+        shell: pwsh
         run: |
-          mkdir ${{ matrix.artifact_name }}
-          cp build/Release/tinyllama.exe ${{ matrix.artifact_name }}/
-          cp build/Release/tinyllama_server.exe ${{ matrix.artifact_name }}/
-          cp -r docs/html ${{ matrix.artifact_name }}/docs
-          cp README.md LICENSE ${{ matrix.artifact_name }}/
+          New-Item -ItemType Directory -Force -Path ${{ matrix.artifact_name }}
+          Copy-Item -Path "build/Release/tinyllama.exe" -Destination "${{ matrix.artifact_name }}/"
+          Copy-Item -Path "build/Release/tinyllama_server.exe" -Destination "${{ matrix.artifact_name }}/"
+          Copy-Item -Path "docs/html" -Destination "${{ matrix.artifact_name }}/docs" -Recurse
+          Copy-Item -Path "README.md" -Destination "${{ matrix.artifact_name }}/"
+          Copy-Item -Path "LICENSE" -Destination "${{ matrix.artifact_name }}/"
           7z a ${{ matrix.asset_name }} ${{ matrix.artifact_name }}
 
       - name: Upload Release Asset
