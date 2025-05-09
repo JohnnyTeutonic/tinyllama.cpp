@@ -91,7 +91,7 @@ jobs:
       - name: Install Dependencies (Windows)
         if: runner.os == 'Windows'
         run: |
-          choco install doxygen.install graphviz
+          choco install doxygen.install graphviz openssl -y
 
       - name: Configure CMake (Linux)
         if: runner.os == 'Linux'
