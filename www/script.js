@@ -27,25 +27,19 @@ document.addEventListener('DOMContentLoaded', () => {
         addMessageToHistory('user', messageText);
         messageInput.value = ''; // Clear input field
 
-        // The complex prompt construction logic previously here is now removed.
-        // The server will handle prompt formatting based on the model type.
-
-        // console.log("Sending user input:", messageText); // Optional: for debugging
-
         try {
             const response = await fetch('/chat', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                 },
-                // Send the raw user input. The server will format the full prompt.
-                body: JSON.stringify({ user_input: messageText })
-                // Optionally, can also send other parameters like temperature, max_new_tokens:
-                // body: JSON.stringify({ 
-                //   user_input: messageText, 
-                //   temperature: 0.7, // Example value
-                //   max_new_tokens: 100 // Example value
-                // })
+                body: JSON.stringify({ 
+                    user_input: messageText,
+                    temperature: 0.1,  // Low temperature for focused responses
+                    max_new_tokens: 60,
+                    top_k: 40,        // Limit to top 40 tokens
+                    top_p: 0.9        // Sample from 90% of probability mass
+                })
             });
 
             if (!response.ok) {
@@ -54,12 +48,10 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             const data = await response.json();
-            // Add the AI's response, ensuring it's not marked as an error
             addMessageToHistory('assistant', data.reply);
 
         } catch (error) {
             console.error('Error sending message:', error);
-            // Add error message to history, marked as an error
             addMessageToHistory('assistant', `Error: ${error.message}`, true);
         }
     }
@@ -71,12 +63,8 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-     // Initial focus
-     // Add AI prefix to initial message in history display
-     const initialAIMessage = historyDiv.querySelector('.server-message');
-     if(initialAIMessage) initialAIMessage.textContent = "AI: Hello! How can I help you today?";
-     // Add initial message to conversationHistory array?
-     // Let's assume the initial greeting doesn't need to be part of the context sent back yet.
-     
-     messageInput.focus();
+    const initialAIMessage = historyDiv.querySelector('.server-message');
+    if(initialAIMessage) initialAIMessage.textContent = "AI: Hello! How can I help you today?";
+    
+    messageInput.focus();
 }); 

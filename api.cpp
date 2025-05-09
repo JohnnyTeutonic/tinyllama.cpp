@@ -48,6 +48,11 @@ static int sample_top_k_top_p_temperature(const std::vector<float>& logits,
     throw std::runtime_error("Cannot sample from empty logits.");
   }
 
+  // If temperature is very low, fall back to greedy sampling
+  if (temperature < 0.05f) {
+    return std::distance(logits.begin(), std::max_element(logits.begin(), logits.end()));
+  }
+
   int vocab_size = logits.size();
 
   top_k = std::min(top_k, vocab_size);
@@ -57,8 +62,10 @@ static int sample_top_k_top_p_temperature(const std::vector<float>& logits,
   float max_logit = -std::numeric_limits<float>::infinity();
   for (float logit : logits) max_logit = std::max(max_logit, logit);
 
+  // Scale logits to avoid numerical instability
+  const float scale = 1.0f / temperature;
   for (int i = 0; i < vocab_size; ++i) {
-    scaled_logits[i] = (logits[i] - max_logit) / std::max(temperature, GGUF_SMALL_VAL);
+    scaled_logits[i] = (logits[i] - max_logit) * scale;
   }
 
   std::vector<double> probs_double(vocab_size);
@@ -68,8 +75,16 @@ static int sample_top_k_top_p_temperature(const std::vector<float>& logits,
     sum_exp += probs_double[i];
   }
 
-  for (int i = 0; i < vocab_size; ++i) {
-    probs_double[i] /= sum_exp;
+  // Normalize probabilities
+  if (sum_exp > 0.0) {
+    for (int i = 0; i < vocab_size; ++i) {
+      probs_double[i] /= sum_exp;
+    }
+  } else {
+    // If all probabilities are zero, fall back to uniform distribution
+    for (int i = 0; i < vocab_size; ++i) {
+      probs_double[i] = 1.0 / vocab_size;
+    }
   }
 
   std::vector<std::pair<float, int>> prob_idx(vocab_size);
@@ -99,9 +114,17 @@ static int sample_top_k_top_p_temperature(const std::vector<float>& logits,
   for (const auto& pi : prob_idx) {
     final_sum += pi.first;
   }
+
+  // Renormalize probabilities after top-k and top-p filtering
   std::vector<float> final_probs(prob_idx.size());
-  for (size_t i = 0; i < prob_idx.size(); ++i) {
-    final_probs[i] = prob_idx[i].first / std::max(final_sum, GGUF_SMALL_VAL);
+  if (final_sum > 0.0f) {
+    for (size_t i = 0; i < prob_idx.size(); ++i) {
+      final_probs[i] = prob_idx[i].first / final_sum;
+    }
+  } else {
+    // If all probabilities are zero after filtering, use uniform distribution
+    float uniform_prob = 1.0f / prob_idx.size();
+    std::fill(final_probs.begin(), final_probs.end(), uniform_prob);
   }
 
   std::discrete_distribution<int> dist(final_probs.begin(), final_probs.end());
@@ -203,11 +226,15 @@ TinyLlamaSession::~TinyLlamaSession() {
 }
 
 std::string TinyLlamaSession::generate(const std::string& prompt_input,
-                                       int steps, float temperature,
-                                       const std::string& system_prompt,
-                                       bool apply_q_a_format) {
+                                      int steps, float temperature,
+                                      int top_k, float top_p,
+                                      const std::string& system_prompt,
+                                      bool apply_q_a_format) {
   Logger::info("Generate called. Initial Prompt: \"" + prompt_input +
                "\", Steps: " + std::to_string(steps) +
+               ", Temperature: " + std::to_string(temperature) +
+               ", Top-K: " + std::to_string(top_k) +
+               ", Top-P: " + std::to_string(top_p) +
                ", Apply Q&A Format: " + (apply_q_a_format ? "true" : "false"));
 
   std::string final_prompt_for_tokenization;
@@ -253,7 +280,6 @@ std::string TinyLlamaSession::generate(const std::string& prompt_input,
 #ifdef HAS_CUDA
     logits = model_->forward_device(input_token_id, pos, &kv_cache_, nullptr);
 #else
-
     std::vector<float> input_embedding =
         model_->lookup_embedding(input_token_id);
     if (input_embedding.empty()) {
@@ -278,7 +304,7 @@ std::string TinyLlamaSession::generate(const std::string& prompt_input,
     }
 
     if (pos >= num_prompt_tokens - 1) {
-      next_token_id = argmax(logits);
+      next_token_id = sample_top_k_top_p_temperature(logits, temperature, top_k, top_p, rng_);
 
       if (next_token_id == eos_token_id_) {
         Logger::info("EOS token generated. Stopping.");

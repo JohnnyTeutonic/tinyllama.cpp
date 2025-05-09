@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <random>
 
 #include "model.h"
 #include "tokenizer.h"
@@ -38,17 +39,20 @@ class TinyLlamaSession {
    *
    * @param prompt The input prompt string.
    * @param steps The number of steps to generate.
-   * @param temperature Sampling temperature. Lower values are more
-   * deterministic.
+   * @param temperature Sampling temperature. Lower values are more deterministic (default: 0.1).
+   * @param top_k Top-K sampling parameter. Limits sampling to K most likely tokens (default: 40).
+   * @param top_p Nucleus sampling parameter. Limits sampling to tokens comprising top P probability mass (default: 0.9).
    * @param system_prompt Optional system prompt to guide the generation.
    * @param apply_q_a_format Whether to apply Q&A format.
    * @return The generated text string (excluding the prompt).
    * @throws std::runtime_error if generation fails.
    */
   std::string generate(const std::string& prompt, int steps = 128,
-                       float temperature = 0.7f,
-                       const std::string& system_prompt = "",
-                       bool apply_q_a_format = false);
+                      float temperature = 0.1f,
+                      int top_k = 40,
+                      float top_p = 0.9f,
+                      const std::string& system_prompt = "",
+                      bool apply_q_a_format = false);
 
   const Tokenizer* get_tokenizer() const { return tokenizer_.get(); }
   const ModelConfig& get_config() const { return config_; }
@@ -62,6 +66,7 @@ class TinyLlamaSession {
   ModelConfig config_;
   KVCache kv_cache_;
   int eos_token_id_;
+  std::mt19937 rng_{std::random_device{}()};
 };
 
 }  // namespace tinyllama

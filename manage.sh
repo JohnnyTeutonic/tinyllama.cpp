@@ -10,6 +10,9 @@ DEFAULT_MODEL_DIR="data"
 DEFAULT_SERVER_HOST="localhost"
 DEFAULT_SERVER_PORT="8080"
 DEFAULT_RELEASE_VERSION="0.1.0"
+DEFAULT_TEMPERATURE="0.1"
+DEFAULT_TOP_K="40"
+DEFAULT_TOP_P="0.9"
 FORMAT_TOOL="clang-format"
 DOXYGEN_CONFIG_FILE="Doxyfile"
 PROJECT_ROOT_DIR=$(pwd) # Assuming script is run from project root
@@ -46,6 +49,10 @@ usage() {
     echo "  run-chat     Run the command-line chat client."
     echo "               Options:"
     echo "                 --model-dir <path>          (default: ${DEFAULT_MODEL_DIR})"
+    echo "                 --temperature <float>        (default: ${DEFAULT_TEMPERATURE})"
+    echo "                 --top-k <int>               (default: ${DEFAULT_TOP_K})"
+    echo "                 --top-p <float>             (default: ${DEFAULT_TOP_P})"
+    echo "                 --prompt <text>             (default: interactive mode)"
     echo ""
     echo "  format       Format C++/CUDA source code using ${FORMAT_TOOL}."
     echo "               (Assumes .clang-format file in project root)"
@@ -147,10 +154,19 @@ do_run_server() {
 
 do_run_chat() {
     local model_dir="${DEFAULT_MODEL_DIR}"
+    local temperature="${DEFAULT_TEMPERATURE}"
+    local top_k="${DEFAULT_TOP_K}"
+    local top_p="${DEFAULT_TOP_P}"
+    local prompt=""
+    local steps="64"
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --model-dir) model_dir="$2"; shift 2 ;;
+            --temperature) temperature="$2"; shift 2 ;;
+            --top-k) top_k="$2"; shift 2 ;;
+            --top-p) top_p="$2"; shift 2 ;;
+            --prompt) prompt="$2"; shift 2 ;;
             *) error "Unknown option for run-chat: $1"; usage ;;
         esac
     done
@@ -161,7 +177,18 @@ do_run_chat() {
     fi
     log "Starting chat client from $executable_path..."
     log "Model directory/path: $model_dir"
-    "$executable_path" "$model_dir"
+    log "Temperature: $temperature"
+    log "Top-K: $top_k"
+    log "Top-P: $top_p"
+    if [ -n "$prompt" ]; then
+        log "Prompt: $prompt"
+    else
+        log "Mode: Interactive"
+        prompt="Hello, world!"  # Set default prompt for interactive mode
+    fi
+
+    # Pass arguments in the correct order: model_path prompt steps temperature top_k top_p
+    "$executable_path" "$model_dir" "$prompt" "$steps" "$temperature" "$top_k" "$top_p"
 }
 
 do_format() {

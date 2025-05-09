@@ -80,8 +80,10 @@ int main(int argc, char** argv) {
 
     std::string user_input_from_client;
 
-    float temperature = 0.7f;
+    float temperature = 0.1f;  // Lower temperature for more focused chat responses
     int max_new_tokens = 60;
+    int top_k = 40;           // Default top-k value
+    float top_p = 0.9f;       // Default top-p value
 
     try {
       json req_json = json::parse(req.body);
@@ -95,6 +97,10 @@ int main(int argc, char** argv) {
         max_new_tokens = req_json["max_new_tokens"].get<int>();
       if (req_json.contains("temperature"))
         temperature = req_json["temperature"].get<float>();
+      if (req_json.contains("top_k"))
+        top_k = req_json["top_k"].get<int>();
+      if (req_json.contains("top_p"))
+        top_p = req_json["top_p"].get<float>();
 
       Logger::info("Processing user input: " +
                    user_input_from_client.substr(0, 100) + "...");
@@ -130,7 +136,7 @@ int main(int argc, char** argv) {
       }
 
       std::string reply = session->generate(
-          prompt_for_session_generate, max_new_tokens, temperature, "",
+          prompt_for_session_generate, max_new_tokens, temperature, top_k, top_p, "",
           use_q_a_format_for_session_generate);
       Logger::info("Generated reply: " + reply.substr(0, 50) + "...");
 
