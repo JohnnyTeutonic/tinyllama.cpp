@@ -21,7 +21,6 @@ find_package(Threads REQUIRED)
 find_package(nlohmann_json 3.2.0 REQUIRED)
 find_package(OpenMP REQUIRED)
 find_package(OpenSSL)
-find_package(Boost REQUIRED COMPONENTS regex)
 
 # Handle CUDA
 find_package(CUDA)
@@ -61,7 +60,7 @@ add_library(tinyllama_core STATIC
     api.cpp # Added API implementation
     vocab_loader.cpp
     gguf_parser.cpp
-    quantization.cpp # ADDED QUANTIZATION SOURCE
+    quantization.cpp
     ${CUDA_SOURCES} # Conditionally include CUDA source file
 )
 
@@ -70,8 +69,7 @@ target_include_directories(tinyllama_core PUBLIC # Use PUBLIC so executables inh
     ${nlohmann_json_INCLUDE_DIRS}
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CUDA_INCLUDE_DIRS}
-    ${cpp-httplib_SOURCE_DIR} # Add include directory for httplib
-    ${Boost_INCLUDE_DIRS}
+    ${cpp-httplib_SOURCE_DIR}
 )
 
 # Link system/other libraries
@@ -104,22 +102,6 @@ add_executable(tinyllama_server
 )
 
 target_link_libraries(tinyllama_server PRIVATE tinyllama_core)
-
-# --- New GGUF Loader Executable ---
-add_executable(tinyllamagguf
-    main_gguf.cpp
-)
-
-# Link GGUF loader against the core library (inherits CUDA/OpenMP/etc links)
-target_link_libraries(tinyllamagguf PRIVATE tinyllama_core)
-
-# --- ADDED: Tokenizer Test Executable --- REMOVED
-# add_executable(test_tokenizer
-#     test_tokenizer.cpp
-# )
-# Link the test executable against the core library REMOVED
-# target_link_libraries(test_tokenizer PRIVATE tinyllama_core Boost::regex)
-# --- END ADDED --- REMOVED
 
 # Link OpenSSL if found (needed by httplib if SSL support is enabled)
 if(OPENSSL_FOUND)
@@ -158,12 +140,3 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 
 message(STATUS "Project source directory: ${CMAKE_CURRENT_SOURCE_DIR}")
-
-# add_executable(dequantize_roundtrip dequantize_roundtrip.cpp) # REMOVED
-# target_link_libraries(dequantize_roundtrip PRIVATE tinyllama_core) # REMOVED
-
-# add_executable(matvec_test matvec_test.cpp) # REMOVED
-# target_link_libraries(matvec_test PRIVATE tinyllama_core) # REMOVED
-
-# add_executable(compare_quant_fp16 compare_quant_fp16.cpp) # REMOVED
-# target_link_libraries(compare_quant_fp16 PRIVATE tinyllama_core) # REMOVED
