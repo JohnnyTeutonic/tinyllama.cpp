@@ -2,15 +2,15 @@
 
 #include <cstdint>
 
-// Enum definition based on GGUF specification and common types
-// REF: https://github.com/ggerganov/ggml/blob/master/docs/gguf.md#tensor-types
+
+
 enum GGMLType {
   GGML_TYPE_F32 = 0,
   GGML_TYPE_F16 = 1,
   GGML_TYPE_Q4_0 = 2,
   GGML_TYPE_Q4_1 = 3,
-  // GGML_TYPE_Q4_2 = 4, // Unused
-  // GGML_TYPE_Q4_3 = 5, // Unused
+  
+  
   GGML_TYPE_Q5_0 = 6,
   GGML_TYPE_Q5_1 = 7,
   GGML_TYPE_Q8_0 = 8,
@@ -25,11 +25,11 @@ enum GGMLType {
   GGML_TYPE_I16 = 17,
   GGML_TYPE_I32 = 18,
   GGML_TYPE_BF16 = 30,
-  GGML_TYPE_COUNT,  // Sentinel value
+  GGML_TYPE_COUNT,  
 };
 
-// Represents the possible value types in GGUF metadata
-// Based on GGUF specification
+
+
 enum class GGUFValueType : uint32_t {
   UINT8 = 0,
   INT8 = 1,

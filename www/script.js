@@ -27,21 +27,10 @@ document.addEventListener('DOMContentLoaded', () => {
         addMessageToHistory('user', messageText);
         messageInput.value = ''; // Clear input field
 
-        // Construct the prompt using the official chat template format
-        let promptString = "<|system|>\nYou are a helpful AI.</s>\n"; // Default system prompt
-        conversationHistory.forEach(message => {
-            if (message.role === 'user') {
-                promptString += `<|user|>\n${message.content}</s>\n`;
-            } else if (message.role === 'assistant') {
-                // Check if the content is not an error message before adding
-                if (!message.isError) { // Assuming isError property exists or can be added
-                     promptString += `<|assistant|>\n${message.content}</s>\n`;
-                }
-            }
-        });
-        promptString += "<|assistant|>\n"; // Add the final assistant marker
+        // The complex prompt construction logic previously here is now removed.
+        // The server will handle prompt formatting based on the model type.
 
-        console.log("Sending prompt:", JSON.stringify(promptString)); // Log the exact prompt being sent
+        // console.log("Sending user input:", messageText); // Optional: for debugging
 
         try {
             const response = await fetch('/chat', {
@@ -49,8 +38,14 @@ document.addEventListener('DOMContentLoaded', () => {
                 headers: {
                     'Content-Type': 'application/json',
                 },
-                // Send the constructed prompt string directly
-                body: JSON.stringify({ message: promptString })
+                // Send the raw user input. The server will format the full prompt.
+                body: JSON.stringify({ user_input: messageText })
+                // Optionally, can also send other parameters like temperature, max_new_tokens:
+                // body: JSON.stringify({ 
+                //   user_input: messageText, 
+                //   temperature: 0.7, // Example value
+                //   max_new_tokens: 100 // Example value
+                // })
             });
 
             if (!response.ok) {

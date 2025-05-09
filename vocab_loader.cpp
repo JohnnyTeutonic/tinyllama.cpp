@@ -18,7 +18,7 @@ void load_vocab_from_json(const std::string& json_path,
   const auto& vocab = j["model"]["vocab"];
   token_to_id.clear();
   id_to_token.clear();
-  // Find max id to size the vector
+  
   int max_id = -1;
   for (auto it = vocab.begin(); it != vocab.end(); ++it) {
     int id = it.value();

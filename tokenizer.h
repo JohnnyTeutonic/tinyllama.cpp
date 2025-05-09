@@ -6,11 +6,11 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
-#include <utility>  // For std::pair
+#include <utility>  
 #include <vector>
 
-#include "gguf_structs.h"  // Need GGUFData definition
-#include "logger.h"        // For logging
+#include "gguf_structs.h"  
+#include "logger.h"        
 #include "model.h"
 
 /**
@@ -21,9 +21,9 @@
 class Tokenizer {
  public:
   enum PreTokenizeMethod {
-    DEFAULT,     // Use the tokenizer's configured default
-    WHITESPACE,  // Force whitespace splitting before BPE
-    LLAMA_REGEX  // Force llama.cpp regex before BPE
+    DEFAULT,     
+    WHITESPACE,  
+    LLAMA_REGEX  
   };
 
   /**
@@ -34,7 +34,7 @@ class Tokenizer {
    */
   Tokenizer(const std::string& model_path, const std::string& vocab_path);
 
-  // This constructor prioritizes loading tokenizer info from GGUF metadata
+  
   explicit Tokenizer(const GGUFData& gguf_data);
 
   /**
@@ -65,25 +65,25 @@ class Tokenizer {
    */
   std::string detokenize(const std::vector<std::string>& tokens) const;
 
-  // Encode/decode methods with option to add special tokens
+  
   std::vector<int> encode(
       const std::string& text, bool add_bos = true,
-      bool add_eos = false,  // <<< Default add_eos to false
+      bool add_eos = false,  
       PreTokenizeMethod pre_tok_override = PreTokenizeMethod::DEFAULT) const;
   std::string decode(const std::vector<int>& ids,
                      bool skip_special_tokens = true) const;
 
-  // Apply Chat Template
+  
   std::string apply_chat_template(const std::string& user_prompt,
                                   const std::string& system_message,
                                   const ModelConfig& config) const;
 
-  // GGUF Vocab Size
+  
   int vocab_size() const;
 
   bool is_added_token(int id) const;
 
-  // Special token accessors
+  
   int bos_token_id() const { return bos_token_id_; }
   int eos_token_id() const { return eos_token_id_; }
   int pad_token_id() const { return pad_token_id_; }
@@ -91,40 +91,40 @@ class Tokenizer {
 
   std::vector<std::string> space_tokenize(const std::string& text) const;
   std::vector<std::string> bpe_tokenize(
-      const std::string& text) const;  // For JSON/merges (Backup Version)
+      const std::string& text) const;  
   std::vector<std::string> regex_tokenize(const std::string& text) const;
 
  private:
-  // Tokenization implementations
+  
   std::vector<std::string> bpe_tokenize_from_scores(
-      const std::string& text) const;  // For GGUF/scores
+      const std::string& text) const;  
   std::vector<std::string> sentencepiece_tokenize(
       const std::string& text) const;
 
-  // Loading functions
+  
   void load_vocab_from_json(const std::string& vocab_path,
                             std::unordered_map<std::string, int>& token_to_id,
                             std::vector<std::string>& id_to_token);
   void load_bpe_merges_from_json(const std::string& model_path);
   void load_sentencepiece_model(const std::string& model_path);
 
-  // Vocabulary mapping
+  
   std::unordered_map<std::string, int> token_to_id_;
   std::vector<std::string> id_to_token_;
 
-  // BPE merges (pair -> rank) - Loaded from JSON
+  
   std::unordered_map<std::string, int> bpe_merges_;
 
-  std::vector<float> token_scores_;   // Loaded from tokenizer.ggml.scores
-  std::vector<int32_t> token_types_;  // Loaded from tokenizer.ggml.token_type
-                                      // (use int32_t as per GGUF spec)
+  std::vector<float> token_scores_;   
+  std::vector<int32_t> token_types_;  
+                                      
   bool initialized_from_gguf_ =
-      false;  // Flag to indicate initialization source
+      false;  
 
   std::unordered_map<std::string, int>
-      added_tokens_;  // Map from token string to ID
+      added_tokens_;  
 
-  // Special token handling
+  
   std::string unk_token_;
   std::string bos_token_;
   std::string eos_token_;
@@ -135,7 +135,7 @@ class Tokenizer {
   int eos_token_id_ = -1;
   int pad_token_id_ = -1;
 
-  // SentencePiece model state
+  
   bool sentencepiece_model_loaded_ = false;
 
   std::string pre_tok_type_ = "unknown";

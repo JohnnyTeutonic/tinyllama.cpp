@@ -10,7 +10,7 @@
 #include <vector>
 
 namespace {
-// Ensures log file is truncated only once per run
+
 void ensure_log_truncated() {
   static bool truncated = false;
   if (!truncated) {
@@ -18,7 +18,7 @@ void ensure_log_truncated() {
     truncated = true;
   }
 }
-}  // namespace
+}  
 
 void Logger::info(const std::string& message) {
   ensure_log_truncated();
@@ -45,16 +45,16 @@ void Logger::debug(const std::string& message) {
 }
 
 void Logger::fatal(const std::string& message) {
-  ensure_log_truncated();  // Ensure log file is ready
-  // Log to file first
+  ensure_log_truncated();  
+  
   std::ofstream log("debugging.log", std::ios::app);
   log << "[FATAL] " << message << std::endl;
-  log.close();  // Close the file stream before terminating
+  log.close();  
 
-  // Also print to standard error
+  
   std::cerr << "[FATAL] " << message << std::endl;
 
-  // Terminate the program
+  
   std::exit(EXIT_FAILURE);
 }
 

@@ -28,4 +28,4 @@ class SafeTensorsLoader {
   size_t data_start_ = 0;
 };
 
-#endif  // SAFETENSORS_LOADER_H
+#endif  

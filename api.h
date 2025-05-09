@@ -1,20 +1,20 @@
 #ifndef TINYLLAMA_API_H
 #define TINYLLAMA_API_H
 
-#include <memory>     // For std::unique_ptr
-#include <stdexcept>  // Required for std::runtime_error
+#include <memory>     
+#include <stdexcept>  
 #include <string>
 #include <vector>
 
 #include "model.h"
 #include "tokenizer.h"
 
-// Forward declarations - Keep these for the direct members
-// class Tokenizer; // Already included via tokenizer.h
-// struct ModelConfig; // Already included via model.h
-// class TinyLlamaModel; // Already included via model.h
-struct KVCache;  // Keep if KVCache definition isn't fully visible via model.h
-                 // (safer to keep)
+
+
+
+
+struct KVCache;  
+                 
 
 namespace tinyllama {
 
@@ -46,30 +46,36 @@ class TinyLlamaSession {
    * @param temperature Sampling temperature. Lower values are more
    * deterministic.
    * @param system_prompt Optional system prompt to guide the generation.
+   * @param apply_q_a_format Whether to apply Q&A format.
    * @return The generated text string (excluding the prompt).
    * @throws std::runtime_error if generation fails.
    */
   std::string generate(const std::string& prompt, int steps = 128,
-                       float temperature = 0.7f,  // Adjusted default
-                       const std::string& system_prompt = "");
+                       float temperature = 0.7f,
+                       const std::string& system_prompt = "",
+                       bool apply_q_a_format = false);
+
+  // Add public getters
+  const Tokenizer* get_tokenizer() const { return tokenizer_.get(); }
+  const ModelConfig& get_config() const { return config_; }
 
  private:
-  // REMOVED PImpl - Direct members now
-  // struct SessionImpl;
-  // std::unique_ptr<SessionImpl> pimpl_;
+  
+  
+  
 
-  // Prevent copying/assignment
+  
   TinyLlamaSession(const TinyLlamaSession&) = delete;
   TinyLlamaSession& operator=(const TinyLlamaSession&) = delete;
 
-  // Direct Members
-  std::unique_ptr<TinyLlamaModel> model_;  // Use unique_ptr for RAII
+  
+  std::unique_ptr<TinyLlamaModel> model_;  
   std::unique_ptr<Tokenizer> tokenizer_;
   ModelConfig config_;
   KVCache kv_cache_;
   int eos_token_id_;
 };
 
-}  // namespace tinyllama
+}  
 
-#endif  // TINYLLAMA_API_H
+#endif  

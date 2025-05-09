@@ -1,15 +1,15 @@
 #ifndef CUDA_KERNELS_H
 #define CUDA_KERNELS_H
 
-// Only define these functions if CUDA is enabled during compilation
+
 #ifdef HAS_CUDA
 
 #include <cublas_v2.h>
 
-#include <cstdint>  // For uint16_t
+#include <cstdint>  
 #include <vector>
 
-// --- CUDA Error Checking Utility ---
+
 #include <cuda_runtime.h>
 
 #include <stdexcept>
@@ -23,14 +23,14 @@ inline void gpuAssert(cudaError_t code, const char* file, int line,
     std::string err_msg =
         "GPUassert: " + std::string(cudaGetErrorString(code)) + " " +
         std::string(file) + " " + std::to_string(line);
-    Logger::error(err_msg);  // Use your logger
+    Logger::error(err_msg);  
     if (abort) throw std::runtime_error(err_msg);
   }
 }
 #define gpuErrchk(ans) \
   { gpuAssert((ans), __FILE__, __LINE__); }
 
-// --- Kernel Wrapper Declarations ---
+
 
 /**
  * @brief Performs RMS Normalization on the GPU (device pointers version).
@@ -45,7 +45,7 @@ void rmsnorm_vector_cuda(const float* x_dev, const float* weight_dev,
                          float* out_dev, int n, float eps,
                          cudaStream_t stream = 0);
 
-// (Optional: keep the host vector overload for now)
+
 void rmsnorm_vector_cuda(const std::vector<float>& x_in_host,
                          const std::vector<float>& weight_host,
                          std::vector<float>& out_host, int n, float eps);
@@ -85,10 +85,10 @@ void silu_cuda(const std::vector<float>& x_host, std::vector<float>& out_host,
 void softmax_vector_cuda(const std::vector<float>& x_host,
                          std::vector<float>& out_host, int n);
 
-// Device-pointer RoPE wrapper (UPDATED SIGNATURE)
+
 void rope_cuda(float* vec, int num_heads, int head_dim,
                const float* freqs_cis_dev, int pos,
-               cudaStream_t stream);  // Modified signature
+               cudaStream_t stream);  
 
 /**
  * @brief CUDA Attention kernel wrapper (Reads directly from flat K/V Cache)
@@ -126,12 +126,12 @@ void attention_cuda(const float* Q_current_dev, const float* K_layer_cache_base,
  */
 void add_vectors_cuda(const float* a_dev, const float* b_dev, float* result_dev,
                       int n,
-                      cudaStream_t stream = 0);  // Default stream
+                      cudaStream_t stream = 0);  
 
-// Fused Residual Addition (result = matvec_out + residual)
+
 void add_residual_cuda(const float* matvec_out_dev, const float* residual_dev,
                        float* result_dev, int n,
-                       cudaStream_t stream = 0);  // Default stream
+                       cudaStream_t stream = 0);  
 
 /**
  * @brief Updates a specific entry in the flat K/V cache on the device.
@@ -148,23 +148,23 @@ void add_residual_cuda(const float* matvec_out_dev, const float* residual_dev,
  */
 void update_kv_cache_cuda(float* cache_base_ptr, const float* current_kv_vector,
                           int pos, int kv_head_idx,
-                          int max_seq_len,   // Needed for offset calculation
-                          int num_kv_heads,  // Needed for offset calculation
+                          int max_seq_len,   
+                          int num_kv_heads,  
                           int head_dim, cudaStream_t stream = 0);
 
-// Fused RoPE + K/V Cache Update
-void rope_and_update_kv_cache_cuda(
-    float* cache_base_ptr,            // Base K or V cache ptr for the layer
-    const float* kv_vector_head,      // Original K or V data for *this head*
-    const float* all_freqs_cis_base,  // Global RoPE frequencies buffer
-    int pos, int kv_head_idx, int max_seq_len, int num_kv_heads, int head_dim,
-    cudaStream_t stream = 0);  // Default stream
 
-// --- Moved SwiGLU declaration INSIDE HAS_CUDA ---
+void rope_and_update_kv_cache_cuda(
+    float* cache_base_ptr,            
+    const float* kv_vector_head,      
+    const float* all_freqs_cis_base,  
+    int pos, int kv_head_idx, int max_seq_len, int num_kv_heads, int head_dim,
+    cudaStream_t stream = 0);  
+
+
 void swiglu_cuda(const float* gate_dev, const float* up_dev, float* out_dev,
                  int n, cudaStream_t stream = 0);
 
-// NEW KERNEL DECLARATION (MODIFIED SIGNATURE)
+
 void lookup_embedding_bf16_f32_cuda(const uint16_t* embedding_table_dev,
                                     float* output_vector_dev, int token_id,
                                     int hidden_size, int vocab_size,
@@ -174,14 +174,14 @@ void matvec_f32_f32_cuda(cublasHandle_t handle, const float* mat_f32_dev,
                          const float* vec_f32_dev, float* out_f32_dev, int rows,
                          int cols, cudaStream_t stream);
 
-// Performs embedding lookup directly on the GPU.
-// Reads from either a BF16 or FP32 embedding table on the device.
-// table_dev: Pointer to the embedding table on the device (either const
-// uint16_t* or const float*). output_dev: Pointer to the output buffer on the
-// device (float*). token_id: The ID of the token to look up. hidden_size: The
-// dimension of the embedding vector. vocab_size: Total size of the vocabulary
-// (for bounds checking). is_bf16: True if table_dev points to BF16 data, False
-// if it points to FP32 data. stream: The CUDA stream to use.
+
+
+
+
+
+
+
+
 void lookup_embedding_cuda(const void* table_dev, float* output_dev,
                            int token_id, int hidden_size, int vocab_size,
                            bool is_bf16, cudaStream_t stream);
@@ -190,6 +190,6 @@ void matvec_bf16_f32_cuda(cublasHandle_t handle, const uint16_t* mat_bf16_dev,
                           const float* vec_f32_dev, float* out_f32_dev,
                           int rows, int cols, cudaStream_t stream = 0);
 
-#endif  // HAS_CUDA
+#endif  
 
-#endif  // CUDA_KERNELS_H
+#endif  

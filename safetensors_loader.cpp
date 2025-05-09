@@ -7,13 +7,13 @@ SafeTensorsLoader::SafeTensorsLoader(const std::string& path) {
   if (!file)
     throw std::runtime_error("Failed to open safetensors file: " + path);
 
-  // Read header length (first 8 bytes, little-endian uint64)
+  
   uint64_t header_len = 0;
   file.read(reinterpret_cast<char*>(&header_len), sizeof(header_len));
   if (file.gcount() != sizeof(header_len))
     throw std::runtime_error("Failed to read safetensors header length");
 
-  // Read header JSON
+  
   std::vector<char> header_buf(header_len);
   file.read(header_buf.data(), header_len);
   if (file.gcount() != static_cast<std::streamsize>(header_len))
@@ -21,10 +21,10 @@ SafeTensorsLoader::SafeTensorsLoader(const std::string& path) {
   std::string header_json(header_buf.begin(), header_buf.end());
   nlohmann::json header = nlohmann::json::parse(header_json);
 
-  // Parse tensor metadata
+  
   for (auto it = header.begin(); it != header.end(); ++it) {
     const std::string& key = it.key();
-    if (key == "__metadata__") continue;  // skip special entry
+    if (key == "__metadata__") continue;  
     const auto& meta = it.value();
     TensorInfo info;
     info.name = key;
@@ -34,7 +34,7 @@ SafeTensorsLoader::SafeTensorsLoader(const std::string& path) {
     info.nbytes = meta["data_offsets"][1].get<size_t>() - info.data_offset;
     tensors_[key] = info;
   }
-  // Save file path for later data access
+  
   file_path_ = path;
   data_start_ = 8 + header_len;
 }
