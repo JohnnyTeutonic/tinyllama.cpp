@@ -51,10 +51,30 @@ SafeTensorsLoader::SafeTensorsLoader(const std::string& path)
 SafeTensorsLoader::~SafeTensorsLoader() { cleanup_memory_mapping(); }
 
 void SafeTensorsLoader::initialize_memory_mapping() {
+#ifdef _WIN32
+  file_handle_ = CreateFileA(file_path_.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                            NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+  if (file_handle_ == INVALID_HANDLE_VALUE) {
+    throw std::runtime_error("Failed to open file for memory mapping: " + file_path_);
+  }
+
+  mapping_handle_ = CreateFileMappingA(file_handle_, NULL, PAGE_READONLY,
+                                      0, 0, NULL);
+  if (mapping_handle_ == NULL) {
+    CloseHandle(file_handle_);
+    throw std::runtime_error("Failed to create file mapping: " + file_path_);
+  }
+
+  mapped_data_ = MapViewOfFile(mapping_handle_, FILE_MAP_READ, 0, 0, 0);
+  if (mapped_data_ == NULL) {
+    CloseHandle(mapping_handle_);
+    CloseHandle(file_handle_);
+    throw std::runtime_error("Failed to map view of file: " + file_path_);
+  }
+#else
   fd_ = open(file_path_.c_str(), O_RDONLY);
   if (fd_ == -1) {
-    throw std::runtime_error("Failed to open file for memory mapping: " +
-                             file_path_);
+    throw std::runtime_error("Failed to open file for memory mapping: " + file_path_);
   }
 
   mapped_data_ = mmap(nullptr, file_size_, PROT_READ, MAP_PRIVATE, fd_, 0);
@@ -62,9 +82,24 @@ void SafeTensorsLoader::initialize_memory_mapping() {
     close(fd_);
     throw std::runtime_error("Failed to memory map file: " + file_path_);
   }
+#endif
 }
 
 void SafeTensorsLoader::cleanup_memory_mapping() {
+#ifdef _WIN32
+  if (mapped_data_ != nullptr) {
+    UnmapViewOfFile(mapped_data_);
+    mapped_data_ = nullptr;
+  }
+  if (mapping_handle_ != NULL) {
+    CloseHandle(mapping_handle_);
+    mapping_handle_ = NULL;
+  }
+  if (file_handle_ != INVALID_HANDLE_VALUE) {
+    CloseHandle(file_handle_);
+    file_handle_ = INVALID_HANDLE_VALUE;
+  }
+#else
   if (mapped_data_ != nullptr) {
     munmap(mapped_data_, file_size_);
     mapped_data_ = nullptr;
@@ -73,6 +108,7 @@ void SafeTensorsLoader::cleanup_memory_mapping() {
     close(fd_);
     fd_ = -1;
   }
+#endif
 }
 
 std::vector<std::string> SafeTensorsLoader::tensor_names() const {

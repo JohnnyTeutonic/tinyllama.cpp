@@ -1,9 +1,13 @@
 #ifndef SAFETENSORS_LOADER_H
 #define SAFETENSORS_LOADER_H
 
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#endif
 
 #include <functional>
 #include <future>
@@ -105,7 +109,12 @@ class SafeTensorsLoader {
   std::string file_path_;                      /**< Path to the SafeTensors file */
   size_t data_start_ = 0;                      /**< Offset where tensor data begins */
 
+#ifdef _WIN32
+  HANDLE file_handle_ = INVALID_HANDLE_VALUE;   /**< Windows file handle */
+  HANDLE mapping_handle_ = NULL;                /**< Windows file mapping handle */
+#else
   int fd_ = -1;                                /**< File descriptor for memory mapping */
+#endif
   void* mapped_data_ = nullptr;                /**< Pointer to memory mapped data */
   size_t file_size_ = 0;                       /**< Total size of the file */
 

@@ -8,6 +8,13 @@
 #include "ggml_types.h"
 #include "gguf_parser.h"  // Include for GGML_QK_K
 
+// Define RESTRICT macro based on compiler
+#ifdef _MSC_VER
+#define RESTRICT
+#else
+#define RESTRICT __restrict__
+#endif
+
 /**
  * @file quantization.h
  * @brief Weight quantization structures and functions for model compression
@@ -157,7 +164,7 @@ void dequantize_q2_k(const void* q_data, float* f_data,
  * @param num_elements Number of elements to dequantize
  * @param log_this_block Whether to log dequantization details
  */
-void dequantize_q4_k_m(const block_q4_K* qblock, float* __restrict__ output_f32,
+void dequantize_q4_k_m(const block_q4_K* qblock, float* RESTRICT output_f32,
                        int num_elements, bool log_this_block = false);
 
 /**
@@ -167,7 +174,7 @@ void dequantize_q4_k_m(const block_q4_K* qblock, float* __restrict__ output_f32,
  * @param num_elements Number of elements to dequantize
  * @param log_this_block Whether to log dequantization details
  */
-void dequantize_q6_k(const block_q6_K* qblock, float* __restrict__ output_f32,
+void dequantize_q6_k(const block_q6_K* qblock, float* RESTRICT output_f32,
                      int num_elements, bool log_this_block = false);
 
 /**
