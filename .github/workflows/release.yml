@@ -4,6 +4,17 @@ on:
   push:
     tags:
       - 'v*'  # Trigger on version tags
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g., v1.0.0)'
+        required: true
+        type: string
+      prerelease:
+        description: 'Is this a pre-release?'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -19,14 +30,16 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.version || github.ref }}
         
       - name: Create Release
         id: create_release
         uses: softprops/action-gh-release@v1
         with:
-          name: Release ${{ github.ref_name }}
+          name: Release ${{ github.event.inputs.version || github.ref_name }}
           draft: false
-          prerelease: false
+          prerelease: ${{ github.event.inputs.prerelease || false }}
           token: ${{ secrets.GITHUB_TOKEN }}
 
   build-and-release:
@@ -48,6 +61,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.version || github.ref }}
 
       - name: Setup CMake
         uses: jwlawson/actions-setup-cmake@v1.14
@@ -74,10 +89,9 @@ jobs:
 
       - name: Configure CMake (Windows)
         if: runner.os == 'Windows'
-        run: |
-          mkdir build
-          cd build
-          cmake .. -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release -DHAS_CUDA=OFF
+        uses: jwlawson/actions-setup-cmake@v1.14
+        with:
+          cmake-version: '3.27.0'
 
       - name: Build
         run: |
@@ -99,6 +113,18 @@ jobs:
           cp README.md LICENSE ${{ matrix.artifact_name }}/
           tar czf ${{ matrix.asset_name }} ${{ matrix.artifact_name }}
 
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          cd build
+          cmake --build . --config Release
+
+      - name: Generate Documentation (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          cd build
+          cmake --build . --target docs
+
       - name: Package (Windows)
         if: runner.os == 'Windows'
         run: |
@@ -119,10 +145,12 @@ jobs:
     permissions:
       contents: write
     needs: create-release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04  # Explicitly use Ubuntu 22.04
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.version || github.ref }}
 
       - name: Setup CUDA
         uses: Jimver/cuda-toolkit@v0.2.11

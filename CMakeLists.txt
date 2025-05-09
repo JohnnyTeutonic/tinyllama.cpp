@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.11)
-project(TinyLlamaCpp LANGUAGES CXX CUDA)
+project(TinyLlamaCpp LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -37,18 +37,19 @@ find_package(Threads REQUIRED)
 find_package(OpenMP REQUIRED)
 
 # Handle CUDA
-find_package(CUDA)
-# Modern CMake approach to find specific CUDA components
-if(CUDA_FOUND)
-    find_package(CUDAToolkit COMPONENTS cublas) 
-endif()
-
 OPTION(HAS_CUDA "Enable CUDA support (requires CUDA Toolkit and cuBLAS)" ON) # Default to ON, user can override with -DHAS_CUDA=OFF
 
 set(CUDA_ENABLED FALSE) # Default to disabled
 set(CUDA_SOURCES "")   # Default to no CUDA sources
 
 if(HAS_CUDA)
+    enable_language(CUDA)
+    find_package(CUDA)
+    # Modern CMake approach to find specific CUDA components
+    if(CUDA_FOUND)
+        find_package(CUDAToolkit COMPONENTS cublas) 
+    endif()
+    
     if(CUDA_FOUND AND CUDAToolkit_FOUND)
         message(STATUS "CUDA toolkit and cuBLAS found, and HAS_CUDA option is ON.")
         message(STATUS "Found CUDA toolkit version: ${CUDA_VERSION}")
