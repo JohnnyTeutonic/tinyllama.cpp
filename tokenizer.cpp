@@ -1,5 +1,3 @@
-#include "tokenizer.h"
-
 #include <algorithm>  
 #include <cctype>
 #include <fstream>
@@ -11,13 +9,10 @@
 #include <sstream>
 #include <stdexcept>  
 #include <unordered_set>
-
 #include "logger.h"
+#include "tokenizer.h"
 
 using json = nlohmann::json;
-
-
-
 
 std::string capitalize_first_letter(const std::string& s) {
   if (s.empty()) return s;
@@ -62,7 +57,7 @@ Tokenizer::Tokenizer(const std::string& model_path,
     
     if (token_to_id_.find(unk_token_) != token_to_id_.end()) {
       unk_token_id_ = token_to_id_[unk_token_];
-    } else {
+      } else {
       Logger::info("No UNK token found in vocabulary");
       unk_token_id_ = 0;
     }
@@ -76,7 +71,7 @@ Tokenizer::Tokenizer(const std::string& model_path,
 
     if (token_to_id_.find(eos_token_) != token_to_id_.end()) {
       eos_token_id_ = token_to_id_[eos_token_];
-    } else {
+      } else {
       Logger::info("No EOS token found in vocabulary");
       eos_token_id_ = -1;  
     }
@@ -134,7 +129,7 @@ Tokenizer::Tokenizer(const std::string& model_path,
     } else if (added_tokens_.find(tok) != added_tokens_.end()) {
       Logger::debug("[MANUAL INJECT] Chat token '" + tok +
                     "' already loaded from JSON. Skipping injection.");
-    } else {  
+      } else {
       Logger::warning("[MANUAL INJECT] Cannot add chat token '" + tok +
                       "', assumed ID " + std::to_string(id) +
                       " clashes with loaded vocab size (" +
@@ -152,7 +147,7 @@ Tokenizer::Tokenizer(const GGUFData& gguf_data) : initialized_from_gguf_(true) {
   Logger::info("Initializing Tokenizer from GGUFData...");
 
   if (gguf_data.tokenizer_tokens.empty()) {
-    throw std::runtime_error(
+      throw std::runtime_error(
         "GGUF data does not contain 'tokenizer.ggml.tokens'");
   }
   if (gguf_data.tokenizer_scores.empty()) {
@@ -169,12 +164,12 @@ Tokenizer::Tokenizer(const GGUFData& gguf_data) : initialized_from_gguf_(true) {
   }
 
   id_to_token_ = gguf_data.tokenizer_tokens;
-  token_scores_ = gguf_data.tokenizer_scores;
-  token_types_.resize(gguf_data.tokenizer_token_types.size());
-  std::transform(gguf_data.tokenizer_token_types.begin(),
-                 gguf_data.tokenizer_token_types.end(), token_types_.begin(),
-                 [](unsigned int u) { return static_cast<int32_t>(u); });
-
+  token_scores_ = gguf_data.tokenizer_scores; 
+  token_types_.resize(gguf_data.tokenizer_token_types.size()); 
+    std::transform(gguf_data.tokenizer_token_types.begin(),
+                   gguf_data.tokenizer_token_types.end(), token_types_.begin(),
+                   [](unsigned int u) { return static_cast<int32_t>(u); });
+  
   
   token_to_id_.reserve(id_to_token_.size());
   for (size_t i = 0; i < id_to_token_.size(); ++i) {
@@ -210,12 +205,12 @@ Tokenizer::Tokenizer(const GGUFData& gguf_data) : initialized_from_gguf_(true) {
 
   
   auto get_meta_value = [&](const std::string& key, auto default_value) {
-    using TargetType = typename std::decay<decltype(default_value)>::type;
-    auto it = gguf_data.metadata.find(key);
-    if (it != gguf_data.metadata.end()) {
-      return std::visit(
-          [&](const auto& val) -> TargetType {
-            using T = std::decay_t<decltype(val)>;
+      using TargetType = typename std::decay<decltype(default_value)>::type;
+      auto it = gguf_data.metadata.find(key);
+      if (it != gguf_data.metadata.end()) {
+          return std::visit(
+              [&](const auto& val) -> TargetType {
+              using T = std::decay_t<decltype(val)>;
             if constexpr (std::is_arithmetic_v<TargetType> &&
                           std::is_arithmetic_v<T>) {
               if constexpr (std::is_integral_v<TargetType> &&
@@ -227,27 +222,27 @@ Tokenizer::Tokenizer(const GGUFData& gguf_data) : initialized_from_gguf_(true) {
                   Logger::warning(
                       "Potential overflow casting float to int for GGUF key '" +
                       key + "'. Using default.");
-                  return default_value;
-                }
+                          return default_value;
+                      }
               } else if constexpr (std::is_floating_point_v<TargetType> &&
                                    std::is_integral_v<T>) {
-              }
-              return static_cast<TargetType>(val);
+                  }
+                  return static_cast<TargetType>(val);
             } else if constexpr (std::is_same_v<TargetType, bool> &&
                                  std::is_same_v<T, bool>) {
-              return val;
+                  return val;
             } else if constexpr (std::is_same_v<TargetType, std::string> &&
                                  std::is_same_v<T, std::string>) {
-              return val;
-            }
+                  return val;
+              }
             Logger::warning(
                 "GGUF metadata key '" + key +
                 "' type mismatch or unhandled conversion. Using default.");
-            return default_value;
-          },
-          it->second);
-    }
-    return default_value;
+              return default_value;
+              },
+              it->second);
+      }
+      return default_value;
   };
 
   auto get_meta_string = [&](const std::string& key,
@@ -256,8 +251,8 @@ Tokenizer::Tokenizer(const GGUFData& gguf_data) : initialized_from_gguf_(true) {
     if (it != gguf_data.metadata.end() &&
         std::holds_alternative<std::string>(it->second)) {
       return std::get<std::string>(it->second);
-    }
-    return default_val;
+      }
+      return default_val;
   };
 
   
@@ -360,8 +355,8 @@ Tokenizer::Tokenizer(const GGUFData& gguf_data) : initialized_from_gguf_(true) {
   }
 
   
-  
-  added_tokens_.clear();  
+
+  added_tokens_.clear();
                           
   id_to_added_token_.clear();
 
@@ -372,8 +367,8 @@ Tokenizer::Tokenizer(const GGUFData& gguf_data) : initialized_from_gguf_(true) {
       int token_id = static_cast<int>(i);
       bool is_known_special_id =
           (token_id == bos_token_id_ || token_id == eos_token_id_ ||
-           token_id == unk_token_id_ || token_id == pad_token_id_);
-
+                                  token_id == unk_token_id_ || token_id == pad_token_id_);
+      
       
       
       
@@ -381,8 +376,8 @@ Tokenizer::Tokenizer(const GGUFData& gguf_data) : initialized_from_gguf_(true) {
         const std::string& token_str = id_to_token_[i];
         
         if (added_tokens_.find(token_str) == added_tokens_.end()) {
-          added_tokens_[token_str] = token_id;
-          id_to_added_token_[token_id] = token_str;
+            added_tokens_[token_str] = token_id;
+            id_to_added_token_[token_id] = token_str;
           added_count++;
         }
       }
@@ -891,7 +886,7 @@ std::vector<int> Tokenizer::encode(const std::string& text, bool add_bos,
 
     final_ids = tokens_to_ids(bpe_pieces);
 
-    
+
     if (add_bos && bos_token_id_ != -1) {
       final_ids.insert(final_ids.begin(), bos_token_id_);
       Logger::debug("[ENCODE] Prepended BOS token: " +
@@ -909,8 +904,8 @@ std::vector<int> Tokenizer::encode(const std::string& text, bool add_bos,
   } else {
     Logger::debug("[ENCODE] Using GGUF score-based tokenizer path.");
     
-    if (add_bos && bos_token_id_ != -1) {
-      final_ids.push_back(bos_token_id_);
+        if (add_bos && bos_token_id_ != -1) {
+            final_ids.push_back(bos_token_id_);
       Logger::debug("[ENCODE] Added BOS token: " +
                     std::to_string(bos_token_id_));
     }
@@ -921,22 +916,22 @@ std::vector<int> Tokenizer::encode(const std::string& text, bool add_bos,
     std::string current_segment;
     std::string text_to_process = text;
 
-    
-    PreTokenizeMethod method_to_use;
-    if (pre_tok_override == PreTokenizeMethod::DEFAULT) {
+
+        PreTokenizeMethod method_to_use;
+        if (pre_tok_override == PreTokenizeMethod::DEFAULT) {
       if (pre_tok_type_ == "default") {
-        method_to_use = PreTokenizeMethod::DEFAULT;
+                method_to_use = PreTokenizeMethod::DEFAULT;
         Logger::debug(
             "[ENCODE] Using DEFAULT pre-tokenization path (split by special "
             "tokens, BPE for non-specials).");
-      } else if (pre_tok_type_ == "llama") {
-        method_to_use = PreTokenizeMethod::LLAMA_REGEX;
-      } else {
-        method_to_use = PreTokenizeMethod::WHITESPACE;
-      }
-    } else {
-      method_to_use = pre_tok_override;
-    }
+            } else if (pre_tok_type_ == "llama") {
+                method_to_use = PreTokenizeMethod::LLAMA_REGEX;
+            } else {
+                method_to_use = PreTokenizeMethod::WHITESPACE; 
+            }
+        } else {
+            method_to_use = pre_tok_override;
+        }
     std::string method_str;
     if (method_to_use == PreTokenizeMethod::LLAMA_REGEX)
       method_str = "LLAMA_REGEX";
@@ -946,7 +941,7 @@ std::vector<int> Tokenizer::encode(const std::string& text, bool add_bos,
       method_str = "DEFAULT";
     Logger::debug("[ENCODE] Effective pre-tokenization method: " + method_str);
 
-    if (method_to_use == PreTokenizeMethod::DEFAULT) {
+        if (method_to_use == PreTokenizeMethod::DEFAULT) {
       
       
       
@@ -980,12 +975,12 @@ std::vector<int> Tokenizer::encode(const std::string& text, bool add_bos,
             "segment.");
       } else {
         std::regex special_regex(special_pattern_str);
-        auto words_begin =
+                auto words_begin =
             std::sregex_iterator(text.begin(), text.end(), special_regex);
-        auto words_end = std::sregex_iterator();
-        long last_pos = 0;
-        for (std::sregex_iterator i = words_begin; i != words_end; ++i) {
-          std::smatch match = *i;
+                auto words_end = std::sregex_iterator();
+                long last_pos = 0;
+                for (std::sregex_iterator i = words_begin; i != words_end; ++i) {
+                    std::smatch match = *i;
           long current_pos = match.position();
           std::string match_str = match.str();
           if (current_pos > last_pos) {
@@ -1013,7 +1008,7 @@ std::vector<int> Tokenizer::encode(const std::string& text, bool add_bos,
             Logger::debug("[ENCODE] Added special token ID: " +
                           std::to_string(it->second) + " for '" +
                           segment_to_process + "'");
-          } else {
+                    } else {
             Logger::debug("[ENCODE] Skipping template-only special token: '" +
                           segment_to_process + "'");
           }
@@ -1037,15 +1032,15 @@ std::vector<int> Tokenizer::encode(const std::string& text, bool add_bos,
                 space_pieces.push_back(word);
               }
               bpe_pieces = space_pieces;
-            }
-          } else {
+                }
+            } else { 
             Logger::debug(
                 "[ENCODE] Passing segment to bpe_tokenize (merge-based): '" +
                 segment_to_process + "' with method: " + method_str);
             bpe_pieces = bpe_tokenize(
                 segment_to_process);  
           }
-          std::vector<int> segment_ids = tokens_to_ids(bpe_pieces);
+            std::vector<int> segment_ids = tokens_to_ids(bpe_pieces);
           final_ids.insert(final_ids.end(), segment_ids.begin(),
                            segment_ids.end());
           std::stringstream ss_bpe;
@@ -1061,38 +1056,38 @@ std::vector<int> Tokenizer::encode(const std::string& text, bool add_bos,
     } else {
     }
 
-    
-    if (add_eos && eos_token_id_ != -1) {
-      final_ids.push_back(eos_token_id_);
+
+        if (add_eos && eos_token_id_ != -1) {
+            final_ids.push_back(eos_token_id_);
       Logger::debug("[ENCODE] Added EOS token: " +
                     std::to_string(eos_token_id_));
-    }
+        }
 
     Logger::debug("[ENCODE] Final IDs: " + std::to_string(final_ids.size()) +
                   " tokens.");
-    return final_ids;
-  }
+        return final_ids;
+    }
 }
 
 
 std::string Tokenizer::decode(const std::vector<int>& ids,
                               bool skip_special_tokens) const {
-  std::stringstream ss;
-  bool first_token = true;  
-  for (int id : ids) {
+    std::stringstream ss;
+    bool first_token = true;  
+    for (int id : ids) {
     if (id >= 0 && static_cast<size_t>(id) < id_to_token_.size()) {
       std::string token = id_to_token_[id];
-      if (skip_special_tokens) {
+        if (skip_special_tokens) {
         if (id == bos_token_id_ || id == eos_token_id_ || id == pad_token_id_ ||
             id == unk_token_id_) {
-          continue;  
+                continue;  
+            }
         }
-      }
-      
-      
+        
+        
       const std::string gpt2_space_prefix = "\xC4\xA0";
       const std::string tinyllama_space_prefix = "\xE2\x96\x81";
-      if (!token.empty()) {
+        if (!token.empty()) {
         if ((token.size() >= gpt2_space_prefix.size() &&
              token.substr(0, gpt2_space_prefix.size()) == gpt2_space_prefix)) {
           if (!first_token) ss << " ";  
@@ -1109,9 +1104,9 @@ std::string Tokenizer::decode(const std::vector<int>& ids,
       first_token = false;  
     } else {
       ss << "[INVALID_ID:" << id << "]";
-      first_token = false;
+             first_token = false;  
+        }
     }
-  }
   return ss.str();
 }
 

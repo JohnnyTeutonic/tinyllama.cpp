@@ -67,11 +67,11 @@ int main(int argc, char** argv) {
     tinyllama::TinyLlamaSession session(model_path_or_dir);
     Logger::info("TinyLlamaSession initialized successfully.");
 
-    // Ensure Q: A: format is applied by session.generate for models run via main.cpp
-    // The system_prompt argument ("") is unused by api.cpp's generate when apply_q_a_format is true.
+    
+    
     std::string generated_text = session.generate(prompt, steps, temperature, "", true);
 
-    // Output the raw prompt and the generated text
+    
     std::cout << "Prompt: " + prompt << std::endl;
     std::cout << "Generated: " << generated_text << std::endl;
 

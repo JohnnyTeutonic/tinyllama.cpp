@@ -16,7 +16,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 
-// Forward declare ThreadPool
+
 class ThreadPool;
 
 class SafeTensorsLoader {
@@ -32,7 +32,7 @@ class SafeTensorsLoader {
   explicit SafeTensorsLoader(const std::string& path);
   ~SafeTensorsLoader();
 
-  // Prevent copying
+  
   SafeTensorsLoader(const SafeTensorsLoader&) = delete;
   SafeTensorsLoader& operator=(const SafeTensorsLoader&) = delete;
 
@@ -40,7 +40,7 @@ class SafeTensorsLoader {
   std::vector<uint8_t> get_tensor_bytes(const std::string& name) const;
   const TensorInfo& get_tensor_info(const std::string& name) const;
 
-  // New methods for parallel loading
+  
   std::vector<uint8_t> get_tensor_bytes_parallel(const std::string& name) const;
   std::map<std::string, std::vector<uint8_t>> load_all_tensors_parallel() const;
 
@@ -49,18 +49,18 @@ class SafeTensorsLoader {
   std::string file_path_;
   size_t data_start_ = 0;
   
-  // Memory mapping
+  
   int fd_ = -1;
   void* mapped_data_ = nullptr;
   size_t file_size_ = 0;
   
-  // Helper methods
+  
   void initialize_memory_mapping();
   void cleanup_memory_mapping();
   std::vector<uint8_t> convert_tensor_data(const uint8_t* data, size_t size, const std::string& dtype) const;
 };
 
-// ThreadPool implementation
+
 class ThreadPool {
 public:
   explicit ThreadPool(size_t num_threads);

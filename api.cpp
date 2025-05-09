@@ -229,8 +229,8 @@ TinyLlamaSession::TinyLlamaSession(const std::string& model_path) {
 
 
 TinyLlamaSession::~TinyLlamaSession() {
-  // Free KVCache CUDA memory if allocated
-  // kv_cache_.free_cuda_memory(); // Assuming KVCache has such a method
+  
+  
   Logger::info("TinyLlamaSession: Destroyed.");
 }
 
@@ -248,7 +248,7 @@ std::string TinyLlamaSession::generate(const std::string& prompt_input, int step
     final_prompt_for_tokenization = "Q: " + prompt_input + "\nA:";
     Logger::info("Applied Q:A: format. Prompt for tokenization: \"" + final_prompt_for_tokenization + "\"");
   } else {
-    final_prompt_for_tokenization = prompt_input; // Use as-is
+    final_prompt_for_tokenization = prompt_input; 
     Logger::info("Using provided prompt as-is for tokenization: \"" + final_prompt_for_tokenization + "\"");
   }
 

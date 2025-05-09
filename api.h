@@ -55,7 +55,7 @@ class TinyLlamaSession {
                        const std::string& system_prompt = "",
                        bool apply_q_a_format = false);
 
-  // Add public getters
+  
   const Tokenizer* get_tokenizer() const { return tokenizer_.get(); }
   const ModelConfig& get_config() const { return config_; }
 

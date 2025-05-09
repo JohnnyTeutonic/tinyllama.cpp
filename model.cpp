@@ -355,7 +355,7 @@ std::vector<uint16_t> uint8_vector_to_uint16_vector(
         "Byte vector size mismatch for uint16_t conversion");
   }
   std::vector<uint16_t> out(numel);
-  // Use memcpy for direct byte copying, assuming little-endian system and data
+  
   std::memcpy(out.data(), bytes.data(), bytes.size());
   return out;
 }
@@ -837,7 +837,7 @@ void TinyLlamaModel::initialize_weights(const SafeTensorsLoader* loader,
       Logger::info("All SafeTensors tensors loaded in parallel. Total tensors: " + std::to_string(all_tensors.size()));
     } catch (const std::exception& e) {
       Logger::error("Failed to load all tensors in parallel: " + std::string(e.what()));
-      throw; // Re-throw if parallel loading fails critically
+      throw; 
     }
 
     auto get_tensor_data = [&](const std::string& name) -> const std::vector<uint8_t>& {
@@ -1691,7 +1691,7 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& config_in,
       if (magic == GGUF_MAGIC) {
         is_gguf_detected_runtime = true;
       }
-      file.close(); // Ensure file is closed after reading magic number
+      file.close(); 
     } else {
       Logger::warning("Could not open weights file to check magic number: " +
                       weights_path);
@@ -1702,10 +1702,10 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& config_in,
     Logger::info("Detected GGUF file. Loading metadata and mapping weights...");
     gguf_data_ = std::make_unique<GGUFData>(load_gguf_meta(weights_path));
     config_ = parse_model_config_from_gguf(
-        *gguf_data_);  // This populates config_ from GGUF metadata
-    config_.is_gguf_file_loaded = true; // Set our new flag
+        *gguf_data_);  
+    config_.is_gguf_file_loaded = true; 
 
-    // Override max_position_embeddings from config_in if provided and different
+    
     if (config_in.max_position_embeddings > 0 &&
         config_in.max_position_embeddings != config_.max_position_embeddings) {
       Logger::warning("Overriding GGUF max_position_embeddings (" +
@@ -1722,9 +1722,9 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& config_in,
     Logger::info("GGUF weights mapped.");
 
   } else {
-    // This is the SafeTensors path
+    
     config_ = config_in;
-    config_.is_gguf_file_loaded = false; // Explicitly set flag for non-GGUF
+    config_.is_gguf_file_loaded = false; 
     Logger::info(
         "Detected non-GGUF file. Using provided config and loading with "
         "SafeTensors loader...");

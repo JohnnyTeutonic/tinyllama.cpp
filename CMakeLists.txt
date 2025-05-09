@@ -8,7 +8,6 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 include(FetchContent)
 
 # --- Fetch nlohmann/json --- 
-# Try to find it system-wide first
 find_package(nlohmann_json 3.2.0 QUIET)
 if(NOT nlohmann_json_FOUND)
   message(STATUS "nlohmann_json not found via find_package. Fetching with FetchContent.")
@@ -24,7 +23,6 @@ else()
   message(STATUS "Found nlohmann_json system-wide or via CMake package config. Version: ${nlohmann_json_VERSION}")
   set(NLOHMANN_JSON_INCLUDE_DIRS ${nlohmann_json_INCLUDE_DIRS} CACHE INTERNAL "nlohmann_json include directory")
 endif()
-# --------------------------
 
 # --- Fetch cpp-httplib --- 
 FetchContent_Declare(
@@ -33,13 +31,10 @@ FetchContent_Declare(
   GIT_TAG        v0.15.3
 )
 FetchContent_MakeAvailable(cpp-httplib)
-# --------------------------
 
 # Find necessary system libraries
 find_package(Threads REQUIRED)
-# find_package(nlohmann_json 3.2.0 REQUIRED) # Replaced by FetchContent logic above
 find_package(OpenMP REQUIRED)
-# find_package(OpenSSL) # OpenSSL is optional and handled later for the server target
 
 # Handle CUDA
 find_package(CUDA)
@@ -48,7 +43,6 @@ if(CUDA_FOUND)
     find_package(CUDAToolkit COMPONENTS cublas) 
 endif()
 
-# --- USER OPTION TO CONTROL CUDA --- 
 OPTION(HAS_CUDA "Enable CUDA support (requires CUDA Toolkit and cuBLAS)" ON) # Default to ON, user can override with -DHAS_CUDA=OFF
 
 set(CUDA_ENABLED FALSE) # Default to disabled
@@ -84,17 +78,16 @@ add_library(tinyllama_core STATIC
 )
 
 # Set properties for the core library
-target_include_directories(tinyllama_core PUBLIC # Use PUBLIC so executables inherit includes
-    ${NLOHMANN_JSON_INCLUDE_DIRS} # Use the variable set by our FetchContent logic
+target_include_directories(tinyllama_core PUBLIC
+    ${NLOHMANN_JSON_INCLUDE_DIRS}
     ${CMAKE_CURRENT_SOURCE_DIR}
-    # ${CUDA_INCLUDE_DIRS} # CUDA includes are handled conditionally below or by CMAKE_CUDA_STANDARD_LIBRARIES
-    ${cpp-httplib_SOURCE_DIR}/ # httplib is header-only, point to its source dir for includes
+    # ${CUDA_INCLUDE_DIRS}
+    ${cpp-httplib_SOURCE_DIR}/
 )
 
-# Link system/other libraries
-target_link_libraries(tinyllama_core PRIVATE # Dependencies needed to BUILD the library
+target_link_libraries(tinyllama_core PRIVATE
     Threads::Threads
-    nlohmann_json::nlohmann_json # Link against the target from find_package or FetchContent
+    nlohmann_json::nlohmann_json
     OpenMP::OpenMP_CXX
 )
 
@@ -105,7 +98,6 @@ if(CUDA_ENABLED)
     target_link_libraries(tinyllama_core PRIVATE ${CUDA_LIBRARIES} CUDA::cublas)
 endif()
 
-# --- Original Executable (Now uses the library) ---
 add_executable(tinyllama 
     main.cpp 
 )
@@ -113,7 +105,6 @@ add_executable(tinyllama
 # Link tinyllama executable against the core library
 target_link_libraries(tinyllama PRIVATE tinyllama_core)
 
-# --- New Chat Server Executable ---
 add_executable(tinyllama_server
     server.cpp
 )
@@ -125,13 +116,9 @@ find_package(OpenSSL QUIET) # Try to find OpenSSL for cpp-httplib to potentially
 if(OPENSSL_FOUND AND TARGET OpenSSL::SSL AND TARGET OpenSSL::Crypto)
     message(STATUS "Found OpenSSL. Enabling SSL support in cpp-httplib.")
     target_compile_definitions(tinyllama_server PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT)
-    # No explicit linking here as cpp-httplib should handle it.
-    # If cpp-httplib is fetched as source, it will build with SSL if OpenSSL is found by its own CMake logic.
 else()
     message(STATUS "OpenSSL not found or targets not available. HTTPS support in server will be disabled.")
 endif()
-
-# --- Common Settings --- 
 
 # Add OpenMP flags (applies to all targets using CXX)
 if(OpenMP_FOUND)
@@ -143,10 +130,6 @@ else()
     message(WARNING "OpenMP not found. Performance will be suboptimal.")
 endif()
 
-# if(NOT nlohmann_json_FOUND AND NOT TARGET nlohmann_json::nlohmann_json)
-#     message(FATAL_ERROR "nlohmann_json not found and not fetched. Check CMake configuration.")
-# endif()
-
 # For Windows: avoid conflicting runtime (Apply to all targets)
 if (MSVC)
   # Need to apply to tinyllama_core as well
@@ -155,7 +138,6 @@ if (MSVC)
   endforeach()
 endif()
 
-# Set library output directories
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 

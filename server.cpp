@@ -82,19 +82,19 @@ int main(int argc, char** argv) {
   svr.Post(
       "/chat", [&session](const httplib::Request& req, httplib::Response& res) {
         Logger::info("Received request for /chat");
-        res.set_header("Access-Control-Allow-Origin", "*");  // Allow all origins
+        res.set_header("Access-Control-Allow-Origin", "*");  
         res.set_header("Access-Control-Allow-Methods", "POST, OPTIONS");
         res.set_header("Access-Control-Allow-Headers", "Content-Type");
 
         std::string user_input_from_client;
-        // Default values for generation parameters
+        
         float temperature = 0.7f;
         int max_new_tokens = 60;
-        // int top_k = 50; // Not currently used by session->generate
-        // float top_p = 0.9f; // Not currently used by session->generate
+        
+        
 
         try {
-          // Parse request JSON
+          
           json req_json = json::parse(req.body);
           if (req_json.contains("user_input")) {
             user_input_from_client = req_json["user_input"].get<std::string>();
@@ -114,36 +114,36 @@ int main(int argc, char** argv) {
           std::string prompt_for_session_generate;
           bool use_q_a_format_for_session_generate = false;
 
-          // Access Tokenizer without tinyllama:: namespace as it's globally defined in tokenizer.h
+          
           const Tokenizer* tokenizer = session->get_tokenizer(); 
 
           if (config.is_gguf_file_loaded) {
-            prompt_for_session_generate = user_input_from_client; // Send raw input
-            use_q_a_format_for_session_generate = true; // session->generate will add Q: A:
+            prompt_for_session_generate = user_input_from_client; 
+            use_q_a_format_for_session_generate = true; 
             Logger::info("GGUF model detected. Using Q:A: format via session->generate.");
           } else {
-            // Safetensors model: construct ChatML-style prompt here
-            std::string system_prompt_text = "You are a helpful AI."; // Default or from config
+            
+            std::string system_prompt_text = "You are a helpful AI."; 
             if (tokenizer) {
-              // Use the tokenizer's method to apply the chat template for Safetensors
+              
               prompt_for_session_generate = tokenizer->apply_chat_template(user_input_from_client, system_prompt_text, config);
               Logger::info("Safetensors model detected. Applied chat template via tokenizer. Prompt: " + prompt_for_session_generate.substr(0,200) + "...");
             } else {
-              // Fallback if tokenizer is somehow null (should not happen with current setup)
+              
               Logger::error("CRITICAL: Tokenizer not available for Safetensors model in server. Cannot apply chat template.");
-              // As a very basic fallback, just use raw input, but this is likely not ideal for Safetensors
+              
               prompt_for_session_generate = user_input_from_client; 
-              // If we fall here, apply_q_a_format should remain false, so raw input is sent.
+              
             }
-            use_q_a_format_for_session_generate = false; // Prompt is already formatted
+            use_q_a_format_for_session_generate = false; 
           }
           
-          // The system_prompt argument to session->generate is unused by current api.cpp version, pass empty.
+          
           std::string reply = session->generate(
               prompt_for_session_generate, max_new_tokens, temperature, "", use_q_a_format_for_session_generate);
           Logger::info("Generated reply: " + reply.substr(0, 50) + "...");
 
-          // Prepare and send response JSON
+          
           json res_json;
           res_json["reply"] = reply;
 
