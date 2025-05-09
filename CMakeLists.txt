@@ -74,6 +74,7 @@ add_library(tinyllama_core STATIC
     vocab_loader.cpp
     gguf_parser.cpp
     quantization.cpp
+    model_constants.h
     ${CUDA_SOURCES} # Conditionally include CUDA source file
 )
 

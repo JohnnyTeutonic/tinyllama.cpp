@@ -16,8 +16,9 @@
 #include <vector>
 
 #include "logger.h"
+#include "gguf_parser.h"
 
-static const float K_SCALE_VALUES[64] = {
+constexpr float K_SCALE_VALUES[64] = {
     1.0f,  1.0625f, 1.125f, 1.1875f, 1.25f, 1.3125f, 1.375f, 1.4375f,
     1.5f,  1.5625f, 1.625f, 1.6875f, 1.75f, 1.8125f, 1.875f, 1.9375f,
     2.0f,  2.125f,  2.25f,  2.375f,  2.5f,  2.625f,  2.75f,  2.875f,
@@ -26,7 +27,8 @@ static const float K_SCALE_VALUES[64] = {
     6.0f,  6.25f,   6.5f,   6.75f,   7.0f,  7.25f,   7.5f,   7.75f,
     8.0f,  8.5f,    9.0f,   9.5f,    10.0f, 10.5f,   11.0f,  11.5f,
     12.0f, 12.5f,   13.0f,  13.5f,   14.0f, 14.5f,   15.0f,  15.5f};
-static const float K_MIN_VALUES[64] = {
+
+constexpr float K_MIN_VALUES[64] = {
     0.0f,       -0.0078125f, -0.015625f, -0.0234375f, -0.03125f,  -0.0390625f,
     -0.046875f, -0.0546875f, -0.0625f,   -0.0703125f, -0.078125f, -0.0859375f,
     -0.09375f,  -0.1015625f, -0.109375f, -0.1171875f, -0.125f,    -0.140625f,
@@ -273,16 +275,16 @@ void quantize_q4_k_m(const float* input, void* output_qblock_void,
   }
 
   if (block_max_val == block_min_val) {
-    block_max_val = block_min_val + 1e-6f;
+    block_max_val = block_min_val + GGUF_SMALL_VAL;
   }
-  if (block_max_val < 1e-10f && block_max_val > -1e-10f) {
-    block_max_val = 1e-6f;
+  if (block_max_val < GGUF_EPSILON && block_max_val > -GGUF_EPSILON) {
+    block_max_val = GGUF_SMALL_VAL;
     block_min_val = 0.0f;
   }
 
-  const float d_super_scale_candidate = (block_max_val - block_min_val) / 15.0f;
+  const float d_super_scale_candidate = (block_max_val - block_min_val) / Q4K_SCALE_FACTOR;
   const float d_super =
-      d_super_scale_candidate > 1e-10f ? d_super_scale_candidate : 1e-10f;
+      d_super_scale_candidate > GGUF_EPSILON ? d_super_scale_candidate : GGUF_EPSILON;
   const float min_super = block_min_val;
 
   output_qblock->d = fp32_to_fp16(d_super);
@@ -299,14 +301,14 @@ void quantize_q4_k_m(const float* input, void* output_qblock_void,
     }
 
     float ideal_scale = 0.0f;
-    if (sub_max_val > sub_min_val + 1e-10f) {
-      ideal_scale = (sub_max_val - sub_min_val) / 15.0f;
+    if (sub_max_val > sub_min_val + GGUF_EPSILON) {
+      ideal_scale = (sub_max_val - sub_min_val) / Q4K_SCALE_FACTOR;
     }
     float ideal_min = sub_min_val;
 
     uint8_t best_scale_idx = 0;
     float min_scale_err = std::numeric_limits<float>::max();
-    if (d_super > 1e-10f) {
+    if (d_super > GGUF_EPSILON) {
       for (uint8_t k = 0; k < 16; ++k) {
         float candidate_scale = d_super * K_SCALE_VALUES[k];
         float err = std::abs(candidate_scale - ideal_scale);
@@ -339,8 +341,8 @@ void quantize_q4_k_m(const float* input, void* output_qblock_void,
 
     float actual_scale = d_super * K_SCALE_VALUES[best_scale_idx];
     float actual_min = min_super * K_MIN_VALUES[best_min_idx];
-    float inv_actual_scale = (actual_scale > 1e-10f || actual_scale < -1e-10f)
-                                 ? (1.0f / actual_scale)
+    float inv_actual_scale = (actual_scale > GGUF_EPSILON || actual_scale < -GGUF_EPSILON)
+                                 ? 1.0f / actual_scale
                                  : 0.0f;
 
     uint8_t packed_qs[8];
@@ -353,7 +355,7 @@ void quantize_q4_k_m(const float* input, void* output_qblock_void,
       int quant_val = 0;
       if (inv_actual_scale != 0.0f) {
         quant_val =
-            static_cast<int>(std::round((val - actual_min) * inv_actual_scale));
+            static_cast<int>(std::round((val - actual_min) * inv_actual_scale)) + Q4K_OFFSET;
       }
       quant_val = std::max(0, std::min(15, quant_val));
 
@@ -388,9 +390,8 @@ void dequantize_q2_k(const void* qblock_void, float* output,
   const float dmin_float =
       (!std::isfinite(dmin_float_raw)) ? 0.0f : dmin_float_raw;
 
-  const float d_float_clamped = std::min(std::max(d_float, -1000.0f), 1000.0f);
-  const float dmin_float_clamped =
-      std::min(std::max(dmin_float, -1000.0f), 1000.0f);
+  const float d_float_clamped = std::min(std::max(d_float, TENSOR_SCALE_MIN), TENSOR_SCALE_MAX);
+  const float dmin_float_clamped = std::min(std::max(dmin_float, TENSOR_SCALE_MIN), TENSOR_SCALE_MAX);
 
   const uint8_t* scales_ptr = qblock->scales;
   const uint8_t* qs_ptr = qblock->qs;
@@ -408,9 +409,9 @@ void dequantize_q2_k(const void* qblock_void, float* output,
         d_float_clamped * static_cast<float>(scale_high);
 
     dequantized_scales[i * 2 + 0] =
-        std::min(std::max(dequantized_scales[i * 2 + 0], -1000.0f), 1000.0f);
+        std::min(std::max(dequantized_scales[i * 2 + 0], TENSOR_SCALE_MIN), TENSOR_SCALE_MAX);
     dequantized_scales[i * 2 + 1] =
-        std::min(std::max(dequantized_scales[i * 2 + 1], -1000.0f), 1000.0f);
+        std::min(std::max(dequantized_scales[i * 2 + 1], TENSOR_SCALE_MIN), TENSOR_SCALE_MAX);
   }
 
   weight_index = 0;
@@ -436,10 +437,10 @@ void dequantize_q2_k(const void* qblock_void, float* output,
       float val3 =
           sub_block_scale * static_cast<float>(q3) + dmin_float_clamped;
 
-      val0 = std::min(std::max(val0, -1000.0f), 1000.0f);
-      val1 = std::min(std::max(val1, -1000.0f), 1000.0f);
-      val2 = std::min(std::max(val2, -1000.0f), 1000.0f);
-      val3 = std::min(std::max(val3, -1000.0f), 1000.0f);
+      val0 = std::min(std::max(val0, TENSOR_SCALE_MIN), TENSOR_SCALE_MAX);
+      val1 = std::min(std::max(val1, TENSOR_SCALE_MIN), TENSOR_SCALE_MAX);
+      val2 = std::min(std::max(val2, TENSOR_SCALE_MIN), TENSOR_SCALE_MAX);
+      val3 = std::min(std::max(val3, TENSOR_SCALE_MIN), TENSOR_SCALE_MAX);
 
       output[weight_index++] = val0;
 
@@ -547,7 +548,7 @@ void quantize_q6_k(const float* input, void* output_qblock_void,
     amax = std::max(amax, std::abs(input[i]));
   }
 
-  const float d_float = (amax > 1e-10f) ? (amax / 31.0f) : 1e-10f;
+  const float d_float = (amax > GGUF_EPSILON) ? (amax / Q6K_SCALE_FACTOR) : GGUF_EPSILON;
   output_qblock->d = fp32_to_fp16(d_float);
 
   for (int sub = 0; sub < GGML_QK_K / 16; ++sub) {
@@ -564,7 +565,7 @@ void quantize_q6_k(const float* input, void* output_qblock_void,
 
     for (int i = 0; i < 16; ++i) {
       float val = sub_in[i];
-      int q = static_cast<int>(std::round(val / (d_float * scale))) + 32;
+      int q = static_cast<int>(std::round(val / (d_float * scale))) + Q6K_OFFSET;
       q = std::max(0, std::min(63, q));
 
       int idx = sub * 16 + i;
@@ -717,7 +718,7 @@ std::vector<block_q8_K> quantize_fp32_to_q8_K(
       amax = std::max(amax, std::abs(x[j]));
     }
 
-    const float d_fp32 = amax / 127.0f;
+    const float d_fp32 = amax / Q8K_SCALE_FACTOR;
     const float id = (d_fp32 != 0.f) ? 1.0f / d_fp32 : 0.0f;
     y[i].d = fp32_to_fp16(d_fp32);
 

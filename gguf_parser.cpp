@@ -10,8 +10,6 @@
 #include "logger.h"
 #include "quantization.h"
 
-const uint32_t GGUF_MAGIC = 0x46554747;
-
 size_t gguf_value_type_size(GGUFValueType type) {
   switch (type) {
     case GGUFValueType::UINT8:
@@ -70,7 +68,7 @@ std::string read_gguf_string(std::ifstream& file) {
   uint64_t len;
   read_raw(file, len);
   if (len > 0) {
-    if (len > (1ull << 30)) {
+    if (len > GGUF_STRING_MAX_LENGTH) {
       throw std::runtime_error(
           "GGUF Error: String length exceeds sanity limit: " +
           std::to_string(len));
@@ -331,7 +329,7 @@ GGUFData load_gguf_meta(const std::string& filename) {
 
       uint32_t n_dims;
       read_raw(file, n_dims);
-      if (n_dims > 4) {
+      if (n_dims > GGUF_MAX_TENSOR_DIMS) {
         throw std::runtime_error("Tensor '" + info.name +
                                  "' has unsupported number of dimensions: " +
                                  std::to_string(n_dims));
@@ -444,7 +442,7 @@ GGUFData load_gguf_meta(const std::string& filename) {
   Logger::info("Finished populating tensor_infos_map. Map size: " +
                std::to_string(result.tensor_infos_map.size()));
 
-  uint64_t alignment = 32;
+  uint64_t alignment = GGUF_DEFAULT_ALIGNMENT;
   try {
     if (result.metadata.count("general.alignment")) {
       uint32_t align_val =

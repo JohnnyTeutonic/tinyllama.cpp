@@ -6,13 +6,12 @@
 #include <vector>
 
 #include "ggml_types.h"
+#include "gguf_parser.h"  // Include for GGML_QK_K
 
 struct block_q2_K;
 struct block_q3_K;
 struct block_q4_K;
 struct block_q6_K;
-
-constexpr int GGML_QK_K = 256;
 
 float fp16_to_fp32(uint16_t h, bool is_gguf_scale_field = false);
 uint16_t fp32_to_fp16(float f);
@@ -62,7 +61,6 @@ struct block_q8_K {
   int16_t bsums[GGML_QK_K / 16];
 };
 
-#define GGML_QK8_0 32
 struct block_q8_0 {
   uint16_t d;
   int8_t qs[GGML_QK8_0];

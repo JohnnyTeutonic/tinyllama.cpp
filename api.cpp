@@ -1,4 +1,5 @@
 #include "api.h"
+#include "gguf_parser.h"
 
 #include <algorithm>
 #include <cmath>
@@ -57,7 +58,7 @@ static int sample_top_k_top_p_temperature(const std::vector<float>& logits,
   for (float logit : logits) max_logit = std::max(max_logit, logit);
 
   for (int i = 0; i < vocab_size; ++i) {
-    scaled_logits[i] = (logits[i] - max_logit) / std::max(temperature, 1e-6f);
+    scaled_logits[i] = (logits[i] - max_logit) / std::max(temperature, GGUF_SMALL_VAL);
   }
 
   std::vector<double> probs_double(vocab_size);
@@ -100,7 +101,7 @@ static int sample_top_k_top_p_temperature(const std::vector<float>& logits,
   }
   std::vector<float> final_probs(prob_idx.size());
   for (size_t i = 0; i < prob_idx.size(); ++i) {
-    final_probs[i] = prob_idx[i].first / std::max(final_sum, 1e-6f);
+    final_probs[i] = prob_idx[i].first / std::max(final_sum, GGUF_SMALL_VAL);
   }
 
   std::discrete_distribution<int> dist(final_probs.begin(), final_probs.end());

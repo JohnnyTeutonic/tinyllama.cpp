@@ -110,6 +110,23 @@ Place these three files into a directory, for example, named `data/`.
 
 *(Note: This project expects BF16 weights in `model.safetensors`. Ensure your conversion script saves them in this format if converting from another source).*
 
+### Where to Download Tested Model Weights
+
+This project has been tested with specific model weights. You can download them from the following locations:
+
+*   **For SafeTensors (BF16 format expected):**
+    *   **TinyLlama 1.1B Chat v1.0:** [TinyLlama/TinyLlama-1.1B-Chat-v1.0 on Hugging Face](https://huggingface.co/TinyLlama/TinyLlama-1.1B-Chat-v1.0)
+        *   Ensure you download `config.json`, `tokenizer.json`, and `model.safetensors` (which should be BF16).
+
+*   **For GGUF:**
+    *   **TinyLlama 1.1B Chat v1.0 (Q8_0 GGUF):** [TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF - Q8_0.gguf](https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/blob/main/tinyllama-1.1b-chat-v1.0.Q8_0.gguf)
+        *   This is a quantized version and has been tested.
+    *   **Llama 2 7B (Q8_0 GGUF):** [TheBloke/Llama-2-7B-GGUF - llama-2-7b.Q8_0.gguf](https://huggingface.co/TheBloke/Llama-2-7B-GGUF/blob/main/llama-2-7b.Q8_0.gguf)
+        *   This larger model has also been tested. Performance will vary based on your hardware.
+    *   When using GGUF files, typically only the `.gguf` file itself is needed, as it should contain the necessary metadata. However, for some GGUF files or if using the `tinyllama` executable with a GGUF that doesn't fully embed tokenizer information, ensure a `tokenizer.json` (compatible with Llama 2) is present in the same directory or the model directory specified.
+
+Place downloaded GGUF files in a directory (e.g., `models/`) or directly provide the path to the `tinyllama` executable.
+
 ### 2. Build the C++ Application
 
 Use CMake to build the project:

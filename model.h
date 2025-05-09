@@ -197,6 +197,8 @@ class TinyLlamaModel {
 
   friend void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model);
 
+  void initialize_rope_freqs();
+
  private:
   ModelConfig config_;
 

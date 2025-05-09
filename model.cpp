@@ -24,6 +24,7 @@
 
 #include "gguf_parser.h"
 #include "quantization.h"
+#include "model_constants.h"  // Add this include
 
 static void matvec_q6k_f32_vector_cpu(const std::vector<block_q6_K>& mat_q6k,
                                       const std::vector<float>& vec_f32,
@@ -293,18 +294,20 @@ void log_vector_summary_with_tail(const std::string& name,
 }
 
 float bfloat16_to_float32(uint16_t bf16) {
-  if (bf16 == 0) return 0.0f;
-  if (bf16 == 0x8000) return -0.0f;
+  if (bf16 == bfloat16::ZERO) return 0.0f;
+  if (bf16 == bfloat16::NEG_ZERO) return -0.0f;
 
-  bool is_nan = ((bf16 & 0x7F80) == 0x7F80) && ((bf16 & 0x007F) != 0);
+  bool is_nan = ((bf16 & bfloat16::EXPONENT_MASK) == bfloat16::EXPONENT_MASK) && 
+                ((bf16 & bfloat16::MANTISSA_MASK) != 0);
   if (is_nan) return std::numeric_limits<float>::quiet_NaN();
 
-  if ((bf16 & 0x7F80) == 0x7F80 && (bf16 & 0x007F) == 0) {
-    return (bf16 & 0x8000) ? -std::numeric_limits<float>::infinity()
-                           : std::numeric_limits<float>::infinity();
+  if ((bf16 & bfloat16::EXPONENT_MASK) == bfloat16::EXPONENT_MASK && 
+      (bf16 & bfloat16::MANTISSA_MASK) == 0) {
+    return (bf16 & bfloat16::SIGN_BIT) ? -std::numeric_limits<float>::infinity()
+                                      : std::numeric_limits<float>::infinity();
   }
 
-  uint32_t bits = static_cast<uint32_t>(bf16) << 16;
+  uint32_t bits = static_cast<uint32_t>(bf16) << bfloat16::SHIFT_BITS;
   float result;
   std::memcpy(&result, &bits, sizeof(float));
 
@@ -350,7 +353,7 @@ int argmax(const std::vector<float>& v) {
 
 static void rmsnorm_vector_cpu(const std::vector<float>& x,
                                const std::vector<float>& weight,
-                               std::vector<float>& out, float eps) {
+                               std::vector<float>& out, float eps = numeric::DEFAULT_EPS) {
   if (x.empty() || x.size() != weight.size()) {
     Logger::error("RMSNorm vector size mismatch or empty input.");
     out.assign(x.size(), 0.0f);
@@ -366,7 +369,8 @@ static void rmsnorm_vector_cpu(const std::vector<float>& x,
   }
   ssq /= n;
 
-  float norm_factor = 1.0f / std::sqrt(static_cast<float>(ssq) + eps);
+  float norm_factor = 1.0f / std::sqrt(static_cast<float>(ssq) + 
+                     std::max(eps, numeric::MIN_NORM_EPS));
 
 #pragma omp parallel for
   for (size_t i = 0; i < n; ++i) {
@@ -663,50 +667,30 @@ static void calculate_attention_scores(const std::vector<float>& Q,
                                        const std::vector<float>& K,
                                        std::vector<float>& scores, int seq_len,
                                        int head_dim, float scale) {
-  if (Q.size() != head_dim || K.size() != (size_t)seq_len * head_dim) {
-    Logger::error("calculate_attention_scores: Size mismatch. Q: " +
-                  std::to_string(Q.size()) + " (Expected " +
-                  std::to_string(head_dim) +
-                  "), K: " + std::to_string(K.size()) + " (Expected " +
-                  std::to_string(seq_len * head_dim) + ")");
-    scores.assign(seq_len, 0.0f);
-    return;
-  }
+  if (Q.empty() || K.empty()) return;
   scores.resize(seq_len);
 
-#pragma omp parallel for
-  for (int t = 0; t < seq_len; ++t) {
-    double dot_product = 0.0;
-    double c_kahan = 0.0;
-    size_t k_offset = t * head_dim;
+  scale = std::clamp(scale, attention::MIN_SCALE, attention::MAX_SCALE);
+  float effective_scale = scale * attention::ATTENTION_SCALE_BASE;
 
-    for (int i = 0; i < head_dim; ++i) {
-      double term =
-          static_cast<double>(Q[i]) * static_cast<double>(K[k_offset + i]);
-
-      double y = term - c_kahan;
-      double t_sum = dot_product + y;
-      c_kahan = (t_sum - dot_product) - y;
-      dot_product = t_sum;
+#pragma omp parallel for collapse(1)
+  for (int i = 0; i < seq_len; ++i) {
+    float score = 0.0f;
+    for (int j = 0; j < head_dim; ++j) {
+      score += Q[j] * K[i * head_dim + j];
     }
-    scores[t] = static_cast<float>(dot_product) * scale;
+    scores[i] = score * effective_scale;
   }
 }
 
 static void apply_rope_vector(
     std::vector<float>& x, int num_heads, int head_dim, int pos,
     const std::vector<std::pair<float, float>>& freqs_cis) {
-  if (x.size() != num_heads * head_dim) {
-    Logger::error(
-        "apply_rope_vector: Input vector x has incorrect size. Expected " +
-        std::to_string(num_heads * head_dim) + ", got " +
-        std::to_string(x.size()));
-    return;
-  }
-  if (head_dim % 2 != 0) {
-    Logger::error("apply_rope_vector: head_dim must be even, got " +
-                  std::to_string(head_dim));
-    return;
+  if (pos >= rope::MAX_SEQUENCE_LENGTH) {
+    Logger::warning("Position " + std::to_string(pos) + 
+                " exceeds maximum sequence length of " + 
+                std::to_string(rope::MAX_SEQUENCE_LENGTH));
+    pos = rope::MAX_SEQUENCE_LENGTH - 1;
   }
 
   const int dim_half = head_dim / 2;
@@ -3632,4 +3616,58 @@ static void log_vector_summary_detailed(const std::string& name,
   ss << ", mean=" << std::fixed << std::setprecision(4) << (sum / v.size());
   ss << ", finite=" << (all_finite ? "yes" : "no");
   Logger::info(ss.str());
+}
+
+void TinyLlamaModel::initialize_rope_freqs() {
+  if (config_.num_attention_heads == 0) {
+    Logger::error("Cannot initialize RoPE frequencies: num_attention_heads is zero.");
+    return;
+  }
+  int head_dim = config_.hidden_size / config_.num_attention_heads;
+  if (head_dim == 0) {
+    Logger::error("Cannot initialize RoPE frequencies: calculated head_dim is zero.");
+    return;
+  }
+  if (head_dim % 2 != 0) {
+    Logger::error("Cannot initialize RoPE frequencies: head_dim must be even.");
+    return;
+  }
+
+  // This function precomputes RoPE frequencies for all positions and head dimensions.
+  // The precomputed_freqs_cis_ vector stores pairs of (cos(angle), sin(angle)).
+  // It's a flat vector: precomputed_freqs_cis_[(pos * head_dim / 2) + (dim_pair_idx)]
+
+  if (precomputed_freqs_cis_.empty()) { 
+    int max_seq_len = rope::MAX_SEQUENCE_LENGTH; // Or config_.max_position_embeddings if preferred
+    size_t required_size = (static_cast<size_t>(max_seq_len) * head_dim) / 2;
+    if (required_size == 0) {
+        Logger::warning("RoPE precomputation resulted in zero size. Max seq len: " + 
+                        std::to_string(max_seq_len) + ", head_dim: " + std::to_string(head_dim));
+        return;
+    }
+    precomputed_freqs_cis_.resize(required_size);
+    
+    float rope_theta = config_.rope_theta > 0 ? config_.rope_theta : rope::ROPE_THETA;
+
+    for (int pos = 0; pos < max_seq_len; ++pos) {
+      for (int i = 0; i < head_dim; i += 2) {
+        float freq = 1.0f / std::pow(rope_theta, float(i) / head_dim);
+        float val = static_cast<float>(pos) * freq;
+        float cos_val = std::cos(val);
+        float sin_val = std::sin(val);
+        size_t flat_idx = (static_cast<size_t>(pos) * head_dim / 2) + (i / 2);
+        if (flat_idx < precomputed_freqs_cis_.size()){
+            precomputed_freqs_cis_[flat_idx] = {cos_val, sin_val};
+        } else {
+            Logger::error("RoPE precomputation index out of bounds: " + std::to_string(flat_idx) + 
+                          " vs size " + std::to_string(precomputed_freqs_cis_.size()));
+            // This should not happen if resize was correct
+            return; 
+        }
+      }
+    }
+    Logger::info("Precomputed RoPE frequencies on CPU. Size: " + std::to_string(precomputed_freqs_cis_.size()));
+  } else {
+      Logger::info("RoPE frequencies already precomputed.");
+  }
 }
