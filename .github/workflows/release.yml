@@ -135,5 +135,6 @@ jobs:
       - name: Upload Release Asset
         uses: softprops/action-gh-release@v1
         with:
+          tag_name: ${{ needs.create-release.outputs.version }}
           files: ${{ matrix.asset_name }}
           token: ${{ secrets.GITHUB_TOKEN }} 
