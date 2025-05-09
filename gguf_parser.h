@@ -1,18 +1,19 @@
 #pragma once
 
+#include <cstddef>  // For std::byte
+#include <fstream>
+#include <map>
 #include <string>
 #include <vector>
-#include <map>
-#include <fstream>
-#include <cstddef> // For std::byte
-#include "gguf_structs.h" // Include the GGUF structure definitions
+
+#include "gguf_structs.h"  // Include the GGUF structure definitions
 
 // --- GGUF Constants ---
-extern const uint32_t GGUF_MAGIC; // Defined in gguf_parser.cpp
+extern const uint32_t GGUF_MAGIC;  // Defined in gguf_parser.cpp
 
 // --- Helper Function Declarations ---
 
-template<typename T>
+template <typename T>
 void read_raw(std::ifstream& file, T& dest);
 
 std::string read_gguf_string(std::ifstream& file);
@@ -27,4 +28,5 @@ std::string read_gguf_string(std::ifstream& file);
 GGUFData load_gguf_meta(const std::string& filename);
 
 // TODO: Declare a function to load the actual tensor data later.
-// void load_tensor_data(std::ifstream& file, GGUFTensorInfo& info, std::vector<std::byte>& data_buffer); 
+// void load_tensor_data(std::ifstream& file, GGUFTensorInfo& info,
+// std::vector<std::byte>& data_buffer);
