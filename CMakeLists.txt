@@ -7,6 +7,25 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Include FetchContent module
 include(FetchContent)
 
+# --- Fetch nlohmann/json --- 
+# Try to find it system-wide first
+find_package(nlohmann_json 3.2.0 QUIET)
+if(NOT nlohmann_json_FOUND)
+  message(STATUS "nlohmann_json not found via find_package. Fetching with FetchContent.")
+  FetchContent_Declare(
+    nlohmann_json
+    GIT_REPOSITORY https://github.com/nlohmann/json.git
+    GIT_TAG        v3.11.3
+  )
+  FetchContent_MakeAvailable(nlohmann_json)
+  set(NLOHMANN_JSON_INCLUDE_DIRS ${nlohmann_json_SOURCE_DIR}/include CACHE INTERNAL "nlohmann_json include directory")
+  message(STATUS "nlohmann_json fetched. Include directory: ${NLOHMANN_JSON_INCLUDE_DIRS}")
+else()
+  message(STATUS "Found nlohmann_json system-wide or via CMake package config. Version: ${nlohmann_json_VERSION}")
+  set(NLOHMANN_JSON_INCLUDE_DIRS ${nlohmann_json_INCLUDE_DIRS} CACHE INTERNAL "nlohmann_json include directory")
+endif()
+# --------------------------
+
 # --- Fetch cpp-httplib --- 
 FetchContent_Declare(
   cpp-httplib
@@ -18,9 +37,9 @@ FetchContent_MakeAvailable(cpp-httplib)
 
 # Find necessary system libraries
 find_package(Threads REQUIRED)
-find_package(nlohmann_json 3.2.0 REQUIRED)
+# find_package(nlohmann_json 3.2.0 REQUIRED) # Replaced by FetchContent logic above
 find_package(OpenMP REQUIRED)
-find_package(OpenSSL)
+# find_package(OpenSSL) # OpenSSL is optional and handled later for the server target
 
 # Handle CUDA
 find_package(CUDA)
@@ -66,25 +85,23 @@ add_library(tinyllama_core STATIC
 
 # Set properties for the core library
 target_include_directories(tinyllama_core PUBLIC # Use PUBLIC so executables inherit includes
-    ${nlohmann_json_INCLUDE_DIRS}
+    ${NLOHMANN_JSON_INCLUDE_DIRS} # Use the variable set by our FetchContent logic
     ${CMAKE_CURRENT_SOURCE_DIR}
-    ${CUDA_INCLUDE_DIRS}
-    ${cpp-httplib_SOURCE_DIR}
+    # ${CUDA_INCLUDE_DIRS} # CUDA includes are handled conditionally below or by CMAKE_CUDA_STANDARD_LIBRARIES
+    ${cpp-httplib_SOURCE_DIR}/ # httplib is header-only, point to its source dir for includes
 )
 
 # Link system/other libraries
 target_link_libraries(tinyllama_core PRIVATE # Dependencies needed to BUILD the library
     Threads::Threads
-    nlohmann_json::nlohmann_json
+    nlohmann_json::nlohmann_json # Link against the target from find_package or FetchContent
     OpenMP::OpenMP_CXX
 )
 
 # Conditionally add CUDA definition and link CUDA libs for the library
 if(CUDA_ENABLED)
     target_compile_definitions(tinyllama_core PUBLIC HAS_CUDA)
-    # Also add CUDA include dirs if needed specifically here, though PUBLIC in previous block is okay
-    target_include_directories(tinyllama_core PRIVATE ${CUDA_INCLUDE_DIRS}) # Add includes needed to *build* the lib if CUDA is on
-    # Link core CUDA runtime and the cuBLAS library
+    target_include_directories(tinyllama_core PUBLIC ${CUDA_INCLUDE_DIRS})
     target_link_libraries(tinyllama_core PRIVATE ${CUDA_LIBRARIES} CUDA::cublas)
 endif()
 
@@ -101,14 +118,18 @@ add_executable(tinyllama_server
     server.cpp
 )
 
-target_link_libraries(tinyllama_server PRIVATE tinyllama_core)
+target_link_libraries(tinyllama_server PRIVATE tinyllama_core httplib)
 
 # Link OpenSSL if found (needed by httplib if SSL support is enabled)
-if(OPENSSL_FOUND)
-    message(STATUS "Found OpenSSL, linking ssl and crypto libraries to server.")
-    target_link_libraries(tinyllama_server PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+# cpp-httplib handles OpenSSL linking internally if its CMake options are set (e.g., LIBRESSL_FOUND, OPENSSL_FOUND)
+# We just need to ensure find_package(OpenSSL) is called if we want to influence its detection.
+find_package(OpenSSL QUIET) # Try to find OpenSSL for cpp-httplib to potentially use
+if(OPENSSL_FOUND AND TARGET OpenSSL::SSL AND TARGET OpenSSL::Crypto)
+    message(STATUS "Found OpenSSL. cpp-httplib may use it for HTTPS if compiled with SSL support.")
+    # No explicit linking here as cpp-httplib should handle it.
+    # If cpp-httplib is fetched as source, it will build with SSL if OpenSSL is found by its own CMake logic.
 else()
-    message(WARNING "OpenSSL not found. HTTPS support in server will likely fail to link if enabled via CPPHTTPLIB_OPENSSL_SUPPORT.")
+    message(STATUS "OpenSSL not found or targets not available. HTTPS support in server might be disabled or use other SSL libs if cpp-httplib is configured for them.")
 endif()
 
 # --- Common Settings --- 
@@ -123,9 +144,9 @@ else()
     message(WARNING "OpenMP not found. Performance will be suboptimal.")
 endif()
 
-if(NOT nlohmann_json_FOUND)
-    message(FATAL_ERROR "nlohmann_json not found. You can install it via your package manager or add the single header to your project.")
-endif()
+# if(NOT nlohmann_json_FOUND AND NOT TARGET nlohmann_json::nlohmann_json)
+#     message(FATAL_ERROR "nlohmann_json not found and not fetched. Check CMake configuration.")
+# endif()
 
 # For Windows: avoid conflicting runtime (Apply to all targets)
 if (MSVC)

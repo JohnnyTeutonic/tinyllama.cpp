@@ -44,17 +44,10 @@ sudo apt update
 # 2. Essential build tools (includes g++ compiler) and CMake
 sudo apt install build-essential cmake
 
-# 3. nlohmann/json (JSON parsing library)
-#    Note: CMake will attempt to fetch this if not found by the system.
-#    For a system-wide install:
-sudo apt install nlohmann-json3-dev
-
-# 4. OpenMP (for parallel processing)
+# 3. OpenMP (for parallel processing)
 #    Usually comes with modern g++, but can be installed explicitly if needed.
 sudo apt install libomp-dev
 
-# 5. Boost.Regex (No longer needed as test_tokenizer was removed)
-# sudo apt install libboost-regex-dev
 ```
 *   **cpp-httplib:** This library is fetched directly by CMake ...
 *   **Other Distributions:** For non-Debian/Ubuntu systems, please use your distribution's package manager ...
