@@ -53,6 +53,11 @@ usage() {
     echo "  docs         Generate documentation using Doxygen."
     echo "               (Assumes ${DOXYGEN_CONFIG_FILE} in project root)"
     echo ""
+    echo "  docs-serve   Start a static server for viewing documentation."
+    echo "               (Serves the docs/html directory on http://localhost:8000)"
+    echo ""
+    echo "  docs-clean   Remove generated documentation."
+    echo ""
     echo "  package      Package a release tarball."
     echo "               Options:"
     echo "                 --version <semver>          (default: ${DEFAULT_RELEASE_VERSION})"
@@ -190,6 +195,44 @@ do_generate_docs() {
     log "Documentation generated successfully (check Doxyfile for OUTPUT_DIRECTORY)."
 }
 
+do_docs_serve() {
+    local docs_dir="${PROJECT_ROOT_DIR}/docs/html"
+    
+    if [ ! -d "$docs_dir" ]; then
+        error "Documentation not found at $docs_dir. Please generate docs first using: $0 docs"
+    fi
+
+    # Check if directory is empty
+    if [ -z "$(ls -A $docs_dir)" ]; then
+        error "Documentation directory is empty. Please generate docs first using: $0 docs"
+    fi
+
+    # Check if Python is available
+    if command -v python3 &> /dev/null; then
+        log "Starting documentation server on http://localhost:8000"
+        log "Press Ctrl+C to stop the server"
+        cd "$docs_dir" && python3 -m http.server 8000 --bind 0.0.0.0
+    elif command -v python &> /dev/null; then
+        log "Starting documentation server on http://localhost:8000"
+        log "Press Ctrl+C to stop the server"
+        cd "$docs_dir" && python -m http.server 8000 --bind 0.0.0.0
+    else
+        error "Python not found. Please install Python to use the docs-serve feature."
+    fi
+}
+
+do_docs_clean() {
+    local docs_dir="${PROJECT_ROOT_DIR}/docs"
+    
+    if [ -d "$docs_dir" ]; then
+        log "Removing documentation directory..."
+        rm -rf "$docs_dir"
+        log "Documentation cleaned successfully."
+    else
+        log "No documentation directory found at $docs_dir. Nothing to clean."
+    fi
+}
+
 do_package_release() {
     local release_version="${DEFAULT_RELEASE_VERSION}"
     local package_build_type="Release" # Default to Release for packaging
@@ -230,7 +273,7 @@ do_package_release() {
         cp "${PROJECT_ROOT_DIR}/LICENSE" "${staging_dir_path}/" || log "LICENSE file not found, skipping."
     fi
 
-    local doxy_output_dir="docs/html" # Common default, adjust if your Doxyfile is different
+    local doxy_output_dir="docs/html"
     if [ -d "${PROJECT_ROOT_DIR}/${doxy_output_dir}" ]; then
         mkdir -p "${staging_dir_path}/docs"
         cp -r "${PROJECT_ROOT_DIR}/${doxy_output_dir}" "${staging_dir_path}/docs/" || error "Failed to copy documentation."
@@ -261,11 +304,13 @@ shift # Remove command from arguments list, rest are options for the command
 
 case $COMMAND in
     build) do_build "$@" ;;
-    clean) do_clean "$@" ;;
+    clean) do_clean ;;
     run-server) do_run_server "$@" ;;
     run-chat) do_run_chat "$@" ;;
-    format) do_format "$@" ;;
-    docs) do_generate_docs "$@" ;;
+    format) do_format ;;
+    docs) do_generate_docs ;;
+    docs-serve) do_docs_serve ;;
+    docs-clean) do_docs_clean ;;
     package) do_package_release "$@" ;;
     help|--help|-h) usage ;;
     *)

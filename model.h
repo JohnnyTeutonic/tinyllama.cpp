@@ -19,17 +19,23 @@
 
 #include "quantization.h"
 
+/**
+ * @brief Enumeration of tensor names used in the TinyLlama model
+ * 
+ * This enum class defines the different types of tensors used in the transformer
+ * architecture, including attention projections, feed-forward layers, and embeddings.
+ */
 enum class TensorName {
-  Q_PROJ,
-  K_PROJ,
-  V_PROJ,
-  O_PROJ,
-  GATE_PROJ,
-  UP_PROJ,
-  DOWN_PROJ,
-  TOKEN_EMBD,
-  LM_HEAD,
-  UNKNOWN
+    Q_PROJ,      /**< Query projection matrix */
+    K_PROJ,      /**< Key projection matrix */
+    V_PROJ,      /**< Value projection matrix */
+    O_PROJ,      /**< Output projection matrix */
+    GATE_PROJ,   /**< Gate projection for SwiGLU activation */
+    UP_PROJ,     /**< Upward projection in feed-forward network */
+    DOWN_PROJ,   /**< Downward projection in feed-forward network */
+    TOKEN_EMBD,  /**< Token embedding matrix */
+    LM_HEAD,     /**< Language model head for final token prediction */
+    UNKNOWN      /**< Unknown tensor type */
 };
 
 static std::string tensor_name_to_string(TensorName tn) {
@@ -57,79 +63,107 @@ static std::string tensor_name_to_string(TensorName tn) {
   }
 }
 
+/**
+ * @brief Configuration parameters for the TinyLlama model
+ * 
+ * This structure holds all the hyperparameters and configuration settings
+ * needed to initialize and run the TinyLlama model.
+ */
 struct ModelConfig {
-  int hidden_size;
-  int intermediate_size;
-  int num_attention_heads;
-  int num_key_value_heads;
-  int num_hidden_layers;
-  int vocab_size;
-  int max_position_embeddings;
-  float rms_norm_eps;
-  float rope_theta;
-  std::string hidden_act;
-  std::string torch_dtype;
-  int bos_token_id;
-  int eos_token_id;
-  std::string architecture = "unknown";
-  std::string model_name = "unknown";
-  std::string chat_template_type = "unknown";
-  std::string pre_tokenizer_type = "unknown";
-  std::string chat_template_string;
-  bool is_gguf_file_loaded = false;
+    int hidden_size;              /**< Size of the hidden layers */
+    int intermediate_size;        /**< Size of the intermediate (feed-forward) layers */
+    int num_attention_heads;      /**< Number of attention heads */
+    int num_key_value_heads;      /**< Number of key/value heads for grouped-query attention */
+    int num_hidden_layers;        /**< Number of transformer layers */
+    int vocab_size;              /**< Size of the vocabulary */
+    int max_position_embeddings; /**< Maximum sequence length supported */
+    float rms_norm_eps;         /**< Epsilon for RMSNorm operation */
+    float rope_theta;           /**< Base for rotary position embeddings */
+    std::string hidden_act;     /**< Activation function in hidden layers */
+    std::string torch_dtype;    /**< Data type used in the original PyTorch model */
+    int bos_token_id;          /**< Beginning of sequence token ID */
+    int eos_token_id;          /**< End of sequence token ID */
+    std::string architecture;   /**< Model architecture identifier */
+    std::string model_name;    /**< Name of the model */
+    std::string chat_template_type; /**< Type of chat template used */
+    std::string pre_tokenizer_type; /**< Type of pre-tokenizer */
+    std::string chat_template_string; /**< Template string for chat formatting */
+    bool is_gguf_file_loaded;   /**< Flag indicating if model was loaded from GGUF format */
 };
 
 struct GGUFData;
 struct ModelConfig;
 ModelConfig parse_model_config_from_gguf(const GGUFData& gguf);
 
+/**
+ * @brief Key-Value cache for a single transformer layer
+ * 
+ * Stores the key and value tensors for attention mechanism, with optional
+ * CUDA support for GPU acceleration.
+ */
 struct KVCacheLayer {
-  std::vector<float> k;
-  std::vector<float> v;
+    std::vector<float> k;     /**< Key cache */
+    std::vector<float> v;     /**< Value cache */
 
 #ifdef HAS_CUDA
-
-  float* k_dev = nullptr;
-  float* v_dev = nullptr;
+    float* k_dev = nullptr;  /**< Device pointer for key cache */
+    float* v_dev = nullptr;  /**< Device pointer for value cache */
 #endif
 };
 
+/**
+ * @brief Complete Key-Value cache for all transformer layers
+ * 
+ * Manages the KV cache across all layers of the transformer model,
+ * including memory management for both CPU and GPU implementations.
+ */
 struct KVCache {
-  std::vector<KVCacheLayer> layers;
-  int seq_len = 0;
+    std::vector<KVCacheLayer> layers; /**< KV cache for each layer */
+    int seq_len = 0;                  /**< Current sequence length */
 
 #ifdef HAS_CUDA
+    int allocated_num_layers = 0;     /**< Number of layers allocated on GPU */
+    int allocated_max_seq_len = 0;    /**< Maximum sequence length allocated */
+    int allocated_num_kv_heads = 0;   /**< Number of key/value heads allocated */
+    int allocated_head_dim = 0;       /**< Dimension of each head allocated */
 
-  int allocated_num_layers = 0;
-  int allocated_max_seq_len = 0;
-  int allocated_num_kv_heads = 0;
-  int allocated_head_dim = 0;
-
-  ~KVCache() {
-    if (allocated_num_layers > 0) {
-      Logger::info("Freeing KVCache CUDA memory...");
-      for (int l = 0; l < allocated_num_layers; ++l) {
-        if (layers[l].k_dev) {
-          gpuErrchk(cudaFree(layers[l].k_dev));
-          layers[l].k_dev = nullptr;
+    ~KVCache() {
+      if (allocated_num_layers > 0) {
+        Logger::info("Freeing KVCache CUDA memory...");
+        for (int l = 0; l < allocated_num_layers; ++l) {
+          if (layers[l].k_dev) {
+            gpuErrchk(cudaFree(layers[l].k_dev));
+            layers[l].k_dev = nullptr;
+          }
+          if (layers[l].v_dev) {
+            gpuErrchk(cudaFree(layers[l].v_dev));
+            layers[l].v_dev = nullptr;
+          }
         }
-        if (layers[l].v_dev) {
-          gpuErrchk(cudaFree(layers[l].v_dev));
-          layers[l].v_dev = nullptr;
-        }
+        Logger::info("KVCache CUDA memory freed.");
       }
-      Logger::info("KVCache CUDA memory freed.");
     }
-  }
 #endif
 
-  void initialize(int num_layers, int max_seq_len, int num_kv_heads,
-                  int head_dim);
+    /**
+     * @brief Initializes the KV cache with given dimensions
+     * @param num_layers Number of transformer layers
+     * @param max_seq_len Maximum sequence length to cache
+     * @param num_kv_heads Number of key/value heads
+     * @param head_dim Dimension of each attention head
+     */
+    void initialize(int num_layers, int max_seq_len, int num_kv_heads, int head_dim);
 };
 
 using ForwardDiagCallback = std::function<void(
     int layer, const std::string& name, const std::vector<float>& v)>;
 
+/**
+ * @brief Weights for a single transformer layer
+ * 
+ * Contains all the weight matrices and normalization parameters for
+ * a transformer layer, supporting multiple quantization formats.
+ */
 struct LayerWeights {
   std::vector<uint16_t> input_layernorm;
   std::vector<uint16_t> post_attention_layernorm;
@@ -161,18 +195,45 @@ struct LayerWeights {
 #endif
 };
 
+/**
+ * @brief Main TinyLlama model class
+ * 
+ * Implements the TinyLlama language model, providing methods for
+ * initialization, inference, and weight management.
+ */
 class TinyLlamaModel {
  public:
+  /**
+   * @brief Constructs a TinyLlama model from SafeTensors format
+   * @param config Model configuration
+   * @param loader SafeTensors loader containing weights
+   */
   TinyLlamaModel(const ModelConfig& config, const SafeTensorsLoader& loader);
   TinyLlamaModel(const ModelConfig& config, const std::string& weights_path);
   ~TinyLlamaModel();
 
+  /**
+   * @brief Performs forward pass on CPU
+   * @param x_vec Input tensor
+   * @param pos Position in the sequence
+   * @param cache Optional KV cache
+   * @param attention_mask Optional attention mask
+   * @return Output logits
+   */
   std::vector<float> forward(std::vector<float>& x_vec, int pos,
                              KVCache* cache = nullptr,
                              const std::vector<int>* attention_mask = nullptr);
 
 #ifdef HAS_CUDA
-
+  /**
+   * @brief Performs forward pass on GPU
+   * @param token_id Input token ID
+   * @param pos Position in the sequence
+   * @param cache KV cache
+   * @param attention_mask Optional attention mask
+   * @param stream CUDA stream
+   * @return Output logits
+   */
   std::vector<float> forward_device(
       int token_id, int pos, KVCache* cache,
       const std::vector<int>* attention_mask = nullptr,
