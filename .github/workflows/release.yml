@@ -109,34 +109,14 @@ jobs:
           cd build
           cmake --build . --config Release
 
-      - name: Generate Documentation
-        run: |
-          cd build
-          cmake --build . --target docs
-
       - name: Package (Linux)
         if: runner.os == 'Linux'
         run: |
           mkdir -p ${{ matrix.artifact_name }}
           cp build/tinyllama ${{ matrix.artifact_name }}/
           cp build/tinyllama_server ${{ matrix.artifact_name }}/
-          cp -r docs/html ${{ matrix.artifact_name }}/docs
           cp README.md LICENSE ${{ matrix.artifact_name }}/
           tar czf ${{ matrix.asset_name }} ${{ matrix.artifact_name }}
-
-      - name: Build (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          Set-Location build
-          cmake --build . --config Release
-
-      - name: Generate Documentation (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          Set-Location build
-          cmake --build . --target docs
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
@@ -145,7 +125,6 @@ jobs:
           New-Item -ItemType Directory -Force -Path ${{ matrix.artifact_name }}
           Copy-Item -Path "build/Release/tinyllama.exe" -Destination "${{ matrix.artifact_name }}/"
           Copy-Item -Path "build/Release/tinyllama_server.exe" -Destination "${{ matrix.artifact_name }}/"
-          Copy-Item -Path "docs/html" -Destination "${{ matrix.artifact_name }}/docs" -Recurse
           Copy-Item -Path "README.md" -Destination "${{ matrix.artifact_name }}/"
           Copy-Item -Path "LICENSE" -Destination "${{ matrix.artifact_name }}/"
           7z a ${{ matrix.asset_name }} ${{ matrix.artifact_name }}
@@ -154,54 +133,4 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           files: ${{ matrix.asset_name }}
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-  build-cuda:
-    permissions:
-      contents: write
-    needs: create-release
-    runs-on: ubuntu-22.04  # Explicitly use Ubuntu 22.04
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.inputs.version || github.ref }}
-
-      - name: Setup CUDA
-        run: |
-          wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
-          sudo dpkg -i cuda-keyring_1.1-1_all.deb
-          sudo apt-get update
-          sudo apt-get install -y cuda-toolkit-12-1
-
-      - name: Setup CMake
-        uses: jwlawson/actions-setup-cmake@v1.14
-        with:
-          cmake-version: '3.27.0'
-
-      - name: Install Dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential doxygen graphviz
-
-      - name: Build with CUDA
-        run: |
-          mkdir build
-          cd build
-          cmake .. -DCMAKE_BUILD_TYPE=Release -DHAS_CUDA=ON
-          cmake --build . --config Release
-
-      - name: Package CUDA Build
-        run: |
-          mkdir -p tinyllama-cuda
-          cp build/tinyllama tinyllama-cuda/
-          cp build/tinyllama_server tinyllama-cuda/
-          cp -r docs/html tinyllama-cuda/docs
-          cp README.md LICENSE tinyllama-cuda/
-          tar czf tinyllama-cuda.tar.gz tinyllama-cuda
-
-      - name: Upload CUDA Release Asset
-        uses: softprops/action-gh-release@v1
-        with:
-          files: tinyllama-cuda.tar.gz
           token: ${{ secrets.GITHUB_TOKEN }} 
