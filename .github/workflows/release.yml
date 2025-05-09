@@ -162,11 +162,11 @@ jobs:
           ref: ${{ github.event.inputs.version || github.ref }}
 
       - name: Setup CUDA
-        uses: Jimver/cuda-toolkit@v0.2.11
-        with:
-          cuda: '12.1.0'
-          method: 'network'
-          sub-packages: '["nvcc", "cudart", "cublas", "cublas-dev"]'
+        run: |
+          wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          sudo apt-get update
+          sudo apt-get install -y cuda-toolkit-12-1
 
       - name: Setup CMake
         uses: jwlawson/actions-setup-cmake@v1.14
