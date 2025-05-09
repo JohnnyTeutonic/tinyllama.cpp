@@ -124,6 +124,13 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Setup CUDA
+        uses: Jimver/cuda-toolkit@v0.2.11
+        with:
+          cuda: '12.1.0'
+          method: 'network'
+          sub-packages: '["nvcc", "cudart", "cublas", "cublas-dev"]'
+
       - name: Setup CMake
         uses: jwlawson/actions-setup-cmake@v1.14
         with:
