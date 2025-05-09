@@ -31,7 +31,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.version || github.ref }}
+          fetch-depth: 0
         
       - name: Create Release
         id: create_release
@@ -62,7 +62,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.version || github.ref }}
+          fetch-depth: 0
 
       - name: Setup CMake
         uses: jwlawson/actions-setup-cmake@v1.14
