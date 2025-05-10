@@ -32,6 +32,14 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(cpp-httplib)
 
+# --- Fetch pybind11 ---
+FetchContent_Declare(
+  pybind11
+  GIT_REPOSITORY https://github.com/pybind/pybind11.git
+  GIT_TAG        v2.12.0
+)
+FetchContent_MakeAvailable(pybind11)
+
 # Find necessary system libraries
 find_package(Threads REQUIRED)
 find_package(OpenMP REQUIRED)
@@ -71,13 +79,15 @@ add_library(tinyllama_core STATIC
     safetensors_loader.cpp 
     tokenizer.cpp 
     logger.cpp 
-    api.cpp # Added API implementation
+    api.cpp
     vocab_loader.cpp
     gguf_parser.cpp
     quantization.cpp
     model_constants.h
     ${CUDA_SOURCES} # Conditionally include CUDA source file
 )
+
+set_target_properties(tinyllama_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # Set properties for the core library
 target_include_directories(tinyllama_core PUBLIC
@@ -113,20 +123,29 @@ add_executable(tinyllama_server
 
 target_link_libraries(tinyllama_server PRIVATE tinyllama_core httplib)
 
-# Link OpenSSL if found (needed by httplib if SSL support is enabled)
 find_package(OpenSSL QUIET) # Try to find OpenSSL for cpp-httplib to potentially use
 if(OPENSSL_FOUND AND TARGET OpenSSL::SSL AND TARGET OpenSSL::Crypto)
     message(STATUS "Found OpenSSL. Enabling SSL support in cpp-httplib.")
     message(STATUS "OpenSSL Include Directories: ${OpenSSL_INCLUDE_DIRS}")
     target_compile_definitions(tinyllama_server PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT)
-    # Add OpenSSL include directories
     target_include_directories(tinyllama_server PRIVATE ${OpenSSL_INCLUDE_DIRS})
-    # target_link_libraries(tinyllama_server PRIVATE OpenSSL::SSL OpenSSL::Crypto)
 else()
     message(STATUS "OpenSSL not found or targets not available. HTTPS support in server will be disabled.")
 endif()
 
-# Add OpenMP flags (applies to all targets using CXX)
+find_package(Python COMPONENTS Interpreter Development REQUIRED)
+
+pybind11_add_module(tinyllama_bindings
+    bindings.cpp
+)
+
+target_link_libraries(tinyllama_bindings PRIVATE tinyllama_core)
+
+# For Windows: ensure the Python extension has the .pyd extension
+if (MSVC)
+    set_target_properties(tinyllama_bindings PROPERTIES SUFFIX ".pyd")
+endif()
+
 if(OpenMP_FOUND)
     message(STATUS "Found OpenMP, enabling parallel execution.")
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${OpenMP_C_FLAGS}")
@@ -136,7 +155,6 @@ else()
     message(WARNING "OpenMP not found. Performance will be suboptimal.")
 endif()
 
-# For Windows: avoid conflicting runtime (Apply to all targets)
 if (MSVC)
   # Need to apply to tinyllama_core as well
   foreach(target tinyllama tinyllama_server tinyllama_core)
