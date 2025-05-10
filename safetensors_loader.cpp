@@ -2,9 +2,9 @@
 
 #include <algorithm>
 #include <fstream>
-#include <filesystem> // Required for path manipulation
-#include "model.h"      // Required for ModelConfig definition
-#include "logger.h"     // Required for Logger
+#include <filesystem> // For path manipulation
+#include "model.h"      // For ModelConfig definition and parse_model_config
+#include "logger.h"     // For Logger
 
 #ifdef __AVX2__
 #include <immintrin.h>
@@ -253,21 +253,20 @@ std::future<typename std::result_of<F(Args...)>::type> ThreadPool::submit(
 }
 
 // Implementation of the new static method
-bool SafeTensorsLoader::load_model_config_from_json(const std::string& model_weights_path, ModelConfig& config_to_populate) {
-    namespace fs = std::filesystem;
-    fs::path weights_fs_path(model_weights_path);
-    fs::path config_json_path = weights_fs_path.parent_path() / "config.json";
+bool SafeTensorsLoader::load_model_config_from_json(const std::string& model_path, ModelConfig& config_to_populate) {
+    std::filesystem::path sf_path(model_path);
+    std::filesystem::path config_json_path = sf_path.parent_path() / "config.json";
 
-    Logger::info("[SafetensorsLoader] Attempting to load model config from: " + config_json_path.string());
+    Logger::info("[SafeTensorsLoader] Attempting to load model config from: " + config_json_path.string());
 
-    if (!fs::exists(config_json_path)) {
-        Logger::warning("[SafetensorsLoader] config.json not found at " + config_json_path.string());
+    if (!std::filesystem::exists(config_json_path)) {
+        Logger::warning("[SafeTensorsLoader] config.json not found at " + config_json_path.string());
         return false;
     }
 
     std::ifstream config_file(config_json_path);
     if (!config_file.is_open()) {
-        Logger::error("[SafetensorsLoader] Failed to open config.json at " + config_json_path.string());
+        Logger::error("[SafeTensorsLoader] Failed to open config.json at " + config_json_path.string());
         return false;
     }
 
@@ -276,61 +275,54 @@ bool SafeTensorsLoader::load_model_config_from_json(const std::string& model_wei
         config_file >> json_config;
         config_file.close();
 
-        Logger::info("[SafetensorsLoader] Successfully parsed config.json. Populating ModelConfig...");
+        // Use the existing parse_model_config function (it needs to be callable here)
+        // If parse_model_config is not static or part of a class accessible here, 
+        // we'll need to duplicate its logic or make it accessible.
+        // For now, assuming parse_model_config from model.cpp can be used or adapted.
+        // Let's replicate the relevant parts of parse_model_config directly here for simplicity,
+        // as parse_model_config itself is not part of SafeTensorsLoader.
 
-        // Use .value() for safety, providing a default or relying on ModelConfig defaults if key is missing
-        // For critical fields, consider checking with .contains() and throwing/logging an error if absent
         config_to_populate.hidden_size = json_config.value("hidden_size", 0);
         config_to_populate.intermediate_size = json_config.value("intermediate_size", 0);
         config_to_populate.num_attention_heads = json_config.value("num_attention_heads", 0);
-        // num_key_value_heads might not always be present; often defaults to num_attention_heads
-        config_to_populate.num_key_value_heads = json_config.value("num_key_value_heads", config_to_populate.num_attention_heads);
-        if (json_config.contains("num_key_value_heads")) { // Explicitly set if present
-             config_to_populate.num_key_value_heads = json_config.at("num_key_value_heads").get<int>();
-        } else {
-            config_to_populate.num_key_value_heads = config_to_populate.num_attention_heads; // Default if not found
-        }
+        config_to_populate.num_key_value_heads = json_config.value("num_key_value_heads", config_to_populate.num_attention_heads); // Default to num_attention_heads if not present
         config_to_populate.num_hidden_layers = json_config.value("num_hidden_layers", 0);
         config_to_populate.vocab_size = json_config.value("vocab_size", 0);
         config_to_populate.max_position_embeddings = json_config.value("max_position_embeddings", 0);
         config_to_populate.rms_norm_eps = json_config.value("rms_norm_eps", 1e-5f);
         config_to_populate.rope_theta = json_config.value("rope_theta", 10000.0f);
-        config_to_populate.hidden_act = json_config.value("hidden_act", "");
-        config_to_populate.torch_dtype = json_config.value("torch_dtype", "");
-        config_to_populate.bos_token_id = json_config.value("bos_token_id", -1); // Default to -1 if not set
-        config_to_populate.eos_token_id = json_config.value("eos_token_id", -1); // Default to -1 if not set
+        config_to_populate.hidden_act = json_config.value("hidden_act", "silu");
+        config_to_populate.torch_dtype = json_config.value("torch_dtype", "float16"); // Safetensors often bf16 or f16
+        config_to_populate.bos_token_id = json_config.value("bos_token_id", 1);
+        config_to_populate.eos_token_id = json_config.value("eos_token_id", 2);
         
-        // Architecture: often a list, take the first element if it's an array
+        // Handle 'architectures' field which is often a list
         if (json_config.contains("architectures") && json_config["architectures"].is_array() && !json_config["architectures"].empty()) {
             config_to_populate.architecture = json_config["architectures"][0].get<std::string>();
         } else {
-            config_to_populate.architecture = json_config.value("architecture", ""); // Fallback if not an array or not present
+            config_to_populate.architecture = json_config.value("architecture", ""); // Fallback if not a list or empty
         }
-
-        config_to_populate.model_name = json_config.value("model_type", ""); // Often called model_type in HF configs
-        if (config_to_populate.model_name.empty()) { // Fallback if model_type is not present
+        
+        config_to_populate.model_name = json_config.value("model_type", ""); // Or model_name, varies by config
+        if (config_to_populate.model_name.empty()) {
              config_to_populate.model_name = json_config.value("name_or_path", "");
         }
 
-        // These might not be standard in all config.json, provide defaults or leave empty
-        config_to_populate.chat_template_type = json_config.value("chat_template_type", ""); 
+        // GGUF specific fields, not typically in safetensors config.json, but ensure they are defaulted reasonably.
+        config_to_populate.is_gguf_file_loaded = false; 
+        // chat_template_type, pre_tokenizer_type, chat_template_string might not be in all safetensor configs
+        config_to_populate.chat_template_type = json_config.value("chat_template_type", "");
         config_to_populate.pre_tokenizer_type = json_config.value("pre_tokenizer_type", "");
-        config_to_populate.chat_template_string = json_config.value("chat_template", "");
+        config_to_populate.chat_template_string = json_config.value("chat_template", ""); // often 'chat_template'
 
-        config_to_populate.is_gguf_file_loaded = false; // Explicitly false for safetensors
-
-        Logger::info("[SafetensorsLoader] ModelConfig populated from config.json:");
-        Logger::info("  hidden_size: " + std::to_string(config_to_populate.hidden_size));
-        Logger::info("  vocab_size: " + std::to_string(config_to_populate.vocab_size));
-        // Add more logs for other critical parameters if needed
-
+        Logger::info("[SafeTensorsLoader] Successfully parsed config.json. Hidden size: " + std::to_string(config_to_populate.hidden_size));
         return true;
 
     } catch (const nlohmann::json::exception& e) {
-        Logger::error("[SafetensorsLoader] Failed to parse config.json: " + std::string(e.what()));
+        Logger::error("[SafeTensorsLoader] Failed to parse config.json: " + std::string(e.what()));
         return false;
     } catch (const std::exception& e) {
-        Logger::error("[SafetensorsLoader] An unexpected error occurred while processing config.json: " + std::string(e.what()));
+        Logger::error("[SafeTensorsLoader] An unexpected error occurred while parsing config.json: " + std::string(e.what()));
         return false;
     }
 }

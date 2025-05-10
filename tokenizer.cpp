@@ -273,7 +273,7 @@ Tokenizer::Tokenizer(const GGUFData& gguf_data) : initialized_from_gguf_(true) {
       eos_token_ + "'), UNK=" + std::to_string(unk_token_id_) + " ('" +
       unk_token_ + "'), PAD=" + std::to_string(pad_token_id_) + " ('" +
       pad_token_ + "')");
-
+  
   pre_tok_type_ = get_meta_string("tokenizer.ggml.pre", "unknown");
 
   if (pre_tok_type_ == "unknown") {
@@ -1016,7 +1016,7 @@ std::string Tokenizer::decode(const std::vector<int>& ids,
         }
     }
   return ss.str();
-}
+            }
 
 std::string Tokenizer::apply_chat_template(const std::string& user_prompt,
                                            const std::string& system_message,

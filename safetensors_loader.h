@@ -21,6 +21,8 @@
 #include <thread>
 #include <vector>
 
+struct ModelConfig; // Forward declaration
+
 /**
  * @file safetensors_loader.h
  * @brief SafeTensors format loader for efficient tensor loading
@@ -105,17 +107,17 @@ class SafeTensorsLoader {
   std::map<std::string, std::vector<uint8_t>> load_all_tensors_parallel() const;
 
   /**
-   * @brief Loads model configuration from a JSON file accompanying a .safetensors model.
-   * 
-   * The JSON file (typically "config.json") is expected to be in the same
-   * directory as the .safetensors model file.
-   * 
-   * @param model_weights_path Path to the .safetensors model weights file.
-   * @param config_to_populate Reference to a ModelConfig struct to be filled.
-   * @return true if config.json was found, successfully parsed, and config_to_populate updated.
-   * @return false otherwise (e.g., config.json not found, parse error).
+   * @brief Loads model configuration from a JSON file corresponding to a .safetensors model path.
+   *
+   * Given the path to a .safetensors model, this method attempts to find a "config.json"
+   * in the same directory. If found, it parses the JSON and populates the provided
+   * ModelConfig object.
+   *
+   * @param model_path Path to the .safetensors model file.
+   * @param config_to_populate Reference to a ModelConfig object to be filled.
+   * @return True if config.json was found and successfully parsed, false otherwise.
    */
-  static bool load_model_config_from_json(const std::string& model_weights_path, struct ModelConfig& config_to_populate); // Forward declare ModelConfig
+  static bool load_model_config_from_json(const std::string& model_path, ModelConfig& config_to_populate);
 
  private:
   std::map<std::string, TensorInfo> tensors_;  /**< Map of tensor names to their information */

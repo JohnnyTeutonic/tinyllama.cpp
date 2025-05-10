@@ -273,8 +273,6 @@ class TinyLlamaModel {
   std::vector<LayerWeights> layers;
 
 #ifdef HAS_CUDA
-  bool cuda_initialized_ = false;
-  std::vector<float*> gpu_weights_;
   float* final_norm_dev = nullptr;
   float* all_freqs_cis_dev = nullptr;
   uint16_t* token_embedding_table_dev_ = nullptr;
@@ -316,10 +314,12 @@ class TinyLlamaModel {
   std::vector<std::pair<float, float>> precomputed_freqs_cis_;
 
   std::unique_ptr<GGUFData> gguf_data_;
+  std::string model_path_;
 
   void initialize_weights(const SafeTensorsLoader* loader,
                           const GGUFData* gguf);
   void initialize_gpu_and_rope();
+
 };
 
 ModelConfig parse_model_config(const nlohmann::json& json);
