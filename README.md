@@ -284,8 +284,6 @@ Please refer to the `pytorch/README.md` for detailed usage instructions for this
 
 ## Future Enhancements
 *   Streaming responses in the web UI. 
-*   More robust error handling.
-*   Python bindings.
 
 ## Acknowledgements
 

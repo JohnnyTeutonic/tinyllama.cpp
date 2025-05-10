@@ -19,83 +19,88 @@ def print_config(config_obj, source_msg="Config"):
     print(f"  Architecture: {config_obj.architecture}")
     print(f"  Model name: {config_obj.model_name}")
     print(f"  Is GGUF loaded: {config_obj.is_gguf_file_loaded}")
+    print(f"  BOS token ID: {config_obj.bos_token_id}")
+    print(f"  EOS token ID: {config_obj.eos_token_id}")
     print(f"  Chat template type: {config_obj.chat_template_type}")
     print(f"  Pre-tokenizer type: {config_obj.pre_tokenizer_type}")
     print(f"-------------------------")
 
-def run_model_test(model_path):
+def run_model_test(model_path, prompt_arg=None):
     print(f"\n=============================================")
-    print(f"  TESTING MODEL LOADING: {model_path}")
+    print(f"  TESTING TINYLLAMA SESSION: {model_path}")
     print(f"=============================================")
 
     if not os.path.exists(model_path):
-        print(f"ERROR: Model file not found: {model_path}")
+        print(f"ERROR: Model path not found: {model_path}")
         return False
 
-    # Create a default ModelConfig. C++ side should override it with actual model config.
-    py_initial_cfg = tinyllama_bindings.ModelConfig()
-    py_initial_cfg.hidden_size = 1
-    py_initial_cfg.vocab_size = 2
-
-    print_config(py_initial_cfg, "Python Initial Default Config")
-
-    model = None
+    session = None
     try:
+        print(f"\n--- Initializing TinyLlamaSession with model: {model_path} ---")
         with tinyllama_bindings.ostream_redirect(stdout=True, stderr=True):
-            print(f"\n--- Loading TinyLlamaModel with {os.path.basename(model_path)} ---")
-            model = tinyllama_bindings.TinyLlamaModel(py_initial_cfg, model_path)
-            print(f"--- TinyLlamaModel loaded successfully for {os.path.basename(model_path)} ---")
+            session = tinyllama_bindings.TinyLlamaSession(model_path)
+            print("--- TinyLlamaSession initialized successfully ---")
         
-        cpp_loaded_config = model.get_config()
-        print_config(cpp_loaded_config, "Config from C++ Model")
+        cpp_loaded_config = session.get_config()
+        print_config(cpp_loaded_config, "Config from TinyLlamaSession")
 
-        if cpp_loaded_config.hidden_size == 1 or cpp_loaded_config.vocab_size == 2:
-            print("WARNING: Config values from C++ model still look like Python defaults.")
-            print("         This might indicate the model's config (config.json or GGUF metadata) was not loaded correctly by C++.")
+        # --- Test Generation ---
+        print(f"\n--- Testing Generation using TinyLlamaSession.generate() ---")
         
-        file_is_gguf = model_path.lower().endswith(".gguf")
-        if cpp_loaded_config.is_gguf_file_loaded != file_is_gguf:
-            print(f"ERROR: Mismatch in GGUF status! File is GGUF: {file_is_gguf}, C++ reports: {cpp_loaded_config.is_gguf_file_loaded}")
-        print(f"\nTesting basic model functions:")
-        print(f"  model.get_vocab_size(): {model.get_vocab_size()}")
+        current_prompt = prompt_arg if prompt_arg else "What is the capital of France?"
+        num_steps = 30
+        temperature = 0.1 # Low temperature for more deterministic output
+        top_k = 1 # Effectively greedy
+        top_p = 0.9 # Does not matter much if top_k is 1
+
+        print(f"Prompt: \"{current_prompt}\"")
+        print(f"Generating up to {num_steps} tokens...")
         
-        if model.get_vocab_size() > 0:
-            test_token_id = 0 
-            try:
-                embedding = model.lookup_embedding(test_token_id)
-                print(f"  model.lookup_embedding({test_token_id}) returned vector of size: {len(embedding)}")
-                if len(embedding) != cpp_loaded_config.hidden_size:
-                     print(f"  ERROR: Embedding size {len(embedding)} != hidden_size {cpp_loaded_config.hidden_size}")
-                     return False
-            except Exception as e_embed:
-                print(f"  ERROR during lookup_embedding: {e_embed}")
-                return False
-        else: # vocab_size is 0 or less, which is an error state.
-            print(f"  ERROR: vocab_size is {model.get_vocab_size()}, cannot test lookup_embedding.")
-            return False
-            
-        print(f"Model test completed for {os.path.basename(model_path)}.")
+        generated_text = ""
+        with tinyllama_bindings.ostream_redirect(stdout=True, stderr=True):
+            generated_text = session.generate(
+                current_prompt,
+                num_steps,
+                temperature,
+                top_k,
+                top_p,
+                "",
+                True
+            )
+        
+        print(f"\n--- Generation Result ---")
+        print(f"Prompt: {current_prompt}")
+        print(f"Generated Text: {generated_text}")
+        print("--- Generation test completed ---")
+        
+        if not generated_text or generated_text.isspace():
+            print("WARNING: Generated text is empty or whitespace.")
+
+        print(f"\nSession test completed for {os.path.basename(model_path)}.")
         return True
 
     except Exception as e:
-        print(f"!!! ERROR during model test for {model_path}: {e} !!!")
+        print(f"!!! ERROR during TinyLlamaSession test for {model_path}: {e} !!!")
         import traceback
         traceback.print_exc()
         return False
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Test TinyLlama Python bindings with a given model file.")
-    parser.add_argument("model_path", type=str, help="Path to the .safetensors or .gguf model file.")
+    parser = argparse.ArgumentParser(description="Test TinyLlama Python bindings using TinyLlamaSession.")
+    parser.add_argument("model_path", type=str, help="Path to the model directory or .gguf file.")
+    parser.add_argument("--prompt", type=str, default=None, help="Optional prompt to use for generation.")
     args = parser.parse_args()
 
     print(f"Starting Python bindings test script for model: {args.model_path}")
+    if args.prompt:
+        print(f"Using custom prompt: \"{args.prompt}\"")
     
-    test_passed = run_model_test(args.model_path)
+    test_passed = run_model_test(args.model_path, args.prompt)
 
     print("\n=============================================")
     print("                TEST SUMMARY")
     print("=============================================")
-    print(f"Model Test ({os.path.basename(args.model_path)}): {'PASSED' if test_passed else 'FAILED'}")
+    print(f"Session Test ({os.path.basename(args.model_path)}): {'PASSED' if test_passed else 'FAILED'}")
     print("=============================================")
 
     if not test_passed:

@@ -236,13 +236,37 @@ std::string TinyLlamaSession::generate(const std::string& prompt_input,
                ", Temperature: " + std::to_string(temperature) +
                ", Top-K: " + std::to_string(top_k) +
                ", Top-P: " + std::to_string(top_p) +
-               ", Apply Q&A Format: " + (apply_q_a_format ? "true" : "false"));
+               ", System Prompt: \"" + system_prompt +
+               "\", Apply Chat/Q&A Format: " + (apply_q_a_format ? "true" : "false"));
 
   std::string final_prompt_for_tokenization;
   if (apply_q_a_format) {
-    final_prompt_for_tokenization = "Q: " + prompt_input + "\nA:";
-    Logger::info("Applied Q:A: format. Prompt for tokenization: \"" +
-                 final_prompt_for_tokenization + "\"");
+    // If GGUF is loaded, always use simple Q:A format as it works best.
+    // For SafeTensors, prefer chat template if available.
+    if (config_.is_gguf_file_loaded) {
+        Logger::info("GGUF model detected. Using simple Q:A format for prompt.");
+        final_prompt_for_tokenization = "Q: " + prompt_input + "\\nA:";
+        Logger::info("Applied Q:A format (GGUF). Prompt for tokenization: \"" +
+                     final_prompt_for_tokenization + "\"");
+    } else if (tokenizer_ && !config_.chat_template_string.empty()) {
+        // Non-GGUF (SafeTensors usually) - try chat template
+        try {
+            Logger::info("Applying chat template (SafeTensors). System: '" + system_prompt + "', User: '" + prompt_input + "'");
+            final_prompt_for_tokenization = tokenizer_->apply_chat_template(prompt_input, system_prompt, config_);
+            Logger::info("Formatted prompt using chat template: \"" + final_prompt_for_tokenization + "\"");
+        } catch (const std::exception& e) {
+            Logger::error("Error applying chat template (SafeTensors): " + std::string(e.what()) + ". Falling back to simple Q:A format.");
+            final_prompt_for_tokenization = "Q: " + prompt_input + "\\nA:"; 
+            Logger::info("Applied Q:A: fallback format (SafeTensors). Prompt for tokenization: \"" +
+                         final_prompt_for_tokenization + "\"");
+        }
+    } else {
+        // Fallback for SafeTensors if no chat template string or no tokenizer
+        Logger::warning("Chat template string empty or tokenizer not available (SafeTensors). Using simple Q:A format.");
+        final_prompt_for_tokenization = "Q: " + prompt_input + "\\nA:";
+        Logger::info("Applied Q:A: format (SafeTensors, no template). Prompt for tokenization: \"" +
+                     final_prompt_for_tokenization + "\"");
+    }
   } else {
     final_prompt_for_tokenization = prompt_input;
     Logger::info("Using provided prompt as-is for tokenization: \"" +
