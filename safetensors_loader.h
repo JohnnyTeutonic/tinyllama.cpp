@@ -104,6 +104,19 @@ class SafeTensorsLoader {
    */
   std::map<std::string, std::vector<uint8_t>> load_all_tensors_parallel() const;
 
+  /**
+   * @brief Loads model configuration from a JSON file accompanying a .safetensors model.
+   * 
+   * The JSON file (typically "config.json") is expected to be in the same
+   * directory as the .safetensors model file.
+   * 
+   * @param model_weights_path Path to the .safetensors model weights file.
+   * @param config_to_populate Reference to a ModelConfig struct to be filled.
+   * @return true if config.json was found, successfully parsed, and config_to_populate updated.
+   * @return false otherwise (e.g., config.json not found, parse error).
+   */
+  static bool load_model_config_from_json(const std::string& model_weights_path, struct ModelConfig& config_to_populate); // Forward declare ModelConfig
+
  private:
   std::map<std::string, TensorInfo> tensors_;  /**< Map of tensor names to their information */
   std::string file_path_;                      /**< Path to the SafeTensors file */

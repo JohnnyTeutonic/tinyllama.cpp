@@ -26,6 +26,7 @@
 #include "quantization.h"
 #include "model_constants.h"  // Add this include
 #include "model_macros.h"
+#include "safetensors_loader.h"
 
 static void matvec_q6k_f32_vector_cpu(const std::vector<block_q6_K>& mat_q6k,
                                       const std::vector<float>& vec_f32,
@@ -1563,1097 +1564,126 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& config,
                                const SafeTensorsLoader& loader)
     : config_(config) {
   Logger::info("Constructing TinyLlamaModel from SafeTensorsLoader.");
+  
+  // Set GGUF flag to false since we're using SafeTensors
+  config_.is_gguf_file_loaded = false;
+  
+  // Log configuration details
+  Logger::info("Model configuration:");
+  Logger::info("  - Hidden size: " + std::to_string(config_.hidden_size));
+  Logger::info("  - Intermediate size: " + std::to_string(config_.intermediate_size));
+  Logger::info("  - Number of layers: " + std::to_string(config_.num_hidden_layers));
+  Logger::info("  - Number of attention heads: " + std::to_string(config_.num_attention_heads));
+  Logger::info("  - Number of KV heads: " + std::to_string(config_.num_key_value_heads));
+  Logger::info("  - Vocab size: " + std::to_string(config_.vocab_size));
+  
+  // Validate critical configuration parameters
+  if (config_.hidden_size <= 0)
+    throw std::runtime_error("Invalid model configuration: hidden_size must be positive");
+  if (config_.vocab_size <= 0)
+    throw std::runtime_error("Invalid model configuration: vocab_size must be positive");
+  if (config_.num_attention_heads <= 0)
+    throw std::runtime_error("Invalid model configuration: num_attention_heads must be positive");
+  if (config_.num_key_value_heads <= 0)
+    throw std::runtime_error("Invalid model configuration: num_key_value_heads must be positive");
+  if (config_.hidden_size % config_.num_attention_heads != 0)
+    throw std::runtime_error("Invalid model configuration: hidden_size must be divisible by num_attention_heads");
+  
+  // Initialize RoPE frequencies
+  initialize_rope_freqs();
+  
+  // Initialize weights
   initialize_weights(&loader, nullptr);
+  
 #ifdef HAS_CUDA
+  // Initialize GPU resources and RoPE
   initialize_gpu_and_rope();
 #endif
+
   Logger::info("TinyLlamaModel construction from SafeTensorsLoader complete.");
 }
 
 TinyLlamaModel::TinyLlamaModel(const ModelConfig& config_in,
-                               const std::string& weights_path)
-
-{
+                               const std::string& weights_path) {
   Logger::info("Constructing TinyLlamaModel from path: " + weights_path);
-  bool is_gguf_detected_runtime = false;
-  if (weights_path.size() >= 5 &&
-      weights_path.substr(weights_path.size() - 5) == ".gguf") {
-    is_gguf_detected_runtime = true;
-  } else {
-    std::ifstream file(weights_path, std::ios::binary);
-    if (file.is_open()) {
-      uint32_t magic = 0;
-      file.read(reinterpret_cast<char*>(&magic), sizeof(magic));
-      if (magic == GGUF_MAGIC) {
-        is_gguf_detected_runtime = true;
+  
+  ModelConfig effective_config; // This will hold the config to actually use
+  bool config_source_is_external_file = false; // Flag to track if config came from GGUF or config.json
+
+  // Determine file type and load configuration
+  if (weights_path.size() >= 6 && weights_path.substr(weights_path.size() - 5) == ".gguf") { // Check for .gguf extension
+      Logger::info("Detected GGUF model format by extension.");
+      try {
+          gguf_data_ = std::make_unique<GGUFData>(load_gguf_meta(weights_path)); // load_gguf_meta also reads data
+          effective_config = parse_model_config_from_gguf(*gguf_data_);
+          effective_config.is_gguf_file_loaded = true;
+          config_source_is_external_file = true;
+          Logger::info("Successfully parsed GGUF model config.");
+      } catch (const std::exception& e) {
+          Logger::error("Failed to load or parse GGUF file \"" + weights_path +
+                        "\": " + e.what());
+          throw; // Re-throw, as we can't proceed without GGUF config
       }
-      file.close();
-    } else {
-      Logger::warning("Could not open weights file to check magic number: " +
-                      weights_path);
-    }
+  } else if (weights_path.size() >= 12 && weights_path.substr(weights_path.size() - 12) == ".safetensors") {
+      Logger::info("Detected SafeTensors model format by extension.");
+      if (SafeTensorsLoader::load_model_config_from_json(weights_path, effective_config)) {
+          Logger::info("Successfully loaded model configuration from accompanying config.json for SafeTensors model.");
+          effective_config.is_gguf_file_loaded = false; // Explicitly not GGUF
+          config_source_is_external_file = true;
+      } else {
+          Logger::warning("[TinyLlamaModel Constructor] Failed to load config.json for SafeTensors model, or it was not found. "
+                       "Falling back to initial config provided (e.g., from Python). Ensure this config is accurate.");
+          effective_config = config_in; // Use the config passed from Python
+          effective_config.is_gguf_file_loaded = false; 
+      }
+  } else {
+      // Fallback for unrecognized extensions or if detailed check is needed (like GGUF magic number)
+      // For now, assume if not .gguf or .safetensors by extension, it might be safetensors without proper extension or other.
+      // Let's try to load config.json for it, then fall back to input_config.
+      Logger::warning("[TinyLlamaModel Constructor] Model file format not explicitly .gguf or .safetensors by extension. Path: " + weights_path);
+      Logger::info("[TinyLlamaModel Constructor] Attempting to load config.json as if it were a SafeTensors model.");
+      if (SafeTensorsLoader::load_model_config_from_json(weights_path, effective_config)) {
+          Logger::info("Successfully loaded model configuration from accompanying config.json for model: " + weights_path);
+          effective_config.is_gguf_file_loaded = false;
+          config_source_is_external_file = true;
+      } else {
+          Logger::warning("[TinyLlamaModel Constructor] Could not load config.json for model '" + weights_path + ".' "
+                       "Falling back to initial config provided. Ensure this config is accurate for the model weights.");
+          effective_config = config_in;
+          effective_config.is_gguf_file_loaded = false; 
+      }
   }
 
-  if (is_gguf_detected_runtime) {
-    Logger::info("Detected GGUF file. Loading metadata and mapping weights...");
-    gguf_data_ = std::make_unique<GGUFData>(load_gguf_meta(weights_path));
-    config_ = parse_model_config_from_gguf(*gguf_data_);
-    config_.is_gguf_file_loaded = true;
+  this->config_ = effective_config; // Assign the determined config to the member variable
 
-    if (config_in.max_position_embeddings > 0 &&
-        config_in.max_position_embeddings != config_.max_position_embeddings) {
-      Logger::warning("Overriding GGUF max_position_embeddings (" +
-                      std::to_string(config_.max_position_embeddings) +
-                      ") with value from main: " +
-                      std::to_string(config_in.max_position_embeddings));
-      config_.max_position_embeddings = config_in.max_position_embeddings;
-    }
+  // Log the final effective configuration being used
+  Logger::info("Effective ModelConfig being used:");
+  Logger::info("  hidden_size: " + std::to_string(this->config_.hidden_size));
+  Logger::info("  intermediate_size: " + std::to_string(this->config_.intermediate_size));
+  Logger::info("  num_attention_heads: " + std::to_string(this->config_.num_attention_heads));
+  Logger::info("  num_key_value_heads: " + std::to_string(this->config_.num_key_value_heads));
 
+  // Initialize RoPE frequencies
+  initialize_rope_freqs();
+
+  // Initialize weights based on the determined configuration
+  if (effective_config.is_gguf_file_loaded) {
+    Logger::info("Loading weights from GGUF data...");
     initialize_weights(nullptr, gguf_data_.get());
     Logger::info("GGUF weights mapped.");
-
   } else {
-    config_ = config_in;
-    config_.is_gguf_file_loaded = false;
-    Logger::info(
-        "Detected non-GGUF file. Using provided config and loading with "
-        "SafeTensors loader...");
+    Logger::info("Loading weights from SafeTensors data...");
     SafeTensorsLoader loader(weights_path);
     initialize_weights(&loader, nullptr);
     Logger::info("SafeTensors weights loaded.");
   }
 
-  initialize_gpu_and_rope();
-  Logger::info("TinyLlamaModel construction from path complete.");
-}
-
-TinyLlamaModel::~TinyLlamaModel() {
 #ifdef HAS_CUDA
-  Logger::info("Freeing TinyLlamaModel CUDA resources...");
-  if (cublas_handle_) {
-    cublasStatus_t cublas_status = cublasDestroy(cublas_handle_);
-    if (cublas_status != CUBLAS_STATUS_SUCCESS) {
-      Logger::error("cuBLAS handle destruction failed with error code: " +
-                    std::to_string(cublas_status));
-    }
-    cublas_handle_ = nullptr;
-    Logger::info("cuBLAS handle destroyed.");
-  }
-
-  if (final_norm_dev) {
-    gpuErrchk(cudaFree(final_norm_dev));
-    final_norm_dev = nullptr;
-  }
-
-  for (auto& layer : layers) {
-    if (layer.input_layernorm_dev) {
-      gpuErrchk(cudaFree(layer.input_layernorm_dev));
-      layer.input_layernorm_dev = nullptr;
-    }
-    if (layer.post_attention_layernorm_dev) {
-      gpuErrchk(cudaFree(layer.post_attention_layernorm_dev));
-      layer.post_attention_layernorm_dev = nullptr;
-    }
-  }
-
-  if (all_freqs_cis_dev) {
-    gpuErrchk(cudaFree(all_freqs_cis_dev));
-    all_freqs_cis_dev = nullptr;
-  }
-  if (token_embedding_table_dev_) {
-    gpuErrchk(cudaFree(token_embedding_table_dev_));
-    token_embedding_table_dev_ = nullptr;
-  }
-  if (lm_head_dev_) {
-    gpuErrchk(cudaFree(lm_head_dev_));
-    lm_head_dev_ = nullptr;
-  }
-  if (w_q_dev_) {
-    gpuErrchk(cudaFree(w_q_dev_));
-    w_q_dev_ = nullptr;
-  }
-  if (w_k_dev_) {
-    gpuErrchk(cudaFree(w_k_dev_));
-    w_k_dev_ = nullptr;
-  }
-  if (w_v_dev_) {
-    gpuErrchk(cudaFree(w_v_dev_));
-    w_v_dev_ = nullptr;
-  }
-  if (w_o_dev_) {
-    gpuErrchk(cudaFree(w_o_dev_));
-    w_o_dev_ = nullptr;
-  }
-  if (w_gate_dev_) {
-    gpuErrchk(cudaFree(w_gate_dev_));
-    w_gate_dev_ = nullptr;
-  }
-  if (w_up_dev_) {
-    gpuErrchk(cudaFree(w_up_dev_));
-    w_up_dev_ = nullptr;
-  }
-  if (w_down_dev_) {
-    gpuErrchk(cudaFree(w_down_dev_));
-    w_down_dev_ = nullptr;
-  }
-  if (token_embedding_table_f32_dev_) {
-    gpuErrchk(cudaFree(token_embedding_table_f32_dev_));
-    token_embedding_table_f32_dev_ = nullptr;
-  }
-  if (lm_head_f32_dev_) {
-    gpuErrchk(cudaFree(lm_head_f32_dev_));
-    lm_head_f32_dev_ = nullptr;
-  }
-  if (w_q_f32_dev_) {
-    gpuErrchk(cudaFree(w_q_f32_dev_));
-    w_q_f32_dev_ = nullptr;
-  }
-  if (w_k_f32_dev_) {
-    gpuErrchk(cudaFree(w_k_f32_dev_));
-    w_k_f32_dev_ = nullptr;
-  }
-  if (w_v_f32_dev_) {
-    gpuErrchk(cudaFree(w_v_f32_dev_));
-    w_v_f32_dev_ = nullptr;
-  }
-  if (w_o_f32_dev_) {
-    gpuErrchk(cudaFree(w_o_f32_dev_));
-    w_o_f32_dev_ = nullptr;
-  }
-  if (w_gate_f32_dev_) {
-    gpuErrchk(cudaFree(w_gate_f32_dev_));
-    w_gate_f32_dev_ = nullptr;
-  }
-  if (w_up_f32_dev_) {
-    gpuErrchk(cudaFree(w_up_f32_dev_));
-    w_up_f32_dev_ = nullptr;
-  }
-  if (w_down_f32_dev_) {
-    gpuErrchk(cudaFree(w_down_f32_dev_));
-    w_down_f32_dev_ = nullptr;
-  }
-
-  if (x_dev_) {
-    gpuErrchk(cudaFree(x_dev_));
-    x_dev_ = nullptr;
-  }
-  if (x_norm_dev_) {
-    gpuErrchk(cudaFree(x_norm_dev_));
-    x_norm_dev_ = nullptr;
-  }
-  if (x_resid1_dev_) {
-    gpuErrchk(cudaFree(x_resid1_dev_));
-    x_resid1_dev_ = nullptr;
-  }
-  if (x_resid2_dev_) {
-    gpuErrchk(cudaFree(x_resid2_dev_));
-    x_resid2_dev_ = nullptr;
-  }
-  if (q_dev_) {
-    gpuErrchk(cudaFree(q_dev_));
-    q_dev_ = nullptr;
-  }
-  if (k_dev_) {
-    gpuErrchk(cudaFree(k_dev_));
-    k_dev_ = nullptr;
-  }
-  if (v_dev_) {
-    gpuErrchk(cudaFree(v_dev_));
-    v_dev_ = nullptr;
-  }
-  if (attn_out_dev_) {
-    gpuErrchk(cudaFree(attn_out_dev_));
-    attn_out_dev_ = nullptr;
-  }
-  if (attn_proj_dev_) {
-    gpuErrchk(cudaFree(attn_proj_dev_));
-    attn_proj_dev_ = nullptr;
-  }
-  if (gate_vec_dev_) {
-    gpuErrchk(cudaFree(gate_vec_dev_));
-    gate_vec_dev_ = nullptr;
-  }
-  if (up_vec_dev_) {
-    gpuErrchk(cudaFree(up_vec_dev_));
-    up_vec_dev_ = nullptr;
-  }
-  if (swiglu_vec_dev_) {
-    gpuErrchk(cudaFree(swiglu_vec_dev_));
-    swiglu_vec_dev_ = nullptr;
-  }
-  if (mlp_down_dev_) {
-    gpuErrchk(cudaFree(mlp_down_dev_));
-    mlp_down_dev_ = nullptr;
-  }
-  if (logits_dev_) {
-    gpuErrchk(cudaFree(logits_dev_));
-    logits_dev_ = nullptr;
-  }
-  Logger::info("Freed persistent GPU workspace buffers.");
-
-  Logger::info("Finished freeing TinyLlamaModel CUDA weight memory.");
+  // Initialize GPU resources and RoPE
+  initialize_gpu_and_rope();
 #endif
-}
 
-std::vector<float> TinyLlamaModel::lookup_embedding(int token_id) {
-  int hs = config_.hidden_size;
-  int vs = config_.vocab_size;
-  bool log_initial = (token_id == config_.bos_token_id);
-
-  if (token_id < 0 || token_id >= vs) {
-    Logger::error("Token ID out of bounds in lookup_embedding: " +
-                  std::to_string(token_id));
-    return std::vector<float>(hs, 0.0f);
-  }
-
-  std::vector<float> embedding_vec(hs, 0.0f);
-
-  if (!embed_tokens_q4k.empty()) {
-    if (hs % GGML_QK_K != 0) {
-      Logger::error("Hidden size (" + std::to_string(hs) +
-                    ") is not divisible by GGML_QK_K (" +
-                    std::to_string(GGML_QK_K) + ") for Q4_K embedding lookup.");
-      return embedding_vec;
-    }
-
-    size_t blocks_per_row = hs / GGML_QK_K;
-    size_t start_block_idx = (size_t)token_id * blocks_per_row;
-    size_t end_block_idx = start_block_idx + blocks_per_row;
-
-    if (end_block_idx > embed_tokens_q4k.size()) {
-      Logger::error(
-          "Calculated block index out of bounds for Q4_K embedding table. "
-          "Token: " +
-          std::to_string(token_id) +
-          ", StartBlock: " + std::to_string(start_block_idx) +
-          ", EndBlock: " + std::to_string(end_block_idx) +
-          ", TableSize: " + std::to_string(embed_tokens_q4k.size()));
-      return embedding_vec;
-    }
-
-    float dequantized_block[GGML_QK_K];
-    for (size_t block_n = 0; block_n < blocks_per_row; ++block_n) {
-      dequantize_q4_k_m(&embed_tokens_q4k[start_block_idx + block_n],
-                        dequantized_block, GGML_QK_K, false);
-
-      size_t dest_offset = block_n * GGML_QK_K;
-
-      size_t elements_to_copy = SAFE_MIN((size_t)GGML_QK_K, (size_t)(hs - dest_offset));
-      std::memcpy(&embedding_vec[dest_offset], dequantized_block,
-                  elements_to_copy * sizeof(float));
-    }
-    if (log_initial) {
-      log_vector_summary("[CPU_EMBED Q4_K] Output Embedding (Token " +
-                             std::to_string(token_id) + ")",
-                         embedding_vec);
-    }
-    return embedding_vec;
-  }
-
-  else if (!embed_tokens_q8_0.empty()) {
-    if (hs % GGML_QK8_0 != 0) {
-      Logger::error("Hidden size (" + std::to_string(hs) +
-                    ") is not divisible by GGML_QK8_0 (" +
-                    std::to_string(GGML_QK8_0) +
-                    ") for Q8_0 embedding lookup.");
-      return embedding_vec;
-    }
-    size_t blocks_per_row = hs / GGML_QK8_0;
-    size_t start_block_idx = (size_t)token_id * blocks_per_row;
-    size_t end_block_idx = start_block_idx + blocks_per_row;
-
-    if (end_block_idx > embed_tokens_q8_0.size()) {
-      Logger::error(
-          "Calculated block index out of bounds for Q8_0 embedding table. "
-          "Token: " +
-          std::to_string(token_id) +
-          ", StartBlock: " + std::to_string(start_block_idx) +
-          ", EndBlock: " + std::to_string(end_block_idx) +
-          ", TableSize: " + std::to_string(embed_tokens_q8_0.size()));
-      return embedding_vec;
-    }
-
-    float dequantized_block[GGML_QK8_0];
-    for (size_t block_n = 0; block_n < blocks_per_row; ++block_n) {
-      dequantize_q8_0_block(&embed_tokens_q8_0[start_block_idx + block_n],
-                            dequantized_block);
-      size_t dest_offset = block_n * GGML_QK8_0;
-      size_t elements_to_copy = SAFE_MIN(static_cast<size_t>(GGML_QK8_0), static_cast<size_t>(hs - dest_offset));
-      std::memcpy(&embedding_vec[dest_offset], dequantized_block,
-                  elements_to_copy * sizeof(float));
-    }
-    if (log_initial) {
-      log_vector_summary("[CPU_EMBED Q8_0] Output Embedding (Token " +
-                             std::to_string(token_id) + ")",
-                         embedding_vec);
-    }
-    return embedding_vec;
-  }
-
-  else if (!embed_tokens_f32.empty()) {
-    size_t offset = (size_t)token_id * hs;
-    if (offset + hs > embed_tokens_f32.size()) {
-      Logger::error("Embedding offset out of bounds in F32 lookup for token: " +
-                    std::to_string(token_id));
-      return embedding_vec;
-    }
-
-    std::copy(embed_tokens_f32.begin() + offset,
-              embed_tokens_f32.begin() + offset + hs, embedding_vec.begin());
-    if (log_initial) {
-      log_vector_summary("[CPU_EMBED F32] Output Embedding (Token " +
-                             std::to_string(token_id) + ")",
-                         embedding_vec);
-    }
-    return embedding_vec;
-
-  } else if (!embed_tokens.empty()) {
-    size_t offset = (size_t)token_id * hs;
-    if (offset + hs > embed_tokens.size()) {
-      Logger::error(
-          "Embedding offset out of bounds in BF16 lookup for token: " +
-          std::to_string(token_id));
-      return embedding_vec;
-    }
-    std::vector<uint16_t> token_embedding_bf16(
-        embed_tokens.begin() + offset, embed_tokens.begin() + offset + hs);
-
-    embedding_vec = bf16vec_to_float_vec(token_embedding_bf16);
-    if (log_initial) {
-      log_vector_summary("[CPU_EMBED BF16] Output Embedding (Token " +
-                             std::to_string(token_id) + ")",
-                         embedding_vec);
-    }
-    return embedding_vec;
-
-  } else {
-    Logger::error(
-        "No valid embedding table found (Q4_K, F32, BF16) for token: " +
-        std::to_string(token_id));
-
-    return embedding_vec;
-  }
-}
-
-std::vector<float> TinyLlamaModel::forward(std::vector<float>& input,
-                                           int n_tokens, KVCache* kv_cache,
-                                           const std::vector<int>* input_ids) {
-  bool log_this_step = (n_tokens == 0);
-  bool log_first_gen_step = (n_tokens == 23);
-
-  int hs = config_.hidden_size;
-  int is = config_.intermediate_size;
-  int nhl = config_.num_hidden_layers;
-  int vs = config_.vocab_size;
-  int n_heads = config_.num_attention_heads;
-  int n_kv_heads = config_.num_key_value_heads;
-  int head_dim = hs / n_heads;
-  int max_seq_len = config_.max_position_embeddings;
-  float eps = config_.rms_norm_eps;
-
-  if (log_this_step) Logger::info("[CPU_FWD STEP 0] Entered forward function.");
-  if (log_first_gen_step)
-    Logger::info("[CPU_FWD STEP 23] Entered forward function.");
-
-  if (log_this_step || log_first_gen_step) {
-    Logger::info("[CPU_FWD] forward called. n_tokens=" +
-                 std::to_string(n_tokens));
-    log_vector_summary(
-        "[CPU_FWD] Input input (n_tokens=" + std::to_string(n_tokens) + ")",
-        input);
-    log_vector_summary_with_tail("[CPU_FWD] Initial Embedding Vector (input)",
-                                 input, 10, 10);
-  }
-
-  if (n_tokens >= max_seq_len) {
-    Logger::error("Position index exceeds max_position_embeddings");
-    return std::vector<float>(vs, 0.0f);
-  }
-  if (!kv_cache) {
-    Logger::error("KVCache is required for token-by-token forward pass");
-    return std::vector<float>(vs, 0.0f);
-  }
-  if (input.size() != hs) {
-    Logger::error("Input vector input has incorrect size. Expected " +
-                  std::to_string(hs) + ", got " + std::to_string(input.size()));
-    return std::vector<float>(vs, 0.0f);
-  }
-
-  std::vector<float> x_norm_vec1(hs);
-  std::vector<float> q_vec(hs);
-  std::vector<float> k_vec(n_kv_heads * head_dim);
-  std::vector<float> v_vec(n_kv_heads * head_dim);
-  std::vector<float> attn_out_vec(hs);
-  std::vector<float> attn_proj_vec(hs);
-  std::vector<float> x_norm_vec2(hs);
-  std::vector<float> gate_vec(is);
-  std::vector<float> up_vec(is);
-  std::vector<float> silu_out_vec(is);
-  std::vector<float> swiglu_result_vec(is);
-  std::vector<float> mlp_out_vec(hs);
-
-  if (log_this_step || log_first_gen_step)
-    Logger::info("[CPU_FWD STEP " + std::to_string(n_tokens) +
-                 "] Entering layer loop.");
-
-  for (int l = 0; l < nhl; ++l) {
-    bool log_this_layer = (log_this_step || log_first_gen_step) && (l == 0);
-    if (log_this_layer)
-      Logger::info("[CPU_FWD STEP " + std::to_string(n_tokens) +
-                   "] Start of Layer " + std::to_string(l) + ".");
-    if (log_this_layer)
-      Logger::info("[CPU_FWD] ------ START Layer " + std::to_string(l) +
-                   " (pos=" + std::to_string(n_tokens) + ") ------");
-
-    const auto& lw = layers[l];
-
-    std::vector<float> x_resid1_vec = input;
-
-    const std::vector<float>& w_norm1_vec =
-        lw.input_layernorm_f32.empty()
-            ? bf16vec_to_float_vec(lw.input_layernorm)
-            : lw.input_layernorm_f32;
-    rmsnorm_vector_cpu(input, w_norm1_vec, x_norm_vec1, eps);
-    if (log_this_layer)
-      log_vector_summary(
-          "[CPU_FWD L" + std::to_string(l) +
-              "] RMSNorm1 Out (n_tokens=" + std::to_string(n_tokens) + ")",
-          x_norm_vec1);
-    if (log_this_layer)
-      Logger::info("[CPU_FWD STEP " + std::to_string(n_tokens) +
-                   "] Before QKV projections in Layer " + std::to_string(l) +
-                   ".");
-
-    if (!lw.q_proj_q8_0.empty()) {
-      if (log_this_layer)
-        Logger::info("[CPU_FWD L" + std::to_string(l) +
-                     "] MatVec: Q_Proj (Q8_0)");
-      std::vector<float> q_proj_f32(hs * hs);
-      size_t num_blocks = (size_t)(hs * hs) / GGML_QK8_0;
-      if (lw.q_proj_q8_0.size() != num_blocks) {
-        Logger::error("Q_Proj Q8_0 block count mismatch. Expected " +
-                      std::to_string(num_blocks) + " got " +
-                      std::to_string(lw.q_proj_q8_0.size()));
-        q_vec.assign(hs, 0.0f);
-      } else {
-        for (size_t i = 0; i < lw.q_proj_q8_0.size(); ++i)
-          dequantize_q8_0_block(&lw.q_proj_q8_0[i],
-                                &q_proj_f32[i * GGML_QK8_0]);
-        matvec_f32_f32_vector_cpu(q_proj_f32, x_norm_vec1, q_vec, hs, hs);
-      }
-    } else if (!lw.q_proj_q6k.empty()) {
-      if (log_this_layer)
-        Logger::info("[CPU_FWD L" + std::to_string(l) +
-                     "] MatVec: Q_Proj (Q6_K)");
-      std::vector<float> q_proj_f32(hs * hs);
-      for (size_t i = 0; i < lw.q_proj_q6k.size(); ++i)
-        dequantize_q6_k(&lw.q_proj_q6k[i], &q_proj_f32[i * GGML_QK_K],
-                        GGML_QK_K);
-      matvec_f32_f32_vector_cpu(q_proj_f32, x_norm_vec1, q_vec, hs, hs);
-    } else if (!lw.q_proj_q4k.empty()) {
-      if (log_this_layer)
-        Logger::info("[CPU_FWD L" + std::to_string(l) +
-                     "] MatVec: Q_Proj (Q4_K)");
-      std::vector<float> q_proj_f32(hs * hs);
-      for (size_t i = 0; i < lw.q_proj_q4k.size(); ++i)
-        dequantize_q4_k_m(&lw.q_proj_q4k[i], &q_proj_f32[i * GGML_QK_K],
-                          GGML_QK_K);
-      matvec_f32_f32_vector_cpu(q_proj_f32, x_norm_vec1, q_vec, hs, hs);
-    } else if (!lw.q_proj_f32.empty()) {
-      if (log_this_layer)
-        Logger::info("[CPU_FWD L" + std::to_string(l) +
-                     "] MatVec: Q_Proj (F32)");
-      matvec_f32_f32_vector_cpu(lw.q_proj_f32, x_norm_vec1, q_vec, hs, hs);
-    } else if (!lw.q_proj.empty()) {
-      if (log_this_layer)
-        Logger::warning("[CPU_FWD L" + std::to_string(l) +
-                        "] MatVec: Q_Proj (BF16 Fallback)");
-      matvec_bf16_f32_vector_cpu(lw.q_proj, x_norm_vec1, q_vec, hs, hs);
-    } else {
-      throw std::runtime_error("Layer " + std::to_string(l) +
-                               ": No valid Q projection weights found!");
-    }
-    if (log_this_layer) log_vector_summary("  Output (q_vec)", q_vec);
-
-    size_t k_proj_dim0 = n_kv_heads * head_dim;
-    if (!lw.k_proj_q8_0.empty()) {
-      if (log_this_layer)
-        Logger::info("[CPU_FWD L" + std::to_string(l) +
-                     "] MatVec: K_Proj (Q8_0)");
-      std::vector<float> k_proj_f32(k_proj_dim0 * hs);
-      size_t num_blocks = (k_proj_dim0 * hs) / GGML_QK8_0;
-      if (lw.k_proj_q8_0.size() != num_blocks) {
-        Logger::error("K_Proj Q8_0 block count mismatch");
-        k_vec.assign(k_proj_dim0, 0.0f);
-      } else {
-        for (size_t i = 0; i < lw.k_proj_q8_0.size(); ++i)
-          dequantize_q8_0_block(&lw.k_proj_q8_0[i],
-                                &k_proj_f32[i * GGML_QK8_0]);
-        matvec_f32_f32_vector_cpu(k_proj_f32, x_norm_vec1, k_vec, k_proj_dim0,
-                                  hs);
-      }
-    } else if (!lw.k_proj_q6k.empty()) {
-      if (log_this_layer)
-        Logger::info("[CPU_FWD L" + std::to_string(l) +
-                     "] MatVec: K_Proj (Q6_K)");
-      std::vector<float> k_proj_f32(k_proj_dim0 * hs);
-      for (size_t i = 0; i < lw.k_proj_q6k.size(); ++i)
-        dequantize_q6_k(&lw.k_proj_q6k[i], &k_proj_f32[i * GGML_QK_K],
-                        GGML_QK_K);
-      matvec_f32_f32_vector_cpu(k_proj_f32, x_norm_vec1, k_vec, k_proj_dim0,
-                                hs);
-    } else if (!lw.k_proj_q4k.empty()) {
-      if (log_this_layer)
-        Logger::info("[CPU_FWD L" + std::to_string(l) +
-                     "] MatVec: K_Proj (Q4_K)");
-      std::vector<float> k_proj_f32(k_proj_dim0 * hs);
-      for (size_t i = 0; i < lw.k_proj_q4k.size(); ++i)
-        dequantize_q4_k_m(&lw.k_proj_q4k[i], &k_proj_f32[i * GGML_QK_K],
-                          GGML_QK_K);
-      matvec_f32_f32_vector_cpu(k_proj_f32, x_norm_vec1, k_vec, k_proj_dim0,
-                                hs);
-    } else if (!lw.k_proj_f32.empty()) {
-      if (log_this_layer)
-        Logger::info("[CPU_FWD L" + std::to_string(l) +
-                     "] MatVec: K_Proj (F32)");
-      matvec_f32_f32_vector_cpu(lw.k_proj_f32, x_norm_vec1, k_vec, k_proj_dim0,
-                                hs);
-    } else if (!lw.k_proj.empty()) {
-      if (log_this_layer)
-        Logger::warning("[CPU_FWD L" + std::to_string(l) +
-                        "] MatVec: K_Proj (BF16 Fallback)");
-      matvec_bf16_f32_vector_cpu(lw.k_proj, x_norm_vec1, k_vec, k_proj_dim0,
-                                 hs);
-    } else {
-      throw std::runtime_error("Layer " + std::to_string(l) +
-                               ": No valid K projection weights found!");
-    }
-    if (log_this_layer)
-      log_vector_summary("  [K-Proj L" + std::to_string(l) + "] Output (k_vec)",
-                         k_vec);
-
-    size_t v_proj_dim0 = n_kv_heads * head_dim;
-    if (log_this_layer)
-      log_vector_summary(
-          "  [V-Proj L" + std::to_string(l) + "] Input (x_norm_vec1)",
-          x_norm_vec1);
-    if (!lw.v_proj_q8_0.empty()) {
-      if (log_this_layer)
-        Logger::info("[CPU_FWD L" + std::to_string(l) +
-                     "] MatVec: V_Proj (Q8_0)");
-      std::vector<float> v_proj_f32(v_proj_dim0 * hs);
-      size_t num_blocks = (v_proj_dim0 * hs) / GGML_QK8_0;
-      if (lw.v_proj_q8_0.size() != num_blocks) {
-        Logger::error("V_Proj Q8_0 block count mismatch");
-        v_vec.assign(v_proj_dim0, 0.0f);
-      } else {
-        for (size_t i = 0; i < lw.v_proj_q8_0.size(); ++i)
-          dequantize_q8_0_block(&lw.v_proj_q8_0[i],
-                                &v_proj_f32[i * GGML_QK8_0]);
-        matvec_f32_f32_vector_cpu(v_proj_f32, x_norm_vec1, v_vec, v_proj_dim0,
-                                  hs);
-      }
-    } else if (!lw.v_proj_q6k.empty()) {
-      if (log_this_layer)
-        Logger::info("[CPU_FWD L" + std::to_string(l) +
-                     "] MatVec: V_Proj (Q6_K)");
-      std::vector<float> v_proj_f32(v_proj_dim0 * hs);
-      for (size_t i = 0; i < lw.v_proj_q6k.size(); ++i)
-        dequantize_q6_k(&lw.v_proj_q6k[i], &v_proj_f32[i * GGML_QK_K],
-                        GGML_QK_K);
-      matvec_f32_f32_vector_cpu(v_proj_f32, x_norm_vec1, v_vec, v_proj_dim0,
-                                hs);
-    } else if (!lw.v_proj_q4k.empty()) {
-      if (log_this_layer)
-        Logger::info("[CPU_FWD L" + std::to_string(l) +
-                     "] MatVec: V_Proj (Q4_K)");
-      std::vector<float> v_proj_f32(v_proj_dim0 * hs);
-      for (size_t i = 0; i < lw.v_proj_q4k.size(); ++i)
-        dequantize_q4_k_m(&lw.v_proj_q4k[i], &v_proj_f32[i * GGML_QK_K],
-                          GGML_QK_K);
-      matvec_f32_f32_vector_cpu(v_proj_f32, x_norm_vec1, v_vec, v_proj_dim0,
-                                hs);
-    } else if (!lw.v_proj_f32.empty()) {
-      if (log_this_layer)
-        Logger::info("[CPU_FWD L" + std::to_string(l) +
-                     "] MatVec: V_Proj (F32)");
-      matvec_f32_f32_vector_cpu(lw.v_proj_f32, x_norm_vec1, v_vec, v_proj_dim0,
-                                hs);
-    } else if (!lw.v_proj.empty()) {
-      if (log_this_layer)
-        Logger::warning("[CPU_FWD L" + std::to_string(l) +
-                        "] MatVec: V_Proj (BF16 Fallback)");
-      matvec_bf16_f32_vector_cpu(lw.v_proj, x_norm_vec1, v_vec, v_proj_dim0,
-                                 hs);
-    } else {
-      throw std::runtime_error("Layer " + std::to_string(l) +
-                               ": No valid V projection weights found!");
-    }
-    if (log_this_layer)
-      log_vector_summary("  [V-Proj L" + std::to_string(l) + "] Output (v_vec)",
-                         v_vec);
-
-    size_t freqs_offset = (size_t)n_tokens * head_dim / 2;
-    if (freqs_offset + head_dim / 2 > precomputed_freqs_cis_.size()) {
-      throw std::runtime_error("RoPE freqs_cis access out of bounds. pos: " +
-                               std::to_string(n_tokens) +
-                               " head_dim: " + std::to_string(head_dim));
-    }
-    std::vector<std::pair<float, float>> current_freqs_cis(
-        precomputed_freqs_cis_.begin() + freqs_offset,
-        precomputed_freqs_cis_.begin() + freqs_offset + head_dim / 2);
-    apply_rope_vector(q_vec, n_heads, head_dim, n_tokens, current_freqs_cis);
-    apply_rope_vector(k_vec, n_kv_heads, head_dim, n_tokens, current_freqs_cis);
-    if (log_this_layer)
-      log_vector_summary(
-          "  [K-Proj L" + std::to_string(l) + "] Output After RoPE (k_vec)",
-          k_vec, head_dim);
-
-    float* k_current_ptr = k_vec.data();
-    float* v_current_ptr = v_vec.data();
-    for (int kvh = 0; kvh < n_kv_heads; ++kvh) {
-      size_t current_k_offset = (size_t)kvh * head_dim;
-      size_t current_v_offset = (size_t)kvh * head_dim;
-      size_t write_offset =
-          (size_t)n_tokens * n_kv_heads * head_dim + kvh * head_dim;
-      if (write_offset + head_dim <= kv_cache->layers[l].k.size()) {
-        std::memcpy(&kv_cache->layers[l].k[write_offset],
-                    k_current_ptr + current_k_offset, head_dim * sizeof(float));
-        std::memcpy(&kv_cache->layers[l].v[write_offset],
-                    v_current_ptr + current_v_offset, head_dim * sizeof(float));
-      } else {
-        Logger::error("KVCache write out of bounds: layer=" +
-                      std::to_string(l) + ", pos=" + std::to_string(n_tokens) +
-                      ", kv_head=" + std::to_string(kvh));
-      }
-    }
-    kv_cache->seq_len = n_tokens + 1;
-
-    std::fill(attn_out_vec.begin(), attn_out_vec.end(), 0.0f);
-    int current_seq_len = n_tokens + 1;
-    float scale = 1.0f / SAFE_SQRT(static_cast<float>(head_dim));
-    for (int h = 0; h < n_heads; ++h) {
-      std::vector<float> q_head_rope_vec(q_vec.begin() + h * head_dim,
-                                         q_vec.begin() + (h + 1) * head_dim);
-      int kv_head_idx = h / (n_heads / n_kv_heads);
-      std::vector<float> k_cache_head_vec(current_seq_len * head_dim);
-      std::vector<float> v_cache_head_vec(current_seq_len * head_dim);
-      bool log_attn_details = log_this_layer && (h == 0);
-      if (log_attn_details)
-        log_vector_summary("  [Attn L0H0] Q Head Rope Vec", q_head_rope_vec);
-      for (int j = 0; j < current_seq_len; ++j) {
-        size_t cache_pos_offset =
-            (size_t)j * n_kv_heads * head_dim + kv_head_idx * head_dim;
-        if (cache_pos_offset + head_dim <= kv_cache->layers[l].k.size()) {
-          std::memcpy(k_cache_head_vec.data() + j * head_dim,
-                      &kv_cache->layers[l].k[cache_pos_offset],
-                      head_dim * sizeof(float));
-          std::memcpy(v_cache_head_vec.data() + j * head_dim,
-                      &kv_cache->layers[l].v[cache_pos_offset],
-                      head_dim * sizeof(float));
-        } else {
-          std::fill(k_cache_head_vec.begin() + j * head_dim,
-                    k_cache_head_vec.begin() + (j + 1) * head_dim, 0.0f);
-          std::fill(v_cache_head_vec.begin() + j * head_dim,
-                    v_cache_head_vec.begin() + (j + 1) * head_dim, 0.0f);
-          Logger::error(
-              "Attention K/V access out of bounds: cache_pos_offset=" +
-              std::to_string(cache_pos_offset));
-        }
-      }
-      if (log_attn_details) {
-        log_vector_summary_with_tail("  [Attn L0H0] K Cache Head Vec (SeqLen=" +
-                                         std::to_string(current_seq_len) + ")",
-                                     k_cache_head_vec, 5, head_dim);
-        log_vector_summary("  [Attn L0H0] V Cache Head Vec (SeqLen=" +
-                               std::to_string(current_seq_len) + ")",
-                           v_cache_head_vec);
-      }
-      std::vector<float> scores_vec(current_seq_len);
-      calculate_attention_scores(q_head_rope_vec, k_cache_head_vec, scores_vec,
-                                 current_seq_len, head_dim, scale);
-      if (log_attn_details)
-        log_vector_summary("  [Attn L0H0] Scores Vec (Before Softmax)",
-                           scores_vec);
-      std::vector<float> probs_vec(current_seq_len);
-      softmax_vector_cpu(scores_vec, probs_vec);
-      if (log_attn_details)
-        log_vector_summary("  [Attn L0H0] Probs Vec (After Softmax)",
-                           probs_vec);
-      std::vector<float> head_attn_out_vec(head_dim);
-      weighted_sum_probs_v(probs_vec, v_cache_head_vec, head_attn_out_vec,
-                           current_seq_len, head_dim);
-      if (log_attn_details)
-        log_vector_summary("  [Attn L0H0] Head Attn Out Vec",
-                           head_attn_out_vec);
-      size_t out_offset = h * head_dim;
-      for (int i_val = 0; i_val < head_dim; ++i_val)
-        attn_out_vec[out_offset + i_val] += head_attn_out_vec[i_val];
-    }
-
-    if (!lw.o_proj_q8_0.empty()) {
-      if (log_this_layer)
-        Logger::info("[CPU_FWD L" + std::to_string(l) +
-                     "] MatVec: O_Proj (Q8_0)");
-      std::vector<float> o_proj_f32(hs * hs);
-      size_t num_q8_blocks_o = (hs * hs) / GGML_QK8_0;
-      if (lw.o_proj_q8_0.size() != num_q8_blocks_o) {
-        Logger::error("O_Proj Q8_0 block count mismatch. Expected " +
-                      std::to_string(num_q8_blocks_o) + " got " +
-                      std::to_string(lw.o_proj_q8_0.size()) +
-                      " for tensor 'O_PROJ'");
-      } else {
-        for (size_t i = 0; i < lw.o_proj_q8_0.size(); ++i) {
-          dequantize_q8_0_block(&lw.o_proj_q8_0[i],
-                                &o_proj_f32[i * GGML_QK8_0]);
-        }
-        matvec_f32_f32_vector_cpu(o_proj_f32, attn_out_vec, attn_proj_vec, hs,
-                                  hs);
-      }
-    } else if (!lw.o_proj_q6k.empty()) {
-      if (log_this_layer)
-        Logger::info("[CPU_FWD L" + std::to_string(l) +
-                     "] MatVec: O_Proj (Q6_K)");
-      std::vector<float> o_proj_f32(hs * hs);
-      for (size_t i = 0; i < lw.o_proj_q6k.size(); ++i)
-        dequantize_q6_k(&lw.o_proj_q6k[i], &o_proj_f32[i * GGML_QK_K],
-                        GGML_QK_K);
-      std::vector<float> attn_out_q8k_f32(hs);
-      std::vector<block_q8_K> attn_out_q8k =
-          quantize_fp32_to_q8_K(attn_out_vec);
-      dequantize_q8_k(attn_out_q8k, attn_out_q8k_f32, hs, false);
-      matvec_f32_f32_vector_cpu(o_proj_f32, attn_out_q8k_f32, attn_proj_vec, hs,
-                                hs);
-    } else if (!lw.o_proj_q4k.empty()) {
-      if (log_this_layer)
-        Logger::info("[CPU_FWD L" + std::to_string(l) +
-                     "] MatVec: O_Proj (Q4_K)");
-      std::vector<float> o_proj_f32(hs * hs);
-      for (size_t i = 0; i < lw.o_proj_q4k.size(); ++i)
-        dequantize_q4_k_m(&lw.o_proj_q4k[i], &o_proj_f32[i * GGML_QK_K],
-                          GGML_QK_K);
-      std::vector<float> attn_out_q8k_f32(hs);
-      std::vector<block_q8_K> attn_out_q8k =
-          quantize_fp32_to_q8_K(attn_out_vec);
-      dequantize_q8_k(attn_out_q8k, attn_out_q8k_f32, hs, false);
-      matvec_f32_f32_vector_cpu(o_proj_f32, attn_out_q8k_f32, attn_proj_vec, hs,
-                                hs);
-    } else if (!lw.o_proj_f32.empty()) {
-      if (log_this_layer)
-        Logger::info("[CPU_FWD L" + std::to_string(l) +
-                     "] MatVec: O_Proj (F32)");
-      matvec_f32_f32_vector_cpu(lw.o_proj_f32, attn_out_vec, attn_proj_vec, hs,
-                                hs);
-    } else if (!lw.o_proj.empty()) {
-      if (log_this_layer)
-        Logger::warning("[CPU_FWD L" + std::to_string(l) +
-                        "] MatVec: O_Proj (BF16 Fallback)");
-      matvec_bf16_f32_vector_cpu(lw.o_proj, attn_out_vec, attn_proj_vec, hs,
-                                 hs);
-    } else {
-      throw std::runtime_error("Layer " + std::to_string(l) +
-                               ": No valid O projection weights found!");
-    }
-
-    if (l == 0) {
-      log_vector_summary("Layer 0 Attn Proj Out (attn_proj_vec)",
-                         attn_proj_vec);
-    }
-
-#pragma omp parallel for
-    for (int64_t i = 0; i < static_cast<int64_t>(hs); ++i) {
-      input[i] = x_resid1_vec[i] + attn_proj_vec[i];
-    }
-
-    if (l == 0) {
-      log_vector_summary("Layer 0 After Attn Residual (input)", input);
-    }
-
-    std::vector<float> x_resid2_vec = input;
-
-    const std::vector<float>& w_norm2_vec =
-        lw.post_attention_layernorm_f32.empty()
-            ? bf16vec_to_float_vec(lw.post_attention_layernorm)
-            : lw.post_attention_layernorm_f32;
-    rmsnorm_vector_cpu(input, w_norm2_vec, x_norm_vec2, eps);
-
-    if (!lw.gate_proj_q8_0.empty()) {
-      if (log_this_layer)
-        Logger::info("[CPU_FWD L" + std::to_string(l) +
-                     "] MatVec: Gate_Proj (Q8_0)");
-      std::vector<float> gate_proj_f32(is * hs);
-      size_t num_q8_blocks_gate = (is * hs) / GGML_QK8_0;
-      if (lw.gate_proj_q8_0.size() != num_q8_blocks_gate) {
-        Logger::error("Gate_Proj Q8_0 block count mismatch. Expected " +
-                      std::to_string(num_q8_blocks_gate) + " got " +
-                      std::to_string(lw.gate_proj_q8_0.size()) +
-                      " for tensor 'GATE_PROJ'");
-      } else {
-        for (size_t i = 0; i < lw.gate_proj_q8_0.size(); ++i) {
-          dequantize_q8_0_block(&lw.gate_proj_q8_0[i],
-                                &gate_proj_f32[i * GGML_QK8_0]);
-        }
-        matvec_f32_f32_vector_cpu(gate_proj_f32, x_norm_vec2, gate_vec, is, hs);
-      }
-    } else if (!lw.gate_proj_q6k.empty()) {
-      if (log_this_layer)
-        Logger::info("[CPU_FWD L" + std::to_string(l) +
-                     "] MatVec: Gate_Proj (Q6_K)");
-
-      std::vector<float> gate_proj_f32(is * hs);
-      for (size_t i = 0; i < lw.gate_proj_q6k.size(); ++i)
-        dequantize_q6_k(&lw.gate_proj_q6k[i], &gate_proj_f32[i * GGML_QK_K],
-                        GGML_QK_K);
-      if (log_this_layer)
-        log_vector_summary("Layer 0 Gate Proj Weights (FP32)", gate_proj_f32,
-                           10);
-      std::vector<float> x_norm2_q8k_f32(hs);
-      std::vector<block_q8_K> x_norm2_q8k = quantize_fp32_to_q8_K(x_norm_vec2);
-      dequantize_q8_k(x_norm2_q8k, x_norm2_q8k_f32, hs, false);
-      matvec_f32_f32_vector_cpu(gate_proj_f32, x_norm2_q8k_f32, gate_vec, is,
-                                hs);
-    } else if (!lw.gate_proj_f32.empty()) {
-      if (log_this_layer)
-        Logger::info("[CPU_FWD L" + std::to_string(l) +
-                     "] MatVec: Gate_Proj (F32)");
-      matvec_f32_f32_vector_cpu(lw.gate_proj_f32, x_norm_vec2, gate_vec, is,
-                                hs);
-    } else if (!lw.gate_proj.empty()) {
-      if (log_this_layer)
-        Logger::warning("[CPU_FWD L" + std::to_string(l) +
-                        "] MatVec: Gate_Proj (BF16 Fallback)");
-      matvec_bf16_f32_vector_cpu(lw.gate_proj, x_norm_vec2, gate_vec, is, hs);
-    } else {
-      throw std::runtime_error("Layer " + std::to_string(l) +
-                               ": No valid Gate projection weights found!");
-    }
-    if (log_this_layer) log_vector_summary("Layer 0 Gate Vec", gate_vec);
-
-    if (!lw.up_proj_q8_0.empty()) {
-      if (log_this_layer)
-        Logger::info("[CPU_FWD L" + std::to_string(l) +
-                     "] MatVec: Up_Proj (Q8_0)");
-      std::vector<float> up_proj_f32(is * hs);
-      size_t num_q8_blocks_up = (is * hs) / GGML_QK8_0;
-      if (lw.up_proj_q8_0.size() != num_q8_blocks_up) {
-        Logger::error("Up_Proj Q8_0 block count mismatch. Expected " +
-                      std::to_string(num_q8_blocks_up) + " got " +
-                      std::to_string(lw.up_proj_q8_0.size()) +
-                      " for tensor 'UP_PROJ'");
-      } else {
-        for (size_t i = 0; i < lw.up_proj_q8_0.size(); ++i) {
-          dequantize_q8_0_block(&lw.up_proj_q8_0[i],
-                                &up_proj_f32[i * GGML_QK8_0]);
-        }
-        matvec_f32_f32_vector_cpu(up_proj_f32, x_norm_vec2, up_vec, is, hs);
-      }
-    } else if (!lw.up_proj_q6k.empty()) {
-      if (log_this_layer)
-        Logger::info("[CPU_FWD L" + std::to_string(l) +
-                     "] MatVec: Up_Proj (Q6_K)");
-
-      std::vector<float> up_proj_f32(is * hs);
-      for (size_t i = 0; i < lw.up_proj_q6k.size(); ++i)
-        dequantize_q6_k(&lw.up_proj_q6k[i], &up_proj_f32[i * GGML_QK_K],
-                        GGML_QK_K);
-      std::vector<block_q8_K> x_norm2_q8k = quantize_fp32_to_q8_K(x_norm_vec2);
-      std::vector<float> x_norm2_q8k_f32(hs);
-      dequantize_q8_k(x_norm2_q8k, x_norm2_q8k_f32, hs, false);
-      matvec_f32_f32_vector_cpu(up_proj_f32, x_norm2_q8k_f32, up_vec, is, hs);
-    } else if (!lw.up_proj_f32.empty()) {
-      if (log_this_layer)
-        Logger::info("[CPU_FWD L" + std::to_string(l) +
-                     "] MatVec: Up_Proj (F32)");
-      matvec_f32_f32_vector_cpu(lw.up_proj_f32, x_norm_vec2, up_vec, is, hs);
-    } else if (!lw.up_proj.empty()) {
-      if (log_this_layer)
-        Logger::warning("[CPU_FWD L" + std::to_string(l) +
-                        "] MatVec: Up_Proj (BF16 Fallback)");
-      matvec_bf16_f32_vector_cpu(lw.up_proj, x_norm_vec2, up_vec, is, hs);
-    } else {
-      throw std::runtime_error("Layer " + std::to_string(l) +
-                               ": No valid Up projection weights found!");
-    }
-    if (log_this_layer) log_vector_summary("Layer 0 Up Vec", up_vec);
-
-    silu_cpu(gate_vec, silu_out_vec);
-
-#pragma omp parallel for
-    for (int64_t i = 0; i < static_cast<int64_t>(is); ++i) {
-      swiglu_result_vec[i] = silu_out_vec[i] * up_vec[i];
-    }
-    if (log_this_layer)
-      log_vector_summary("Layer 0 SwiGLU Result Vec", swiglu_result_vec);
-
-    if (!lw.down_proj_q8_0.empty()) {
-      if (log_this_layer)
-        Logger::info("[CPU_FWD L" + std::to_string(l) +
-                     "] MatVec: Down_Proj (Q8_0)");
-      std::vector<float> down_proj_f32(hs * is);
-      size_t num_blocks = (size_t)(hs * is) / GGML_QK8_0;
-      if (lw.down_proj_q8_0.size() != num_blocks) {
-        Logger::error("Down_Proj Q8_0 block count mismatch. Expected " +
-                      std::to_string(num_blocks) + " got " +
-                      std::to_string(lw.down_proj_q8_0.size()) +
-                      " for tensor 'DOWN_PROJ'");
-        mlp_out_vec.assign(hs, 0.0f);
-      } else {
-        for (size_t i = 0; i < lw.down_proj_q8_0.size(); ++i) {
-          dequantize_q8_0_block(&lw.down_proj_q8_0[i],
-                                &down_proj_f32[i * GGML_QK8_0]);
-        }
-        matvec_f32_f32_vector_cpu(down_proj_f32, swiglu_result_vec, mlp_out_vec,
-                                  hs, is);
-      }
-    } else if (!lw.down_proj_q6k.empty()) {
-      if (log_this_layer)
-        Logger::info("[CPU_FWD L" + std::to_string(l) +
-                     "] MatVec: Down_Proj (Q6_K)");
-
-      std::vector<float> down_proj_f32(hs * is);
-      for (size_t i = 0; i < lw.down_proj_q6k.size(); ++i)
-        dequantize_q6_k(&lw.down_proj_q6k[i], &down_proj_f32[i * GGML_QK_K],
-                        GGML_QK_K);
-      std::vector<float> swiglu_q8k_f32(is);
-      std::vector<block_q8_K> swiglu_q8k =
-          quantize_fp32_to_q8_K(swiglu_result_vec);
-      dequantize_q8_k(swiglu_q8k, swiglu_q8k_f32, is, false);
-      matvec_f32_f32_vector_cpu(down_proj_f32, swiglu_q8k_f32, mlp_out_vec, hs,
-                                is);
-    } else if (!lw.down_proj_q4k.empty()) {
-      if (log_this_layer)
-        Logger::info("[CPU_FWD L" + std::to_string(l) +
-                     "] MatVec: Down_Proj (Q4_K)");
-      std::vector<float> down_proj_f32(hs * is);
-      for (size_t i = 0; i < lw.down_proj_q4k.size(); ++i)
-        dequantize_q4_k_m(&lw.down_proj_q4k[i], &down_proj_f32[i * GGML_QK_K],
-                          GGML_QK_K);
-      std::vector<block_q8_K> swiglu_q8k =
-          quantize_fp32_to_q8_K(swiglu_result_vec);
-      std::vector<float> swiglu_q8k_f32(is);
-      dequantize_q8_k(swiglu_q8k, swiglu_q8k_f32, is, false);
-      matvec_f32_f32_vector_cpu(down_proj_f32, swiglu_q8k_f32, mlp_out_vec, hs,
-                                is);
-    } else if (!lw.down_proj_f32.empty()) {
-      if (log_this_layer)
-        Logger::info("[CPU_FWD L" + std::to_string(l) +
-                     "] MatVec: Down_Proj (F32)");
-      matvec_f32_f32_vector_cpu(lw.down_proj_f32, swiglu_result_vec,
-                                mlp_out_vec, hs, is);
-    } else if (!lw.down_proj.empty()) {
-      if (log_this_layer)
-        Logger::warning("[CPU_FWD L" + std::to_string(l) +
-                        "] MatVec: Down_Proj (BF16 Fallback)");
-      matvec_bf16_f32_vector_cpu(lw.down_proj, swiglu_result_vec, mlp_out_vec,
-                                 hs, is);
-    } else {
-      throw std::runtime_error("Layer " + std::to_string(l) +
-                               ": No valid Down projection weights found!");
-    }
-
-#pragma omp parallel for
-    for (int64_t i = 0; i < static_cast<int64_t>(hs); ++i) {
-      input[i] = x_resid2_vec[i] + mlp_out_vec[i];
-    }
-
-    if (l == 0) {
-      log_vector_summary("Layer 0 MLP Down Proj Out (mlp_out_vec)",
-                         mlp_out_vec);
-    }
-
-    if (l == 0) {
-      log_vector_summary("Layer 0 End (After MLP Residual) (input)", input);
-    }
-
-    if (log_this_layer) {
-      Logger::info("[CPU_FWD] ------ END Layer " + std::to_string(l) +
-                   " (pos=" + std::to_string(n_tokens) + ") ------");
-    }
-  }
-
-  if (log_this_step || log_first_gen_step)
-    Logger::info("[CPU_FWD STEP " + std::to_string(n_tokens) +
-                 "] After layer loop, before final RMSNorm.");
-
-  const std::vector<float>& w_final_norm_vec =
-      final_norm_f32.empty() ? bf16vec_to_float_vec(final_norm)
-                             : final_norm_f32;
-  std::vector<float> x_final_norm_vec(hs);
-  rmsnorm_vector_cpu(input, w_final_norm_vec, x_final_norm_vec, eps);
-  if (log_this_step || log_first_gen_step)
-    log_vector_summary("[CPU_FWD] Output of Final CPU RMSNorm (pos=" +
-                           std::to_string(n_tokens) + ")",
-                       x_final_norm_vec);
-
-  std::vector<float> logits(vs);
-  bool lm_head_logged = false;
-  if (!lm_head_q8_0.empty()) {
-    if (log_this_step) Logger::info("[CPU_FWD] Using Q8_0 LM Head");
-    std::vector<float> lm_head_f32(vs * hs);
-    size_t num_blocks = (size_t)(vs * hs) / GGML_QK8_0;
-    if (lm_head_q8_0.size() != num_blocks) {
-      Logger::error("LM_Head Q8_0 block count mismatch. Expected " +
-                    std::to_string(num_blocks) + " got " +
-                    std::to_string(lm_head_q8_0.size()) +
-                    " for tensor 'LM_HEAD'");
-    } else {
-      for (size_t i = 0; i < lm_head_q8_0.size(); ++i) {
-        dequantize_q8_0_block(&lm_head_q8_0[i], &lm_head_f32[i * GGML_QK8_0]);
-      }
-      matvec_f32_f32_vector_cpu(lm_head_f32, x_final_norm_vec, logits, vs, hs);
-      lm_head_logged = true;
-    }
-  } else if (!lm_head_q6k.empty()) {
-    if (log_this_step) Logger::info("[CPU_FWD] Using Q6_K LM Head");
-    std::vector<float> lm_head_f32(vs * hs);
-    for (size_t i = 0; i < lm_head_q6k.size(); ++i)
-      dequantize_q6_k(&lm_head_q6k[i], &lm_head_f32[i * GGML_QK_K], GGML_QK_K);
-    matvec_f32_f32_vector_cpu(lm_head_f32, x_final_norm_vec, logits, vs, hs);
-    lm_head_logged = true;
-  } else if (!lm_head_q4k.empty()) {
-    if (log_this_step) Logger::info("[CPU_FWD] Using Q4_K LM Head");
-    std::vector<float> lm_head_f32(vs * hs);
-    for (size_t i = 0; i < lm_head_q4k.size(); ++i)
-      dequantize_q4_k_m(&lm_head_q4k[i], &lm_head_f32[i * GGML_QK_K],
-                        GGML_QK_K);
-    matvec_f32_f32_vector_cpu(lm_head_f32, x_final_norm_vec, logits, vs, hs);
-    lm_head_logged = true;
-  } else if (!lm_head_f32.empty()) {
-    if (log_this_step) Logger::info("[CPU_FWD] Using F32 LM Head");
-    matvec_f32_f32_vector_cpu(lm_head_f32, x_final_norm_vec, logits, vs, hs);
-    lm_head_logged = true;
-  } else if (!lm_head.empty()) {
-    Logger::warning(
-        "[CPU_FWD] Using BF16 LM head weights directly - Ensure F32 version "
-        "wasn't expected.");
-    if (log_this_step) Logger::info("[CPU_FWD] Using BF16 LM Head (Fallback)");
-    matvec_bf16_f32_vector_cpu(lm_head, x_final_norm_vec, logits, vs, hs);
-    lm_head_logged = true;
-  }
-
-  if (!lm_head_logged) {
-    Logger::fatal(
-        "No valid LM Head weights found or processed (Q8_0, Q6_K, Q4_K, F32, "
-        "or BF16).");
-    throw std::runtime_error("Missing or failed LM head weights processing");
-  }
-  if (log_this_step || log_first_gen_step) {
-    Logger::info("Reached end of forward for n_tokens=0");
-    log_vector_summary("[CPU_FWD] Final Logits (BEFORE RETURN, pos=" +
-                           std::to_string(n_tokens) + ")",
-                       logits, 15);
-  }
-  if (log_this_step || log_first_gen_step) {
-    Logger::info("[CPU_FWD] forward complete. pos=" + std::to_string(n_tokens));
-  }
-
-  if (nhl > 0 && (n_tokens == 12 || n_tokens == 13)) {
-    log_vector_summary_detailed("[CPU] Layer 0 Output (after layer 0, pos=" +
-                                    std::to_string(n_tokens) + ")",
-                                input, n_tokens, 0, 8);
-  }
-
-  return logits;
+  Logger::info("TinyLlamaModel construction from path complete.");
 }
 
 int TinyLlamaModel::get_vocab_size() const { return config_.vocab_size; }
@@ -3664,4 +2694,25 @@ void TinyLlamaModel::initialize_rope_freqs() {
   } else {
       Logger::info("RoPE frequencies already precomputed.");
   }
+}
+
+TinyLlamaModel::~TinyLlamaModel() {
+    Logger::info("Destroying TinyLlamaModel");
+    
+    // Clean up GPU resources if CUDA is enabled
+#ifdef HAS_CUDA
+    if (cuda_initialized_) {
+        for (auto& ptr : gpu_weights_) {
+            if (ptr != nullptr) {
+                cudaFree(ptr);
+                ptr = nullptr;
+            }
+        }
+        gpu_weights_.clear();
+    }
+#endif
+
+    // Clear any other resources
+    gguf_data_.reset();
+    precomputed_freqs_cis_.clear();
 }

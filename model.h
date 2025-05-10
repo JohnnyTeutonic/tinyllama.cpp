@@ -273,6 +273,8 @@ class TinyLlamaModel {
   std::vector<LayerWeights> layers;
 
 #ifdef HAS_CUDA
+  bool cuda_initialized_ = false;
+  std::vector<float*> gpu_weights_;
   float* final_norm_dev = nullptr;
   float* all_freqs_cis_dev = nullptr;
   uint16_t* token_embedding_table_dev_ = nullptr;
