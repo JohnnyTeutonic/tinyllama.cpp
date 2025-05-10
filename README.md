@@ -1,4 +1,5 @@
-# TinyLlama.cpp - Minimal C++ Chat Inference
+# TinyLlama.cpp - A C++ Chat Inference
+#### Author: Jonathan Reich
 
 This codebase supports inference for Llama 2 architecture models (including TinyLlama variants) using Safetensors model format as well as GGUF format.
 
@@ -310,6 +311,28 @@ Please refer to the `pytorch/README.md` for detailed usage instructions for this
 *   `data/` (Example Directory): Conventionally used for placing SafeTensors model directories, which include `config.json`, `model.safetensors`, and `tokenizer.json`.
 *   `models/` (Example Directory): Conventionally used for storing GGUF model files (e.g., `my_model.Q8_0.gguf`).
 
+## Documentation
+
+For detailed API documentation, including class references, function signatures, and implementation details, please visit my documentation website:
+
+[https://johnnyteutonic.github.io/tinyllama.cpp/](https://johnnyteutonic.github.io/tinyllama.cpp/)
+
+The documentation is automatically generated from the source code using Doxygen and includes:
+* Complete API reference for all classes and functions
+* Detailed explanations of the model architecture
+* Implementation details for both CPU and CUDA backends
+* Examples and usage patterns
+* Configuration options and build parameters
+
+You can also generate the documentation locally using the management scripts:
+```bash
+# Using manage.sh (Linux/macOS)
+./manage.sh docs
+
+# Using manage.ps1 (Windows)
+.\manage.ps1 docs
+```
+
 ### Python Bindings (`tinyllama_bindings`)
 
 This project includes Python bindings built using `pybind11`, allowing you to interact with the TinyLlama inference engine directly from Python. The core component exposed is the `TinyLlamaSession` class, which simplifies model loading and text generation.
@@ -402,19 +425,8 @@ except Exception as e:
     import traceback
     traceback.print_exc()
 
-```
+### Running the Command-Line Chat Client (`tinyllama`)
 
-**To Run the Example:**
-
-1.  Ensure the `tinyllama_bindings` module file (e.g., `tinyllama_bindings.pyd`) is in the same directory as your Python script, or in a directory included in `sys.path` (like the `build/Release` or `build/Debug` directory if you run from project root after build configuration).
-    *   A simple way is to copy the `.pyd`/`.so` file from its build location (e.g., `build/Release/`) to the directory where your Python script resides, or to the project root if you run scripts from there.
-    *   Alternatively, you can add its build directory to your `PYTHONPATH` environment variable or `sys.path` in Python.
-2.  Make sure you have the model files downloaded and the `model_path` variable in the script points to the correct location.
-3.  Execute the Python script: `python your_script_name.py`.
-
-Refer to `test_pybindings.py` for a more robust example that includes argument parsing for model path and prompt.
-
-### 4. Running the Command-Line Chat Client (`tinyllama`)
 ```bash
 # Navigate back to the project root or ensure paths are correct
 # Run the server, pointing it to your model data directory
