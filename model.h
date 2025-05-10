@@ -314,10 +314,12 @@ class TinyLlamaModel {
   std::vector<std::pair<float, float>> precomputed_freqs_cis_;
 
   std::unique_ptr<GGUFData> gguf_data_;
+  std::string model_path_;
 
   void initialize_weights(const SafeTensorsLoader* loader,
                           const GGUFData* gguf);
   void initialize_gpu_and_rope();
+
 };
 
 ModelConfig parse_model_config(const nlohmann::json& json);

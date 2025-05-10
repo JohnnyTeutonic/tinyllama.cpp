@@ -24,8 +24,9 @@
 
 #include "gguf_parser.h"
 #include "quantization.h"
-#include "model_constants.h"  // Add this include
+#include "model_constants.h"
 #include "model_macros.h"
+#include "safetensors_loader.h" // Added for SafeTensorsLoader::load_model_config_from_json
 
 static void matvec_q6k_f32_vector_cpu(const std::vector<block_q6_K>& mat_q6k,
                                       const std::vector<float>& vec_f32,
@@ -1570,61 +1571,117 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& config,
   Logger::info("TinyLlamaModel construction from SafeTensorsLoader complete.");
 }
 
-TinyLlamaModel::TinyLlamaModel(const ModelConfig& config_in,
-                               const std::string& weights_path)
-
+TinyLlamaModel::TinyLlamaModel(const ModelConfig& initial_config,
+                               const std::string& model_path)
+    : model_path_(model_path)
+#ifdef HAS_CUDA
+      ,
+      cublas_handle_(nullptr),
+      token_embedding_table_dev_(nullptr),
+      lm_head_dev_(nullptr),
+      final_norm_dev(nullptr),
+      w_q_dev_(nullptr),
+      w_k_dev_(nullptr),
+      w_v_dev_(nullptr),
+      w_o_dev_(nullptr),
+      w_gate_dev_(nullptr),
+      w_up_dev_(nullptr),
+      w_down_dev_(nullptr),
+      all_freqs_cis_dev(nullptr),
+      x_dev_(nullptr),
+      x_norm_dev_(nullptr),
+      x_resid1_dev_(nullptr),
+      x_resid2_dev_(nullptr),
+      q_dev_(nullptr),
+      k_dev_(nullptr),
+      v_dev_(nullptr),
+      attn_out_dev_(nullptr),
+      attn_proj_dev_(nullptr),
+      gate_vec_dev_(nullptr),
+      up_vec_dev_(nullptr),
+      swiglu_vec_dev_(nullptr),
+      mlp_down_dev_(nullptr),
+      logits_dev_(nullptr),
+      token_embedding_table_f32_dev_(nullptr),
+      lm_head_f32_dev_(nullptr),
+      w_q_f32_dev_(nullptr),
+      w_k_f32_dev_(nullptr),
+      w_v_f32_dev_(nullptr),
+      w_o_f32_dev_(nullptr),
+      w_gate_f32_dev_(nullptr),
+      w_up_f32_dev_(nullptr),
+      w_down_f32_dev_(nullptr)
+#endif
 {
-  Logger::info("Constructing TinyLlamaModel from path: " + weights_path);
-  bool is_gguf_detected_runtime = false;
-  if (weights_path.size() >= 5 &&
-      weights_path.substr(weights_path.size() - 5) == ".gguf") {
-    is_gguf_detected_runtime = true;
-  } else {
-    std::ifstream file(weights_path, std::ios::binary);
-    if (file.is_open()) {
-      uint32_t magic = 0;
-      file.read(reinterpret_cast<char*>(&magic), sizeof(magic));
-      if (magic == GGUF_MAGIC) {
-        is_gguf_detected_runtime = true;
-      }
-      file.close();
+  Logger::info("TinyLlamaModel constructor entered. Model path: " + model_path);
+  this->config_ = initial_config; // Set initial config
+
+  std::unique_ptr<SafeTensorsLoader> loader = nullptr;
+  std::unique_ptr<GGUFData> gguf_data = nullptr;
+
+  if (model_path.size() > 5 &&
+      model_path.substr(model_path.size() - 5) == ".gguf") {
+    Logger::info("GGUF file detected: " + model_path);
+    try {
+      // Correctly load GGUF metadata
+      gguf_data = std::make_unique<GGUFData>(load_gguf_meta(model_path));
+      this->config_ = parse_model_config_from_gguf(*gguf_data); // GGUF populates its own config
+      this->config_.is_gguf_file_loaded = true;
+      Logger::info("Successfully parsed GGUF metadata. Model name: " + this->config_.model_name);
+    } catch (const std::exception& e) {
+      Logger::error("Failed to load or parse GGUF file: " + std::string(e.what()));
+      throw; // Re-throw as this is a critical failure for GGUF
+    }
+  } else if (model_path.size() > 12 &&
+             model_path.substr(model_path.size() - 12) == ".safetensors") {
+    Logger::info("SafeTensors file detected: " + model_path);
+    Logger::info("Initial config (from Python/caller): hidden_size=" + std::to_string(this->config_.hidden_size));
+    
+    ModelConfig config_from_json; // Temporary config to be filled by JSON loader
+    bool json_loaded_successfully = SafeTensorsLoader::load_model_config_from_json(model_path, config_from_json);
+
+    if (json_loaded_successfully) {
+        Logger::info("Successfully loaded and parsed config.json for SafeTensors model.");
+        this->config_ = config_from_json; // Update model's config with values from JSON
+        this->config_.is_gguf_file_loaded = false; // Ensure this is false for safetensors
+        Logger::info("Updated config from JSON: hidden_size=" + std::to_string(this->config_.hidden_size) + ", vocab_size=" + std::to_string(this->config_.vocab_size));
     } else {
-      Logger::warning("Could not open weights file to check magic number: " +
-                      weights_path);
+        Logger::warning("Failed to load config.json or it was not found for SafeTensors model. "
+                        "Proceeding with the initial_config provided to the constructor.");
+        // this->config_ already holds initial_config, so no change needed here, just ensure the GGUF flag is false.
+        this->config_.is_gguf_file_loaded = false;
     }
-  }
-
-  if (is_gguf_detected_runtime) {
-    Logger::info("Detected GGUF file. Loading metadata and mapping weights...");
-    gguf_data_ = std::make_unique<GGUFData>(load_gguf_meta(weights_path));
-    config_ = parse_model_config_from_gguf(*gguf_data_);
-    config_.is_gguf_file_loaded = true;
-
-    if (config_in.max_position_embeddings > 0 &&
-        config_in.max_position_embeddings != config_.max_position_embeddings) {
-      Logger::warning("Overriding GGUF max_position_embeddings (" +
-                      std::to_string(config_.max_position_embeddings) +
-                      ") with value from main: " +
-                      std::to_string(config_in.max_position_embeddings));
-      config_.max_position_embeddings = config_in.max_position_embeddings;
+    
+    try {
+      loader = std::make_unique<SafeTensorsLoader>(model_path);
+      Logger::info("SafeTensorsLoader initialized for: " + model_path);
+    } catch (const std::exception& e) {
+        Logger::error("Failed to initialize SafeTensorsLoader: " + std::string(e.what()));
+        throw; // Re-throw as this is critical for safetensors
     }
-
-    initialize_weights(nullptr, gguf_data_.get());
-    Logger::info("GGUF weights mapped.");
 
   } else {
-    config_ = config_in;
-    config_.is_gguf_file_loaded = false;
-    Logger::info(
-        "Detected non-GGUF file. Using provided config and loading with "
-        "SafeTensors loader...");
-    SafeTensorsLoader loader(weights_path);
-    initialize_weights(&loader, nullptr);
-    Logger::info("SafeTensors weights loaded.");
+    throw std::runtime_error(
+        "Unsupported model file type. Please use .gguf or .safetensors");
   }
 
-  initialize_gpu_and_rope();
-  Logger::info("TinyLlamaModel construction from path complete.");
+  // Log final config to be used for model initialization
+  Logger::info("Final ModelConfig to be used for initialization:");
+  Logger::info("  hidden_size: " + std::to_string(config_.hidden_size));
+  Logger::info("  intermediate_size: " + std::to_string(config_.intermediate_size));
+  Logger::info("  num_attention_heads: " + std::to_string(config_.num_attention_heads));
+  Logger::info("  num_key_value_heads: " + std::to_string(config_.num_key_value_heads));
+  Logger::info("  num_hidden_layers: " + std::to_string(config_.num_hidden_layers));
+  Logger::info("  vocab_size: " + std::to_string(config_.vocab_size));
+  Logger::info("  max_position_embeddings: " + std::to_string(config_.max_position_embeddings));
+  Logger::info("  architecture: " + config_.architecture);
+  Logger::info("  is_gguf_file_loaded: " + std::string(config_.is_gguf_file_loaded ? "true" : "false"));
+
+
+  initialize_weights(loader.get(), gguf_data.get());
+  initialize_gpu_and_rope(); 
+
+  Logger::info("TinyLlamaModel constructed and initialized successfully.");
 }
 
 TinyLlamaModel::~TinyLlamaModel() {
