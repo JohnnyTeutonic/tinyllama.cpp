@@ -327,7 +327,7 @@ if [ $# -eq 0 ]; then
 fi
 
 COMMAND=$1
-shift # Remove command from arguments list, rest are options for the command
+shift
 
 case $COMMAND in
     build) do_build "$@" ;;

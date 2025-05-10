@@ -169,9 +169,11 @@ This will create several executables in the `build/` directory (or `build/bin/` 
 
 For detailed insight into the operations performed by the executables (e.g., `tinyllama`, `tinyllama_server`), you can inspect the `debugging.log` file generated in the application's working directory. This log provides a step-by-step account of model loading, tokenization, and generation processes.
 
-### Using the Management Script (manage.sh)
+### Using the Management Scripts
 
-For ease of use, a comprehensive shell script `manage.sh` is provided in the project root to automate common development and project tasks. This script simplifies building, cleaning, running the applications, formatting code, generating documentation, and packaging releases.
+For ease of use, comprehensive scripts are provided in the project root to automate common development and project tasks. These scripts simplify building, cleaning, running the applications, formatting code, generating documentation, and packaging releases.
+
+#### `manage.sh` (for Linux/macOS)
 
 **First, make the script executable:**
 
@@ -184,13 +186,44 @@ chmod +x manage.sh
 *   `./manage.sh build`: Compiles the project with configurable options for build type and CUDA support.
 *   `./manage.sh clean`: Removes build artifacts and generated documentation.
 *   `./manage.sh run-server`: Starts the chat server with configurable model directory, host, and port.
-*   `./manage.sh run-chat`: Starts the command-line chat client with a configurable model directory.
-*   `./manage.sh format`: Formats C++/CUDA source code using `clang-format` (requires `.clang-format` in project root for custom styles).
-*   `./manage.sh docs`: Generates API documentation using Doxygen (requires `Doxyfile` in project root).
-*   `./manage.sh package`: Creates a release tarball (`.tar.gz`) of the project, including executables and documentation.
+*   `./manage.sh run-chat`: Starts the command-line chat client with a configurable model directory and generation parameters.
+*   `./manage.sh format`: Formats C++/CUDA source code using `clang-format`.
+*   `./manage.sh docs`: Generates API documentation using Doxygen.
+*   `./manage.sh docs-serve`: Serves generated documentation locally.
+*   `./manage.sh docs-clean`: Removes generated documentation.
+*   `./manage.sh package`: Creates a release tarball (`.tar.gz`).
 *   `./manage.sh help`: Displays detailed help and options for all commands.
 
-It is recommended to use this script for most routine operations. For detailed options for each command, please run `./manage.sh help` or `./manage.sh <command> --help` (though the primary help is via `./manage.sh help`).
+It is recommended to use this script for most routine operations. For detailed options for each command, please run `./manage.sh help`.
+
+#### `manage.ps1` (for Windows PowerShell)
+
+This script provides equivalent functionality to `manage.sh` for Windows users.
+
+**Running the script:**
+
+Open PowerShell, navigate to the project root directory, and then you can run commands like:
+
+```powershell
+.\manage.ps1 build
+.\manage.ps1 build -BuildType Debug -Cuda OFF
+.\manage.ps1 run-server -ModelDir .\data\TinyLlama-1.1B-Chat-v1.0
+```
+
+**Available Commands:**
+
+*   `.\manage.ps1 build`: Compiles the project. Options: `-BuildType <Release|Debug>`, `-Cuda <ON|OFF>`.
+*   `.\manage.ps1 clean`: Removes build artifacts and generated documentation.
+*   `.\manage.ps1 run-server`: Starts the chat server. Options: `-ModelDir <path>`, `-Host <hostname>`, `-Port <port_number>`.
+*   `.\manage.ps1 run-chat`: Starts the command-line chat client. Options: `-ModelDir <path>`, `-Temperature <float>`, `-TopK <int>`, `-TopP <float>`, `-Prompt <text>`.
+*   `.\manage.ps1 format`: Formats C++/CUDA source code using `clang-format.exe` (must be in PATH).
+*   `.\manage.ps1 docs`: Generates API documentation using `doxygen.exe` (must be in PATH).
+*   `.\manage.ps1 docs-serve`: Serves generated documentation locally using Python's HTTP server (Python must be in PATH).
+*   `.\manage.ps1 docs-clean`: Removes generated documentation.
+*   `.\manage.ps1 package`: Creates a release ZIP archive. Options: `-Version <semver>`, `-BuildType <Release|Debug>`.
+*   `.\manage.ps1 help`: Displays detailed help and options for all commands.
+
+For detailed options for each command, run `.\manage.ps1 help`.
 
 ### 3. Run the Chat Server (Primary Example)
 
@@ -231,20 +264,6 @@ Besides the web server, you can interact with the models directly via command-li
     *   **Example (GGUF file)**:
         ```bash
         ./build/tinyllama ./models/my_model.Q4_K_M.gguf "Explain black holes." 128 0.5
-        ```
-
-*   **`tinyllamagguf`** (Specific GGUF CLI - consider using `tinyllama` which also supports GGUF):
-    *   **Description**: Command-line interface specifically for loading `.gguf` model files for chat.
-    *   **Usage**: `./build/tinyllamagguf <path_to_gguf_file> [prompt] [steps] [temperature]`
-        *   `<path_to_gguf_file>`: Direct path to the `.gguf` model file. (Required)
-        *   `[prompt]`: The text prompt. (Default: "What is the capital of France?")
-        *   `[steps]`: Maximum number of new tokens. (Default: `64`)
-        *   `[temperature]`: Sampling temperature. (Default: `0.7`)
-    *   **Example**:
-        ```bash
-        ./build/tinyllamagguf ./models/another_model.Q8_0.gguf "Tell me a story." 256 0.8
-        ```
-        *(Note: Ensure `tokenizer.json` is present in the same directory as the `.gguf` file for `tinyllamagguf` and when using `.gguf` with `tinyllama` if the GGUF doesn't embed all necessary tokenizer info.)*
 
 ## PyTorch SafeTensors Inference
 
@@ -268,22 +287,150 @@ Please refer to the `pytorch/README.md` for detailed usage instructions for this
 ## Project Structure
 
 *   `CMakeLists.txt`: Defines the build process, dependencies, and targets.
-*   `*.cpp`, `*.h`, `*.cu`: C++ source, header, and CUDA kernel files.
-    *   `main_gguf.cpp`: Main entry point for GGUF model loading and generation tests.
-    *   `api.cpp`/`api.h`: Defines the `TinyLlamaSession` class for easier interaction.
-    *   `model.cpp`/`model.h`: Core model logic (transformer layers, attention, etc.).
-    *   `tokenizer.cpp`/`tokenizer.h`: Tokenizer loading and BPE logic wrapper.
-    *   `safetensors_loader.cpp`/`safetensors_loader.h`: Handles loading weights from `.safetensors` files.
-    *   `gguf_parser.cpp`/`gguf_parser.h`: Handles loading metadata and weights from `.gguf` files.
-    *   `server.cpp`: Implements the HTTP server using `cpp-httplib`.
-    *   `cuda_kernels.cu`: Contains CUDA kernels for GPU acceleration.
-    *   `logger.cpp`/`logger.h`: Simple logging utility.
-    *   `quantization.h`: Contains structures and functions for quantized types (Q4_K, Q6_K, Q8_0 etc.).
-*   `www/`: Contains the static files (HTML, CSS, JavaScript) for the web chat UI.
-*   `data/` (Example): You need to create this directory and place your model files inside it.
+*   `manage.sh`: Management script for common tasks (build, clean, run, etc.) on Linux/macOS.
+*   `manage.ps1`: Management script providing equivalent functionality for Windows PowerShell.
+*   `test_pybindings.py`: Python script for testing and demonstrating the Python bindings.
+*   `.clang-format`: Configuration file for the `clang-format` C++ code formatter.
+*   `Doxyfile`: Configuration file for generating API documentation with Doxygen.
+*   Key C++, Header, and CUDA files (typically in the root or organized by CMake):
+    *   `main_gguf.cpp`: Main entry point for the `tinyllama` command-line chat client (supports GGUF and SafeTensors models).
+    *   `server.cpp`: Implements the `tinyllama_server` HTTP server and its main entry point for web UI interaction.
+    *   `api.cpp`/`api.h`: Defines the `TinyLlamaSession` class, providing a high-level API for loading models and generating text.
+    *   `bindings.cpp`: Implements Python bindings for `TinyLlamaSession` and `ModelConfig` using `pybind11`.
+    *   `model.cpp`/`model.h`: Contains the core Transformer model architecture and logic (attention, feed-forward layers, etc.).
+    *   `model_constants.h`: Defines various constants related to model architecture and parameters.
+    *   `model_macros.h`: Provides utility macros, notably for `NOMINMAX` compatibility (e.g., `SAFE_MIN`, `SAFE_MAX`) and other compile-time helpers.
+    *   `tokenizer.cpp`/`tokenizer.h`: Handles loading of `tokenizer.json`, BPE encoding/decoding, and chat template application.
+    *   `safetensors_loader.cpp`/`safetensors_loader.h`: Logic for parsing metadata and loading tensor data from `.safetensors` files.
+    *   `gguf_parser.cpp`/`gguf_parser.h`: Logic for parsing metadata and loading tensor data from `.gguf` files.
+    *   `cuda_kernels.cu` (and potentially `cuda_utils.h`): Contains CUDA kernels for GPU-accelerated operations and supporting utility functions (compiled if `HAS_CUDA=ON`).
+    *   `logger.cpp`/`logger.h`: A simple utility for logging messages to `debugging.log`.
+    *   `quantization.h`: Defines data structures and functions for handling various GGUF quantization types (e.g., Q8_0, Q4_K).
+*   `www/`: Directory containing static web assets (HTML, CSS, JavaScript) for the chat interface served by `tinyllama_server`.
+*   `data/` (Example Directory): Conventionally used for placing SafeTensors model directories, which include `config.json`, `model.safetensors`, and `tokenizer.json`.
+*   `models/` (Example Directory): Conventionally used for storing GGUF model files (e.g., `my_model.Q8_0.gguf`).
 
-## Future Enhancements
-*   Streaming responses in the web UI. 
+### Python Bindings (`tinyllama_bindings`)
+
+This project includes Python bindings built using `pybind11`, allowing you to interact with the TinyLlama inference engine directly from Python. The core component exposed is the `TinyLlamaSession` class, which simplifies model loading and text generation.
+
+#### Building and Installing the Python Bindings
+
+The Python bindings are built as part of the main C++ project when CMake is configured. There isn't a separate installation step like `pip install .` in the traditional Python sense; rather, the build process generates a Python module file (`.pyd` on Windows, `.so` on Linux) that can be imported if it's in your Python path or if your script is run from a location where Python can find it (e.g., the project root after building).
+
+1.  **Prerequisites:**
+    *   Ensure you have Python installed (the version used for `pybind11` development, typically Python 3.x).
+    *   Make sure CMake can find your Python installation. If you encounter issues, you might need to set CMake variables like `Python_EXECUTABLE` or ensure Python is correctly added to your system's PATH.
+    *   The `pybind11` library is fetched automatically by CMake.
+
+2.  **Build the Project:**
+    Follow the general build instructions in the "Build the C++ Application" section. For example:
+    ```bash
+    # In project root
+    mkdir build
+    cd build
+    cmake .. 
+    # On Linux/macOS:
+    make -j$(nproc)
+    # On Windows (e.g., from Developer Command Prompt):
+    cmake --build . --config Release
+    ```
+    After a successful build, the Python module (e.g., `build/Release/tinyllama_bindings.pyd` or `build/tinyllama_bindings.so`) should be created. The exact location might vary slightly based on your CMake generator and build type.
+
+#### Using the Python Bindings
+
+Once built, you can import and use the `tinyllama_bindings` module in your Python scripts.
+
+**Example (`test_pybindings.py` located in the project root provides a more complete example):**
+
+```python
+import tinyllama_bindings
+import os
+
+# Path to your model (directory containing safetensors/config.json or a .gguf file)
+# Adjust the path as necessary.
+# model_path = "data/TinyLlama-1.1B-Chat-v1.0" 
+# or for GGUF:
+model_path = "models/tinyllama-1.1b-chat-v1.0.Q8_0.gguf"
+
+if not os.path.exists(model_path):
+    print(f"Model path not found: {model_path}")
+    print("Please download the model and update the 'model_path' variable.")
+    exit()
+
+try:
+    # Redirect C++ stdout/stderr to Python (optional, for viewing C++ logs)
+    with tinyllama_bindings.ostream_redirect(stdout=True, stderr=True):
+        print(f"Initializing TinyLlamaSession with model: {model_path}")
+        # 1. Initialize the session with the model path
+        session = tinyllama_bindings.TinyLlamaSession(model_path)
+        print("TinyLlamaSession initialized.")
+
+        # 2. Get model configuration (optional)
+        config = session.get_config()
+        print(f"Model BOS token ID: {config.bos_token_id}")
+        print(f"Model EOS token ID: {config.eos_token_id}")
+        print(f"Loaded from GGUF: {config.is_gguf_file_loaded}")
+
+        # 3. Generate text
+        prompt = "What is the capital of France?"
+        num_steps = 50
+        temperature = 0.7
+        top_k = 40
+        top_p = 0.9
+        # The 'stop_tokens_str' and 'apply_q_a_format' are positional in current bindings
+        # For safetensors models, apply_q_a_format=True is often desired.
+        # For GGUF, it might depend on the model's pre-prompting.
+        
+        print(f"Generating text for prompt: '{prompt}'")
+        generated_text = session.generate(
+            prompt,
+            num_steps,
+            temperature,
+            top_k,
+            top_p,
+            "",  # stop_tokens_str (e.g., "<|user|>")
+            True # apply_q_a_format 
+        )
+        
+        print("\n--- Generated Text ---")
+        print(f"Prompt: {prompt}")
+        print(f"Output: {generated_text}")
+
+except Exception as e:
+    print(f"An error occurred: {e}")
+    import traceback
+    traceback.print_exc()
+
+```
+
+**To Run the Example:**
+
+1.  Ensure the `tinyllama_bindings` module file (e.g., `tinyllama_bindings.pyd`) is in the same directory as your Python script, or in a directory included in `sys.path` (like the `build/Release` or `build/Debug` directory if you run from project root after build configuration).
+    *   A simple way is to copy the `.pyd`/`.so` file from its build location (e.g., `build/Release/`) to the directory where your Python script resides, or to the project root if you run scripts from there.
+    *   Alternatively, you can add its build directory to your `PYTHONPATH` environment variable or `sys.path` in Python.
+2.  Make sure you have the model files downloaded and the `model_path` variable in the script points to the correct location.
+3.  Execute the Python script: `python your_script_name.py`.
+
+Refer to `test_pybindings.py` for a more robust example that includes argument parsing for model path and prompt.
+
+### 4. Running the Command-Line Chat Client (`tinyllama`)
+```bash
+# Navigate back to the project root or ensure paths are correct
+# Run the server, pointing it to your model data directory
+./build/tinyllama_server ./data 
+
+# Example if executable is directly in build:
+# ./build/tinyllama_server ./data
+
+# Example on Windows Release build:
+# ./build/Release/tinyllama_server.exe ./data
+```
+
+*   Replace `./data` with the actual path to the directory containing your `config.json`, `tokenizer.json`, and `model.safetensors`.
+*   The server will start, load the model, and listen on `http://localhost:8080` by default.
+*   Open your web browser and navigate to `http://localhost:8080`.
+*   You should see a basic chat interface where you can interact with the model.
 
 ## Acknowledgements
 
