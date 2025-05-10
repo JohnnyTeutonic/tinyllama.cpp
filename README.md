@@ -5,17 +5,12 @@ This codebase supports inference for Llama 2 architecture models (including Tiny
 
 The GGUF format support includes loading models with various tensor types such as BF16, FP16, FP32, and Q8_0. Nominal support for Q4_K and Q6_K quantization types is also present, though Q8_0 is the most extensively tested quantized format in this project.
 
-## Purpose
-
-This project provides a streamlined, end-to-end C++ inference pipeline for running Llama-2 models for chat applications. The primary goal is to achieve this with minimal dependencies, allowing for deployment without requiring Python or large frameworks like LibTorch at runtime (unless using the optional CUDA backend which requires the CUDA Toolkit).
-
-It includes a simple web server and UI for interactive chatting.
-
 ## Features
 
 *   Pure C++ inference core (CPU-based).
 *   Optional CUDA backend for GPU acceleration.
-*   Loads model configuration (`config.json`), tokenizer (`tokenizer.json`), and weights (`model.safetensors`).
+*   Support for both safetensors and GGUF format.
+*   Python bindings
 *   Built-in web server (`cpp-httplib`) for easy interaction via a web UI.
 *   Minimal external dependencies managed via CMake.
 *   Cross-platform (tested on Linux, Windows - requires C++17 compiler).
@@ -32,7 +27,6 @@ These are needed to **build and run** the C++ application:
 4.  **cpp-httplib:** For the web server backend. (Fetched automatically by CMake).
 5.  **OpenMP (Optional):** For multi-threading CPU acceleration. CMake will try to find it; performance will be lower without it.
 6.  **CUDA Toolkit (Optional):** Required **only** if you want GPU-accelerated inference. CMake will detect it if available and build the CUDA kernels. You'll need a compatible NVIDIA GPU and drivers.
-7.  **Boost.Regex (Optional):** Was required only for the now-removed `test_tokenizer` executable. No longer needed.
 
 #### Installing C++ Dependencies on Linux (Debian/Ubuntu Example)
 
@@ -234,9 +228,6 @@ The main way to use this project is via the web server:
 # Navigate back to the project root or ensure paths are correct
 # Run the server, pointing it to your model data directory
 ./build/tinyllama_server ./data 
-
-# Example if executable is directly in build:
-# ./build/tinyllama_server ./data
 
 # Example on Windows Release build:
 # ./build/Release/tinyllama_server.exe ./data
