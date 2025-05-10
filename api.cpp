@@ -312,6 +312,10 @@ std::string TinyLlamaSession::generate(const std::string& prompt_input,
                     std::to_string(input_token_id));
       break;
     }
+    // Log input_embedding immediately before calling model_->forward
+    if (pos == 12 || pos == 13 || pos == 11) { // Added pos == 11 for context
+        log_vector_summary("[API_CPP PreFWD] input_embedding for pos=" + std::to_string(pos) + " (token " + std::to_string(input_token_id) + ")", input_embedding, 10);
+    }
     logits = model_->forward(input_embedding, pos, &kv_cache_, nullptr);
 #endif
 
