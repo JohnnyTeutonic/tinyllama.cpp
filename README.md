@@ -95,7 +95,7 @@ You would typically use a Python script to load a Hugging Face model and tokeniz
 
 ### 1. Obtain Model Files
 
-You need three files from a compatible TinyLlama model (e.g., from Hugging Face):
+For safetensors models, you need three files from a compatible TinyLlama model (e.g., from Hugging Face):
 
 *   `config.json`
 *   `tokenizer.json`
@@ -104,6 +104,8 @@ You need three files from a compatible TinyLlama model (e.g., from Hugging Face)
 Place these three files into a directory, for example, named `data/`.
 
 *(Note: This project expects BF16 weights in `model.safetensors`. Ensure your conversion script saves them in this format if converting from another source).*
+
+Otherwise, when using GGUF models, you simply need the GGUF file itself.
 
 ### Where to Download Tested Model Weights
 
