@@ -31,7 +31,7 @@ class TinyLlamaSession {
    * file.
    * @throws std::runtime_error if loading fails.
    */
-  TinyLlamaSession(const std::string& model_path);
+  TinyLlamaSession(const std::string& model_path, int cpu_layers = 0);
 
   /**
    * @brief Destructor to ensure proper cleanup (e.g., KVCache CUDA memory).

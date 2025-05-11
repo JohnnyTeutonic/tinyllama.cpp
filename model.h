@@ -89,6 +89,7 @@ struct ModelConfig {
     std::string pre_tokenizer_type; /**< Type of pre-tokenizer */
     std::string chat_template_string; /**< Template string for chat formatting */
     bool is_gguf_file_loaded;   /**< Flag indicating if model was loaded from GGUF format */
+    int num_cpu_offload_layers = 0; /**< Number of layers to offload to CPU */
 };
 
 struct GGUFData;
@@ -226,18 +227,22 @@ class TinyLlamaModel {
 
 #ifdef HAS_CUDA
   /**
-   * @brief Performs forward pass on GPU
-   * @param token_id Input token ID
-   * @param pos Position in the sequence
-   * @param cache KV cache
-   * @param attention_mask Optional attention mask
-   * @param stream CUDA stream
-   * @return Output logits
+   * @brief Performs forward pass on GPU for the layers designated to run on GPU.
+   * @param x_input_dev Device pointer to the input activations (e.g., model_->x_dev_ prepared by caller).
+   * @param pos Position in the sequence.
+   * @param cache KV cache.
+   * @param attention_mask Optional attention mask.
+   * @param stream CUDA stream.
+   * @return Output logits if this stage includes the final layer, otherwise intermediate activations (though current impl. always returns logits from this func).
    */
   std::vector<float> forward_device(
-      int token_id, int pos, KVCache* cache,
-      const std::vector<int>* attention_mask = nullptr,
-      cudaStream_t stream = 0);
+    float* x_input_dev,
+    int pos, 
+    KVCache* cache,
+    const std::vector<int>* attention_mask = nullptr,
+    cudaStream_t stream = 0);
+  
+  float* get_x_dev() { return x_dev_; }
 #endif
 
   const ModelConfig& get_config() const { return config_; }

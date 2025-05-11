@@ -25,6 +25,7 @@ $DefaultHasCuda = "ON" # Set to "OFF" if CUDA is not intended to be used by defa
 $DefaultModelDir = "data"
 $DefaultServerHost = "localhost"
 $DefaultServerPort = "8080"
+$DefaultNGpuLayers = -1 # Default for N_GPU_LAYERS (-1 for auto/all)
 $DefaultReleaseVersion = "0.1.0"
 $DefaultTemperature = "0.1"
 $DefaultTopK = 40
@@ -63,6 +64,7 @@ function Show-Usage {
     Write-Host "                 -ModelDir <path>          (default: ${DefaultModelDir})"
     Write-Host "                 -Host <hostname>           (default: ${DefaultServerHost})"
     Write-Host "                 -Port <port_number>        (default: ${DefaultServerPort})"
+    Write-Host "                 -NGpuLayers <int>         (default: ${DefaultNGpuLayers}, -1 for all on GPU)"
     Write-Host ""
     Write-Host "  run-chat     Run the command-line chat client."
     Write-Host "               Options:"
@@ -71,6 +73,7 @@ function Show-Usage {
     Write-Host "                 -TopK <int>               (default: ${DefaultTopK})"
     Write-Host "                 -TopP <float>             (default: ${DefaultTopP})"
     Write-Host "                 -Prompt <text>             (default: interactive mode, uses default prompt)"
+    Write-Host "                 -NGpuLayers <int>         (default: ${DefaultNGpuLayers}, -1 for all on GPU)"
     Write-Host ""
     Write-Host "  format       Format C++/CUDA source code using ${FormatTool}."
     Write-Host "               (Assumes .clang-format file in project root)"
@@ -154,12 +157,14 @@ function Invoke-RunServer {
         [string]$ModelDir = $DefaultModelDir,
         [string]$ServerHost = $DefaultServerHost,
         [string]$ServerPort = $DefaultServerPort,
-        [string]$BuildType = $DefaultBuildType # To find the executable
+        [string]$BuildType = $DefaultBuildType, # To find the executable
+        [int]$NGpuLayers = $DefaultNGpuLayers
     )
     $Params = $script:Arguments | ConvertFrom-StringData -Delimiter ' '
     if ($Params.ModelDir) { $ModelDir = $Params.ModelDir }
     if ($Params.Host) { $ServerHost = $Params.Host }
     if ($Params.Port) { $ServerPort = $Params.Port }
+    if ($Params.NGpuLayers) { $NGpuLayers = [int]$Params.NGpuLayers }
     
     # Try to determine executable path based on common CMake single/multi-config generator outputs
     $ExecutablePath = Join-Path -Path $ProjectRootDir -ChildPath "build/tinyllama_server.exe" # Common for single-config
@@ -182,8 +187,9 @@ function Invoke-RunServer {
     Log-Message "Model directory: $ModelDir"
     Log-Message "Host: $ServerHost"
     Log-Message "Port: $ServerPort"
+    Log-Message "N GPU Layers: $NGpuLayers"
     
-    & $ExecutablePath $ModelDir $ServerPort $ServerHost
+    & $ExecutablePath $ModelDir $ServerPort $ServerHost $NGpuLayers
     if ($LASTEXITCODE -ne 0) { Write-ErrorAndExit "Server execution failed."}
 }
 
@@ -195,7 +201,8 @@ function Invoke-RunChat {
         [string]$TopP = $DefaultTopP,
         [string]$Prompt = "", # Empty means interactive
         [string]$BuildType = $DefaultBuildType, # To find the executable
-        [string]$Steps = "64" # Default steps for non-interactive
+        [string]$Steps = "64", # Default steps for non-interactive
+        [int]$NGpuLayers = $DefaultNGpuLayers
     )
     $Params = $script:Arguments | ConvertFrom-StringData -Delimiter ' '
     if ($Params.ModelDir) { $ModelDir = $Params.ModelDir }
@@ -203,6 +210,7 @@ function Invoke-RunChat {
     if ($Params.TopK) { $TopK = $Params.TopK }
     if ($Params.TopP) { $TopP = $Params.TopP }
     if ($Params.Prompt) { $Prompt = $Params.Prompt }
+    if ($Params.NGpuLayers) { $NGpuLayers = [int]$Params.NGpuLayers }
 
     $ExecutablePath = Join-Path -Path $ProjectRootDir -ChildPath "build/tinyllama.exe"
      if (-not (Test-Path $ExecutablePath)) {
@@ -225,6 +233,7 @@ function Invoke-RunChat {
     Log-Message "Temperature: $Temperature"
     Log-Message "Top-K: $TopK"
     Log-Message "Top-P: $TopP"
+    Log-Message "N GPU Layers: $NGpuLayers"
     
     $ChatArgs = @($ModelDir)
     if ([string]::IsNullOrEmpty($Prompt)) {
@@ -239,7 +248,7 @@ function Invoke-RunChat {
         $ChatArgs += $Prompt
         $ChatArgs += $Steps # Use default steps if prompt is provided
     }
-    $ChatArgs += @($Temperature, $TopK, $TopP)
+    $ChatArgs += @($Temperature, $TopK, $TopP, $NGpuLayers)
     
     Log-Message "Executing: $ExecutablePath $ChatArgs"
     & $ExecutablePath $ChatArgs

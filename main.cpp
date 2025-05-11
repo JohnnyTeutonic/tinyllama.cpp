@@ -8,7 +8,7 @@
  * required for proper model responses in both formats.
  *
  * Usage:
- *   tinyllama [model_path] [prompt] [steps] [temperature] [top_k] [top_p]
+ *   tinyllama [model_path] [prompt] [steps] [temperature] [top_k] [top_p] [cpu_layers]
  *
  * Arguments:
  *   model_path: Path to model directory or .gguf file (default: data)
@@ -17,9 +17,10 @@
  *   temperature: Sampling temperature, lower is more deterministic (default: 0.1)
  *   top_k: Limit sampling to top K tokens (default: 40)
  *   top_p: Limit sampling to top P probability mass (default: 0.9)
+ *   cpu_layers: Number of layers to offload to CPU (default: 0)
  *
  * Example:
- *   ./tinyllama data "What is the capital of France?" 64 0.1 40 0.9
+ *   ./tinyllama data "What is the capital of France?" 64 0.1 40 0.9 0
  *
  * Note:
  *   The program always applies Q:A formatting to prompts ("Q: [prompt]\nA:")
@@ -50,13 +51,14 @@ std::string trim_whitespace(const std::string& s) {
 }
 
 void print_usage() {
-  std::cout << "Usage: tinyllama [model_path] [prompt] [steps] [temperature] [top_k] [top_p]\n"
+  std::cout << "Usage: tinyllama [model_path] [prompt] [steps] [temperature] [top_k] [top_p] [cpu_layers]\n"
             << "  model_path: Path to model directory or .gguf file (default: data)\n"
             << "  prompt: Input text (default: \"Hello, world!\")\n"
             << "  steps: Number of tokens to generate (default: 64)\n"
             << "  temperature: Sampling temperature, lower is more deterministic (default: 0.7)\n"
             << "  top_k: Limit sampling to top K tokens (default: 40)\n"
-            << "  top_p: Limit sampling to top P probability mass (default: 0.9)\n";
+            << "  top_p: Limit sampling to top P probability mass (default: 0.9)\n"
+            << "  cpu_layers: Number of layers to offload to CPU (default: 0)\n";
 }
 
 int main(int argc, char** argv) {
@@ -71,6 +73,7 @@ int main(int argc, char** argv) {
   float temperature = 0.1f;
   int top_k = 40;
   float top_p = 0.9f;
+  int cpu_layers = 0;
 
   if (argc > 1) {
     model_path_or_dir = argv[1];
@@ -117,15 +120,25 @@ int main(int argc, char** argv) {
     }
   }
 
+  if (argc > 7) {
+    try {
+      cpu_layers = std::stoi(argv[7]);
+    } catch (const std::exception& e) {
+      Logger::error("Invalid cpu_layers argument: " + std::string(argv[7]) +
+                    ". Using default: " + std::to_string(cpu_layers));
+    }
+  }
+
   Logger::info("Using model path/directory: " + model_path_or_dir);
   Logger::info("Raw Prompt (from argv, trimmed): \"" + prompt + "\"");
   Logger::info("Steps (from argv): " + std::to_string(steps));
   Logger::info("Temperature: " + std::to_string(temperature));
   Logger::info("Top-K: " + std::to_string(top_k));
   Logger::info("Top-P: " + std::to_string(top_p));
+  Logger::info("CPU Layers: " + std::to_string(cpu_layers));
 
   try {
-    tinyllama::TinyLlamaSession session(model_path_or_dir);
+    tinyllama::TinyLlamaSession session(model_path_or_dir, cpu_layers);
     Logger::info("TinyLlamaSession initialized successfully.");
 
     std::string generated_text =
