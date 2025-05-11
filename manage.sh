@@ -9,6 +9,7 @@ DEFAULT_HAS_CUDA="ON"
 DEFAULT_MODEL_DIR="data"
 DEFAULT_SERVER_HOST="localhost"
 DEFAULT_SERVER_PORT="8080"
+DEFAULT_N_GPU_LAYERS="-1" # Default for N_GPU_LAYERS (-1 for auto/all)
 DEFAULT_RELEASE_VERSION="0.1.0"
 DEFAULT_TEMPERATURE="0.1"
 DEFAULT_TOP_K="40"
@@ -45,6 +46,7 @@ usage() {
     echo "                 --model-dir <path>          (default: ${DEFAULT_MODEL_DIR})"
     echo "                 --host <hostname>           (default: ${DEFAULT_SERVER_HOST})"
     echo "                 --port <port_number>        (default: ${DEFAULT_SERVER_PORT})"
+    echo "                 --n-gpu-layers <int>        (default: ${DEFAULT_N_GPU_LAYERS}, -1 for all on GPU)"
     echo ""
     echo "  run-chat     Run the command-line chat client."
     echo "               Options:"
@@ -53,6 +55,7 @@ usage() {
     echo "                 --top-k <int>               (default: ${DEFAULT_TOP_K})"
     echo "                 --top-p <float>             (default: ${DEFAULT_TOP_P})"
     echo "                 --prompt <text>             (default: interactive mode)"
+    echo "                 --n-gpu-layers <int>        (default: ${DEFAULT_N_GPU_LAYERS}, -1 for all on GPU)"
     echo ""
     echo "  format       Format C++/CUDA source code using ${FORMAT_TOOL}."
     echo "               (Assumes .clang-format file in project root)"
@@ -131,12 +134,14 @@ do_run_server() {
     local model_dir="${DEFAULT_MODEL_DIR}"
     local server_host="${DEFAULT_SERVER_HOST}"
     local server_port="${DEFAULT_SERVER_PORT}"
+    local n_gpu_layers="${DEFAULT_N_GPU_LAYERS}"
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --model-dir) model_dir="$2"; shift 2 ;;
             --host) server_host="$2"; shift 2 ;;
             --port) server_port="$2"; shift 2 ;;
+            --n-gpu-layers) n_gpu_layers="$2"; shift 2 ;;
             *) error "Unknown option for run-server: $1"; usage ;;
         esac
     done
@@ -149,7 +154,8 @@ do_run_server() {
     log "Model directory: $model_dir"
     log "Host: $server_host"
     log "Port: $server_port"
-    "$executable_path" "$model_dir" "$server_port" "$server_host"
+    log "N GPU Layers: $n_gpu_layers"
+    "$executable_path" "$model_dir" "$server_port" "$server_host" "$n_gpu_layers"
 }
 
 do_run_chat() {
@@ -159,6 +165,7 @@ do_run_chat() {
     local top_p="${DEFAULT_TOP_P}"
     local prompt=""
     local steps="64"
+    local n_gpu_layers="${DEFAULT_N_GPU_LAYERS}"
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -167,6 +174,7 @@ do_run_chat() {
             --top-k) top_k="$2"; shift 2 ;;
             --top-p) top_p="$2"; shift 2 ;;
             --prompt) prompt="$2"; shift 2 ;;
+            --n-gpu-layers) n_gpu_layers="$2"; shift 2 ;;
             *) error "Unknown option for run-chat: $1"; usage ;;
         esac
     done
@@ -180,15 +188,20 @@ do_run_chat() {
     log "Temperature: $temperature"
     log "Top-K: $top_k"
     log "Top-P: $top_p"
+    log "N GPU Layers: $n_gpu_layers"
+
+    local exec_args=("$executable_path" "$model_dir")
     if [ -n "$prompt" ]; then
         log "Prompt: $prompt"
+        exec_args+=("$prompt")
     else
-        log "Mode: Interactive"
-        prompt="Hello, world!"  # Set default prompt for interactive mode
+        log "Mode: Interactive (default prompt will be used by executable if not specified)"
+        exec_args+=("Hello, world!") 
     fi
+    
+    exec_args+=("$steps" "$temperature" "$top_k" "$top_p" "$n_gpu_layers")
 
-    # Pass arguments in the correct order: model_path prompt steps temperature top_k top_p
-    "$executable_path" "$model_dir" "$prompt" "$steps" "$temperature" "$top_k" "$top_p"
+    "${exec_args[@]}"
 }
 
 do_format() {

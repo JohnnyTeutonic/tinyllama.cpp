@@ -134,8 +134,9 @@ static int sample_top_k_top_p_temperature(const std::vector<float>& logits,
   return prob_idx[sampled_idx_in_filtered].second;
 }
 
-TinyLlamaSession::TinyLlamaSession(const std::string& model_path) {
-  Logger::info("TinyLlamaSession: Initializing with path: " + model_path);
+TinyLlamaSession::TinyLlamaSession(const std::string& model_path, int num_gpu_layers_from_cli) {
+  Logger::info("TinyLlamaSession: Initializing with path: " + model_path + 
+               ", Desired GPU Layers from CLI: " + std::to_string(num_gpu_layers_from_cli));
 
   std::filesystem::path path_obj(model_path);
   std::filesystem::path base_dir;
@@ -156,6 +157,14 @@ TinyLlamaSession::TinyLlamaSession(const std::string& model_path) {
   Logger::info("Base directory: " + base_dir.string());
   Logger::info("Attempting tokenizer: " + tokenizer_path_str);
 
+  // Prepare a ModelConfig that will be passed to TinyLlamaModel constructor
+  // This config will have num_cpu_offload_layers set from cli_cpu_layers.
+  ModelConfig config_to_pass_to_model_constructor; 
+  // Set the CLI requested CPU layers. It will be refined/clamped inside TinyLlamaModel constructor
+  // after the actual number of hidden layers is known from the model file.
+  config_to_pass_to_model_constructor.num_cpu_offload_layers = num_gpu_layers_from_cli;
+  Logger::info("TinyLlamaSession: model_constructor_config set with num_cpu_offload_layers = " + std::to_string(config_to_pass_to_model_constructor.num_cpu_offload_layers));
+
   try {
     tokenizer_ =
         std::make_unique<Tokenizer>(tokenizer_path_str, tokenizer_path_str);
@@ -164,6 +173,8 @@ TinyLlamaSession::TinyLlamaSession(const std::string& model_path) {
     throw std::runtime_error("Failed to load tokenizer from " +
                              tokenizer_path_str + ": " + e.what());
   }
+
+  int total_hidden_layers_from_file = 0;
 
   if (std::filesystem::is_directory(path_obj)) {
     Logger::info("Loading SafeTensors model from directory: " + model_path);
@@ -181,15 +192,38 @@ TinyLlamaSession::TinyLlamaSession(const std::string& model_path) {
     }
 
     try {
-      Logger::info("Loading config: " + config_path_str);
-      nlohmann::json config_json =
-          nlohmann::json::parse(read_file_api(config_path_str));
-      ModelConfig loaded_config = parse_model_config(config_json);
+      Logger::info("Loading config for SafeTensors: " + config_path_str);
+      nlohmann::json config_json = nlohmann::json::parse(read_file_api(config_path_str));
+      config_to_pass_to_model_constructor = parse_model_config(config_json);
+      total_hidden_layers_from_file = config_to_pass_to_model_constructor.num_hidden_layers;
+      Logger::info("SafeTensors config.json: num_hidden_layers = " + std::to_string(total_hidden_layers_from_file));
+
+      // Calculate actual_cpu_offload_layers based on desired_gpu_layers and total_layers
+      int actual_cpu_offload_layers = 0;
+      if (num_gpu_layers_from_cli == -1) { // -1 means all/max on GPU
+        actual_cpu_offload_layers = 0;
+        Logger::info("Desired GPU layers is -1 (all GPU), setting actual_cpu_offload_layers to 0.");
+      } else if (num_gpu_layers_from_cli == 0) { // 0 means all on CPU
+        actual_cpu_offload_layers = total_hidden_layers_from_file;
+        Logger::info("Desired GPU layers is 0 (all CPU), setting actual_cpu_offload_layers to " + std::to_string(total_hidden_layers_from_file));
+      } else {
+        actual_cpu_offload_layers = total_hidden_layers_from_file - num_gpu_layers_from_cli;
+        Logger::info("Desired GPU layers: " + std::to_string(num_gpu_layers_from_cli) + 
+                     ", Total layers: " + std::to_string(total_hidden_layers_from_file) + 
+                     ", Calculated actual_cpu_offload_layers: " + std::to_string(actual_cpu_offload_layers));
+      }
+
+      // Clamp actual_cpu_offload_layers
+      if (actual_cpu_offload_layers < 0) actual_cpu_offload_layers = 0;
+      if (actual_cpu_offload_layers > total_hidden_layers_from_file) actual_cpu_offload_layers = total_hidden_layers_from_file;
+      Logger::info("Clamped actual_cpu_offload_layers: " + std::to_string(actual_cpu_offload_layers));
+      
+      config_to_pass_to_model_constructor.num_cpu_offload_layers = actual_cpu_offload_layers;
+      Logger::info("TinyLlamaSession (SafeTensors path): config_to_pass_to_model_constructor set with num_cpu_offload_layers = " + std::to_string(config_to_pass_to_model_constructor.num_cpu_offload_layers));
 
       Logger::info("Loading model weights: " + safetensors_path_str);
       SafeTensorsLoader st_loader(safetensors_path_str);
-
-      model_ = std::make_unique<TinyLlamaModel>(loaded_config, st_loader);
+      model_ = std::make_unique<TinyLlamaModel>(config_to_pass_to_model_constructor, st_loader);
       Logger::info("SafeTensors Model loaded successfully.");
 
     } catch (const std::exception& e) {
@@ -201,7 +235,38 @@ TinyLlamaSession::TinyLlamaSession(const std::string& model_path) {
   } else {
     Logger::info("Loading GGUF model from file: " + model_path);
     try {
-      model_ = std::make_unique<TinyLlamaModel>(ModelConfig{}, model_path);
+      // For GGUF, we first need to know total_hidden_layers to correctly calculate num_cpu_offload_layers
+      Logger::info("Peeking into GGUF metadata to determine total_hidden_layers...");
+      GGUFData gguf_metadata = load_gguf_meta(model_path);
+      ModelConfig temp_gguf_parsed_config = parse_model_config_from_gguf(gguf_metadata);
+      total_hidden_layers_from_file = temp_gguf_parsed_config.num_hidden_layers;
+      Logger::info("GGUF metadata: num_hidden_layers = " + std::to_string(total_hidden_layers_from_file));
+      
+      int actual_cpu_offload_layers = 0;
+      if (num_gpu_layers_from_cli == -1) { // -1 means all/max on GPU
+        actual_cpu_offload_layers = 0;
+        Logger::info("Desired GPU layers is -1 (all GPU), setting actual_cpu_offload_layers to 0 for GGUF.");
+      } else if (num_gpu_layers_from_cli == 0) { // 0 means all on CPU
+        actual_cpu_offload_layers = total_hidden_layers_from_file;
+        Logger::info("Desired GPU layers is 0 (all CPU), setting actual_cpu_offload_layers to " + std::to_string(total_hidden_layers_from_file) + " for GGUF.");
+      } else {
+        actual_cpu_offload_layers = total_hidden_layers_from_file - num_gpu_layers_from_cli;
+        Logger::info("Desired GPU layers: " + std::to_string(num_gpu_layers_from_cli) + 
+                     ", Total layers from GGUF: " + std::to_string(total_hidden_layers_from_file) + 
+                     ", Calculated actual_cpu_offload_layers for GGUF: " + std::to_string(actual_cpu_offload_layers));
+      }
+
+      if (actual_cpu_offload_layers < 0) actual_cpu_offload_layers = 0;
+      if (actual_cpu_offload_layers > total_hidden_layers_from_file) actual_cpu_offload_layers = total_hidden_layers_from_file;
+      Logger::info("Clamped actual_cpu_offload_layers for GGUF: " + std::to_string(actual_cpu_offload_layers));
+
+      // TinyLlamaModel constructor for GGUF will load its full config from the file,
+      // but will respect num_cpu_offload_layers from this initial config due to model.cpp changes.
+      ModelConfig initial_config_for_gguf_model; // Start with a default config
+      initial_config_for_gguf_model.num_cpu_offload_layers = actual_cpu_offload_layers;
+      Logger::info("TinyLlamaSession (GGUF path): initial_config_for_gguf_model set with num_cpu_offload_layers = " + std::to_string(initial_config_for_gguf_model.num_cpu_offload_layers));
+
+      model_ = std::make_unique<TinyLlamaModel>(initial_config_for_gguf_model, model_path);
       Logger::info("GGUF Model loaded successfully.");
     } catch (const std::exception& e) {
       throw std::runtime_error("Failed to load GGUF model from " + model_path +
@@ -209,7 +274,13 @@ TinyLlamaSession::TinyLlamaSession(const std::string& model_path) {
     }
   }
 
-  config_ = model_->get_config();
+  config_ = model_->get_config(); // Get the definitive config from the model instance
+  Logger::info("Model config loaded. Actual num_hidden_layers: " + std::to_string(config_.num_hidden_layers) +
+               ", Actual num_cpu_offload_layers FROM MODEL after construction: " + std::to_string(config_.num_cpu_offload_layers));
+
+  // The session's config_.num_cpu_offload_layers is now authoritative from the model itself.
+  // No further adjustments needed here for that specific field.
+  Logger::info("TinyLlamaSession: Final confirmed num_cpu_offload_layers (from model): " + std::to_string(config_.num_cpu_offload_layers));
 
   eos_token_id_ = config_.eos_token_id;
   int head_dim = config_.hidden_size / config_.num_attention_heads;
@@ -290,6 +361,8 @@ std::string TinyLlamaSession::generate(const std::string& prompt_input,
 
   kv_cache_.seq_len = 0;
 
+  std::vector<float> current_data_host; // To hold embedding or output of CPU layers
+
   for (int pos = 0; pos < total_steps; ++pos) {
     if (pos >= config_.max_position_embeddings) {
       Logger::warning("Reached max sequence length (" +
@@ -300,23 +373,67 @@ std::string TinyLlamaSession::generate(const std::string& prompt_input,
 
     int input_token_id =
         (pos < num_prompt_tokens) ? token_ids[pos] : next_token_id;
-    std::vector<float> logits;
+    std::vector<float> logits; // Declare logits here
+
+    current_data_host = model_->lookup_embedding(input_token_id);
+    if (current_data_host.empty()) {
+        Logger::error("Failed to get embedding for token " + std::to_string(input_token_id) + " at pos " + std::to_string(pos));
+        break;
+    }
+
+    int num_total_layers = config_.num_hidden_layers;
+    int num_cpu = config_.num_cpu_offload_layers;
+    int num_gpu = num_total_layers - num_cpu;
+
+    if (num_cpu > 0) { // Process CPU layers if any
+        Logger::debug("[Generate] Processing " + std::to_string(num_cpu) + " CPU layers for pos " + std::to_string(pos));
+        current_data_host = model_->forward(current_data_host, pos, &kv_cache_, nullptr);
+        // current_data_host now holds output of last CPU layer, or final logits if all layers are CPU (num_gpu == 0)
+    }
 
 #ifdef HAS_CUDA
-    logits = model_->forward_device(input_token_id, pos, &kv_cache_, nullptr);
-#else
-    std::vector<float> input_embedding =
-        model_->lookup_embedding(input_token_id);
-    if (input_embedding.empty()) {
-      Logger::error("Failed to get embedding for token " +
-                    std::to_string(input_token_id));
-      break;
+    if (num_gpu > 0) { // Process GPU layers if any
+        Logger::debug("[Generate] Processing " + std::to_string(num_gpu) + " GPU layers for pos " + std::to_string(pos));
+        // current_data_host contains either embedding (if num_cpu == 0) or output of CPU layers.
+        // Copy this host data to device model_->x_dev_ to start GPU pipeline.
+        float* x_dev_ptr = model_->get_x_dev();
+        if (!x_dev_ptr) { 
+            Logger::fatal("model_->x_dev_ is null before GPU forward pass!"); 
+            throw std::runtime_error("Critical error: x_dev_ is null in GPU pipeline.");
+        }
+        if (current_data_host.size() * sizeof(float) == 0) {
+             Logger::fatal("current_data_host is empty before cudaMemcpy to x_dev_!"); 
+            throw std::runtime_error("Critical error: current_data_host is empty for GPU pipeline.");
+        }
+        gpuErrchk(cudaMemcpy(x_dev_ptr, current_data_host.data(), current_data_host.size() * sizeof(float), cudaMemcpyHostToDevice));
+        
+        logits = model_->forward_device(x_dev_ptr, pos, &kv_cache_, nullptr);
+    } else if (num_cpu > 0 && num_gpu == 0) { // All layers were CPU, and model_->forward() returned logits
+        logits = current_data_host;
+    } else if (num_total_layers == 0) { // No layers at all
+        Logger::warning("No layers in the model (HAS_CUDA path).");
+        logits.assign(config_.vocab_size > 0 ? config_.vocab_size : 1, 0.0f); // Assign dummy if vocab_size is valid
+    } else if (num_cpu == 0 && num_gpu == 0 && num_total_layers > 0) { // Should not happen if logic is correct
+         Logger::error("Inconsistent state: HAS_CUDA, num_cpu=0, num_gpu=0, but num_total_layers > 0. Defaulting to CPU path for safety.");
+         // Fallback to full CPU path just in case, using original embedding as input to forward.
+         // This assumes model_->forward() is safe to call even if it was configured for GPU layers that are now skipped.
+         current_data_host = model_->lookup_embedding(input_token_id); // Re-fetch original embedding for safety
+         logits = model_->forward(current_data_host, pos, &kv_cache_, nullptr);
     }
-    // Log input_embedding immediately before calling model_->forward
-    if (pos == 12 || pos == 13 || pos == 11) { // Added pos == 11 for context
-        log_vector_summary("[API_CPP PreFWD] input_embedding for pos=" + std::to_string(pos) + " (token " + std::to_string(input_token_id) + ")", input_embedding, 10);
+#else // No CUDA compiled - All layers (if any) run on CPU
+    if (num_total_layers > 0) {
+        // current_data_host already contains embedding if num_cpu_layers was 0, or output of CPU layers if num_cpu_layers > 0.
+        // If num_cpu_layers was > 0, model_->forward has already been called. We call it here if it hasn't (pure CPU path from start)
+        if (num_cpu == 0) { // Only call model->forward if it wasn't called for CPU layers above
+             Logger::debug("[Generate] NO_CUDA: Processing all " + std::to_string(num_total_layers) + " layers on CPU for pos " + std::to_string(pos));
+             logits = model_->forward(current_data_host, pos, &kv_cache_, nullptr);
+        } else { // num_cpu > 0, means model->forward was already called and current_data_host has final logits
+            logits = current_data_host;
+        }
+    } else {
+        Logger::warning("No layers in the model (NO_CUDA path).");
+        logits.assign(config_.vocab_size > 0 ? config_.vocab_size : 1, 0.0f); // Assign dummy
     }
-    logits = model_->forward(input_embedding, pos, &kv_cache_, nullptr);
 #endif
 
     kv_cache_.seq_len = pos + 1;
