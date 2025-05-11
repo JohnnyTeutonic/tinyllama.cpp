@@ -77,7 +77,7 @@ int main(int argc, char** argv) {
   std::shared_ptr<tinyllama::TinyLlamaSession> session;
   try {
     Logger::info("Loading model from: " + model_dir);
-    session = std::make_shared<tinyllama::TinyLlamaSession>(model_dir);
+    session = std::make_shared<tinyllama::TinyLlamaSession>(model_dir, "tokenizer.json", 4, -1, true);
     Logger::info("Model loaded successfully.");
   } catch (const std::exception& e) {
     Logger::error(std::string("Failed to load model: ") + e.what());

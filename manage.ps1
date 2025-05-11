@@ -33,6 +33,13 @@ $DefaultTopP = 0.9
 $FormatTool = "clang-format.exe" # Ensure clang-format is in PATH or provide full path
 $DoxygenConfigFile = "Doxyfile"
 $ProjectRootDir = $PSScriptRoot # Assumes script is in the project root
+$DefaultModelPath = ""
+$DefaultTokenizerPath = ""
+$DefaultThreads = (Get-WmiObject Win32_Processor).NumberOfLogicalProcessors # Or a sensible default if query fails
+if (-not $DefaultThreads) { $DefaultThreads = 4 }
+$DefaultUseMmap = $true
+
+$CurrentInteractivePrompt = ""
 
 # --- Helper Functions ---
 function Log-Message {
@@ -65,6 +72,8 @@ function Show-Usage {
     Write-Host "                 -Host <hostname>           (default: ${DefaultServerHost})"
     Write-Host "                 -Port <port_number>        (default: ${DefaultServerPort})"
     Write-Host "                 -NGpuLayers <int>         (default: ${DefaultNGpuLayers}, -1 for all on GPU)"
+    Write-Host "                 -Mmap <true|false>        (default: ${DefaultUseMmap})"
+    Write-Host "                 -NoLog                  : Disable logging to file for server mode (logs to console only)."
     Write-Host ""
     Write-Host "  run-chat     Run the command-line chat client."
     Write-Host "               Options:"
@@ -74,6 +83,7 @@ function Show-Usage {
     Write-Host "                 -TopP <float>             (default: ${DefaultTopP})"
     Write-Host "                 -Prompt <text>             (default: interactive mode, uses default prompt)"
     Write-Host "                 -NGpuLayers <int>         (default: ${DefaultNGpuLayers}, -1 for all on GPU)"
+    Write-Host "                 -Mmap <true|false>        (default: ${DefaultUseMmap})"
     Write-Host ""
     Write-Host "  format       Format C++/CUDA source code using ${FormatTool}."
     Write-Host "               (Assumes .clang-format file in project root)"
@@ -158,13 +168,21 @@ function Invoke-RunServer {
         [string]$ServerHost = $DefaultServerHost,
         [string]$ServerPort = $DefaultServerPort,
         [string]$BuildType = $DefaultBuildType, # To find the executable
-        [int]$NGpuLayers = $DefaultNGpuLayers
+        [int]$NGpuLayers = $DefaultNGpuLayers,
+        [string]$TokenizerPath = $DefaultTokenizerPath,
+        [int]$Threads = $DefaultThreads,
+        [bool]$UseMmap = $DefaultUseMmap,
+        [switch]$NoLog
     )
     $Params = $script:Arguments | ConvertFrom-StringData -Delimiter ' '
     if ($Params.ModelDir) { $ModelDir = $Params.ModelDir }
     if ($Params.Host) { $ServerHost = $Params.Host }
     if ($Params.Port) { $ServerPort = $Params.Port }
     if ($Params.NGpuLayers) { $NGpuLayers = [int]$Params.NGpuLayers }
+    if ($Params.TokenizerPath) { $TokenizerPath = $Params.TokenizerPath }
+    if ($Params.Threads) { $Threads = [int]$Params.Threads }
+    if ($Params.UseMmap) { $UseMmap = [bool]$Params.UseMmap }
+    if ($Params.NoLog) { $NoLog = $Params.NoLog }
     
     # Try to determine executable path based on common CMake single/multi-config generator outputs
     $ExecutablePath = Join-Path -Path $ProjectRootDir -ChildPath "build/tinyllama_server.exe" # Common for single-config
@@ -188,8 +206,17 @@ function Invoke-RunServer {
     Log-Message "Host: $ServerHost"
     Log-Message "Port: $ServerPort"
     Log-Message "N GPU Layers: $NGpuLayers"
+    Log-Message "Tokenizer Path: $TokenizerPath"
+    Log-Message "Threads: $Threads"
+    Log-Message "Use Mmap: $UseMmap"
+    Log-Message "No Log: $NoLog"
     
-    & $ExecutablePath $ModelDir $ServerPort $ServerHost $NGpuLayers
+    $ScriptArgs = @($ModelDir, $ServerPort, $ServerHost, $NGpuLayers, [string]$UseMmap)
+    if ($NoLog) {
+        $ScriptArgs += "--no-log"
+    }
+    
+    & $ExecutablePath $ScriptArgs
     if ($LASTEXITCODE -ne 0) { Write-ErrorAndExit "Server execution failed."}
 }
 
@@ -202,7 +229,11 @@ function Invoke-RunChat {
         [string]$Prompt = "", # Empty means interactive
         [string]$BuildType = $DefaultBuildType, # To find the executable
         [string]$Steps = "64", # Default steps for non-interactive
-        [int]$NGpuLayers = $DefaultNGpuLayers
+        [int]$NGpuLayers = $DefaultNGpuLayers,
+        [string]$TokenizerPath = $DefaultTokenizerPath,
+        [int]$Threads = $DefaultThreads,
+        [bool]$UseMmap = $DefaultUseMmap,
+        [switch]$NoLog
     )
     $Params = $script:Arguments | ConvertFrom-StringData -Delimiter ' '
     if ($Params.ModelDir) { $ModelDir = $Params.ModelDir }
@@ -211,6 +242,10 @@ function Invoke-RunChat {
     if ($Params.TopP) { $TopP = $Params.TopP }
     if ($Params.Prompt) { $Prompt = $Params.Prompt }
     if ($Params.NGpuLayers) { $NGpuLayers = [int]$Params.NGpuLayers }
+    if ($Params.TokenizerPath) { $TokenizerPath = $Params.TokenizerPath }
+    if ($Params.Threads) { $Threads = [int]$Params.Threads }
+    if ($Params.UseMmap) { $UseMmap = [bool]$Params.UseMmap }
+    if ($Params.NoLog) { $NoLog = $Params.NoLog }
 
     $ExecutablePath = Join-Path -Path $ProjectRootDir -ChildPath "build/tinyllama.exe"
      if (-not (Test-Path $ExecutablePath)) {
@@ -234,24 +269,32 @@ function Invoke-RunChat {
     Log-Message "Top-K: $TopK"
     Log-Message "Top-P: $TopP"
     Log-Message "N GPU Layers: $NGpuLayers"
+    Log-Message "Tokenizer Path: $TokenizerPath"
+    Log-Message "Threads: $Threads"
+    Log-Message "Use Mmap: $UseMmap"
+    Log-Message "No Log: $NoLog"
     
-    $ChatArgs = @($ModelDir)
+    $ScriptArgs = @($ModelDir, $TokenizerPath, $Threads, $NGpuLayers, [string]$UseMmap)
     if ([string]::IsNullOrEmpty($Prompt)) {
         Log-Message "Mode: Interactive"
         # For interactive, tinyllama.exe might not need a prompt, or a default one. Assuming it handles interactive mode if no prompt.
         # The C++ tinyllama expects: model_path, prompt, steps, temperature, top_k, top_p
         # For interactive mode, let's pass a default prompt and let the C++ app handle it.
-        $ChatArgs += "What is the capital of France?" # Default placeholder prompt for the C++ app if it expects one
-        $ChatArgs += $Steps
+        $ScriptArgs += "What is the capital of France?" # Default placeholder prompt for the C++ app if it expects one
+        $ScriptArgs += $Steps
     } else {
         Log-Message "Prompt: $Prompt"
-        $ChatArgs += $Prompt
-        $ChatArgs += $Steps # Use default steps if prompt is provided
+        $ScriptArgs += $Prompt
+        $ScriptArgs += $Steps # Use default steps if prompt is provided
     }
-    $ChatArgs += @($Temperature, $TopK, $TopP, $NGpuLayers)
+    $ScriptArgs += @($Temperature, $TopK, $TopP)
     
-    Log-Message "Executing: $ExecutablePath $ChatArgs"
-    & $ExecutablePath $ChatArgs
+    if ($NoLog) {
+        $ScriptArgs += "--no-log"
+    }
+    
+    Log-Message "Executing: $ExecutablePath $ScriptArgs"
+    & $ExecutablePath $ScriptArgs
     if ($LASTEXITCODE -ne 0) { Write-ErrorAndExit "Chat client execution failed."}
 }
 

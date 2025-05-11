@@ -81,9 +81,14 @@ void read_raw(std::ifstream& file, T& dest);
 std::string read_gguf_string(std::ifstream& file);
 
 /**
- * @brief Loads metadata from a GGUF file
- * @param filename Path to the GGUF file
- * @return GGUFData structure containing the file's metadata
- * @throws std::runtime_error if file is invalid or corrupted
+ * @brief Loads GGUF metadata and optionally memory-maps tensor data.
+ *
+ * Parses the header, metadata, and tensor information from a GGUF file.
+ * If mmap is enabled, it will also memory-map the tensor data region.
+ * If mmap is disabled, tensor data pointers will be null and fd will be -1.
+ * @param filename Path to the GGUF file.
+ * @param use_mmap Whether to memory-map the tensor data block.
+ * @return GGUFData structure containing loaded information.
+ * @throw std::runtime_error on file I/O or format errors.
  */
-GGUFData load_gguf_meta(const std::string& filename);
+GGUFData load_gguf_meta(const std::string& filename, bool use_mmap);

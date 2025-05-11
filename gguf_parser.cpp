@@ -92,8 +92,8 @@ std::string read_gguf_string(std::ifstream& file) {
   }
 }
 
-GGUFData load_gguf_meta(const std::string& filename) {
-  Logger::info("Attempting to load GGUF file: " + filename);
+GGUFData load_gguf_meta(const std::string& filename, bool use_mmap) {
+  Logger::info("Attempting to load GGUF file: " + filename + (use_mmap ? " with mmap" : " without mmap"));
   std::ifstream metadata_file(filename, std::ios::binary);
   if (!metadata_file.is_open()) {
     throw std::runtime_error("Failed to open file for metadata: " + filename);
@@ -493,6 +493,14 @@ GGUFData load_gguf_meta(const std::string& filename) {
   
   metadata_file.close();
   Logger::info("[GGUF_LOAD] Metadata ifstream closed.");
+
+  if (!use_mmap) {
+    Logger::info("[GGUF_LOAD] mmap is disabled by configuration. Tensor data will not be memory-mapped from GGUF.");
+    // GGUFData members (file_descriptor, mapped_tensor_data, etc.) are already defaulted
+    // to safe values (-1, nullptr) by its constructor.
+    // map_gguf_weights function in model.cpp already checks for mapped_tensor_data == nullptr.
+    return result; 
+  }
 
   result.file_descriptor = open(filename.c_str(), O_RDONLY);
   if (result.file_descriptor == -1) {

@@ -43,8 +43,12 @@ PYBIND11_MODULE(tinyllama_bindings, m) {
         );
 
     py::class_<tinyllama::TinyLlamaSession>(m, "TinyLlamaSession")
-        .def(py::init<const std::string&>(), 
+        .def(py::init<const std::string &, const std::string &, int, int, bool>(), 
              py::arg("model_path"),
+             py::arg("tokenizer_path"),
+             py::arg("threads") = 1,
+             py::arg("n_gpu_layers") = 0,
+             py::arg("use_mmap") = false,
              "Loads the model, config, and tokenizer from the specified model_path (directory or .gguf file)." 
         )
         .def("generate", &tinyllama::TinyLlamaSession::generate,
