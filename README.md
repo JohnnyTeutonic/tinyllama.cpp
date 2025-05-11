@@ -3,13 +3,13 @@
 
 This codebase supports inference for Llama 2 architecture models (including TinyLlama variants) using Safetensors model format as well as GGUF format.
 
-The GGUF format support includes loading models with various tensor types such as BF16, FP16, FP32, and Q8_0. Nominal support for Q4_K and Q6_K quantization types is also present, though Q8_0 is the most extensively tested quantized format in this project.
+The GGUF format support includes loading models with various tensor types such as BF16, FP16, FP32, and the quantised types: Q4_K_M, Q6_K and Q8_0.
 
 ## Features
 
 *   Pure C++ inference core (CPU-based).
 *   Optional CUDA backend for GPU acceleration.
-*   Support for both safetensors and GGUF format.
+*   Support for both safetensors and GGUF formats.
 *   Python bindings
 *   Built-in web server (`cpp-httplib`) for easy interaction via a web UI.
 *   Minimal external dependencies managed via CMake.
@@ -95,6 +95,8 @@ You would typically use a Python script to load a Hugging Face model and tokeniz
 
 ### 1. Obtain Model Files
 
+#### Safetensors
+
 For safetensors models, you need three files from a compatible TinyLlama model (e.g., from Hugging Face):
 
 *   `config.json`
@@ -105,11 +107,14 @@ Place these three files into a directory, for example, named `data/`.
 
 *(Note: This project expects BF16 weights in `model.safetensors`. Ensure your conversion script saves them in this format if converting from another source).*
 
-Otherwise, when using GGUF models, you simply need the GGUF file itself.
+#### GGUF
+
+Simply download a llama v2 or tinyllama model from huggingface (TheBloke's repos are the best for this) and place the file into the appropriate directory.
+
 
 ### Where to Download Tested Model Weights
 
-This project has been tested with specific model weights. You can download them from the following locations:
+This project has been tested with a number of different weights. You can download some of them from the following locations:
 
 *   **For SafeTensors (BF16 format expected):**
     *   **TinyLlama 1.1B Chat v1.0:** [TinyLlama/TinyLlama-1.1B-Chat-v1.0 on Hugging Face](https://huggingface.co/TinyLlama/TinyLlama-1.1B-Chat-v1.0)
@@ -122,7 +127,8 @@ This project has been tested with specific model weights. You can download them 
         *   This larger model has also been tested. Performance will vary based on your hardware.
     *   When using GGUF files, typically only the `.gguf` file itself is needed, as it should contain the necessary metadata. However, for some GGUF files or if using the `tinyllama` executable with a GGUF that doesn't fully embed tokenizer information, ensure a `tokenizer.json` (compatible with Llama 2) is present in the same directory or the model directory specified.
 
-Place downloaded GGUF files in a directory (e.g., `models/`) or directly provide the path to the `tinyllama` executable.
+
+As a reminder, place the downloaded GGUF files in a directory (e.g., `models/`) or directly provide the path to the `tinyllama` executable.
 
 ### 2. Build the C++ Application
 
@@ -442,4 +448,3 @@ Find `llama.cpp` on GitHub: [https://github.com/ggerganov/llama.cpp](https://git
 
 *   **SafeTensors Model Formats**: While the SafeTensors loading mechanism is in place, only BF16 (BFloat16) weight types have been extensively tested for these models. Other float types (like FP16 or FP32) in SafeTensors files may load but are not as thoroughly validated in this specific C++ implementation.
 *   **Windows Support**: Building and running on Windows is possible but is considered highly experimental. The primary development and testing focus has been on Linux. Users may encounter build issues or runtime instabilities on Windows that are not present on Linux.
-*   **Quantization Support (GGUF Path)**: The GGUF versions of tinyllama and Llama v2 have been tested using Q8_0 quants, but there is nominal support for Q4_K and Q6_K (along with their 'M' suffixes).
