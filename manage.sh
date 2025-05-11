@@ -18,6 +18,14 @@ FORMAT_TOOL="clang-format"
 DOXYGEN_CONFIG_FILE="Doxyfile"
 PROJECT_ROOT_DIR=$(pwd) # Assuming script is run from project root
 
+DEFAULT_MODEL_PATH=""
+DEFAULT_TOKENIZER_PATH=""
+DEFAULT_THREADS=$(grep -c ^processor /proc/cpuinfo 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
+DEFAULT_USE_MMAP="true"
+
+CURRENT_INTERACTIVE_PROMPT=""
+MAX_TOKENS_SERVER=1024
+
 # --- Helper Functions ---
 log() {
     echo "[INFO] $1"
@@ -47,15 +55,20 @@ usage() {
     echo "                 --host <hostname>           (default: ${DEFAULT_SERVER_HOST})"
     echo "                 --port <port_number>        (default: ${DEFAULT_SERVER_PORT})"
     echo "                 --n-gpu-layers <int>        (default: ${DEFAULT_N_GPU_LAYERS}, -1 for all on GPU)"
+    echo "                 --mmap <true|false>          (default: ${DEFAULT_USE_MMAP})"
+    echo "                 --no-log                    Disable logging to file for server mode (logs to console only)"
     echo ""
     echo "  run-chat     Run the command-line chat client."
     echo "               Options:"
     echo "                 --model-dir <path>          (default: ${DEFAULT_MODEL_DIR})"
-    echo "                 --temperature <float>        (default: ${DEFAULT_TEMPERATURE})"
-    echo "                 --top-k <int>               (default: ${DEFAULT_TOP_K})"
-    echo "                 --top-p <float>             (default: ${DEFAULT_TOP_P})"
+    echo "                 --tokenizer <path>        (default: '${DEFAULT_TOKENIZER_PATH}' or auto-detect from model_dir)"
+    echo "                 --threads <num>             (default: ${DEFAULT_THREADS})"
+    echo "                 --temperature <float>        (default: ${DEFAULT_TEMPERATURE}) (Note: Currently uses C++ default)"
+    echo "                 --top-k <int>               (default: ${DEFAULT_TOP_K}) (Note: Currently uses C++ default)"
+    echo "                 --top-p <float>             (default: ${DEFAULT_TOP_P}) (Note: Currently uses C++ default)"
     echo "                 --prompt <text>             (default: interactive mode)"
     echo "                 --n-gpu-layers <int>        (default: ${DEFAULT_N_GPU_LAYERS}, -1 for all on GPU)"
+    echo "                 --mmap <true|false>          (default: ${DEFAULT_USE_MMAP})"
     echo ""
     echo "  format       Format C++/CUDA source code using ${FORMAT_TOOL}."
     echo "               (Assumes .clang-format file in project root)"
@@ -74,6 +87,10 @@ usage() {
     echo "                 --build-type <Release|Debug> (default: Release, for packaging)"
     echo ""
     echo "  help         Show this help message."
+    echo ""
+    echo "  --n-gpu-layers <num> Number of layers to offload to GPU (-1 for all, 0 for none, default: ${DEFAULT_N_GPU_LAYERS})"
+    echo "  --mmap <true|false>  Use mmap for GGUF files (default: ${DEFAULT_USE_MMAP})"
+    echo "  --no-log             Disable logging to file for server mode (logs to console only)"
     echo ""
     exit 0
 }
@@ -135,6 +152,8 @@ do_run_server() {
     local server_host="${DEFAULT_SERVER_HOST}"
     local server_port="${DEFAULT_SERVER_PORT}"
     local n_gpu_layers="${DEFAULT_N_GPU_LAYERS}"
+    local use_mmap="${DEFAULT_USE_MMAP}"
+    local no_log="false"
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -142,6 +161,8 @@ do_run_server() {
             --host) server_host="$2"; shift 2 ;;
             --port) server_port="$2"; shift 2 ;;
             --n-gpu-layers) n_gpu_layers="$2"; shift 2 ;;
+            --mmap) use_mmap="$2"; shift 2 ;;
+            --no-log) no_log="true"; shift 1 ;;
             *) error "Unknown option for run-server: $1"; usage ;;
         esac
     done
@@ -155,53 +176,102 @@ do_run_server() {
     log "Host: $server_host"
     log "Port: $server_port"
     log "N GPU Layers: $n_gpu_layers"
-    "$executable_path" "$model_dir" "$server_port" "$server_host" "$n_gpu_layers"
+    log "Use Mmap: $use_mmap"
+    log "No Log: $no_log"
+
+    local n_gpu_layers_arg="${n_gpu_layers}"
+    local use_mmap_arg="${use_mmap}"
+    local no_log_flag="${no_log}"
+
+    echo "Starting server with: Model=${model_dir}, Host=${server_host}, Port=${server_port}, N_GPU_Layers=${n_gpu_layers_arg}, Use_Mmap=${use_mmap_arg}, No_Log=${no_log_flag}"
+    LD_LIBRARY_PATH=./build/lib ./build/bin/main "${model_dir}" "${server_port}" "${server_host}" "${n_gpu_layers_arg}" "${use_mmap_arg}" "${no_log_flag}" > "${SERVER_LOG_FILE}" 2>&1 &
+    SERVER_PID=$!
+    echo "Server PID: ${SERVER_PID}"
 }
 
 do_run_chat() {
-    local model_dir="${DEFAULT_MODEL_DIR}"
-    local temperature="${DEFAULT_TEMPERATURE}"
-    local top_k="${DEFAULT_TOP_K}"
-    local top_p="${DEFAULT_TOP_P}"
-    local prompt=""
-    local steps="64"
-    local n_gpu_layers="${DEFAULT_N_GPU_LAYERS}"
+    local model_dir_arg="${DEFAULT_MODEL_DIR}"
+    local tokenizer_path_arg="${DEFAULT_TOKENIZER_PATH}"
+    local threads_arg="${DEFAULT_THREADS}"
+    local temperature_arg="${DEFAULT_TEMPERATURE}"
+    local top_k_arg="${DEFAULT_TOP_K}"
+    local top_p_arg="${DEFAULT_TOP_P}"
+    local prompt_arg=""
+    local steps_arg="64" # Corresponds to max_tokens in main.cpp
+    local n_gpu_layers_arg="${DEFAULT_N_GPU_LAYERS}"
+    local use_mmap_arg="${DEFAULT_USE_MMAP}"
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --model-dir) model_dir="$2"; shift 2 ;;
-            --temperature) temperature="$2"; shift 2 ;;
-            --top-k) top_k="$2"; shift 2 ;;
-            --top-p) top_p="$2"; shift 2 ;;
-            --prompt) prompt="$2"; shift 2 ;;
-            --n-gpu-layers) n_gpu_layers="$2"; shift 2 ;;
-            *) error "Unknown option for run-chat: $1"; usage ;;
+            --model-dir)
+            model_dir_arg="$2"
+            shift; shift;;
+            --tokenizer)
+            tokenizer_path_arg="$2"
+            shift; shift;;
+            --threads)
+            threads_arg="$2"
+            shift; shift;;
+            --temperature)
+            temperature_arg="$2"
+            shift; shift;;
+            --top-k)
+            top_k_arg="$2"
+            shift; shift;;
+            --top-p)
+            top_p_arg="$2"
+            shift; shift;;
+            --prompt)
+            prompt_arg="$2"
+            shift; shift;;
+            --n-gpu-layers)
+            n_gpu_layers_arg="$2"
+            shift; shift;;
+            --mmap)
+            use_mmap_arg="$2"
+            shift; shift;;
+            *)
+            error "Unknown option for run-chat: $1"; usage ;;
         esac
     done
 
-    local executable_path="${PROJECT_ROOT_DIR}/build/tinyllama"
+    local executable_path="${PROJECT_ROOT_DIR}/build/bin/main" # Adjusted to use the main executable
     if [ ! -f "$executable_path" ]; then
-        error "Chat client executable not found at $executable_path. Please build the project first."
+        # Fallback for older build structures or different executable name if needed
+        executable_path="${PROJECT_ROOT_DIR}/build/tinyllama"
+        if [ ! -f "$executable_path" ]; then
+            error "Chat client executable not found at ./build/bin/main or ./build/tinyllama. Please build the project first."
+        fi
     fi
+
     log "Starting chat client from $executable_path..."
-    log "Model directory/path: $model_dir"
-    log "Temperature: $temperature"
-    log "Top-K: $top_k"
-    log "Top-P: $top_p"
-    log "N GPU Layers: $n_gpu_layers"
+    log "  Model Path: $model_dir_arg"
+    log "  Tokenizer Path: $tokenizer_path_arg"
+    log "  Threads: $threads_arg"
+    log "  N GPU Layers: $n_gpu_layers_arg"
+    log "  Use Mmap: $use_mmap_arg"
+    log "  Prompt: ${prompt_arg:-'(interactive)'}"
+    log "  Max Tokens (steps): $steps_arg"
+    log "  (Note: Temperature, Top-K, Top-P from manage.sh are not currently passed to C++ main)"
 
-    local exec_args=("$executable_path" "$model_dir")
-    if [ -n "$prompt" ]; then
-        log "Prompt: $prompt"
-        exec_args+=("$prompt")
-    else
-        log "Mode: Interactive (default prompt will be used by executable if not specified)"
-        exec_args+=("Hello, world!") 
-    fi
+    local mode_for_main="chat"
     
-    exec_args+=("$steps" "$temperature" "$top_k" "$top_p" "$n_gpu_layers")
+    # Construct arguments for main.cpp
+    # main.cpp expects: <model_path> <tokenizer_path> <num_threads> <mode> <initial_prompt> <max_tokens> <n_gpu_layers> <use_mmap>
+    local exec_args_for_cpp=(
+        "$executable_path"
+        "$model_dir_arg"
+        "$tokenizer_path_arg"
+        "$threads_arg"
+        "$mode_for_main"
+        "$prompt_arg" # main.cpp's chat loop handles if this is empty for interactive
+        "$steps_arg"
+        "$n_gpu_layers_arg"
+        "$use_mmap_arg"
+    )
 
-    "${exec_args[@]}"
+    echo "Invoking C++ main: ${exec_args_for_cpp[*]}"
+    LD_LIBRARY_PATH=./build/lib "${exec_args_for_cpp[@]}"
 }
 
 do_format() {

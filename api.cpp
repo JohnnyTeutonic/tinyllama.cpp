@@ -134,9 +134,24 @@ static int sample_top_k_top_p_temperature(const std::vector<float>& logits,
   return prob_idx[sampled_idx_in_filtered].second;
 }
 
-TinyLlamaSession::TinyLlamaSession(const std::string& model_path, int num_gpu_layers_from_cli) {
-  Logger::info("TinyLlamaSession: Initializing with path: " + model_path + 
-               ", Desired GPU Layers from CLI: " + std::to_string(num_gpu_layers_from_cli));
+TinyLlamaSession::TinyLlamaSession(const std::string& model_path,
+                                   const std::string& tokenizer_path,
+                                   int threads,
+                                   int num_gpu_layers_from_cli,
+                                   bool cli_use_mmap)
+    : tokenizer_(nullptr), model_(nullptr), kv_cache_() {
+  Logger::info("TinyLlamaSession constructor entered. Model path: " +
+               model_path + ", Tokenizer path: " + tokenizer_path +
+               ", Threads: " + std::to_string(threads) +
+               ", Num GPU Layers from CLI: " + std::to_string(num_gpu_layers_from_cli) +
+               ", Use mmap from CLI: " + (cli_use_mmap ? "true" : "false"));
+
+  ModelConfig model_constructor_config; // This will be passed to TinyLlamaModel
+  model_constructor_config.num_cpu_offload_layers = 0; // Default, will be calculated
+  model_constructor_config.use_mmap_for_gguf = cli_use_mmap; // Set mmap flag
+
+  // Determine total hidden layers from the model file first
+  int total_hidden_layers_from_file = 0;
 
   std::filesystem::path path_obj(model_path);
   std::filesystem::path base_dir;
@@ -157,14 +172,6 @@ TinyLlamaSession::TinyLlamaSession(const std::string& model_path, int num_gpu_la
   Logger::info("Base directory: " + base_dir.string());
   Logger::info("Attempting tokenizer: " + tokenizer_path_str);
 
-  // Prepare a ModelConfig that will be passed to TinyLlamaModel constructor
-  // This config will have num_cpu_offload_layers set from cli_cpu_layers.
-  ModelConfig config_to_pass_to_model_constructor; 
-  // Set the CLI requested CPU layers. It will be refined/clamped inside TinyLlamaModel constructor
-  // after the actual number of hidden layers is known from the model file.
-  config_to_pass_to_model_constructor.num_cpu_offload_layers = num_gpu_layers_from_cli;
-  Logger::info("TinyLlamaSession: model_constructor_config set with num_cpu_offload_layers = " + std::to_string(config_to_pass_to_model_constructor.num_cpu_offload_layers));
-
   try {
     tokenizer_ =
         std::make_unique<Tokenizer>(tokenizer_path_str, tokenizer_path_str);
@@ -173,8 +180,6 @@ TinyLlamaSession::TinyLlamaSession(const std::string& model_path, int num_gpu_la
     throw std::runtime_error("Failed to load tokenizer from " +
                              tokenizer_path_str + ": " + e.what());
   }
-
-  int total_hidden_layers_from_file = 0;
 
   if (std::filesystem::is_directory(path_obj)) {
     Logger::info("Loading SafeTensors model from directory: " + model_path);
@@ -194,8 +199,8 @@ TinyLlamaSession::TinyLlamaSession(const std::string& model_path, int num_gpu_la
     try {
       Logger::info("Loading config for SafeTensors: " + config_path_str);
       nlohmann::json config_json = nlohmann::json::parse(read_file_api(config_path_str));
-      config_to_pass_to_model_constructor = parse_model_config(config_json);
-      total_hidden_layers_from_file = config_to_pass_to_model_constructor.num_hidden_layers;
+      model_constructor_config = parse_model_config(config_json);
+      total_hidden_layers_from_file = model_constructor_config.num_hidden_layers;
       Logger::info("SafeTensors config.json: num_hidden_layers = " + std::to_string(total_hidden_layers_from_file));
 
       // Calculate actual_cpu_offload_layers based on desired_gpu_layers and total_layers
@@ -218,12 +223,12 @@ TinyLlamaSession::TinyLlamaSession(const std::string& model_path, int num_gpu_la
       if (actual_cpu_offload_layers > total_hidden_layers_from_file) actual_cpu_offload_layers = total_hidden_layers_from_file;
       Logger::info("Clamped actual_cpu_offload_layers: " + std::to_string(actual_cpu_offload_layers));
       
-      config_to_pass_to_model_constructor.num_cpu_offload_layers = actual_cpu_offload_layers;
-      Logger::info("TinyLlamaSession (SafeTensors path): config_to_pass_to_model_constructor set with num_cpu_offload_layers = " + std::to_string(config_to_pass_to_model_constructor.num_cpu_offload_layers));
+      model_constructor_config.num_cpu_offload_layers = actual_cpu_offload_layers;
+      Logger::info("TinyLlamaSession (SafeTensors path): model_constructor_config set with num_cpu_offload_layers = " + std::to_string(model_constructor_config.num_cpu_offload_layers));
 
       Logger::info("Loading model weights: " + safetensors_path_str);
       SafeTensorsLoader st_loader(safetensors_path_str);
-      model_ = std::make_unique<TinyLlamaModel>(config_to_pass_to_model_constructor, st_loader);
+      model_ = std::make_unique<TinyLlamaModel>(model_constructor_config, st_loader);
       Logger::info("SafeTensors Model loaded successfully.");
 
     } catch (const std::exception& e) {
@@ -237,7 +242,7 @@ TinyLlamaSession::TinyLlamaSession(const std::string& model_path, int num_gpu_la
     try {
       // For GGUF, we first need to know total_hidden_layers to correctly calculate num_cpu_offload_layers
       Logger::info("Peeking into GGUF metadata to determine total_hidden_layers...");
-      GGUFData gguf_metadata = load_gguf_meta(model_path);
+      GGUFData gguf_metadata = load_gguf_meta(model_path, cli_use_mmap);
       ModelConfig temp_gguf_parsed_config = parse_model_config_from_gguf(gguf_metadata);
       total_hidden_layers_from_file = temp_gguf_parsed_config.num_hidden_layers;
       Logger::info("GGUF metadata: num_hidden_layers = " + std::to_string(total_hidden_layers_from_file));
@@ -260,11 +265,14 @@ TinyLlamaSession::TinyLlamaSession(const std::string& model_path, int num_gpu_la
       if (actual_cpu_offload_layers > total_hidden_layers_from_file) actual_cpu_offload_layers = total_hidden_layers_from_file;
       Logger::info("Clamped actual_cpu_offload_layers for GGUF: " + std::to_string(actual_cpu_offload_layers));
 
-      // TinyLlamaModel constructor for GGUF will load its full config from the file,
-      // but will respect num_cpu_offload_layers from this initial config due to model.cpp changes.
-      ModelConfig initial_config_for_gguf_model; // Start with a default config
+      // Use the already prepared model_constructor_config as a base
+      // to ensure cli_use_mmap is propagated, then set the GGUF specific cpu layers.
+      ModelConfig initial_config_for_gguf_model = model_constructor_config; 
       initial_config_for_gguf_model.num_cpu_offload_layers = actual_cpu_offload_layers;
-      Logger::info("TinyLlamaSession (GGUF path): initial_config_for_gguf_model set with num_cpu_offload_layers = " + std::to_string(initial_config_for_gguf_model.num_cpu_offload_layers));
+      // The use_mmap_for_gguf is already set correctly in model_constructor_config
+      Logger::info("TinyLlamaSession (GGUF path): initial_config_for_gguf_model set with num_cpu_offload_layers = " + 
+                   std::to_string(initial_config_for_gguf_model.num_cpu_offload_layers) +
+                   " and use_mmap_for_gguf = " + (initial_config_for_gguf_model.use_mmap_for_gguf ? "true" : "false"));
 
       model_ = std::make_unique<TinyLlamaModel>(initial_config_for_gguf_model, model_path);
       Logger::info("GGUF Model loaded successfully.");

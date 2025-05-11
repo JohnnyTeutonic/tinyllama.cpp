@@ -50,100 +50,135 @@ std::string trim_whitespace(const std::string& s) {
   return (start < end ? std::string(start, end) : std::string());
 }
 
-void print_usage() {
-  std::cout << "Usage: tinyllama [model_path] [prompt] [steps] [temperature] [top_k] [top_p] [cpu_layers]\n"
-            << "  model_path: Path to model directory or .gguf file (default: data)\n"
-            << "  prompt: Input text (default: \"Hello, world!\")\n"
-            << "  steps: Number of tokens to generate (default: 64)\n"
-            << "  temperature: Sampling temperature, lower is more deterministic (default: 0.7)\n"
-            << "  top_k: Limit sampling to top K tokens (default: 40)\n"
-            << "  top_p: Limit sampling to top P probability mass (default: 0.9)\n"
-            << "  cpu_layers: Number of layers to offload to CPU (default: 0)\n";
+void print_usage(const char* program_name) {
+  std::cout << "Usage: " << program_name
+            << " <model_path> <tokenizer_path> <num_threads> <prompt|chat> "
+               "[initial_prompt_string] [max_tokens] [n_gpu_layers] [use_mmap]"
+            << std::endl;
+  std::cout << "\nArguments:\n"
+               "  model_path          : Path to the model file (.gguf) or directory (SafeTensors).\n"
+               "  tokenizer_path      : Path to the tokenizer file (for GGUF only).\n"
+               "  num_threads         : Number of threads to use for generation.\n"
+               "  prompt|chat         : 'prompt' for single prompt generation or 'chat' for chat mode.\n"
+               "  initial_prompt_string: (Optional) Initial prompt string for chat mode.\n"
+               "  max_tokens          : (Optional) Maximum number of tokens to generate. Default: 256.\n"
+               "  n_gpu_layers        : (Optional) Number of layers to offload to GPU (-1 for all, 0 for none). Default: -1.\n"
+               "  use_mmap            : (Optional) Use mmap for GGUF files ('true' or 'false'). Default: true.\n"
+            << std::endl;
 }
 
 int main(int argc, char** argv) {
   if (argc > 1 && (std::string(argv[1]) == "-h" || std::string(argv[1]) == "--help")) {
-    print_usage();
+    print_usage(argv[0]);
     return 0;
   }
 
-  std::string model_path_or_dir = "data";
-  std::string prompt = "Hello, world!";
-  int steps = 64;
+  if (argc < 5) { // Minimum required: model_path, tokenizer_path, num_threads, mode
+    std::cerr << "ERROR: Missing required arguments." << std::endl;
+    print_usage(argv[0]);
+    return 1;
+  }
+
+  std::string model_path_or_dir = argv[1];
+  std::string tokenizer_path = argv[2];
+  int num_threads = 4; // Default
+  try {
+    num_threads = std::stoi(argv[3]);
+  } catch (const std::exception& e) {
+    Logger::error("Invalid num_threads argument: " + std::string(argv[3]) +
+                  ". Using default: " + std::to_string(num_threads));
+  }
+
+  std::string mode_str = argv[4];
+  std::string initial_prompt_string = "Hello, world!"; // Default
+  int max_tokens = 256; // Default for steps
+  int n_gpu_layers = -1; // Default: all layers on GPU
+  bool use_mmap = true; // Default: use mmap
+  
+  // Default sampling params for generate, as their CLI args are now gone from this simple main
   float temperature = 0.1f;
   int top_k = 40;
   float top_p = 0.9f;
-  int cpu_layers = 0;
-
-  if (argc > 1) {
-    model_path_or_dir = argv[1];
-  }
-
-  if (argc > 2) {
-    std::string raw_prompt_from_argv = argv[2];
-    prompt = trim_whitespace(raw_prompt_from_argv);
-  }
-
-  if (argc > 3) {
-    try {
-      steps = std::stoi(argv[3]);
-    } catch (const std::exception& e) {
-      Logger::error("Invalid steps argument: " + std::string(argv[3]) +
-                    ". Using default: " + std::to_string(steps));
-    }
-  }
-
-  if (argc > 4) {
-    try {
-      temperature = std::stof(argv[4]);
-    } catch (const std::exception& e) {
-      Logger::error("Invalid temperature argument: " + std::string(argv[4]) +
-                    ". Using default: " + std::to_string(temperature));
-    }
-  }
 
   if (argc > 5) {
-    try {
-      top_k = std::stoi(argv[5]);
-    } catch (const std::exception& e) {
-      Logger::error("Invalid top_k argument: " + std::string(argv[5]) +
-                    ". Using default: " + std::to_string(top_k));
-    }
+    initial_prompt_string = trim_whitespace(argv[5]);
   }
 
   if (argc > 6) {
     try {
-      top_p = std::stof(argv[6]);
+      max_tokens = std::stoi(argv[6]);
     } catch (const std::exception& e) {
-      Logger::error("Invalid top_p argument: " + std::string(argv[6]) +
-                    ". Using default: " + std::to_string(top_p));
+      Logger::error("Invalid max_tokens argument: " + std::string(argv[6]) +
+                    ". Using default: " + std::to_string(max_tokens));
     }
   }
 
   if (argc > 7) {
     try {
-      cpu_layers = std::stoi(argv[7]);
-    } catch (const std::exception& e) {
-      Logger::error("Invalid cpu_layers argument: " + std::string(argv[7]) +
-                    ". Using default: " + std::to_string(cpu_layers));
+      n_gpu_layers = std::stoi(argv[7]);
+    } catch (const std::invalid_argument& ia) {
+      std::cerr << "ERROR: Invalid n_gpu_layers: " << argv[7] << std::endl;
+      return 1;
+    }
+  }
+
+  if (argc > 8) {
+    std::string mmap_str = argv[8];
+    std::transform(mmap_str.begin(), mmap_str.end(), mmap_str.begin(), ::tolower);
+    if (mmap_str == "false" || mmap_str == "0") {
+      use_mmap = false;
+    } else if (mmap_str == "true" || mmap_str == "1") {
+      use_mmap = true;
+    } else {
+      std::cerr << "ERROR: Invalid use_mmap value: " << argv[8]
+                << ". Expected 'true', 'false', '1', or '0'." << std::endl;
+      return 1;
     }
   }
 
   Logger::info("Using model path/directory: " + model_path_or_dir);
-  Logger::info("Raw Prompt (from argv, trimmed): \"" + prompt + "\"");
-  Logger::info("Steps (from argv): " + std::to_string(steps));
-  Logger::info("Temperature: " + std::to_string(temperature));
-  Logger::info("Top-K: " + std::to_string(top_k));
-  Logger::info("Top-P: " + std::to_string(top_p));
-  Logger::info("CPU Layers: " + std::to_string(cpu_layers));
+  Logger::info("Tokenizer path: " + tokenizer_path);
+  Logger::info("Num threads: " + std::to_string(num_threads));
+  Logger::info("Mode: " + mode_str);
+  Logger::info("Initial prompt/string: \"" + initial_prompt_string + "\"");
+  Logger::info("Max tokens: " + std::to_string(max_tokens));
+  Logger::info("N GPU Layers: " + std::to_string(n_gpu_layers));
+  Logger::info(std::string("Use mmap: ") + (use_mmap ? "true" : "false"));
 
   try {
-    tinyllama::TinyLlamaSession session(model_path_or_dir, cpu_layers);
+    tinyllama::TinyLlamaSession session(model_path_or_dir, tokenizer_path, num_threads, n_gpu_layers, use_mmap);
     Logger::info("TinyLlamaSession initialized successfully.");
 
-    std::string generated_text =
-        session.generate(prompt, steps, temperature, top_k, top_p, "", true);
-    std::cout << generated_text << std::endl;
+    if (mode_str == "prompt") {
+      std::string generated_text =
+          session.generate(initial_prompt_string, max_tokens, temperature, top_k, top_p, "", true);
+      std::cout << generated_text << std::endl;
+    } else if (mode_str == "chat") {
+      std::cout << "Entering chat mode. Type 'exit', 'quit' to end." << std::endl;
+      std::string current_chat_prompt;
+      if (!initial_prompt_string.empty() && initial_prompt_string != "Hello, world!") {
+          // Use initial_prompt_string for the first turn if it's not the default and provided
+          current_chat_prompt = initial_prompt_string;
+          std::cout << "AI: " << session.generate(current_chat_prompt, max_tokens, temperature, top_k, top_p, "", true) << std::endl;
+      }
+      while (true) {
+        std::cout << "You: ";
+        std::getline(std::cin, current_chat_prompt);
+        if (current_chat_prompt == "exit" || current_chat_prompt == "quit") {
+          break;
+        }
+        if (current_chat_prompt.empty()) {
+          continue;
+        }
+        std::string ai_response = session.generate(current_chat_prompt, max_tokens, temperature, top_k, top_p, "", true);
+        std::cout << "AI: " << ai_response << std::endl;
+      }
+    } else {
+        std::cerr << "ERROR: Invalid mode '" << mode_str << "'. Expected 'prompt' or 'chat'." << std::endl;
+        print_usage(argv[0]);
+        return 1;
+    }
+
   } catch (const std::exception& e) {
     Logger::error("Error: " + std::string(e.what()));
     return 1;

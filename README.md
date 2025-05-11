@@ -176,18 +176,12 @@ For ease of use, comprehensive scripts are provided in the project root to autom
 chmod +x manage.sh
 ```
 
-**Available Commands:**
+**Key Command Options (refer to `./manage.sh help` for all options):**
 
-*   `./manage.sh build`: Compiles the project with configurable options for build type and CUDA support.
-*   `./manage.sh clean`: Removes build artifacts and generated documentation.
-*   `./manage.sh run-server`: Starts the chat server with configurable model directory, host, and port.
-*   `./manage.sh run-chat`: Starts the command-line chat client with a configurable model directory and generation parameters.
-*   `./manage.sh format`: Formats C++/CUDA source code using `clang-format`.
-*   `./manage.sh docs`: Generates API documentation using Doxygen.
-*   `./manage.sh docs-serve`: Serves generated documentation locally.
-*   `./manage.sh docs-clean`: Removes generated documentation.
-*   `./manage.sh package`: Creates a release tarball (`.tar.gz`).
-*   `./manage.sh help`: Displays detailed help and options for all commands.
+*   `./manage.sh build [--build-type <Release|Debug>] [--cuda <ON|OFF>]`
+*   `./manage.sh run-server [--model-dir <path>] [--tokenizer <path>] [--threads <num>] [--host <hostname>] [--port <num>] [--n-gpu-layers <num>] [--mmap <true|false>] [--no-log]`
+*   `./manage.sh run-chat [--model-dir <path>] [--tokenizer <path>] [--threads <num>] [--prompt <text>] [--n-gpu-layers <num>] [--mmap <true|false>]`
+    *   (Note: `run-chat` specific sampling parameters like temperature, top-k, top-p are set to defaults in the C++ `main`.)
 
 It is recommended to use this script for most routine operations. For detailed options for each command, please run `./manage.sh help`.
 
@@ -195,30 +189,22 @@ It is recommended to use this script for most routine operations. For detailed o
 
 This script provides equivalent functionality to `manage.sh` for Windows users.
 
-**Running the script:**
-
-Open PowerShell, navigate to the project root directory, and then you can run commands like:
+**Running the script (example):**
 
 ```powershell
-.\manage.ps1 build
-.\manage.ps1 build -BuildType Debug -Cuda OFF
-.\manage.ps1 run-server -ModelDir .\data\TinyLlama-1.1B-Chat-v1.0
+.\\manage.ps1 build -BuildType Debug -Cuda OFF
+.\\manage.ps1 run-chat -ModelDir .\\models\\my_model.gguf -TokenizerPath .\\models\\tokenizer.json -Threads 2 -Prompt "Hello" -NGpuLayers 0 -Mmap $false
 ```
 
-**Available Commands:**
+**Key Command Options (refer to `.\\manage.ps1 help` for all options):**
 
-*   `.\manage.ps1 build`: Compiles the project. Options: `-BuildType <Release|Debug>`, `-Cuda <ON|OFF>`.
-*   `.\manage.ps1 clean`: Removes build artifacts and generated documentation.
-*   `.\manage.ps1 run-server`: Starts the chat server. Options: `-ModelDir <path>`, `-Host <hostname>`, `-Port <port_number>`.
-*   `.\manage.ps1 run-chat`: Starts the command-line chat client. Options: `-ModelDir <path>`, `-Temperature <float>`, `-TopK <int>`, `-TopP <float>`, `-Prompt <text>`.
-*   `.\manage.ps1 format`: Formats C++/CUDA source code using `clang-format.exe` (must be in PATH).
-*   `.\manage.ps1 docs`: Generates API documentation using `doxygen.exe` (must be in PATH).
-*   `.\manage.ps1 docs-serve`: Serves generated documentation locally using Python's HTTP server (Python must be in PATH).
-*   `.\manage.ps1 docs-clean`: Removes generated documentation.
-*   `.\manage.ps1 package`: Creates a release ZIP archive. Options: `-Version <semver>`, `-BuildType <Release|Debug>`.
-*   `.\manage.ps1 help`: Displays detailed help and options for all commands.
+*   `.\\manage.ps1 build [-BuildType <Release|Debug>] [-Cuda <ON|OFF>]`
+*   `.\\manage.ps1 run-server [-ModelDir <path>] [-TokenizerPath <path>] [-Threads <num>] [-Host <hostname>] [-Port <num>] [-NGpuLayers <num>] [-Mmap <$true|$false>] [-NoLog]`
+*   `.\\manage.ps1 run-chat [-ModelDir <path>] [-TokenizerPath <path>] [-Threads <num>] [-Prompt <text>] [-NGpuLayers <num>] [-Mmap <$true|$false>]`
+    *   (Note: `run-chat` specific sampling parameters like temperature, top-k, top-p are set to defaults in the C++ `main`.)
 
-For detailed options for each command, run `.\manage.ps1 help`.
+
+For detailed options for each command, run `.\\manage.ps1 help`.
 
 ### 3. Run the Chat Server (Primary Example)
 
@@ -240,22 +226,31 @@ The main way to use this project is via the web server:
 
 ### 4. Other Executables / Command-Line Usage
 
-Besides the web server, you can interact with the models directly via command-line executables. These are typically found in `./build/bin/`.
+Besides the web server, you can interact with the models directly via command-line executables. These are typically found in `./build/bin/` or `./build/`.
 
-*   **`tinyllama`**:
-    *   **Description**: Command-line interface for chat. Can load models from a SafeTensors model directory (containing `config.json`, `model.safetensors`, `tokenizer.json`) OR by providing a direct path to a `.gguf` model file.
-    *   **Usage**: `./build/tinyllama <model_path_or_dir> [prompt] [steps] [temperature]`
-        *   `<model_path_or_dir>`: Path to model directory or `.gguf` file. (Default: `data`)
-        *   `[prompt]`: The text prompt to send to the model. (Default: "Hello, world!")
-        *   `[steps]`: Maximum number of new tokens to generate. (Default: `64`)
-        *   `[temperature]`: Sampling temperature. (Default: `0.7`)
-    *   **Example (SafeTensors directory)**:
-        ```bash
-        ./build/tinyllama ./data "Who is the prime minister of Australia?" 32 0.1
+*   **`tinyllama`** (main executable, usually in `./build/bin/main` or `./build/tinyllama`):
+    *   **Description**: Command-line interface for chat or single prompt generation. Can load models from a SafeTensors model directory (containing `config.json`, `model.safetensors`, `tokenizer.json`) OR by providing a direct path to a `.gguf` model file.
+    *   **Usage**:
         ```
-    *   **Example (GGUF file)**:
+        ./build/bin/main <model_path> <tokenizer_path> <num_threads> <mode> [initial_prompt] [max_tokens] [n_gpu_layers] [use_mmap]
+        ```
+        *   `<model_path>`: Path to the model file (.gguf) or directory (SafeTensors).
+        *   `<tokenizer_path>`: Path to the `tokenizer.json` file. For GGUF models that embed tokenizer info, this can often be an empty string `""` or a placeholder if `manage.sh` supplies it, but it's a required positional argument for the C++ executable.
+        *   `<num_threads>`: Number of threads to use for generation (CPU computation).
+        *   `<mode>`: Operation mode. Use `"chat"` for interactive chat or `"prompt"` for single prompt generation.
+        *   `[initial_prompt]`: (Optional) The initial prompt string. For `chat` mode, this starts the conversation. For `prompt` mode, this is the text to complete. (Default: "Hello, world!")
+        *   `[max_tokens]`: (Optional) Maximum number of new tokens to generate. (Default: `256`)
+        *   `[n_gpu_layers]`: (Optional) Number of layers to offload to GPU. `-1` for all available, `0` for none (CPU only). (Default: `-1`)
+        *   `[use_mmap]`: (Optional) Whether to use memory-mapping for GGUF files (`true` or `false`). (Default: `true`). Note: For GGUF weight loading, mmap is currently always used internally by the model loader; this flag mainly affects the initial metadata peek for GGUFs.
+    *   **Note on Sampling Parameters**: The `tinyllama` executable currently uses default internal values for temperature, top-k, and top-p. To control these, modify them within `main.cpp` or extend `main.cpp` to parse them from the command line.
+    *   **Example (SafeTensors directory, chat mode via `manage.sh` which constructs the correct call):**
         ```bash
-        ./build/tinyllama ./models/my_model.Q4_K_M.gguf "Explain black holes." 128 0.5
+        ./manage.sh run-chat --model-dir ./data/TinyLlama-1.1B-Chat-v1.0 --tokenizer ./data/TinyLlama-1.1B-Chat-v1.0/tokenizer.json --threads 4 --prompt "Who is Bill Gates?" --n-gpu-layers -1
+        ```
+    *   **Example (GGUF file, direct call, prompt mode):**
+        ```bash
+        ./build/bin/main ./models/tinyllama-1.1b-chat-v1.0.Q8_0.gguf ./models/tokenizer.json 4 prompt "Explain black holes in simple terms" 128 0 true
+        ```
 
 ## PyTorch SafeTensors Inference
 

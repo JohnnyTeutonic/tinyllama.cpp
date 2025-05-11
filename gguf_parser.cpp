@@ -6,6 +6,14 @@
 #include <sstream>
 #include <stdexcept>
 #include <vector>
+#include <cstring> // For strerror
+#include <cerrno>  // For errno
+
+// mmap related includes are now in gguf_structs.h, but also here for clarity/safety
+#include <sys/mman.h>   // For mmap, munmap
+#include <sys/stat.h>   // For fstat, stat
+#include <fcntl.h>      // For O_RDONLY
+#include <unistd.h>     // For close, fstat, read, lseek
 
 #include "logger.h"
 #include "quantization.h"
@@ -84,19 +92,21 @@ std::string read_gguf_string(std::ifstream& file) {
   }
 }
 
-GGUFData load_gguf_meta(const std::string& filename) {
-  Logger::info("Attempting to load GGUF file: " + filename);
-  std::ifstream file(filename, std::ios::binary);
-  if (!file.is_open()) {
-    throw std::runtime_error("Failed to open file: " + filename);
+GGUFData load_gguf_meta(const std::string& filename, bool use_mmap) {
+  Logger::info("Attempting to load GGUF file: " + filename + (use_mmap ? " with mmap" : " without mmap"));
+  std::ifstream metadata_file(filename, std::ios::binary);
+  if (!metadata_file.is_open()) {
+    throw std::runtime_error("Failed to open file for metadata: " + filename);
   }
 
   GGUFData result;
+  // The file_descriptor for mmap will be opened separately and stored in result.
+  // The GGUFData destructor will handle closing this fd and munmap.
 
-  read_raw(file, result.header.magic);
-  read_raw(file, result.header.version);
-  read_raw(file, result.header.tensor_count);
-  read_raw(file, result.header.metadata_kv_count);
+  read_raw(metadata_file, result.header.magic);
+  read_raw(metadata_file, result.header.version);
+  read_raw(metadata_file, result.header.tensor_count);
+  read_raw(metadata_file, result.header.metadata_kv_count);
 
   {
     std::stringstream ss;
@@ -118,86 +128,86 @@ GGUFData load_gguf_meta(const std::string& filename) {
     std::string key;
     GGUFValueType value_type_enum;
     try {
-      key = read_gguf_string(file);
-      read_raw(file, value_type_enum);
+      key = read_gguf_string(metadata_file);
+      read_raw(metadata_file, value_type_enum);
 
       switch (value_type_enum) {
         case GGUFValueType::UINT8: {
           uint8_t val;
-          read_raw(file, val);
+          read_raw(metadata_file, val);
           result.metadata[key] = val;
           break;
         }
         case GGUFValueType::INT8: {
           int8_t val;
-          read_raw(file, val);
+          read_raw(metadata_file, val);
           result.metadata[key] = val;
           break;
         }
         case GGUFValueType::UINT16: {
           uint16_t val;
-          read_raw(file, val);
+          read_raw(metadata_file, val);
           result.metadata[key] = val;
           break;
         }
         case GGUFValueType::INT16: {
           int16_t val;
-          read_raw(file, val);
+          read_raw(metadata_file, val);
           result.metadata[key] = val;
           break;
         }
         case GGUFValueType::UINT32: {
           uint32_t val;
-          read_raw(file, val);
+          read_raw(metadata_file, val);
           result.metadata[key] = val;
           break;
         }
         case GGUFValueType::INT32: {
           int32_t val;
-          read_raw(file, val);
+          read_raw(metadata_file, val);
           result.metadata[key] = val;
           break;
         }
         case GGUFValueType::FLOAT32: {
           float val;
-          read_raw(file, val);
+          read_raw(metadata_file, val);
           result.metadata[key] = val;
           break;
         }
         case GGUFValueType::BOOL: {
           uint8_t byte;
-          read_raw(file, byte);
+          read_raw(metadata_file, byte);
           result.metadata[key] = (byte != 0);
           break;
         }
         case GGUFValueType::STRING: {
-          std::string val = read_gguf_string(file);
+          std::string val = read_gguf_string(metadata_file);
           result.metadata[key] = val;
           break;
         }
         case GGUFValueType::UINT64: {
           uint64_t val;
-          read_raw(file, val);
+          read_raw(metadata_file, val);
           result.metadata[key] = val;
           break;
         }
         case GGUFValueType::INT64: {
           int64_t val;
-          read_raw(file, val);
+          read_raw(metadata_file, val);
           result.metadata[key] = val;
           break;
         }
         case GGUFValueType::FLOAT64: {
           double val;
-          read_raw(file, val);
+          read_raw(metadata_file, val);
           result.metadata[key] = val;
           break;
         }
         case GGUFValueType::ARRAY: {
           GGUFValueType array_type_enum;
           uint64_t count;
-          read_raw(file, array_type_enum);
-          read_raw(file, count);
+          read_raw(metadata_file, array_type_enum);
+          read_raw(metadata_file, count);
 
           GGUFArray array_obj;
           array_obj.type = array_type_enum;
@@ -210,7 +220,7 @@ GGUFData load_gguf_meta(const std::string& filename) {
                          std::to_string(count) + " elements...");
             result.tokenizer_tokens.reserve(static_cast<size_t>(count));
             for (uint64_t arr_i = 0; arr_i < count; ++arr_i) {
-              result.tokenizer_tokens.push_back(read_gguf_string(file));
+              result.tokenizer_tokens.push_back(read_gguf_string(metadata_file));
             }
             Logger::info("Loaded tokenizer_tokens. Size: " +
                          std::to_string(result.tokenizer_tokens.size()));
@@ -219,9 +229,9 @@ GGUFData load_gguf_meta(const std::string& filename) {
             Logger::info("Loading FLOAT32 array data ('" + key + "') with " +
                          std::to_string(count) + " elements...");
             result.tokenizer_scores.resize(static_cast<size_t>(count));
-            file.read(reinterpret_cast<char*>(result.tokenizer_scores.data()),
+            metadata_file.read(reinterpret_cast<char*>(result.tokenizer_scores.data()),
                       static_cast<std::streamsize>(count * sizeof(float)));
-            if (!file) {
+            if (!metadata_file) {
               throw std::runtime_error(
                   "GGUF Error: Failed to read scores array data.");
             }
@@ -232,10 +242,10 @@ GGUFData load_gguf_meta(const std::string& filename) {
             Logger::info("Loading UINT32 array data ('" + key + "') with " +
                          std::to_string(count) + " elements...");
             result.tokenizer_token_types.resize(static_cast<size_t>(count));
-            file.read(
+            metadata_file.read(
                 reinterpret_cast<char*>(result.tokenizer_token_types.data()),
                 static_cast<std::streamsize>(count * sizeof(uint32_t)));
-            if (!file) {
+            if (!metadata_file) {
               throw std::runtime_error(
                   "GGUF Error: Failed to read token_type array data.");
             }
@@ -247,7 +257,7 @@ GGUFData load_gguf_meta(const std::string& filename) {
                          std::to_string(count) + " elements...");
             result.tokenizer_merges.reserve(static_cast<size_t>(count));
             for (uint64_t arr_i = 0; arr_i < count; ++arr_i) {
-              result.tokenizer_merges.push_back(read_gguf_string(file));
+              result.tokenizer_merges.push_back(read_gguf_string(metadata_file));
             }
             Logger::info("Loaded tokenizer_merges. Size: " +
                          std::to_string(result.tokenizer_merges.size()));
@@ -262,7 +272,7 @@ GGUFData load_gguf_meta(const std::string& filename) {
             if (array_type_enum == GGUFValueType::STRING) {
               for (uint64_t arr_i = 0; arr_i < count; ++arr_i) {
                 try {
-                  std::string discarded_str = read_gguf_string(file);
+                  std::string discarded_str = read_gguf_string(metadata_file);
                 } catch (const std::exception& e) {
                   Logger::error("Error skipping string element " +
                                 std::to_string(arr_i) + " for key '" + key +
@@ -287,9 +297,9 @@ GGUFData load_gguf_meta(const std::string& filename) {
               }
               uint64_t total_size_to_skip = count * element_size;
               if (total_size_to_skip > 0) {
-                file.seekg(static_cast<std::streamoff>(total_size_to_skip),
+                metadata_file.seekg(static_cast<std::streamoff>(total_size_to_skip),
                            std::ios::cur);
-                if (!file) {
+                if (!metadata_file) {
                   throw std::runtime_error(
                       "GGUF Error: Failed to seek past array data for key '" +
                       key + "'");
@@ -325,10 +335,10 @@ GGUFData load_gguf_meta(const std::string& filename) {
   for (uint64_t i = 0; i < result.header.tensor_count; ++i) {
     GGUFTensorInfo info;
     try {
-      info.name = read_gguf_string(file);
+      info.name = read_gguf_string(metadata_file);
 
       uint32_t n_dims;
-      read_raw(file, n_dims);
+      read_raw(metadata_file, n_dims);
       if (n_dims > GGUF_MAX_TENSOR_DIMS) {
         throw std::runtime_error("Tensor '" + info.name +
                                  "' has unsupported number of dimensions: " +
@@ -336,16 +346,16 @@ GGUFData load_gguf_meta(const std::string& filename) {
       }
       info.shape.resize(n_dims);
       for (uint32_t d = 0; d < n_dims; ++d) {
-        read_raw(file, info.shape[d]);
+        read_raw(metadata_file, info.shape[d]);
       }
 
       uint32_t ggml_type_u32;
-      read_raw(file, ggml_type_u32);
+      read_raw(metadata_file, ggml_type_u32);
       info.type = static_cast<GGMLType>(ggml_type_u32);
 
-      uint64_t pos_before_offset_read = file.tellg();
+      uint64_t pos_before_offset_read = metadata_file.tellg();
 
-      read_raw(file, info.offset);
+      read_raw(metadata_file, info.offset);
 
       std::stringstream ss_offset_log;
       ss_offset_log
@@ -468,155 +478,112 @@ GGUFData load_gguf_meta(const std::string& filename) {
                     std::string(e.what()) +
                     ". Using default alignment: " + std::to_string(alignment));
   }
+  result.data_alignment = alignment; // Store the determined alignment
 
-  uint64_t current_pos = file.tellg();
-  Logger::info("[GGUF_LOAD] Current file position before padding seek: " +
-               std::to_string(current_pos));
-  uint64_t padding = (alignment - (current_pos % alignment)) % alignment;
+  uint64_t current_pos_metadata_stream = metadata_file.tellg();
+  Logger::info("[GGUF_LOAD] Current file position (metadata stream) before padding seek: " +
+               std::to_string(current_pos_metadata_stream));
+  uint64_t padding = (alignment - (current_pos_metadata_stream % alignment)) % alignment;
   Logger::info("[GGUF_LOAD] Calculated padding: " + std::to_string(padding));
-  if (padding > 0) {
-    Logger::info("[GGUF_LOAD] Seeking past " + std::to_string(padding) +
-                 " padding bytes to reach alignment " +
-                 std::to_string(alignment) + ".");
-    file.seekg(padding, std::ios::cur);
-    if (!file) {
-      throw std::runtime_error(
-          "GGUF Error: Failed to seek past padding before tensor data.");
-    }
-  }
-  uint64_t data_start_pos = file.tellg();
-
+  
+  uint64_t actual_data_start_offset_in_file = current_pos_metadata_stream + padding;
   Logger::info(
-      "[GGUF_LOAD] File position after padding seek (data_start_pos): " +
-      std::to_string(data_start_pos));
-  std::string target_tensor_name_debug = "blk.0.ffn_down.weight";
-  uint64_t offset_of_d_in_block_q6k = 208;
-  if (result.tensor_infos_map.count(target_tensor_name_debug)) {
-    const GGUFTensorInfo& t_info_debug =
-        result.tensor_infos_map.at(target_tensor_name_debug);
-    if (t_info_debug.type == GGML_TYPE_Q6_K) {
-      uint64_t tensor_relative_offset = t_info_debug.offset;
-      uint64_t d_field_abs_file_offset =
-          data_start_pos + tensor_relative_offset + offset_of_d_in_block_q6k;
+      "[GGUF_LOAD] Calculated actual_data_start_offset_in_file (for mmap): " +
+      std::to_string(actual_data_start_offset_in_file));
+  
+  metadata_file.close();
+  Logger::info("[GGUF_LOAD] Metadata ifstream closed.");
 
-      Logger::info("[GGUF_DEBUG_READ] Targeting tensor '" +
-                   target_tensor_name_debug + "' (type Q6_K)");
-      Logger::info("[GGUF_DEBUG_READ]   data_start_pos (file): " +
-                   std::to_string(data_start_pos));
-      Logger::info("[GGUF_DEBUG_READ]   tensor_relative_offset (metadata): " +
-                   std::to_string(tensor_relative_offset));
-      Logger::info("[GGUF_DEBUG_READ]   d_field_offset_in_block: " +
-                   std::to_string(offset_of_d_in_block_q6k));
-      Logger::info("[GGUF_DEBUG_READ]   Calculated d_field_abs_file_offset: " +
-                   std::to_string(d_field_abs_file_offset));
-
-      uint64_t seek_pos_debug = d_field_abs_file_offset - 4;
-      int bytes_to_read_debug = 8;
-      std::vector<uint8_t> debug_buffer(bytes_to_read_debug);
-
-      uint64_t original_file_pos_before_debug_read = file.tellg();
-      file.seekg(seek_pos_debug, std::ios::beg);
-      if (!file) {
-        Logger::error("[GGUF_DEBUG_READ] Failed to seek to debug position: " +
-                      std::to_string(seek_pos_debug));
-      } else {
-        Logger::info("[GGUF_DEBUG_READ] At debug seek position: " +
-                     std::to_string(file.tellg()));
-        file.read(reinterpret_cast<char*>(debug_buffer.data()),
-                  bytes_to_read_debug);
-        if (!file) {
-          Logger::error("[GGUF_DEBUG_READ] Failed to read debug bytes. Read " +
-                        std::to_string(file.gcount()) + " bytes.");
-        } else {
-          std::stringstream ss_debug_bytes;
-          ss_debug_bytes << "[GGUF_DEBUG_READ]   Read " << file.gcount()
-                         << " bytes from file @ " << seek_pos_debug << ": ";
-          for (int k = 0; k < file.gcount(); ++k)
-            ss_debug_bytes << "0x" << std::hex << (int)debug_buffer[k] << " ";
-          Logger::info(ss_debug_bytes.str());
-        }
-        file.clear();
-        file.seekg(original_file_pos_before_debug_read, std::ios::beg);
-        Logger::info(
-            "[GGUF_DEBUG_READ] Seeked back to "
-            "original_file_pos_before_debug_read: " +
-            std::to_string(file.tellg()));
-      }
-    } else {
-      Logger::warning("[GGUF_DEBUG_READ] Target tensor '" +
-                      target_tensor_name_debug +
-                      "' is not Q6_K. Skipping debug read.");
-    }
-  } else {
-    Logger::warning("[GGUF_DEBUG_READ] Target tensor '" +
-                    target_tensor_name_debug + "' not found for debug read.");
+  if (!use_mmap) {
+    Logger::info("[GGUF_LOAD] mmap is disabled by configuration. Tensor data will not be memory-mapped from GGUF.");
+    // GGUFData members (file_descriptor, mapped_tensor_data, etc.) are already defaulted
+    // to safe values (-1, nullptr) by its constructor.
+    // map_gguf_weights function in model.cpp already checks for mapped_tensor_data == nullptr.
+    return result; 
   }
 
-  file.seekg(0, std::ios::end);
-  uint64_t file_end_pos = file.tellg();
-  file.seekg(data_start_pos, std::ios::beg);
+  result.file_descriptor = open(filename.c_str(), O_RDONLY);
+  if (result.file_descriptor == -1) {
+      throw std::runtime_error("GGUF Error: Failed to open file for mmap: " + filename + " - " + strerror(errno));
+  }
+  Logger::info("[GGUF_LOAD] File opened for mmap with fd: " + std::to_string(result.file_descriptor));
 
-  if (file_end_pos < data_start_pos) {
+  struct stat file_stat;
+  if (fstat(result.file_descriptor, &file_stat) == -1) {
+      close(result.file_descriptor); 
+      result.file_descriptor = -1;
+      throw std::runtime_error("GGUF Error: Failed to fstat file for mmap: " + filename + " - " + strerror(errno));
+  }
+  uint64_t file_total_size = static_cast<uint64_t>(file_stat.st_size);
+
+  if (file_total_size < actual_data_start_offset_in_file) {
+    close(result.file_descriptor); 
+    result.file_descriptor = -1;
     throw std::runtime_error(
-        "GGUF Error: File end position is before calculated data start "
-        "position.");
+        "GGUF Error: File total size (" + std::to_string(file_total_size) + 
+        ") is less than calculated actual_data_start_offset_in_file (" + std::to_string(actual_data_start_offset_in_file) + ").");
   }
 
-  uint64_t data_size = file_end_pos - data_start_pos;
-  Logger::info("[GGUF_LOAD] Calculated tensor data block size: " +
-               std::to_string(data_size) + " bytes.");
+  uint64_t tensor_data_block_size_on_disk = file_total_size - actual_data_start_offset_in_file;
+  Logger::info("[GGUF_LOAD] Calculated tensor_data_block_size_on_disk (for mmap length calculation): " +
+               std::to_string(tensor_data_block_size_on_disk) + " bytes.");
+  
+  long page_size = sysconf(_SC_PAGE_SIZE);
+  if (page_size == -1) {
+      close(result.file_descriptor);
+      result.file_descriptor = -1;
+      throw std::runtime_error(std::string("GGUF Error: Failed to get page size using sysconf - ") + strerror(errno));
+  }
+  Logger::info("[GGUF_LOAD] System page size: " + std::to_string(page_size));
 
-  if (data_size > 0) {
-    try {
-      result.tensor_data.resize(static_cast<size_t>(data_size));
-    } catch (const std::bad_alloc& e) {
-      throw std::runtime_error("Failed to allocate memory for tensor data: " +
-                               std::to_string(data_size) + " bytes. " +
-                               e.what());
+  uint64_t mmap_offset = (actual_data_start_offset_in_file / page_size) * page_size;
+  result.offset_diff_for_mmap = static_cast<size_t>(actual_data_start_offset_in_file - mmap_offset);
+  size_t mmap_length = static_cast<size_t>(tensor_data_block_size_on_disk + result.offset_diff_for_mmap);
+
+  Logger::info("[GGUF_LOAD] Aligning mmap: actual_data_start_offset_in_file=" + std::to_string(actual_data_start_offset_in_file) +
+               ", mmap_offset=" + std::to_string(mmap_offset) +
+               ", offset_diff_for_mmap=" + std::to_string(result.offset_diff_for_mmap) +
+               ", mmap_length=" + std::to_string(mmap_length));
+
+  if (mmap_length > 0) { // Only mmap if there's something to map
+    result.mapped_tensor_data_size = mmap_length; // Store the actual mapped length
+    result.mapped_tensor_data = mmap(nullptr, result.mapped_tensor_data_size, 
+                                         PROT_READ, MAP_SHARED, 
+                                         result.file_descriptor, static_cast<off_t>(mmap_offset));
+    
+    if (result.mapped_tensor_data == MAP_FAILED) {
+        int mmap_errno = errno; 
+        close(result.file_descriptor); 
+        result.file_descriptor = -1;
+        result.mapped_tensor_data = nullptr; 
+        result.mapped_tensor_data_size = 0; // Reset on failure
+        result.offset_diff_for_mmap = 0;    // Reset on failure
+        throw std::runtime_error("GGUF Error: mmap failed for tensor data. Aligned Offset: " + std::to_string(mmap_offset) +
+                                 ", Mmap Length: " + std::to_string(mmap_length) + 
+                                 " - Error: " + strerror(mmap_errno));
     }
+    Logger::info("[GGUF_LOAD] Successfully mmapped tensor data block. Mapped Address: " + 
+                 std::to_string(reinterpret_cast<uintptr_t>(result.mapped_tensor_data)) + 
+                 ", Mapped Size: " + std::to_string(result.mapped_tensor_data_size) + 
+                 " bytes from file offset " + std::to_string(mmap_offset));
 
-    Logger::info("[GGUF_LOAD] Reading " + std::to_string(data_size) +
-                 " bytes into tensor_data vector...");
-    file.read(reinterpret_cast<char*>(result.tensor_data.data()),
-              static_cast<std::streamsize>(data_size));
-    uint64_t pos_after_read = file.tellg();
-    std::streamsize bytes_read = file.gcount();
-    Logger::info("[GGUF_LOAD] File position after read: " +
-                 std::to_string(pos_after_read));
-    Logger::info("[GGUF_LOAD] Bytes reported read by gcount(): " +
-                 std::to_string(bytes_read));
-    Logger::info("[GGUF_LOAD] Stream state after read: good=" +
-                 std::to_string(file.good()) +
-                 ", eof=" + std::to_string(file.eof()) +
-                 ", fail=" + std::to_string(file.fail()));
-
-    if (!file || bytes_read != static_cast<std::streamsize>(data_size)) {
-      if (file.eof()) {
-        throw std::runtime_error(
-            "GGUF Error: Reached EOF prematurely while reading tensor data. "
-            "Expected " +
-            std::to_string(data_size) + " bytes, read " +
-            std::to_string(bytes_read) + ".");
-      } else {
-        throw std::runtime_error(
-            "GGUF Error: Failed to read tensor data block from file. Stream "
-            "state indicates error.");
-      }
-    }
-    Logger::info("[GGUF_LOAD] Successfully read tensor data block.");
-
-    if (data_size >= 16) {
+    if (result.mapped_tensor_data_size >= (result.offset_diff_for_mmap + 16)) {
       std::stringstream ss_bytes;
-      ss_bytes << "[GGUF_LOAD] First 16 bytes of tensor_data buffer: ";
+      ss_bytes << "[GGUF_LOAD] First 16 bytes of *actual* tensor data (after offset_diff) in mmap: ";
+      const uint8_t* actual_data_ptr = static_cast<const uint8_t*>(result.mapped_tensor_data) + result.offset_diff_for_mmap;
       for (int i = 0; i < 16; ++i)
-        ss_bytes << "0x" << std::hex << (int)result.tensor_data[i] << " ";
+        ss_bytes << "0x" << std::hex << static_cast<int>(actual_data_ptr[i]) << " ";
       Logger::info(ss_bytes.str());
     }
-  } else {
-    Logger::info("[GGUF_LOAD] Tensor data block size is 0. Nothing to read.");
-  }
 
-  file.close();
-  Logger::info("GGUF metadata and data loaded successfully.");
+  } else {
+    Logger::info("[GGUF_LOAD] Tensor data block size (or mmap_length) is 0. Nothing to mmap.");
+    result.mapped_tensor_data = nullptr; // Ensure it's null if not mapped
+    result.mapped_tensor_data_size = 0;
+    result.offset_diff_for_mmap = 0;
+    // fd will be closed by GGUFData destructor if not already closed by an error path.
+  }
+  
+  Logger::info("GGUF metadata loaded and tensor data (if any) mmapped successfully.");
   return result;
 }

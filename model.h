@@ -89,6 +89,7 @@ struct ModelConfig {
     std::string pre_tokenizer_type; /**< Type of pre-tokenizer */
     std::string chat_template_string; /**< Template string for chat formatting */
     bool is_gguf_file_loaded;   /**< Flag indicating if model was loaded from GGUF format */
+    bool use_mmap_for_gguf = true; // Whether to use mmap for GGUF files, defaults to true
     int num_cpu_offload_layers = 0; /**< Number of layers to offload to CPU */
 };
 

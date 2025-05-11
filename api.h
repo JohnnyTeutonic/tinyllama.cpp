@@ -29,9 +29,15 @@ class TinyLlamaSession {
    * or GGUF file.
    * @param model_path Path to the directory containing model files OR a .gguf
    * file.
+   * @param tokenizer_path Path to the tokenizer file.
+   * @param threads Number of threads to use for model loading.
+   * @param num_gpu_layers_from_cli Number of GPU layers to use from command-line arguments.
+   * @param cli_use_mmap Whether to use mmap for loading the model.
    * @throws std::runtime_error if loading fails.
    */
-  TinyLlamaSession(const std::string& model_path, int cpu_layers = 0);
+  TinyLlamaSession(const std::string& model_path,
+                   const std::string& tokenizer_path, int threads,
+                   int num_gpu_layers_from_cli, bool cli_use_mmap);
 
   /**
    * @brief Destructor to ensure proper cleanup (e.g., KVCache CUDA memory).
