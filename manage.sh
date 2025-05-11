@@ -10,7 +10,7 @@ DEFAULT_MODEL_DIR="data"
 DEFAULT_SERVER_HOST="localhost"
 DEFAULT_SERVER_PORT="8080"
 DEFAULT_N_GPU_LAYERS="-1" # Default for N_GPU_LAYERS (-1 for auto/all)
-DEFAULT_RELEASE_VERSION="0.1.0"
+DEFAULT_RELEASE_VERSION="1.0.14"
 DEFAULT_TEMPERATURE="0.1"
 DEFAULT_TOP_K="40"
 DEFAULT_TOP_P="0.9"
@@ -22,6 +22,7 @@ DEFAULT_MODEL_PATH=""
 DEFAULT_TOKENIZER_PATH=""
 DEFAULT_THREADS=$(grep -c ^processor /proc/cpuinfo 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
 DEFAULT_USE_MMAP="true"
+DEFAULT_MODEL_DIR_CHAT="${DEFAULT_MODEL_DIR}"
 
 CURRENT_INTERACTIVE_PROMPT=""
 MAX_TOKENS_SERVER=1024
@@ -67,6 +68,16 @@ usage() {
     echo "                 --top-k <int>               (default: ${DEFAULT_TOP_K}) (Note: Currently uses C++ default)"
     echo "                 --top-p <float>             (default: ${DEFAULT_TOP_P}) (Note: Currently uses C++ default)"
     echo "                 --prompt <text>             (default: interactive mode)"
+    echo "                 --n-gpu-layers <int>        (default: ${DEFAULT_N_GPU_LAYERS}, -1 for all on GPU)"
+    echo "                 --mmap <true|false>          (default: ${DEFAULT_USE_MMAP})"
+    echo ""
+    echo "  run-prompt   Run the C++ model with a single prompt and exit."
+    echo "               Options:"
+    echo "                 --model-dir <path>          (default: ${DEFAULT_MODEL_DIR})"
+    echo "                 --tokenizer <path>          (default: ${DEFAULT_TOKENIZER_PATH})"
+    echo "                 --prompt <text>             (default: ${CURRENT_INTERACTIVE_PROMPT})"
+    echo "                 --steps <num>               (default: ${MAX_TOKENS_SERVER})"
+    echo "                 --threads <num>             (default: ${DEFAULT_THREADS})"
     echo "                 --n-gpu-layers <int>        (default: ${DEFAULT_N_GPU_LAYERS}, -1 for all on GPU)"
     echo "                 --mmap <true|false>          (default: ${DEFAULT_USE_MMAP})"
     echo ""
@@ -274,6 +285,119 @@ do_run_chat() {
     LD_LIBRARY_PATH=./build/lib "${exec_args_for_cpp[@]}"
 }
 
+do_run_prompt() {
+    local model_dir_arg="$DEFAULT_MODEL_DIR_CHAT" # Use chat default as a base
+    local tokenizer_path_arg_base="$DEFAULT_TOKENIZER_PATH"
+    local prompt_arg="$DEFAULT_PROMPT"
+    local steps_arg="$DEFAULT_STEPS"
+    local threads_arg="$DEFAULT_THREADS"
+    local n_gpu_layers_arg="$DEFAULT_N_GPU_LAYERS"
+    local use_mmap_arg="$DEFAULT_USE_MMAP"
+
+    shift # Get past "run-prompt"
+
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --model-dir)
+                if [ -z "$2" ]; then error "Missing value for --model-dir"; fi
+                model_dir_arg="$2"
+                shift # Consume --model-dir
+                shift # Consume its value
+                ;;
+            --tokenizer)
+                if [ -z "$2" ]; then error "Missing value for --tokenizer"; fi
+                tokenizer_path_arg_base="$2"
+                shift # Consume --tokenizer
+                shift # Consume its value
+                ;;
+            --prompt)
+                if [ -z "$2" ]; then error "Missing value for --prompt"; fi
+                prompt_arg="$2"
+                shift # Consume --prompt
+                shift # Consume its value
+                ;;
+            --steps)
+                if [ -z "$2" ]; then error "Missing value for --steps"; fi
+                steps_arg="$2"
+                shift # Consume --steps
+                shift # Consume its value
+                ;;
+            --threads)
+                if [ -z "$2" ]; then error "Missing value for --threads"; fi
+                threads_arg="$2"
+                shift # Consume --threads
+                shift # Consume its value
+                ;;
+            --n-gpu-layers)
+                if [ -z "$2" ]; then error "Missing value for --n-gpu-layers"; fi
+                n_gpu_layers_arg="$2"
+                shift # Consume --n-gpu-layers
+                shift # Consume its value
+                ;;
+            --mmap)
+                if [ -z "$2" ]; then error "Missing value for --mmap"; fi
+                use_mmap_arg="$2"
+                shift # Consume --mmap
+                shift # Consume its value
+                ;;
+            -*)
+                # Handle unknown options that start with -
+                echo "Unknown option for run-prompt: $1"
+                usage
+                exit 1
+                ;;
+            *)
+                # Handle positional arguments if any were expected, or error if not.
+                # In this case, we don't expect positional arguments after options.
+                echo "Unexpected argument for run-prompt: $1"
+                usage
+                exit 1
+                ;;
+        esac
+    done
+
+    # Support positional model dir as fallback
+    if [ -z "$model_dir_arg" ] && [ "$#" -gt 0 ]; then
+        model_dir_arg="$1"
+        shift
+    fi
+
+    local executable_path="${PROJECT_ROOT_DIR}/build/bin/main"
+    if [ ! -f "$executable_path" ]; then
+        executable_path="${PROJECT_ROOT_DIR}/build/tinyllama" # Fallback for older structure
+        if [ ! -f "$executable_path" ]; then
+            error "Main executable not found at ./build/bin/main or ./build/tinyllama. Please build the project first."
+        fi
+    fi
+    log "Using executable: $executable_path"
+
+    local tokenizer_path_arg
+    if [ -d "$model_dir_arg" ]; then
+        tokenizer_path_arg="$model_dir_arg/$tokenizer_path_arg_base"
+    else
+        if [ "$tokenizer_path_arg_base" = "$DEFAULT_TOKENIZER_PATH" ] && [ -f "$model_dir_arg" ]; then # If it's a GGUF file
+            tokenizer_path_arg="tokenizer.model" # Placeholder, C++ side handles GGUF internal tokenizer
+        else
+            tokenizer_path_arg="$tokenizer_path_arg_base"
+        fi
+    fi
+    
+    echo "Running prompt mode..."
+    echo "Model: $model_dir_arg"
+    echo "Tokenizer: $tokenizer_path_arg"
+    echo "Threads: $threads_arg"
+    echo "Prompt: $prompt_arg"
+    echo "Steps: $steps_arg"
+    echo "N GPU Layers: $n_gpu_layers_arg"
+    echo "Use Mmap: $use_mmap_arg"
+
+    # Order: model_path, tokenizer_path, num_threads, mode, initial_prompt_string, max_tokens, n_gpu_layers, use_mmap
+    local exec_args_for_cpp=("$executable_path" "$model_dir_arg" "$tokenizer_path_arg" "$threads_arg" "prompt" "$prompt_arg" "$steps_arg" "$n_gpu_layers_arg" "$use_mmap_arg")
+    
+    echo "Executing: ${exec_args_for_cpp[@]}"
+    LD_LIBRARY_PATH=./build/lib "${exec_args_for_cpp[@]}"
+}
+
 do_format() {
     if ! command -v ${FORMAT_TOOL} &> /dev/null; then
         error "${FORMAT_TOOL} could not be found. Please install it and ensure it's in your PATH."
@@ -417,6 +541,7 @@ case $COMMAND in
     clean) do_clean ;;
     run-server) do_run_server "$@" ;;
     run-chat) do_run_chat "$@" ;;
+    run-prompt) do_run_prompt "$@" ;;
     format) do_format ;;
     docs) do_generate_docs ;;
     docs-serve) do_docs_serve ;;

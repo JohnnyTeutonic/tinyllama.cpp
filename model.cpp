@@ -1634,7 +1634,7 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& initial_config,
   Logger::info("  architecture: " + config_.architecture);
   Logger::info("  is_gguf_file_loaded: " + std::string(config_.is_gguf_file_loaded ? "true" : "false"));
   Logger::info("  use_mmap_for_gguf: " + std::string(config_.use_mmap_for_gguf ? "true" : "false"));
-  
+
 
   initialize_weights(loader.get(), gguf_data.get());
   initialize_gpu_and_rope(); 

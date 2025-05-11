@@ -12,7 +12,7 @@
 [CmdletBinding()]
 param (
     [Parameter(Mandatory=$false, Position=0)]
-    [ValidateSet("build", "clean", "run-server", "run-chat", "format", "docs", "docs-serve", "docs-clean", "package", "help")]
+    [ValidateSet("build", "clean", "run-server", "run-chat", "run-prompt", "format", "docs", "docs-serve", "docs-clean", "package", "help")]
     [string]$Command,
 
     [Parameter(Mandatory=$false, Position=1, ValueFromRemainingArguments=$true)]
@@ -82,6 +82,15 @@ function Show-Usage {
     Write-Host "                 -TopK <int>               (default: ${DefaultTopK})"
     Write-Host "                 -TopP <float>             (default: ${DefaultTopP})"
     Write-Host "                 -Prompt <text>             (default: interactive mode, uses default prompt)"
+    Write-Host "                 -NGpuLayers <int>         (default: ${DefaultNGpuLayers}, -1 for all on GPU)"
+    Write-Host "                 -Mmap <true|false>        (default: ${DefaultUseMmap})"
+    Write-Host ""
+    Write-Host "  run-prompt   Run the C++ model with a single prompt and exit."
+    Write-Host "               Options:"
+    Write-Host "                 -ModelDir <path>          (default: ${DefaultModelDir})"
+    Write-Host "                 -TokenizerPath <path>      (default: ${DefaultTokenizerPath})"
+    Write-Host "                 -Prompt <text>             (default: ${DefaultPrompt})"
+    Write-Host "                 -Steps <num>               (default: ${DefaultSteps})"
     Write-Host "                 -NGpuLayers <int>         (default: ${DefaultNGpuLayers}, -1 for all on GPU)"
     Write-Host "                 -Mmap <true|false>        (default: ${DefaultUseMmap})"
     Write-Host ""
@@ -298,6 +307,51 @@ function Invoke-RunChat {
     if ($LASTEXITCODE -ne 0) { Write-ErrorAndExit "Chat client execution failed."}
 }
 
+function Invoke-RunPrompt {
+    param (
+        [string]$ModelDir = $DefaultModelDir,
+        [string]$Prompt = "",
+        [string]$Steps = "64",
+        [int]$NGpuLayers = $DefaultNGpuLayers,
+        [string]$TokenizerPath = $DefaultTokenizerPath,
+        [bool]$UseMmap = $DefaultUseMmap
+    )
+    $Params = $script:Arguments | ConvertFrom-StringData -Delimiter ' '
+    if ($Params.ModelDir) { $ModelDir = $Params.ModelDir }
+    if ($Params.Prompt) { $Prompt = $Params.Prompt }
+    if ($Params.Steps) { $Steps = $Params.Steps }
+    if ($Params.NGpuLayers) { $NGpuLayers = [int]$Params.NGpuLayers }
+    if ($Params.TokenizerPath) { $TokenizerPath = $Params.TokenizerPath }
+    if ($Params.UseMmap) { $UseMmap = [bool]$Params.UseMmap }
+
+    $ExecutablePath = Join-Path -Path $ProjectRootDir -ChildPath "build/tinyllama.exe"
+     if (-not (Test-Path $ExecutablePath)) {
+      $ExecutablePath = Join-Path -Path $ProjectRootDir -ChildPath "build/Release/tinyllama.exe" # MSVC default
+    }
+     if (-not (Test-Path $ExecutablePath)) {
+      $ExecutablePath = Join-Path -Path $ProjectRootDir -ChildPath "build/Debug/tinyllama.exe" # MSVC default
+    }
+
+    if (-not (Test-Path $ExecutablePath)) {
+        Write-ErrorAndExit "Chat client executable not found at common paths (e.g., $ProjectRootDir\build\tinyllama.exe or $ProjectRootDir\build\Release\tinyllama.exe). Please build the project first."
+    }
+
+    Log-Message "Starting prompt mode from $ExecutablePath..."
+    Log-Message "Model directory/path: $ModelDir"
+    Log-Message "Prompt: $Prompt"
+    Log-Message "Steps: $Steps"
+    Log-Message "N GPU Layers: $NGpuLayers"
+    Log-Message "Tokenizer Path: $TokenizerPath"
+    Log-Message "Use Mmap: $UseMmap"
+
+    $ScriptArgs = @($ModelDir, $TokenizerPath, $Steps, $NGpuLayers, [string]$UseMmap)
+    $ScriptArgs += $Prompt
+
+    Log-Message "Executing: $ExecutablePath $ScriptArgs"
+    & $ExecutablePath $ScriptArgs
+    if ($LASTEXITCODE -ne 0) { Write-ErrorAndExit "Prompt execution failed."}
+}
+
 function Invoke-FormatCode {
     Log-Message "Formatting code with $FormatTool..."
     if (-not (Get-Command $FormatTool -ErrorAction SilentlyContinue)) {
@@ -451,6 +505,7 @@ switch ($Command) {
     "clean"       { Invoke-Clean }
     "run-server"  { Invoke-RunServer }
     "run-chat"    { Invoke-RunChat }
+    "run-prompt"  { Invoke-RunPrompt }
     "format"      { Invoke-FormatCode }
     "docs"        { Invoke-Docs }
     "docs-serve"  { Invoke-DocsServe }
