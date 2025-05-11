@@ -1198,6 +1198,14 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
     gpuErrchk(cudaMemcpy(token_embedding_table_f32_dev_, f32_data.data(), f32_data.size() * sizeof(float), cudaMemcpyHostToDevice));
     Logger::info("Dequantized token_embedding_table (Q4_K->fp32) to GPU.");
   }
+  // Fallback: Dequantized Q6_K to FP32 if still no FP32 table
+  if (!token_embedding_table_f32_dev_ && !embed_tokens_q6k.empty()) {
+    std::vector<float> f32_data(embed_tokens_q6k.size() * GGML_QK_K);
+    for (size_t i=0; i < embed_tokens_q6k.size(); ++i) dequantize_q6_k(&embed_tokens_q6k[i], &f32_data[i * GGML_QK_K], GGML_QK_K);
+    gpuErrchk(cudaMalloc(&token_embedding_table_f32_dev_, f32_data.size() * sizeof(float)));
+    gpuErrchk(cudaMemcpy(token_embedding_table_f32_dev_, f32_data.data(), f32_data.size() * sizeof(float), cudaMemcpyHostToDevice));
+    Logger::info("Dequantized token_embedding_table (Q6_K->fp32) to GPU.");
+  }
 
   SAFE_CUDA_FREE(lm_head_f32_dev_);
   if (!lm_head_f32.empty()) { // Prefer direct F32
@@ -1225,6 +1233,14 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
     gpuErrchk(cudaMalloc(&lm_head_f32_dev_, f32_data.size() * sizeof(float)));
     gpuErrchk(cudaMemcpy(lm_head_f32_dev_, f32_data.data(), f32_data.size() * sizeof(float), cudaMemcpyHostToDevice));
     Logger::info("Dequantized lm_head (Q4_K->fp32) to GPU.");
+  }
+  // Fallback: Dequantized Q6_K to FP32 for LM Head
+  if (!lm_head_f32_dev_ && !lm_head_q6k.empty()) {
+    std::vector<float> f32_data(lm_head_q6k.size() * GGML_QK_K);
+    for (size_t i=0; i < lm_head_q6k.size(); ++i) dequantize_q6_k(&lm_head_q6k[i], &f32_data[i * GGML_QK_K], GGML_QK_K);
+    gpuErrchk(cudaMalloc(&lm_head_f32_dev_, f32_data.size() * sizeof(float)));
+    gpuErrchk(cudaMemcpy(lm_head_f32_dev_, f32_data.data(), f32_data.size() * sizeof(float), cudaMemcpyHostToDevice));
+    Logger::info("Dequantized lm_head (Q6_K->fp32) to GPU.");
   }
   Logger::info("Finished processing embedding and LM head tables for GPU.");
 
@@ -1329,7 +1345,8 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
       const std::function<const std::vector<float>&(const LayerWeights&)>& f32_accessor,
       const std::function<const std::vector<uint16_t>&(const LayerWeights&)>& bf16_accessor,
       const std::function<const std::vector<block_q8_0>&(const LayerWeights&)>& q8_accessor,
-      // TODO: Add Q4_K, Q6_K accessors if models use them for these main weights
+      const std::function<const std::vector<block_q4_K>&(const LayerWeights&)>& q4k_accessor, // Added Q4_K
+      const std::function<const std::vector<block_q6_K>&(const LayerWeights&)>& q6k_accessor, // Added Q6_K
       float*& dev_ptr, size_t single_layer_elem_size, const std::string& name_base) {
     
     SAFE_CUDA_FREE(dev_ptr); // Free before attempting to populate
@@ -1344,12 +1361,14 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
     bool use_f32_path = !f32_accessor(first_gpu_lw).empty();
     bool use_bf16_path = !use_f32_path && !bf16_accessor(first_gpu_lw).empty();
     bool use_q8_path = !use_f32_path && !use_bf16_path && !q8_accessor(first_gpu_lw).empty();
-    // TODO: Add Q4/Q6 path detection
+    bool use_q4k_path = !use_f32_path && !use_bf16_path && !use_q8_path && !q4k_accessor(first_gpu_lw).empty(); // Added Q4_K path detection
+    bool use_q6k_path = !use_f32_path && !use_bf16_path && !use_q8_path && !use_q4k_path && !q6k_accessor(first_gpu_lw).empty(); // Added Q6_K path detection
 
     if (use_f32_path) source_type_str = "F32";
     else if (use_bf16_path) source_type_str = "BF16->F32";
     else if (use_q8_path) source_type_str = "Q8_0->F32";
-    // TODO: Set source_type_str for Q4/Q6
+    else if (use_q4k_path) source_type_str = "Q4_K->F32"; // Added Q4_K source string
+    else if (use_q6k_path) source_type_str = "Q6_K->F32"; // Added Q6_K source string
 
     bool all_layers_consistent = true;
     for (int i = 0; i < active_num_gpu_layers; ++i) {
@@ -1373,7 +1392,21 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
           for (size_t bi = 0; bi < q8_blocks.size(); ++bi) dequantize_q8_0_block(&q8_blocks[bi], &temp_layer_f32[bi * GGML_QK8_0]);
           current_layer_processed = true;
         } else { all_layers_consistent = false; break; }
-      } // TODO: Add Q4/Q6 processing logic here
+      } else if (use_q4k_path) { // Added Q4_K processing logic
+        const auto& q4k_blocks = q4k_accessor(lw);
+        if (!q4k_blocks.empty()) {
+          temp_layer_f32.resize(q4k_blocks.size() * GGML_QK_K);
+          for (size_t bi = 0; bi < q4k_blocks.size(); ++bi) dequantize_q4_k_m(&q4k_blocks[bi], &temp_layer_f32[bi * GGML_QK_K], GGML_QK_K);
+          current_layer_processed = true;
+        } else { all_layers_consistent = false; break; }
+      } else if (use_q6k_path) { // Added Q6_K processing logic
+        const auto& q6k_blocks = q6k_accessor(lw);
+        if (!q6k_blocks.empty()) {
+          temp_layer_f32.resize(q6k_blocks.size() * GGML_QK_K);
+          for (size_t bi = 0; bi < q6k_blocks.size(); ++bi) dequantize_q6_k(&q6k_blocks[bi], &temp_layer_f32[bi * GGML_QK_K], GGML_QK_K);
+          current_layer_processed = true;
+        } else { all_layers_consistent = false; break; }
+      } 
       
       if (current_layer_processed) {
         concat_host_f32.insert(concat_host_f32.end(), temp_layer_f32.begin(), temp_layer_f32.end());
@@ -1397,36 +1430,50 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
     [](const LayerWeights& lw) -> const std::vector<float>& { return lw.q_proj_f32; }, 
     [](const LayerWeights& lw) -> const std::vector<uint16_t>& { return lw.q_proj; }, 
     [](const LayerWeights& lw) -> const std::vector<block_q8_0>& { return lw.q_proj_q8_0; }, 
+    [](const LayerWeights& lw) -> const std::vector<block_q4_K>& { return lw.q_proj_q4k; },
+    [](const LayerWeights& lw) -> const std::vector<block_q6_K>& { return lw.q_proj_q6k; },
     w_q_f32_dev_, layer_q_size_f32, "W_Q");
   process_gpu_layer_weights_to_f32_concat(
     [](const LayerWeights& lw) -> const std::vector<float>& { return lw.k_proj_f32; }, 
     [](const LayerWeights& lw) -> const std::vector<uint16_t>& { return lw.k_proj; }, 
     [](const LayerWeights& lw) -> const std::vector<block_q8_0>& { return lw.k_proj_q8_0; }, 
+    [](const LayerWeights& lw) -> const std::vector<block_q4_K>& { return lw.k_proj_q4k; },
+    [](const LayerWeights& lw) -> const std::vector<block_q6_K>& { return lw.k_proj_q6k; },
     w_k_f32_dev_, layer_k_size_f32, "W_K");
   process_gpu_layer_weights_to_f32_concat(
     [](const LayerWeights& lw) -> const std::vector<float>& { return lw.v_proj_f32; }, 
     [](const LayerWeights& lw) -> const std::vector<uint16_t>& { return lw.v_proj; }, 
     [](const LayerWeights& lw) -> const std::vector<block_q8_0>& { return lw.v_proj_q8_0; }, 
+    [](const LayerWeights& lw) -> const std::vector<block_q4_K>& { return lw.v_proj_q4k; },
+    [](const LayerWeights& lw) -> const std::vector<block_q6_K>& { return lw.v_proj_q6k; },
     w_v_f32_dev_, layer_v_size_f32, "W_V");
   process_gpu_layer_weights_to_f32_concat(
     [](const LayerWeights& lw) -> const std::vector<float>& { return lw.o_proj_f32; }, 
     [](const LayerWeights& lw) -> const std::vector<uint16_t>& { return lw.o_proj; }, 
     [](const LayerWeights& lw) -> const std::vector<block_q8_0>& { return lw.o_proj_q8_0; }, 
+    [](const LayerWeights& lw) -> const std::vector<block_q4_K>& { return lw.o_proj_q4k; },
+    [](const LayerWeights& lw) -> const std::vector<block_q6_K>& { return lw.o_proj_q6k; },
     w_o_f32_dev_, layer_o_size_f32, "W_O");
   process_gpu_layer_weights_to_f32_concat(
     [](const LayerWeights& lw) -> const std::vector<float>& { return lw.gate_proj_f32; }, 
     [](const LayerWeights& lw) -> const std::vector<uint16_t>& { return lw.gate_proj; }, 
     [](const LayerWeights& lw) -> const std::vector<block_q8_0>& { return lw.gate_proj_q8_0; }, 
+    [](const LayerWeights& lw) -> const std::vector<block_q4_K>& { return lw.gate_proj_q4k; },
+    [](const LayerWeights& lw) -> const std::vector<block_q6_K>& { return lw.gate_proj_q6k; },
     w_gate_f32_dev_, layer_gate_size_f32, "W_GATE");
   process_gpu_layer_weights_to_f32_concat(
     [](const LayerWeights& lw) -> const std::vector<float>& { return lw.up_proj_f32; }, 
     [](const LayerWeights& lw) -> const std::vector<uint16_t>& { return lw.up_proj; }, 
     [](const LayerWeights& lw) -> const std::vector<block_q8_0>& { return lw.up_proj_q8_0; }, 
+    [](const LayerWeights& lw) -> const std::vector<block_q4_K>& { return lw.up_proj_q4k; },
+    [](const LayerWeights& lw) -> const std::vector<block_q6_K>& { return lw.up_proj_q6k; },
     w_up_f32_dev_, layer_up_size_f32, "W_UP");
   process_gpu_layer_weights_to_f32_concat(
     [](const LayerWeights& lw) -> const std::vector<float>& { return lw.down_proj_f32; }, 
     [](const LayerWeights& lw) -> const std::vector<uint16_t>& { return lw.down_proj; }, 
     [](const LayerWeights& lw) -> const std::vector<block_q8_0>& { return lw.down_proj_q8_0; }, 
+    [](const LayerWeights& lw) -> const std::vector<block_q4_K>& { return lw.down_proj_q4k; },
+    [](const LayerWeights& lw) -> const std::vector<block_q6_K>& { return lw.down_proj_q6k; },
     w_down_f32_dev_, layer_down_size_f32, "W_DOWN");
 
   Logger::info("Finished processing ALL weights for GPU layers (if any).");
@@ -1587,7 +1634,7 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& initial_config,
   Logger::info("  architecture: " + config_.architecture);
   Logger::info("  is_gguf_file_loaded: " + std::string(config_.is_gguf_file_loaded ? "true" : "false"));
   Logger::info("  use_mmap_for_gguf: " + std::string(config_.use_mmap_for_gguf ? "true" : "false"));
-
+  
 
   initialize_weights(loader.get(), gguf_data.get());
   initialize_gpu_and_rope(); 
@@ -1859,6 +1906,45 @@ std::vector<float> TinyLlamaModel::lookup_embedding(int token_id) {
     }
     if (log_this_token_lookup) {
       log_vector_summary("[CPU_EMBED_DETAIL Q8_0] Output Embedding (Token " +
+                             std::to_string(token_id) + ")",
+                         embedding_vec);
+    }
+    return embedding_vec;
+  }
+
+  else if (!embed_tokens_q6k.empty()) { // New Q6_K block
+    if (hs % GGML_QK_K != 0) {
+      Logger::error("Hidden size (" + std::to_string(hs) +
+                    ") is not divisible by GGML_QK_K (" +
+                    std::to_string(GGML_QK_K) + ") for Q6_K embedding lookup.");
+      return embedding_vec;
+    }
+    size_t blocks_per_row = hs / GGML_QK_K;
+    size_t start_block_idx = (size_t)token_id * blocks_per_row;
+    size_t end_block_idx = start_block_idx + blocks_per_row;
+
+    if (end_block_idx > embed_tokens_q6k.size()) {
+      Logger::error(
+          "Calculated block index out of bounds for Q6_K embedding table. "
+          "Token: " +
+          std::to_string(token_id) +
+          ", StartBlock: " + std::to_string(start_block_idx) +
+          ", EndBlock: " + std::to_string(end_block_idx) +
+          ", TableSize: " + std::to_string(embed_tokens_q6k.size()));
+      return embedding_vec;
+    }
+
+    float dequantized_block[GGML_QK_K];
+    for (size_t block_n = 0; block_n < blocks_per_row; ++block_n) {
+      dequantize_q6_k(&embed_tokens_q6k[start_block_idx + block_n],
+                        dequantized_block, GGML_QK_K);
+      size_t dest_offset = block_n * GGML_QK_K;
+      size_t elements_to_copy = SAFE_MIN(static_cast<size_t>(GGML_QK_K), static_cast<size_t>(hs - dest_offset));
+      std::memcpy(&embedding_vec[dest_offset], dequantized_block,
+                  elements_to_copy * sizeof(float));
+    }
+    if (log_this_token_lookup) {
+      log_vector_summary("[CPU_EMBED_DETAIL Q6_K] Output Embedding (Token " +
                              std::to_string(token_id) + ")",
                          embedding_vec);
     }
