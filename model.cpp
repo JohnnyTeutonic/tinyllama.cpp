@@ -2442,36 +2442,46 @@ std::vector<float> TinyLlamaModel::forward_device(
 
 void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
   Logger::info("Mapping GGUF weights to model fields...");
-  if (gguf.tensor_data.empty()) {
-    Logger::warning("GGUF tensor data buffer is empty. Cannot map weights.");
+  if (gguf.mapped_tensor_data == nullptr || gguf.mapped_tensor_data_size == 0) {
+    Logger::warning("GGUF mapped_tensor_data is null or size is 0. Cannot map weights.");
     return;
   }
-  const uint8_t* data_buffer_start = gguf.tensor_data.data();
-  const uint8_t* data_buffer_end = data_buffer_start + gguf.tensor_data.size();
-  Logger::info("map_gguf_weights: Total tensor data size available: " +
-               std::to_string(gguf.tensor_data.size()) + " bytes.");
+  // This is the start of the mmapped region in memory.
+  const uint8_t* mmap_buffer_start = static_cast<const uint8_t*>(gguf.mapped_tensor_data);
+  // This is the start of the *actual* GGUF tensor data within that mmapped region,
+  // accounting for any alignment padding mmap had to do.
+  const uint8_t* actual_data_block_start = mmap_buffer_start + gguf.offset_diff_for_mmap;
+  // The end of the valid *actual* data block within the mmap.
+  const uint8_t* actual_data_block_end = actual_data_block_start + (gguf.mapped_tensor_data_size - gguf.offset_diff_for_mmap);
+
+  Logger::info("map_gguf_weights: Total mmapped region size: " +
+               std::to_string(gguf.mapped_tensor_data_size) + " bytes. " +
+               "Offset diff for mmap: " + std::to_string(gguf.offset_diff_for_mmap));
 
   for (const auto& pair : gguf.tensor_infos_map) {
     std::stringstream ss_map;
     const std::string& target_field = pair.first;
     const GGUFTensorInfo& info = pair.second;
-    const uint8_t* tensor_data_ptr = data_buffer_start + info.offset;
+    // info.offset is relative to the start of the *actual* GGUF tensor data block.
+    const uint8_t* tensor_data_ptr = actual_data_block_start + info.offset;
     const uint8_t* tensor_data_end = tensor_data_ptr + info.size_in_bytes;
 
     ss_map << "Attempting to map tensor: '" << info.name
-           << "', Type: " << info.type << ", Offset: " << info.offset
+           << "', Type: " << info.type << ", GGUFOffset: " << info.offset
            << ", NumElem: " << info.num_elements
            << ", SizeBytes: " << info.size_in_bytes
-           << ", SrcAddr: " << static_cast<const void*>(tensor_data_ptr)
-           << ", ReadEndAddr: " << static_cast<const void*>(tensor_data_end)
-           << ", DataBuffer: [" << static_cast<const void*>(data_buffer_start)
-           << " - " << static_cast<const void*>(data_buffer_end) << "]";
+           << ", SrcAddrInMmap: " << static_cast<const void*>(tensor_data_ptr)
+           << ", ReadEndAddrInMmap: " << static_cast<const void*>(tensor_data_end)
+           << ", MmapRegion: [" << static_cast<const void*>(mmap_buffer_start)
+           << " - " << static_cast<const void*>(mmap_buffer_start + gguf.mapped_tensor_data_size) << "]"
+           << ", ActualDataBlock: [" << static_cast<const void*>(actual_data_block_start)
+           << " - " << static_cast<const void*>(actual_data_block_end) << "]";
 
-    if (tensor_data_ptr < data_buffer_start ||
-        tensor_data_end > data_buffer_end) {
+    if (tensor_data_ptr < actual_data_block_start || 
+        tensor_data_end > actual_data_block_end) {
       ss_map << ", InBounds: NO";
       Logger::error(ss_map.str());
-      Logger::error("Tensor data out of bounds for: " + info.name);
+      Logger::error("Tensor data out of mmapped actual data block bounds for: " + info.name);
       continue;
     } else {
       ss_map << ", InBounds: YES";
@@ -2775,19 +2785,28 @@ void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
           return;
         }
         size_t num_blocks = info_local.num_elements / GGML_QK8_0;
+        // info_local.offset is relative to the start of the actual data block within the mmap
         const block_q8_0* src = reinterpret_cast<const block_q8_0*>(
-            gguf.tensor_data.data() + info_local.offset);
+            static_cast<const uint8_t*>(gguf.mapped_tensor_data) + gguf.offset_diff_for_mmap + info_local.offset);
 
-        if (reinterpret_cast<const uint8_t*>(src) < data_buffer_start ||
-            reinterpret_cast<const uint8_t*>(src + num_blocks) >
-                data_buffer_end) {
+        // Boundary check against the entire mmapped region is still useful, 
+        // though the primary check should be that (src + num_blocks) does not exceed (mmap_start + mmap_size)
+        const uint8_t* mmap_start_ptr = static_cast<const uint8_t*>(gguf.mapped_tensor_data);
+        const uint8_t* mmap_end_ptr = mmap_start_ptr + gguf.mapped_tensor_data_size;
+
+        if (reinterpret_cast<const uint8_t*>(src) < mmap_start_ptr ||
+            reinterpret_cast<const uint8_t*>(src + num_blocks) > mmap_end_ptr) {
           Logger::error(
               "Tensor '" + info_local.name +
-              "' (Q8_0) data is out of bounds. Offset: " +
-              std::to_string(info_local.offset) + ", NumBlocks: " +
-              std::to_string(num_blocks) + ", ExpectedSize: " +
+              "' (Q8_0) data is out of mmapped bounds. Calculated Src: " + std::to_string(reinterpret_cast<uintptr_t>(src)) +
+              ", MmapStart: " + std::to_string(reinterpret_cast<uintptr_t>(mmap_start_ptr)) + 
+              ", CalculatedEnd: " + std::to_string(reinterpret_cast<uintptr_t>(src + num_blocks)) + 
+              ", MmapEnd: " + std::to_string(reinterpret_cast<uintptr_t>(mmap_end_ptr)) +
+              ". GGUF Offset: " + std::to_string(info_local.offset) + ", NumBlocks: " +
+              std::to_string(num_blocks) + ", ExpectedBlockSize: " +
               std::to_string(num_blocks * sizeof(block_q8_0)) +
-              ", BufferSize: " + std::to_string(gguf.tensor_data.size()));
+              ", MmapTotalSize: " + std::to_string(gguf.mapped_tensor_data_size) +
+              ", MmapOffsetDiff: " + std::to_string(gguf.offset_diff_for_mmap));
           vec.clear();
           return;
         }

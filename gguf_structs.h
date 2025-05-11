@@ -6,6 +6,12 @@
 #include <variant>
 #include <vector>
 
+// mmap related includes
+#include <sys/mman.h>   // For mmap, munmap
+#include <sys/stat.h>   // For fstat, stat
+#include <fcntl.h>      // For O_RDONLY
+#include <unistd.h>     // For close, fstat, read, lseek
+
 #include "ggml_types.h"
 
 /**
@@ -77,6 +83,87 @@ struct GGUFData {
   std::vector<uint32_t> tokenizer_token_types;         /**< Token type information */
   std::vector<std::string> tokenizer_merges;           /**< BPE merge rules */
 
-  std::vector<uint8_t> tensor_data;                    /**< Raw tensor data */
+  // Memory-mapped tensor data instead of std::vector
+  int file_descriptor = -1;                          /**< File descriptor for the GGUF file */
+  void* mapped_tensor_data = nullptr;                /**< Pointer to memory-mapped tensor data block */
+  size_t mapped_tensor_data_size = 0;               /**< Size of the mapped tensor data block in bytes */
   uint64_t data_alignment = 32;                        /**< Alignment requirement for tensor data */
+  size_t offset_diff_for_mmap = 0;                   /**< Difference between aligned mmap offset and actual data start */
+
+  // Default constructor
+  GGUFData() : file_descriptor(-1), mapped_tensor_data(nullptr), mapped_tensor_data_size(0), data_alignment(32), offset_diff_for_mmap(0) {}
+
+  // Destructor to clean up memory map and file descriptor
+  ~GGUFData() {
+    if (mapped_tensor_data != nullptr && mapped_tensor_data != MAP_FAILED) {
+      munmap(mapped_tensor_data, mapped_tensor_data_size);
+      mapped_tensor_data = nullptr; // Avoid double-free on accidental copy
+    }
+    if (file_descriptor != -1) {
+      close(file_descriptor);
+      file_descriptor = -1; // Avoid double-close on accidental copy
+    }
+  }
+
+  // Prevent accidental copying which could lead to double free/close issues
+  // If copies are needed, a proper copy constructor/assignment operator
+  // that handles mmap duplication or remapping would be necessary.
+  GGUFData(const GGUFData&) = delete;
+  GGUFData& operator=(const GGUFData&) = delete;
+
+  // Allow move semantics
+  GGUFData(GGUFData&& other) noexcept 
+    : header(other.header)
+    , metadata(std::move(other.metadata))
+    , tensor_infos(std::move(other.tensor_infos))
+    , tensor_infos_map(std::move(other.tensor_infos_map))
+    , tokenizer_tokens(std::move(other.tokenizer_tokens))
+    , tokenizer_scores(std::move(other.tokenizer_scores))
+    , tokenizer_token_types(std::move(other.tokenizer_token_types))
+    , tokenizer_merges(std::move(other.tokenizer_merges))
+    , file_descriptor(other.file_descriptor)
+    , mapped_tensor_data(other.mapped_tensor_data)
+    , mapped_tensor_data_size(other.mapped_tensor_data_size)
+    , data_alignment(other.data_alignment)
+    , offset_diff_for_mmap(other.offset_diff_for_mmap)
+  {
+    // Leave other in a valid but safe state (resources transferred)
+    other.file_descriptor = -1;
+    other.mapped_tensor_data = nullptr;
+    other.mapped_tensor_data_size = 0;
+    other.offset_diff_for_mmap = 0;
+  }
+
+  GGUFData& operator=(GGUFData&& other) noexcept {
+    if (this != &other) {
+      // Clean up existing resources first
+      if (mapped_tensor_data != nullptr && mapped_tensor_data != MAP_FAILED) {
+        munmap(mapped_tensor_data, mapped_tensor_data_size);
+      }
+      if (file_descriptor != -1) {
+        close(file_descriptor);
+      }
+
+      header = other.header;
+      metadata = std::move(other.metadata);
+      tensor_infos = std::move(other.tensor_infos);
+      tensor_infos_map = std::move(other.tensor_infos_map);
+      tokenizer_tokens = std::move(other.tokenizer_tokens);
+      tokenizer_scores = std::move(other.tokenizer_scores);
+      tokenizer_token_types = std::move(other.tokenizer_token_types);
+      tokenizer_merges = std::move(other.tokenizer_merges);
+      file_descriptor = other.file_descriptor;
+      mapped_tensor_data = other.mapped_tensor_data;
+      mapped_tensor_data_size = other.mapped_tensor_data_size;
+      data_alignment = other.data_alignment;
+      offset_diff_for_mmap = other.offset_diff_for_mmap;
+
+      // Leave other in a valid but safe state
+      other.file_descriptor = -1;
+      other.mapped_tensor_data = nullptr;
+      other.mapped_tensor_data_size = 0;
+      other.offset_diff_for_mmap = 0;
+    }
+    return *this;
+  }
 };
