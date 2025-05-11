@@ -216,34 +216,45 @@ void dequantize_q6_k(const block_q6_K* qblock, float* output,
     return;
   }
 
-  const float d_super = fp16_to_fp32(qblock->d, true);
-  const uint8_t* ql_ptr = qblock->ql;
-  const uint8_t* qh_ptr = qblock->qh;
-  const int8_t* scales_ptr = qblock->scales;
+  const float d = fp16_to_fp32(qblock->d, false);
 
-  for (int sub_block_idx = 0; sub_block_idx < GGML_QK_K / 16; ++sub_block_idx) {
-    const float s_sub_block = static_cast<float>(scales_ptr[sub_block_idx]);
+  // Pointers to the start of the whole block's data
+  const uint8_t * p_ql = qblock->ql;
+  const uint8_t * p_qh = qblock->qh;
+  const int8_t  * p_sc = qblock->scales;
+  float * p_y  = output;
 
-    const float effective_scale = d_super * s_sub_block;
+  // Process the 256 elements of the block.
+  // The llama.cpp code structure processes it in two 128-element chunks.
+  for (int half_idx = 0; half_idx < 2; ++half_idx) { // Process first 128, then next 128
+      // Set up pointers for the current 128-element half
+      const uint8_t * ql = p_ql + (half_idx * 64); // Each half uses 64 bytes of ql
+      const uint8_t * qh = p_qh + (half_idx * 32); // Each half uses 32 bytes of qh
+      const int8_t  * sc = p_sc + (half_idx * 8);  // Each half uses 8 scales for these 128 elements
+      float         * y  = p_y  + (half_idx * 128); // Output pointer for this half
 
-    const uint8_t* current_ql = ql_ptr + sub_block_idx * 8;
-    const uint8_t* current_qh = qh_ptr + sub_block_idx * 4;
-    float* current_output_ptr = output + sub_block_idx * 16;
+      // Inner loop processes 32 sets of 4 values = 128 floats
+      for (int l = 0; l < 32; ++l) {
+          int is = l / 16; // Scale sub-group index within this half's 8 scales (0 for l=0..15, 1 for l=16..31)
 
-    for (int N_in_subblock = 0; N_in_subblock < 16; ++N_in_subblock) {
-      uint8_t q_low_byte = current_ql[N_in_subblock / 2];
-      int q_low =
-          (N_in_subblock % 2 == 0) ? (q_low_byte & 0x0F) : (q_low_byte >> 4);
+          // Extract the four 6-bit quantized values, already offset by -32
+          const int8_t q1 = (int8_t)(((ql[l +  0] & 0x0F) | (((qh[l] >> 0) & 0x03) << 4))) - 32;
+          const int8_t q2 = (int8_t)(((ql[l + 32] & 0x0F) | (((qh[l] >> 2) & 0x03) << 4))) - 32;
+          const int8_t q3 = (int8_t)(((ql[l +  0]  >> 4) | (((qh[l] >> 4) & 0x03) << 4))) - 32;
+          const int8_t q4 = (int8_t)(((ql[l + 32]  >> 4) | (((qh[l] >> 6) & 0x03) << 4))) - 32;
 
-      uint8_t q_high_byte = current_qh[N_in_subblock / 4];
-      int q_high_shift = (N_in_subblock % 4) * 2;
-      int q_high = (q_high_byte >> q_high_shift) & 0x03;
+          // Apply scales and dequantize
+          // sc points to the 8 scales for the current 128-element half.
+          // is = 0 means l is 0-15, so we use sc[0], sc[2], sc[4], sc[6]
+          // is = 1 means l is 16-31, so we use sc[1], sc[3], sc[5], sc[7]
+          // This is effectively sc[is + 0], sc[is + 2], sc[is + 4], sc[is + 6] relative to the start of the 8 scales for this half
+          // when considering the two sets of scales used across the 32 iterations of l.
 
-      int quant_val = (q_high << 4) | q_low;
-
-      current_output_ptr[N_in_subblock] =
-          effective_scale * (static_cast<float>(quant_val) - 32.0f);
-    }
+          y[l +  0] = d * sc[is + 0] * q1;
+          y[l + 32] = d * sc[is + 2] * q2;
+          y[l + 64] = d * sc[is + 4] * q3;
+          y[l + 96] = d * sc[is + 6] * q4;
+      }
   }
 }
 

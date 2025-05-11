@@ -242,8 +242,8 @@ Besides the web server, you can interact with the models directly via command-li
         *   `<mode>`: Operation mode. Use `"chat"` for interactive chat or `"prompt"` for single prompt generation.
         *   `[initial_prompt]`: (Optional) The initial prompt string. For `chat` mode, this starts the conversation. For `prompt` mode, this is the text to complete. (Default: "Hello, world!")
         *   `[max_tokens]`: (Optional) Maximum number of new tokens to generate. (Default: `256`)
-        *   `[n_gpu_layers]`: (Optional) Number of layers to offload to GPU. `-1` for all available, `0` for none (CPU only). (Default: `-1`)
-        *   `[use_mmap]`: (Optional) Whether to use memory-mapping for GGUF files (`true` or `false`). (Default: `true`). Note: For GGUF weight loading, mmap is currently always used internally by the model loader; this flag mainly affects the initial metadata peek for GGUFs.
+        *   `[n_gpu_layers]`: (Optional) Number of layers to offload to GPU. `-1` means all layers to GPU, `0` means all layers to CPU. A positive number specifies the exact number of layers for the GPU (remaining on CPU). (Default: `-1`).
+        *   `[use_mmap]`: (Optional) Whether to use memory-mapping for GGUF file metadata reading (`true` or `false`). (Default: `true`). Note: For GGUF weight loading itself, mmap is currently always used internally by the model loader for efficiency; this flag primarily influences the initial metadata peek by `TinyLlamaSession`.
     *   **Note on Sampling Parameters**: The `tinyllama` executable currently uses default internal values for temperature, top-k, and top-p. To control these, modify them within `main.cpp` or extend `main.cpp` to parse them from the command line.
     *   **Example (SafeTensors directory, chat mode via `manage.sh` which constructs the correct call):**
         ```bash
