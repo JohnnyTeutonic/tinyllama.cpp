@@ -144,9 +144,26 @@ std::vector<float> k_lookup_table_min;
 
 }  // namespace
 
-static inline void get_scale_min_indices_q4_K(int j, const uint8_t* scales,
-                                              uint8_t* scale_index,
-                                              uint8_t* min_index) {
+static inline void get_scale_min_k4(int j, const uint8_t * q, uint8_t * d_val, uint8_t * m_val) {
+    // j is the index for the 32-element group (0 to 7 for a QK_K block)
+    // q is x[i].scales which is uint8_t scales[12] in block_q4_K
+    if (j < 4) { // For first 4 groups of 32 (i.e., first 128 elements, using scales[0..7])
+        *d_val = q[j] & 63;     // Takes lower 6 bits from q[j] (scales[0..3])
+        *m_val = q[j + 4] & 63; // Takes lower 6 bits from q[j+4] (scales[4..7])
+    } else { // For next 4 groups of 32 (i.e., next 128 elements, using scales[8..11] and bits from scales[0..7])
+        // q[j+4] here would be q[8..11] for j=4..7
+        // q[j-4] here would be q[0..3] for j=4..7
+        // q[j-0] (mistake in comment, should be q[j]) here would be q[4..7] for j=4..7
+        *d_val = (q[j+4] & 0x0F) | ((q[j-4] >> 6) << 4); // Lower 4 bits from q[8..11] and upper 2 bits from q[0..3]
+        *m_val = (q[j+4] >>  4) | ((q[j-0] >> 6) << 4); // Upper 4 bits from q[8..11] and upper 2 bits from q[4..7]
+    }
+}
+
+static inline void get_scale_min_indices_q4_K(
+    int j,
+    const uint8_t* scales,
+    uint8_t* scale_index,
+    uint8_t* min_index) {
   assert(j >= 0 && j < 16);
 
   *scale_index = scales[j % 8] >> (4 * (j / 8));
@@ -186,23 +203,49 @@ void dequantize_q4_k_m(const block_q4_K* qblock, float* output,
     return;
   }
 
-  const float d = fp16_to_fp32(qblock->d, true);
-  const float dmin = fp16_to_fp32(qblock->dmin, true);
-  const uint8_t* scales_u8 = qblock->scales;
-  const uint8_t* qs_ptr = qblock->qs;
+  const float d_super_scale = fp16_to_fp32(qblock->d, false);
+  const float d_super_min   = fp16_to_fp32(qblock->dmin, false);
+  
+  const uint8_t * q_bytes_ptr = qblock->qs; // Pointer to the start of quantized data for the block
+  float * y_ptr = output;             // Pointer to the start of output float data for the block
 
-  for (int j = 0; j < GGML_QK_K / 16; ++j) {
-    const float sub_scale_factor_normalized =
-        static_cast<float>(scales_u8[j]) / 4.0f;
-    const float final_sub_block_scale = d * sub_scale_factor_normalized;
-    const size_t qs_offset = j * 8;
-    for (int k = 0; k < 8; ++k) {
-      const uint8_t q_byte = qs_ptr[qs_offset + k];
-      const int8_t q_low = ((q_byte & 0x0F) - 8);
-      output[j * 16 + k] = final_sub_block_scale * q_low + dmin;
-      const int8_t q_high = ((q_byte >> 4) - 8);
-      output[j * 16 + k + 8] = final_sub_block_scale * q_high + dmin;
+  int scale_group_idx = 0; // This will be the 'is' in llama.cpp reference (0, 2, 4, 6)
+
+  // Loop 4 times, processing 64 elements (four 16-element sub-sub-blocks) in each iteration.
+  // This corresponds to the outer j loop in dequantize_row_q4_K from llama.cpp (j from 0 to QK_K, step 64)
+  for (int sixtyfour_chunk_idx = 0; sixtyfour_chunk_idx < GGML_QK_K / 64; ++sixtyfour_chunk_idx) {
+    uint8_t sc_val1, m_val1;
+    uint8_t sc_val2, m_val2;
+
+    // Get scales/mins for the two 32-element halves of this 64-element chunk
+    // The `j` for get_scale_min_k4 is the 32-element group index (0-7)
+    get_scale_min_k4(scale_group_idx + 0, qblock->scales, &sc_val1, &m_val1);
+    get_scale_min_k4(scale_group_idx + 1, qblock->scales, &sc_val2, &m_val2);
+
+    const float d1 = d_super_scale * static_cast<float>(sc_val1);
+    const float m1 = d_super_min   * static_cast<float>(m_val1);
+    const float d2 = d_super_scale * static_cast<float>(sc_val2);
+    const float m2 = d_super_min   * static_cast<float>(m_val2);
+
+    // Dequantize the first 32 elements of this 64-element chunk
+    for (int l = 0; l < 32; ++l) {
+      // q_bytes_ptr points to the start of the 32 bytes for these 64 quants
+      uint8_t quant_nibble = (q_bytes_ptr[l] & 0x0F); // First nibble for first element
+      *y_ptr++ = d1 * static_cast<float>(quant_nibble) - m1;
     }
+    // q_bytes_ptr is NOT advanced yet here in the reference, it uses q[l] and q[l] >> 4 for the two sets of 32.
+    // So the above loop dequantized y[0..31] using lower nibbles of q_bytes_ptr[0..31]
+    // Now, dequantize y[32..63] using upper nibbles of q_bytes_ptr[0..31]
+    // This means the y_ptr has already advanced by 32 from the previous loop.
+
+    // Dequantize the second 32 elements of this 64-element chunk
+    for (int l = 0; l < 32; ++l) {
+      uint8_t quant_nibble = (q_bytes_ptr[l] >> 4); // Upper nibble from the same byte
+      *y_ptr++ = d2 * static_cast<float>(quant_nibble) - m2;
+    }
+    
+    q_bytes_ptr += 32; // Advance q_bytes_ptr by 32 bytes (covering 64 quants)
+    scale_group_idx += 2; // Advance the scale group index for get_scale_min_k4
   }
 }
 
