@@ -309,47 +309,149 @@ function Invoke-RunChat {
 
 function Invoke-RunPrompt {
     param (
-        [string]$ModelDir = $DefaultModelDir,
-        [string]$Prompt = "",
-        [string]$Steps = "64",
-        [int]$NGpuLayers = $DefaultNGpuLayers,
-        [string]$TokenizerPath = $DefaultTokenizerPath,
-        [bool]$UseMmap = $DefaultUseMmap
+        # These params are defaults if not overridden by $script:Arguments
+        [string]$InitialModelPath = $DefaultModelDir, # Default to directory
+        [string]$InitialPrompt = "",
+        [string]$InitialSteps = "64", # Default steps
+        [int]$InitialNGpuLayers = $DefaultNGpuLayers,
+        [string]$InitialTokenizerPath = $DefaultTokenizerPath, # Default tokenizer path
+        [bool]$InitialUseMmap = $DefaultUseMmap,
+        [int]$InitialThreads = $DefaultThreads
     )
-    $Params = $script:Arguments | ConvertFrom-StringData -Delimiter ' '
-    if ($Params.ModelDir) { $ModelDir = $Params.ModelDir }
-    if ($Params.Prompt) { $Prompt = $Params.Prompt }
-    if ($Params.Steps) { $Steps = $Params.Steps }
-    if ($Params.NGpuLayers) { $NGpuLayers = [int]$Params.NGpuLayers }
-    if ($Params.TokenizerPath) { $TokenizerPath = $Params.TokenizerPath }
-    if ($Params.UseMmap) { $UseMmap = [bool]$Params.UseMmap }
 
-    $ExecutablePath = Join-Path -Path $ProjectRootDir -ChildPath "build/tinyllama.exe"
-     if (-not (Test-Path $ExecutablePath)) {
-      $ExecutablePath = Join-Path -Path $ProjectRootDir -ChildPath "build/Release/tinyllama.exe" # MSVC default
+    # Resolved values after parsing
+    [string]$ModelPath = $InitialModelPath
+    [string]$Prompt = $InitialPrompt
+    [string]$Steps = $InitialSteps
+    [int]$NGpuLayers = $InitialNGpuLayers
+    [string]$TokenizerPath = $InitialTokenizerPath
+    [bool]$UseMmap = $InitialUseMmap
+    [int]$Threads = $InitialThreads
+
+    # Parse $script:Arguments
+    $RemainingArgs = $script:Arguments
+    $ArgsToParse = New-Object System.Collections.Generic.List[string]
+
+    # Check if the first argument is a positional model path
+    if ($RemainingArgs.Count -gt 0 -and -not ($RemainingArgs[0].StartsWith("-"))) {
+        $ModelPath = $RemainingArgs[0]
+        Log-Message "Positional model path detected: $ModelPath"
+        # Add remaining args (skipping the first one) to $ArgsToParse
+        for ($j = 1; $j -lt $RemainingArgs.Count; $j++) {
+            $ArgsToParse.Add($RemainingArgs[$j])
+        }
+    } else {
+        # All args are potentially named or no args
+        $ArgsToParse.AddRange($RemainingArgs)
     }
-     if (-not (Test-Path $ExecutablePath)) {
-      $ExecutablePath = Join-Path -Path $ProjectRootDir -ChildPath "build/Debug/tinyllama.exe" # MSVC default
+
+    # Parse named arguments from $ArgsToParse
+    $NamedParams = @{}
+    for ($i = 0; $i -lt $ArgsToParse.Count; $i++) {
+        if ($ArgsToParse[$i] -match \'^-{1,2}(.+)\') {
+            $Key = $Matches[1]
+            # Check if it's a switch (no value follows or next arg is another param)
+            if (($i + 1) -ge $ArgsToParse.Count -or $ArgsToParse[$i+1].StartsWith("-")) {
+                $NamedParams[$Key] = $true # Switch parameter
+            } else {
+                $NamedParams[$Key] = $ArgsToParse[$i+1]
+                $i++ # Increment to skip the value
+            }
+        }
+        # Silently ignore arguments that are not part of a key-value pair after positional model path
     }
 
-    if (-not (Test-Path $ExecutablePath)) {
-        Write-ErrorAndExit "Chat client executable not found at common paths (e.g., $ProjectRootDir\build\tinyllama.exe or $ProjectRootDir\build\Release\tinyllama.exe). Please build the project first."
+    # Override defaults with parsed named arguments
+    if ($NamedParams.ContainsKey('ModelDir')) {
+        # If a positional ModelPath was set AND different from InitialModelPath (meaning it was truly positional)
+        # AND -ModelDir is also present, this is a conflict.
+        if (($ModelPath -ne $InitialModelPath) -and ($ArgsToParse.Count -lt $RemainingArgs.Count)) { # $ArgsToParse.Count < $RemainingArgs.Count implies positional was consumed
+             Write-ErrorAndExit "Cannot specify both a positional model path ('$ModelPath') and -ModelDir ('$($NamedParams['ModelDir'])'). Please provide only one."
+        }
+        $ModelPath = $NamedParams['ModelDir']
+        Log-Message "Using -ModelDir: $ModelPath"
     }
 
-    Log-Message "Starting prompt mode from $ExecutablePath..."
-    Log-Message "Model directory/path: $ModelDir"
-    Log-Message "Prompt: $Prompt"
-    Log-Message "Steps: $Steps"
-    Log-Message "N GPU Layers: $NGpuLayers"
-    Log-Message "Tokenizer Path: $TokenizerPath"
-    Log-Message "Use Mmap: $UseMmap"
+    if ($NamedParams.ContainsKey('Prompt')) { $Prompt = $NamedParams['Prompt'] }
+    if ($NamedParams.ContainsKey('Steps')) { $Steps = $NamedParams['Steps'] }
+    if ($NamedParams.ContainsKey('NGpuLayers')) { $NGpuLayers = [int]$NamedParams['NGpuLayers'] }
+    if ($NamedParams.ContainsKey('TokenizerPath')) { $TokenizerPath = $NamedParams['TokenizerPath'] }
+    if ($NamedParams.ContainsKey('UseMmap')) { $UseMmap = [bool]::Parse($NamedParams['UseMmap']) } # Ensure boolean conversion
+    if ($NamedParams.ContainsKey('Threads')) { $Threads = [int]$NamedParams['Threads'] }
 
-    $ScriptArgs = @($ModelDir, $TokenizerPath, $Steps, $NGpuLayers, [string]$UseMmap)
-    $ScriptArgs += $Prompt
 
-    Log-Message "Executing: $ExecutablePath $ScriptArgs"
+    # Executable path determination
+    $ExecutableName = "main.exe" # Assuming main.exe is the prompt executable
+    $ExecutablePathCandidates = @(
+        (Join-Path -Path $ProjectRootDir -ChildPath "build\\bin\\$ExecutableName"),
+        (Join-Path -Path $ProjectRootDir -ChildPath "build\\$ExecutableName"), # Fallback
+        (Join-Path -Path $ProjectRootDir -ChildPath "build\\Release\\$ExecutableName"),
+        (Join-Path -Path $ProjectRootDir -ChildPath "build\\Debug\\$ExecutableName")
+    )
+    $ExecutablePath = $ExecutablePathCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+    if (-not $ExecutablePath) {
+        Write-ErrorAndExit "Prompt executable '$ExecutableName' not found. Searched: $($ExecutablePathCandidates -join ', ')"
+    }
+    Log-Message "Using executable: $ExecutablePath"
+
+
+    # Adjust TokenizerPath based on ModelPath
+    # If ModelPath is a file (likely GGUF)
+    if ((Test-Path $ModelPath -PathType Leaf)) {
+        if (($TokenizerPath -eq $InitialTokenizerPath) -or ([string]::IsNullOrEmpty($TokenizerPath))) {
+            # If TokenizerPath is default/empty, C++ app will look for "tokenizer.model" or use GGUF's embedded tokenizer.
+            $TokenizerPath = "tokenizer.model" 
+            Log-Message "ModelPath is a file. Using default TokenizerPath ('$TokenizerPath') for C++ app to resolve."
+        }
+        # If TokenizerPath was explicitly set (e.g. -TokenizerPath path/to/tokenizer.model), use that value directly.
+    } elseif (Test-Path $ModelPath -PathType Container) { # If ModelPath is a directory
+        if (([string]::IsNullOrEmpty($TokenizerPath)) -or ($TokenizerPath -eq "tokenizer.model") -or ($TokenizerPath -eq $InitialTokenizerPath)) {
+            # If tokenizer path is default, empty, or "tokenizer.model", assume it's relative to ModelPath (the directory)
+            $TokenizerPath = Join-Path -Path $ModelPath -ChildPath "tokenizer.model"
+            Log-Message "ModelPath is a directory. Resolved TokenizerPath to '$TokenizerPath'"
+        } elseif (-not (Split-Path $TokenizerPath -IsAbsolute)) {
+             # If tokenizer path is relative and explicitly set (and not the default placeholder name), make it relative to ModelPath
+             $TokenizerPath = Join-Path -Path $ModelPath -ChildPath $TokenizerPath
+             Log-Message "ModelPath is a directory. Resolved explicit relative TokenizerPath to '$TokenizerPath'"
+        }
+        # If TokenizerPath is absolute and explicitly set, use that value directly.
+    } else {
+        # ModelPath is not a file and not a directory. Could be an issue unless it's the default $InitialModelPath which might not exist yet.
+        if ($ModelPath -ne $InitialModelPath) {
+            Write-ErrorAndExit "ModelPath '$ModelPath' is not a valid file or directory."
+        } else {
+            # It's the default path (e.g., "data"), which might not exist. Construct tokenizer path assuming it's a directory.
+            $TokenizerPath = Join-Path -Path $ModelPath -ChildPath "tokenizer.model"
+            Log-Message "ModelPath ('$ModelPath') is default and may not exist. Assuming directory structure for TokenizerPath ('$TokenizerPath')."
+        }
+    }
+
+
+    Log-Message "Final parameters for C++ application:"
+    Log-Message "  Model Path: $ModelPath"
+    Log-Message "  Tokenizer Path: $TokenizerPath"
+    Log-Message "  Prompt: $Prompt"
+    Log-Message "  Steps: $Steps"
+    Log-Message "  Threads: $Threads"
+    Log-Message "  N GPU Layers: $NGpuLayers"
+    Log-Message "  Use Mmap: $UseMmap"
+
+    # Arguments for main.exe: <model_path> <tokenizer_path> <num_threads> <mode> <initial_prompt_string> <max_tokens> <n_gpu_layers> <use_mmap>
+    $ScriptArgs = @(
+        $ModelPath,
+        $TokenizerPath,
+        [string]$Threads,  # Ensure it's a string for the process arguments
+        "prompt",          # Mode
+        $Prompt,
+        [string]$Steps,    # Ensure it's a string
+        [string]$NGpuLayers, # Ensure it's a string
+        [string]$UseMmap.ToString().ToLower() # Ensure it's "true" or "false" string
+    )
+
+    Log-Message "Executing: & `"$ExecutablePath`" $($ScriptArgs -join ' ')"
     & $ExecutablePath $ScriptArgs
-    if ($LASTEXITCODE -ne 0) { Write-ErrorAndExit "Prompt execution failed."}
+    if ($LASTEXITCODE -ne 0) { Write-ErrorAndExit "Prompt execution failed with exit code $LASTEXITCODE."}
 }
 
 function Invoke-FormatCode {

@@ -286,21 +286,32 @@ do_run_chat() {
 }
 
 do_run_prompt() {
-    local model_dir_arg="$DEFAULT_MODEL_DIR_CHAT" # Use chat default as a base
+    local model_path_arg="" # New variable for the model path
     local tokenizer_path_arg_base="$DEFAULT_TOKENIZER_PATH"
     local prompt_arg="$DEFAULT_PROMPT"
     local steps_arg="$DEFAULT_STEPS"
     local threads_arg="$DEFAULT_THREADS"
     local n_gpu_layers_arg="$DEFAULT_N_GPU_LAYERS"
     local use_mmap_arg="$DEFAULT_USE_MMAP"
+    # local model_dir_provided=false # Flag to track if --model-dir was used (optional if we simplify --model-dir handling)
 
     shift # Get past "run-prompt"
 
+    # Check if the first argument is a model path (GGUF file or directory)
+    if [[ "$#" -gt 0 && "$1" != -* ]]; then
+        model_path_arg="$1"
+        shift # Consume the model path argument
+    fi
+
     while [ "$#" -gt 0 ]; do
         case "$1" in
-            --model-dir)
+            --model-dir) # This option is primarily for providing a directory
                 if [ -z "$2" ]; then error "Missing value for --model-dir"; fi
-                model_dir_arg="$2"
+                if [ -n "$model_path_arg" ]; then # If model_path_arg was set positionally
+                    error "Cannot specify both a positional model path ('$model_path_arg') and --model-dir ('$2'). Please provide only one."
+                fi
+                model_path_arg="$2" # Treat --model-dir as setting the model_path_arg
+                # model_dir_provided=true # (optional flag)
                 shift # Consume --model-dir
                 shift # Consume its value
                 ;;
@@ -347,19 +358,19 @@ do_run_prompt() {
                 exit 1
                 ;;
             *)
-                # Handle positional arguments if any were expected, or error if not.
-                # In this case, we don't expect positional arguments after options.
-                echo "Unexpected argument for run-prompt: $1"
+                # This case should ideally not be hit if the model path is consumed before the loop
+                # and all other arguments are options.
+                echo "Unexpected argument for run-prompt: $1. Model path should be the first argument or specified with --model-dir."
                 usage
                 exit 1
                 ;;
         esac
     done
 
-    # Support positional model dir as fallback
-    if [ -z "$model_dir_arg" ] && [ "$#" -gt 0 ]; then
-        model_dir_arg="$1"
-        shift
+    # If no model path was provided positionally or via --model-dir, use default from DEFAULT_MODEL_DIR_CHAT
+    if [ -z "$model_path_arg" ]; then
+        log "No model path specified by user, defaulting to model directory: $DEFAULT_MODEL_DIR_CHAT"
+        model_path_arg="$DEFAULT_MODEL_DIR_CHAT" # Default to directory if nothing else provided
     fi
 
     local executable_path="${PROJECT_ROOT_DIR}/build/bin/main"
@@ -372,18 +383,38 @@ do_run_prompt() {
     log "Using executable: $executable_path"
 
     local tokenizer_path_arg
-    if [ -d "$model_dir_arg" ]; then
-        tokenizer_path_arg="$model_dir_arg/$tokenizer_path_arg_base"
-    else
-        if [ "$tokenizer_path_arg_base" = "$DEFAULT_TOKENIZER_PATH" ] && [ -f "$model_dir_arg" ]; then # If it's a GGUF file
-            tokenizer_path_arg="tokenizer.model" # Placeholder, C++ side handles GGUF internal tokenizer
+    # Determine tokenizer_path_arg based on model_path_arg
+    if [ -d "$model_path_arg" ]; then # If model_path_arg is a directory
+        # If user specified a base for tokenizer (e.g. --tokenizer tokenizer.bin) use it relative to model_path_arg
+        # Otherwise, if tokenizer_path_arg_base is the default (empty), form path like "data/tokenizer.model"
+        if [ -n "$tokenizer_path_arg_base" ] && [ "$tokenizer_path_arg_base" != "$DEFAULT_TOKENIZER_PATH" ]; then
+             tokenizer_path_arg="${model_path_arg}/${tokenizer_path_arg_base}"
+        else # Default tokenizer name with model directory
+             tokenizer_path_arg="${model_path_arg}/tokenizer.model"
+        fi
+    elif [ -f "$model_path_arg" ]; then # If model_path_arg is a file (e.g., GGUF)
+        if [ "$tokenizer_path_arg_base" = "$DEFAULT_TOKENIZER_PATH" ] || [ -z "$tokenizer_path_arg_base" ]; then
+            # If no explicit tokenizer path is given, or it's the default (empty string),
+            # pass "tokenizer.model". The C++ app will look for a real file with this name
+            # next to the GGUF, or use the GGUF's internal tokenizer.
+            tokenizer_path_arg="tokenizer.model"
         else
+            # User explicitly provided a tokenizer path, use that.
             tokenizer_path_arg="$tokenizer_path_arg_base"
+        fi
+    else
+        # If model_path_arg is not a directory and not a file, but was specified (not default)
+        if [ "$model_path_arg" != "$DEFAULT_MODEL_DIR_CHAT" ]; then
+             error "Model path '$model_path_arg' is not a valid file or directory."
+        else # It's the default directory which might not exist yet, which is fine for --model-dir
+             log "Default model directory '$model_path_arg' may not exist yet. This is acceptable if the C++ application creates it or expects it."
+             # For default directory, construct tokenizer path as before
+             tokenizer_path_arg="${model_path_arg}/tokenizer.model"
         fi
     fi
     
     echo "Running prompt mode..."
-    echo "Model: $model_dir_arg"
+    echo "Model: $model_path_arg"
     echo "Tokenizer: $tokenizer_path_arg"
     echo "Threads: $threads_arg"
     echo "Prompt: $prompt_arg"
@@ -392,7 +423,7 @@ do_run_prompt() {
     echo "Use Mmap: $use_mmap_arg"
 
     # Order: model_path, tokenizer_path, num_threads, mode, initial_prompt_string, max_tokens, n_gpu_layers, use_mmap
-    local exec_args_for_cpp=("$executable_path" "$model_dir_arg" "$tokenizer_path_arg" "$threads_arg" "prompt" "$prompt_arg" "$steps_arg" "$n_gpu_layers_arg" "$use_mmap_arg")
+    local exec_args_for_cpp=("$executable_path" "$model_path_arg" "$tokenizer_path_arg" "$threads_arg" "prompt" "$prompt_arg" "$steps_arg" "$n_gpu_layers_arg" "$use_mmap_arg")
     
     echo "Executing: ${exec_args_for_cpp[@]}"
     LD_LIBRARY_PATH=./build/lib "${exec_args_for_cpp[@]}"
