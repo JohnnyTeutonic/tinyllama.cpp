@@ -1345,8 +1345,8 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
       const std::function<const std::vector<float>&(const LayerWeights&)>& f32_accessor,
       const std::function<const std::vector<uint16_t>&(const LayerWeights&)>& bf16_accessor,
       const std::function<const std::vector<block_q8_0>&(const LayerWeights&)>& q8_accessor,
-      const std::function<const std::vector<block_q4_K>&(const LayerWeights&)>& q4k_accessor, // Added Q4_K
-      const std::function<const std::vector<block_q6_K>&(const LayerWeights&)>& q6k_accessor, // Added Q6_K
+      const std::function<const std::vector<block_q4_K>&(const LayerWeights&)>& q4k_accessor,
+      const std::function<const std::vector<block_q6_K>&(const LayerWeights&)>& q6k_accessor,
       float*& dev_ptr, size_t single_layer_elem_size, const std::string& name_base) {
     
     SAFE_CUDA_FREE(dev_ptr); // Free before attempting to populate
@@ -1354,74 +1354,95 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
 
     std::vector<float> concat_host_f32;
     concat_host_f32.reserve(active_num_gpu_layers * single_layer_elem_size);
-    std::string source_type_str = "Unknown";
+    std::string source_type_str = "Unknown"; // For logging the type of the first processed layer or "Mixed"
+    bool first_layer_type_logged = false;
 
-    // Determine source type based on the first GPU layer
-    const auto& first_gpu_lw = layers[active_num_cpu_layers];
-    bool use_f32_path = !f32_accessor(first_gpu_lw).empty();
-    bool use_bf16_path = !use_f32_path && !bf16_accessor(first_gpu_lw).empty();
-    bool use_q8_path = !use_f32_path && !use_bf16_path && !q8_accessor(first_gpu_lw).empty();
-    bool use_q4k_path = !use_f32_path && !use_bf16_path && !use_q8_path && !q4k_accessor(first_gpu_lw).empty(); // Added Q4_K path detection
-    bool use_q6k_path = !use_f32_path && !use_bf16_path && !use_q8_path && !use_q4k_path && !q6k_accessor(first_gpu_lw).empty(); // Added Q6_K path detection
+    bool all_layers_consistent = true; // True if all GPU layers provide processable data for this weight
 
-    if (use_f32_path) source_type_str = "F32";
-    else if (use_bf16_path) source_type_str = "BF16->F32";
-    else if (use_q8_path) source_type_str = "Q8_0->F32";
-    else if (use_q4k_path) source_type_str = "Q4_K->F32"; // Added Q4_K source string
-    else if (use_q6k_path) source_type_str = "Q6_K->F32"; // Added Q6_K source string
-
-    bool all_layers_consistent = true;
     for (int i = 0; i < active_num_gpu_layers; ++i) {
       int model_layer_idx = active_num_cpu_layers + i;
       const auto& lw = layers[model_layer_idx];
       std::vector<float> temp_layer_f32;
       bool current_layer_processed = false;
+      std::string current_layer_source_type_for_log = "None";
 
-      if (use_f32_path) {
-        const auto& data = f32_accessor(lw);
-        if (!data.empty()) { temp_layer_f32 = data; current_layer_processed = true; }
-        else { all_layers_consistent = false; break; }
-      } else if (use_bf16_path) {
-        const auto& data_bf16 = bf16_accessor(lw);
-        if (!data_bf16.empty()) { temp_layer_f32 = bf16vec_to_float_vec(data_bf16); current_layer_processed = true; }
-        else { all_layers_consistent = false; break; }
-      } else if (use_q8_path) {
-        const auto& q8_blocks = q8_accessor(lw);
-        if (!q8_blocks.empty()) {
-          temp_layer_f32.resize(q8_blocks.size() * GGML_QK8_0);
-          for (size_t bi = 0; bi < q8_blocks.size(); ++bi) dequantize_q8_0_block(&q8_blocks[bi], &temp_layer_f32[bi * GGML_QK8_0]);
+      const auto& f32_data = f32_accessor(lw);
+      if (!f32_data.empty()) {
+        temp_layer_f32 = f32_data;
+        current_layer_processed = true;
+        current_layer_source_type_for_log = "F32";
+      } else {
+        const auto& bf16_data = bf16_accessor(lw);
+        if (!bf16_data.empty()) {
+          temp_layer_f32 = bf16vec_to_float_vec(bf16_data);
           current_layer_processed = true;
-        } else { all_layers_consistent = false; break; }
-      } else if (use_q4k_path) { // Added Q4_K processing logic
-        const auto& q4k_blocks = q4k_accessor(lw);
-        if (!q4k_blocks.empty()) {
-          temp_layer_f32.resize(q4k_blocks.size() * GGML_QK_K);
-          for (size_t bi = 0; bi < q4k_blocks.size(); ++bi) dequantize_q4_k_m(&q4k_blocks[bi], &temp_layer_f32[bi * GGML_QK_K], GGML_QK_K);
-          current_layer_processed = true;
-        } else { all_layers_consistent = false; break; }
-      } else if (use_q6k_path) { // Added Q6_K processing logic
-        const auto& q6k_blocks = q6k_accessor(lw);
-        if (!q6k_blocks.empty()) {
-          temp_layer_f32.resize(q6k_blocks.size() * GGML_QK_K);
-          for (size_t bi = 0; bi < q6k_blocks.size(); ++bi) dequantize_q6_k(&q6k_blocks[bi], &temp_layer_f32[bi * GGML_QK_K], GGML_QK_K);
-          current_layer_processed = true;
-        } else { all_layers_consistent = false; break; }
-      } 
+          current_layer_source_type_for_log = "BF16->F32";
+        } else {
+          const auto& q8_blocks = q8_accessor(lw);
+          if (!q8_blocks.empty()) {
+            temp_layer_f32.resize(q8_blocks.size() * GGML_QK8_0);
+            for (size_t bi = 0; bi < q8_blocks.size(); ++bi) {
+              dequantize_q8_0_block(&q8_blocks[bi], &temp_layer_f32[bi * GGML_QK8_0]);
+            }
+            current_layer_processed = true;
+            current_layer_source_type_for_log = "Q8_0->F32";
+          } else {
+            const auto& q4k_blocks = q4k_accessor(lw);
+            if (!q4k_blocks.empty()) {
+              temp_layer_f32.resize(q4k_blocks.size() * GGML_QK_K);
+              for (size_t bi = 0; bi < q4k_blocks.size(); ++bi) {
+                dequantize_q4_k_m(&q4k_blocks[bi], &temp_layer_f32[bi * GGML_QK_K], GGML_QK_K);
+              }
+              current_layer_processed = true;
+              current_layer_source_type_for_log = "Q4_K->F32";
+            } else {
+              const auto& q6k_blocks = q6k_accessor(lw);
+              if (!q6k_blocks.empty()) {
+                temp_layer_f32.resize(q6k_blocks.size() * GGML_QK_K);
+                for (size_t bi = 0; bi < q6k_blocks.size(); ++bi) {
+                  dequantize_q6_k(&q6k_blocks[bi], &temp_layer_f32[bi * GGML_QK_K], GGML_QK_K);
+                }
+                current_layer_processed = true;
+                current_layer_source_type_for_log = "Q6_K->F32";
+              }
+            }
+          }
+        }
+      }
       
       if (current_layer_processed) {
+        if (!first_layer_type_logged) {
+          source_type_str = current_layer_source_type_for_log;
+          first_layer_type_logged = true;
+        } else if (source_type_str != current_layer_source_type_for_log && source_type_str != "Mixed") {
+          Logger::info("Weight " + name_base + " has mixed types across GPU layers. Layer " +
+                       std::to_string(model_layer_idx) + " is " + current_layer_source_type_for_log +
+                       " while previous determined type was " + source_type_str + ". Final buffer is F32.");
+          source_type_str = "Mixed"; // Indicate mixed types encountered
+        }
         concat_host_f32.insert(concat_host_f32.end(), temp_layer_f32.begin(), temp_layer_f32.end());
       } else {
-        all_layers_consistent = false; // Should have been caught by path selection or inner empty check
-        break;
+        all_layers_consistent = false; 
+        Logger::error("Layer " + std::to_string(model_layer_idx) +
+                      " for weight " + name_base + " has no F32, BF16, Q8_0, Q4_K, or Q6_K data. Cannot form concatenated GPU tensor.");
+        break; 
       }
     }
 
     if (all_layers_consistent && !concat_host_f32.empty()) {
-        gpuErrchk(cudaMalloc(&dev_ptr, concat_host_f32.size() * sizeof(float)));
-        gpuErrchk(cudaMemcpy(dev_ptr, concat_host_f32.data(), concat_host_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
-        Logger::info("Uploaded concatenated " + name_base + " (" + source_type_str + ") for " + std::to_string(active_num_gpu_layers) + " GPU layers.");
+        if (concat_host_f32.size() != active_num_gpu_layers * single_layer_elem_size) {
+            Logger::error("Concatenated host buffer for " + name_base + " has incorrect size. Expected: " +
+                          std::to_string(active_num_gpu_layers * single_layer_elem_size) +
+                          ", Got: " + std::to_string(concat_host_f32.size()) +
+                          ". This indicates an issue with dequantization or data processing for one of the layers. Source type(s): " + source_type_str);
+            SAFE_CUDA_FREE(dev_ptr); // Do not upload incorrect buffer
+        } else {
+            gpuErrchk(cudaMalloc(&dev_ptr, concat_host_f32.size() * sizeof(float)));
+            gpuErrchk(cudaMemcpy(dev_ptr, concat_host_f32.data(), concat_host_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
+            Logger::info("Uploaded concatenated " + name_base + " (source(s): " + source_type_str + ", final: F32) for " + std::to_string(active_num_gpu_layers) + " GPU layers. Total elements: " + std::to_string(concat_host_f32.size()));
+        }
     } else {
-        Logger::warning("Could not consistently populate concatenated " + name_base + " for GPU layers. Source type: " + source_type_str + ". All_consistent: " + (all_layers_consistent?"Y":"N") + ". Host_empty: " + (concat_host_f32.empty()?"Y":"N"));
+        Logger::warning("Could not consistently populate or host buffer empty for concatenated " + name_base + " for GPU layers. Source type(s) identified: " + source_type_str + ". All_consistent: " + (all_layers_consistent?"Y":"N") + ". Host_empty: " + (concat_host_f32.empty()?"Y":"N") + ". GPU tensor will not be created.");
         SAFE_CUDA_FREE(dev_ptr); // Ensure it's freed if allocation failed or data inconsistent
     }
   };
