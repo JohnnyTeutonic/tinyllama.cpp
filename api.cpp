@@ -256,7 +256,7 @@ TinyLlamaSession::TinyLlamaSession(const std::string& model_path,
       if (!std::filesystem::exists(default_tokenizer_json_path)) {
         throw std::runtime_error(std::string("tokenizer.json not found at: ") + default_tokenizer_json_path);
       }
-      tokenizer_ = std::make_unique<Tokenizer>(default_tokenizer_json_path, base_dir.string(), config_);
+      tokenizer_ = std::make_unique<Tokenizer>(default_tokenizer_json_path, default_tokenizer_json_path, config_); 
       Logger::info("Tokenizer initialized from external files for SafeTensors model.");
     }
   } catch (const std::exception& e) {

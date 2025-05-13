@@ -298,6 +298,7 @@ Tokenizer::Tokenizer(const std::string& vocab_path,
       bos_token_("<s>"),
       eos_token_("</s>"),
       pad_token_("<pad>") {
+  Logger::info("[Tokenizer Constructor JSON] vocab_path: '" + vocab_path + "', model_path: '" + model_path + "'"); // Diagnostic log
   try {
     Logger::info(std::string("Loading tokenizer and vocab from: ") + vocab_path);
     std::string family_str = "UNKNOWN";
@@ -2072,6 +2073,7 @@ std::string Tokenizer::capitalize_first_letter(std::string s) const { // Added T
 // --- BEGIN REFACTORED Tokenizer::bpe_tokenize (for SentencePiece/Safetensors) ---
 std::vector<std::string> Tokenizer::bpe_tokenize(
     const std::string& text) const {
+    Logger::debug("[Refactored bpe_tokenize] Entered. bpe_merges_ size: " + std::to_string(bpe_merges_.size())); // Diagnostic log
     std::vector<std::string> all_final_tokens; // Store the final BPE tokens
     const std::string sp_space_prefix = "\xE2\x96\x81"; // SentencePiece space U+2581
 
