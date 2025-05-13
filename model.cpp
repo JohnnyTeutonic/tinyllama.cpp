@@ -674,10 +674,11 @@ void KVCache::initialize(int num_layers, int max_seq_len, int num_kv_heads,
     gpuErrchk(cudaMalloc(&layers[l].k_dev, cache_bytes_per_layer));
     gpuErrchk(cudaMalloc(&layers[l].v_dev, cache_bytes_per_layer));
 
+    // Explicitly zero out the allocated GPU memory for the KV cache
     gpuErrchk(cudaMemset(layers[l].k_dev, 0, cache_bytes_per_layer));
     gpuErrchk(cudaMemset(layers[l].v_dev, 0, cache_bytes_per_layer));
   }
-  Logger::info("KVCache GPU allocation complete.");
+  Logger::info("KVCache GPU allocation and zeroing complete.");
 
 #else
 

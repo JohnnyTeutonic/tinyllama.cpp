@@ -149,17 +149,25 @@ int main(int argc, char** argv) {
     tinyllama::TinyLlamaSession session(model_path_or_dir, tokenizer_path, num_threads, n_gpu_layers, use_mmap);
     Logger::info("TinyLlamaSession initialized successfully.");
 
+    const ModelConfig& config = session.get_config();
+    bool apply_qa_formatting = true; // Default to true
+    if (config.tokenizer_family == ModelConfig::TokenizerFamily::LLAMA3_TIKTOKEN) {
+        apply_qa_formatting = false;
+        Logger::info("Llama 3 model detected (via tokenizer_family), Q&A prompt formatting will be DISABLED.");
+    } else {
+        Logger::info("Non-Llama 3 model detected (via tokenizer_family), Q&A prompt formatting will be ENABLED.");
+    }
+
     if (mode_str == "prompt") {
       std::string generated_text =
-          session.generate(initial_prompt_string, max_tokens, temperature, top_k, top_p, "", true);
+          session.generate(initial_prompt_string, max_tokens, temperature, top_k, top_p, "", apply_qa_formatting);
       std::cout << generated_text << std::endl;
     } else if (mode_str == "chat") {
       std::cout << "Entering chat mode. Type 'exit', 'quit' to end." << std::endl;
       std::string current_chat_prompt;
       if (!initial_prompt_string.empty() && initial_prompt_string != "Hello, world!") {
-          // Use initial_prompt_string for the first turn if it's not the default and provided
           current_chat_prompt = initial_prompt_string;
-          std::cout << "AI: " << session.generate(current_chat_prompt, max_tokens, temperature, top_k, top_p, "", true) << std::endl;
+          std::cout << "AI: " << session.generate(current_chat_prompt, max_tokens, temperature, top_k, top_p, "", apply_qa_formatting) << std::endl;
       }
       while (true) {
         std::cout << "You: ";
@@ -170,7 +178,7 @@ int main(int argc, char** argv) {
         if (current_chat_prompt.empty()) {
           continue;
         }
-        std::string ai_response = session.generate(current_chat_prompt, max_tokens, temperature, top_k, top_p, "", true);
+        std::string ai_response = session.generate(current_chat_prompt, max_tokens, temperature, top_k, top_p, "", apply_qa_formatting);
         std::cout << "AI: " << ai_response << std::endl;
       }
     } else {

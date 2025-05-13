@@ -435,9 +435,10 @@ std::string TinyLlamaSession::generate(const std::string& prompt_input,
 
     if (pos >= num_prompt_tokens - 1) {
       next_token_id = sample_top_k_top_p_temperature(logits, temperature, top_k, top_p, rng_);
+      Logger::debug("[Generate Loop] Pos: " + std::to_string(pos) + ", Prompt Tokens: " + std::to_string(num_prompt_tokens) + ", Generated Token ID: " + std::to_string(next_token_id));
 
       if (next_token_id == eos_token_id_) {
-        Logger::info("EOS token generated. Stopping.");
+        Logger::info("EOS token generated (ID: " + std::to_string(next_token_id) + "). Stopping.");
         break;
       }
 
@@ -453,6 +454,14 @@ std::string TinyLlamaSession::generate(const std::string& prompt_input,
 
   std::vector<int> generated_only_ids(token_ids.begin() + num_prompt_tokens,
                                       token_ids.end());
+
+  // Log all generated IDs before decoding
+  std::string generated_ids_str = "[Generated IDs Pre-Decode] ";
+  for(int gen_id : generated_only_ids) {
+    generated_ids_str += std::to_string(gen_id) + " ";
+  }
+  Logger::debug(generated_ids_str);
+
   std::string result = tokenizer_->decode(generated_only_ids, true);
   Logger::info("Generated response: " + result);
   return result;
