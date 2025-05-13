@@ -238,13 +238,24 @@ GGUFData load_gguf_meta(const std::string& filename, bool use_mmap) {
             Logger::info("Loaded tokenizer_scores. Size: " +
                          std::to_string(result.tokenizer_scores.size()));
           } else if (key == "tokenizer.ggml.token_type" &&
-                     array_type_enum == GGUFValueType::UINT32) {
-            Logger::info("Loading UINT32 array data ('" + key + "') with " +
+                     (array_type_enum == GGUFValueType::UINT32 || array_type_enum == GGUFValueType::INT32) ) {
+            Logger::info("Loading " + std::string(array_type_enum == GGUFValueType::UINT32 ? "UINT32" : "INT32") + 
+                         " array data ('" + key + "') with " +
                          std::to_string(count) + " elements...");
             result.tokenizer_token_types.resize(static_cast<size_t>(count));
-            metadata_file.read(
-                reinterpret_cast<char*>(result.tokenizer_token_types.data()),
-                static_cast<std::streamsize>(count * sizeof(uint32_t)));
+            if (array_type_enum == GGUFValueType::UINT32) {
+                metadata_file.read(
+                    reinterpret_cast<char*>(result.tokenizer_token_types.data()),
+                    static_cast<std::streamsize>(count * sizeof(uint32_t)));
+            } else { // GGUFValueType::INT32
+                std::vector<int32_t> temp_s32_types(static_cast<size_t>(count));
+                metadata_file.read(
+                    reinterpret_cast<char*>(temp_s32_types.data()),
+                    static_cast<std::streamsize>(count * sizeof(int32_t)));
+                for(size_t k=0; k < count; ++k) {
+                    result.tokenizer_token_types[k] = static_cast<uint32_t>(temp_s32_types[k]);
+                }
+            }
             if (!metadata_file) {
               throw std::runtime_error(
                   "GGUF Error: Failed to read token_type array data.");

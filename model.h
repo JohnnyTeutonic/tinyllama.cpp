@@ -83,6 +83,8 @@ struct ModelConfig {
     std::string torch_dtype;    /**< Data type used in the original PyTorch model */
     int bos_token_id;          /**< Beginning of sequence token ID */
     int eos_token_id;          /**< End of sequence token ID */
+    int unk_token_id = -1;     /**< Unknown token ID, default to -1 if not specified */
+    int pad_token_id = -1;      /**< Padding token ID, default to -1 if not specified */
     std::string architecture;   /**< Model architecture identifier */
     std::string model_name;    /**< Name of the model */
     std::string chat_template_type; /**< Type of chat template used */
@@ -91,6 +93,13 @@ struct ModelConfig {
     bool is_gguf_file_loaded;   /**< Flag indicating if model was loaded from GGUF format */
     bool use_mmap_for_gguf = true; // Whether to use mmap for GGUF files, defaults to true
     int num_cpu_offload_layers = 0; /**< Number of layers to offload to CPU */
+
+    enum class TokenizerFamily {
+        UNKNOWN,
+        LLAMA_SENTENCEPIECE, // For Llama 2 and similar SentencePiece BPE
+        LLAMA3_TIKTOKEN      // For Llama 3's Tiktoken-based BPE
+    };
+    TokenizerFamily tokenizer_family = TokenizerFamily::UNKNOWN;
 };
 
 struct GGUFData;
@@ -212,6 +221,7 @@ class TinyLlamaModel {
    */
   TinyLlamaModel(const ModelConfig& config, const SafeTensorsLoader& loader);
   TinyLlamaModel(const ModelConfig& config, const std::string& weights_path);
+  TinyLlamaModel(const ModelConfig& config, std::unique_ptr<GGUFData> gguf_data);
   ~TinyLlamaModel();
 
   /**

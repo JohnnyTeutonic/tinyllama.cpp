@@ -8,10 +8,47 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
+#include <queue>
+#include <functional>
 
 #include "gguf_structs.h"
 #include "logger.h"
 #include "model.h"
+
+// --- BEGIN MOVED STRUCTURES (Fixing compilation errors) ---
+
+// Helper struct to represent segments during BPE tokenization
+struct llm_symbol {
+  using index = int;
+  index prev;              // index of the previous symbol in the linked list
+  index next;              // index of the next symbol in the linked list
+  const char * text;       // pointer to the start of the symbol's text in the original string
+  size_t n;                // length of the symbol's text
+};
+
+// Helper struct representing a potential byte pair merge
+struct llm_bigram_bpe {
+    // Comparator for the priority queue: higher rank first, then lower left index
+    struct comparator {
+        bool operator()(const llm_bigram_bpe & l, const llm_bigram_bpe & r) const {
+            // Prioritize lower rank (higher priority in BPE merges)
+            // If ranks are equal, prioritize the one starting earlier (lower left index)
+            return l.rank > r.rank || (l.rank == r.rank && l.left > r.left);
+        }
+    };
+
+    using queue_storage = std::vector<llm_bigram_bpe>;
+    // Define a min-priority queue based on the comparator
+    using queue = std::priority_queue<llm_bigram_bpe, queue_storage, comparator>; 
+
+    llm_symbol::index left;  // index of the left symbol in the pair
+    llm_symbol::index right; // index of the right symbol in the pair
+    std::string text;        // the merged text of the pair (for checking against merges map)
+    int rank;                // rank of the merge (lower is better)
+    size_t size;             // size of the merged text (for validation)
+};
+
+// --- END MOVED STRUCTURES ---
 
 /**
  * @brief A lightweight tokenizer implementation for text processing
@@ -28,22 +65,29 @@ class Tokenizer {
    */
   enum PreTokenizeMethod {
     DEFAULT,     /**< Use the default tokenization method specified during initialization */
-    WHITESPACE,  /**< Simple whitespace-based tokenization */
     LLAMA_REGEX  /**< LLaMA-style regex-based tokenization */
   };
 
+  enum class Type {
+    UNKNOWN,
+    SENTENCEPIECE_BPE,
+    TIKTOKEN_BPE
+  };
+
   /**
-   * @brief Constructs a tokenizer from vocabulary and model files
-   * @param model_path Path to the model file (reserved for future SentencePiece support)
+   * @brief Constructs a tokenizer from vocabulary and model files (for Llama 2 style JSON)
    * @param vocab_path Path to the JSON vocabulary file
+   * @param model_path Path to the JSON model file containing BPE merges (optional)
+   * @param config The model configuration (used to get special token IDs if not in vocab file)
    */
-  Tokenizer(const std::string& model_path, const std::string& vocab_path);
+  Tokenizer(const std::string& vocab_path, const std::string& model_path, const ModelConfig& config);
 
   /**
    * @brief Constructs a tokenizer from GGUF format data
    * @param gguf_data The GGUF data containing tokenizer information
+   * @param config The model configuration (contains tokenizer_family, special token IDs etc.)
    */
-  explicit Tokenizer(const GGUFData& gguf_data);
+  explicit Tokenizer(const GGUFData& gguf_data, const ModelConfig& config);
 
   /**
    * @brief Tokenizes input text into token strings
@@ -52,12 +96,6 @@ class Tokenizer {
    */
   std::vector<std::string> tokenize(const std::string& text) const;
 
-  /**
-   * @brief Converts token strings to their corresponding token IDs
-   * @param tokens Vector of token strings to convert
-   * @return Vector of token IDs
-   */
-  std::vector<int> tokens_to_ids(const std::vector<std::string>& tokens) const;
 
   /**
    * @brief Converts token IDs back to token strings
@@ -142,38 +180,7 @@ class Tokenizer {
    */
   int unk_token_id() const { return unk_token_id_; }
 
-  /**
-   * @brief Tokenizes text using whitespace
-   * @param text Input text
-   * @return Vector of tokens
-   */
-  std::vector<std::string> space_tokenize(const std::string& text) const;
-
-  /**
-   * @brief Tokenizes text using BPE algorithm
-   * @param text Input text
-   * @return Vector of tokens
-   */
-  std::vector<std::string> bpe_tokenize(const std::string& text) const;
-
-  /**
-   * @brief Tokenizes text using regex patterns
-   * @param text Input text
-   * @return Vector of tokens
-   */
-  std::vector<std::string> regex_tokenize(const std::string& text) const;
-
  private:
-  /**
-   * @brief Performs BPE tokenization using token scores
-   */
-  std::vector<std::string> bpe_tokenize_from_scores(const std::string& text) const;
-
-  /**
-   * @brief Performs SentencePiece tokenization
-   */
-  std::vector<std::string> sentencepiece_tokenize(const std::string& text) const;
-
   /**
    * @brief Loads vocabulary from JSON file
    */
@@ -191,12 +198,15 @@ class Tokenizer {
    */
   void load_sentencepiece_model(const std::string& model_path);
 
+
   // Token mappings
   std::unordered_map<std::string, int> token_to_id_;    /**< Maps tokens to their IDs */
   std::vector<std::string> id_to_token_;                /**< Maps IDs to their tokens */
-  std::unordered_map<std::string, int> bpe_merges_;     /**< BPE merge rules */
-  std::vector<float> token_scores_;                      /**< Token scores for BPE */
-  std::vector<int32_t> token_types_;                    /**< Token type information */
+  std::unordered_map<std::string, int> bpe_merges_;     /**< BPE merge rules (rank/order based for SentencePiece/Tiktoken) */
+  std::vector<std::string> tiktoken_merges_list_;       /**< Tiktoken BPE merge rules, loaded as ordered list from GGUF */
+  std::vector<float> token_scores_;                      /**< Token scores for BPE (primarily for Llama2 GGUF) */
+  std::vector<int32_t> token_types_;                    /**< Token type information from GGUF */
+  ModelConfig::TokenizerFamily tokenizer_family_ = ModelConfig::TokenizerFamily::UNKNOWN;
   bool initialized_from_gguf_ = false;                   /**< Initialization source flag */
   std::unordered_map<std::string, int> added_tokens_;   /**< Additional tokens */
 
@@ -217,4 +227,21 @@ class Tokenizer {
   std::unordered_map<int, std::string> id_to_added_token_; /**< Maps IDs to added tokens */
   std::unordered_set<std::string> chat_template_special_tokens; /**< Special tokens for chat */
   std::unordered_map<char, int> byte_char_to_id_;       /**< Byte-level character mapping */
+
+  Type type_ = Type::UNKNOWN;
+
+  // --- BEGIN ADDED HELPER DECLARATION (Step 2) ---
+  int find_bpe_rank(const std::string & token_left, const std::string & token_right) const;
+  // --- END ADDED HELPER DECLARATION ---
+
+  // --- BEGIN ADDED CORE TOKENIZATION FUNCTION DECLARATION (Step 3) ---
+  std::vector<int> bpe_tokenize_to_ids(const std::string& text) const;
+  // --- END ADDED CORE TOKENIZATION FUNCTION DECLARATION ---
+
+  // --- BEGIN ADDED add_bigram_to_queue DECLARATION (Fixing error #4) ---
+  void add_bigram_to_queue(const std::vector<llm_symbol>& symbols, 
+                             llm_symbol::index left, llm_symbol::index right, 
+                             llm_bigram_bpe::queue& work_queue) const;
+  // --- END ADDED add_bigram_to_queue DECLARATION ---
+
 };
