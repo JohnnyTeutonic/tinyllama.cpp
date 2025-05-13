@@ -22,214 +22,129 @@
 
 using json = nlohmann::json;
 
+// Forward declaration for helper function defined later in an anonymous namespace
+namespace {
+    size_t unicode_char_len(char src);
+} // end anonymous namespace
+
+// Helper function to check if a string represents a number.
+bool is_numeric(const std::string& s) {
+// ... existing code ...
+}
+
 // --- BEGIN ADDED HELPER IMPLEMENTATION (Step 2) ---
 // Finds the rank of a potential BPE merge.
 // Returns the rank (lower is better) if the merge exists, otherwise -1.
 int Tokenizer::find_bpe_rank(const std::string & token_left, const std::string & token_right) const {
-    auto it = bpe_merges_.find(token_left + token_right);
+    auto it = bpe_merges_.find(token_left + token_right); // Ensure this uses the correct combined form if prefixes are involved
     if (it != bpe_merges_.end()) {
         return it->second; // Return the rank
     }
     return -1; // Merge not found
 }
-std::vector<std::string> Tokenizer::bpe_tokenize(
-    const std::string& text) const {
-  std::vector<std::string> all_tokens;
-  
-  bool using_space_prefix = false;
-  const std::string sp_underline_char = "\xE2\x96\x81"; // Actual U+2581 char
 
-  // Check if the vocabulary uses a common space prefix (like SentencePiece's U+2581 or GPT-2's U+0120)
-  // This check might need refinement if it's too broad or conflicts with Llama3 GĠ logic if this function were ever used for it.
-  for (const auto& token_str_entry : id_to_token_) { // Renamed to avoid conflict
-    if (!token_str_entry.empty() && token_str_entry.rfind(sp_underline_char, 0) == 0) {
-      using_space_prefix = true;
-      Logger::debug("[bpe_tokenize] Detected SentencePiece space prefix (U+2581) usage in vocab.");
-      break;
-    }
-    // Optional: Add check for GPT-2 style GĠ if this function needs to be more general, though it's for SPM path.
-  }
-  
-  std::string processed_text = text;
-
-  // --- BEGIN SENTENCEPIECE SPACE NORMALIZATION ---
-  if (using_space_prefix) {
-    Logger::debug("[bpe_tokenize] Normalizing spaces to U+2581 for SentencePiece BPE.");
-    std::string normalized_text;
-    normalized_text.reserve(text.length()); // Pre-allocate
-    for (char c : text) {
-      if (c == ' ') {
-        normalized_text += sp_underline_char;
-      } else {
-        normalized_text += c;
-      }
-    }
-    processed_text = normalized_text;
-    Logger::debug("[bpe_tokenize] Normalized text: '" + processed_text + "'");
-  } else {
-      // If not using space prefix, split by whitespace. This path is less common for SPM.
-      // The original crude splitting by space could be used here as a fallback if desired,
-      // or a more robust whitespace pre-tokenization regex.
-      // For now, if not using_space_prefix, we'll let the character splitting handle it as is,
-      // which means spaces might become individual characters if not part of merges.
-      Logger::debug("[bpe_tokenize] Not using space prefix. Text processed as is for character splitting.");
-  }
-  // --- END SENTENCEPIECE SPACE NORMALIZATION ---
-  
-  // The 'words' concept changes. After normalization, the entire processed_text is one 'word' for BPE.
-  // Or, if not using_space_prefix and we wanted word-level BPE, we'd split by space here.
-  // Given the reinstatement goal, we assume the BPE merges handle the sp_underline_char correctly.
-
-  // For this SPM path, we are essentially treating the (potentially space-normalized) text
-  // as a single sequence to be broken down by BPE merges, rather than splitting into words first.
-  // This aligns more with how SentencePiece's own BPE works on normalized strings.
-  std::vector<std::string> current_word_parts; 
-
-  // Split the (potentially normalized) processed_text into initial UTF-8 characters
-  for (size_t i = 0; i < processed_text.size();) {
-    int bytes = 1; 
-    if ((processed_text[i] & 0xE0) == 0xC0) bytes = 2;
-    else if ((processed_text[i] & 0xF0) == 0xE0) bytes = 3;
-    else if ((processed_text[i] & 0xF8) == 0xF0) bytes = 4;
-    
-    if (i + bytes <= processed_text.size()) {
-      current_word_parts.push_back(processed_text.substr(i, bytes));
-    } else {
-      current_word_parts.push_back(processed_text.substr(i)); 
-    }
-    i += bytes;
-  }
-
-  if (current_word_parts.empty() && !processed_text.empty()) {
-      // Should not happen if processed_text is not empty, but as a safeguard.
-      Logger::warning("[bpe_tokenize] Initial character splitting resulted in empty parts for non-empty text.");
-      // Fallback: maybe add the whole string as one part if an error occurred.
-      // For now, let it proceed, will result in empty all_tokens if so.
-  }
-  
-  // Perform BPE merges on these character parts
-  bool changes = true;
-  int merge_iteration = 0;
-  while (changes && current_word_parts.size() > 1) {
-    merge_iteration++;
-    changes = false;
-    int best_score = std::numeric_limits<int>::max(); 
-    int best_i = -1; 
-
-    for (size_t i = 0; i < current_word_parts.size() - 1; ++i) {
-      std::string pair = current_word_parts[i] + current_word_parts[i + 1];
-      auto it = bpe_merges_.find(pair); 
-      if (it != bpe_merges_.end() && it->second < best_score) {
-        best_score = it->second;
-        best_i = i;
-      }
-    }
-
-    if (best_i >= 0) {
-      std::string merged = current_word_parts[best_i] + current_word_parts[best_i + 1];
-      current_word_parts[best_i] = merged;
-      current_word_parts.erase(current_word_parts.begin() + best_i + 1);
-      changes = true;
-    }
-  } 
-  
-  all_tokens.insert(all_tokens.end(), current_word_parts.begin(), current_word_parts.end());
-
-  // The old loop `for (auto& word : words)` and its internal prefixing logic is removed
-  // as normalization and BPE on the whole string is now the approach.
-
-  return all_tokens;
-}
-// --- END Tokenizer::bpe_tokenize FUNCTION ---
-
-// --- BEGIN Tokenizer::bpe_tokenize_from_scores FUNCTION ---
-// (Content of Tokenizer::bpe_tokenize_from_scores as provided by user)
 std::vector<std::string> Tokenizer::bpe_tokenize_from_scores(
     const std::string& text) const {
   std::vector<std::string> all_tokens;
-  std::vector<std::string> initial_units;
+  std::vector<std::string> initial_units; // Pre-tokenized parts (words, symbols, spaces)
 
-  // Llama-like regex for pre-tokenization (adjust if needed)
-  // This regex attempts to capture common patterns like 's, 't, words, numbers, symbols, and spaces.
-  // USE BOOST::REGEX
+  // Llama-like regex for pre-tokenization
   boost::regex llama_regex(
-      R"('s|'t|'re|'ve|'m|'ll|'d| ?[[:alpha:]]+| ?[[:digit:]]+| ?[^\\s[:alpha:][:digit:]]+|\\s+(?!\\S)|\\s+)");
+      // Added \r to character classes, and ensured \s+ handles various whitespace correctly.
+      // This pattern is common for SentencePiece-like splitting by words, numbers, symbols, and whitespace.
+      R"([\r\n]+|[[:space:]]+|[^\r\n[:space:][:alnum:]]+|[[:alnum:]]+)"); 
   boost::smatch match;
   std::string text_to_search = text;
 
   // Pre-tokenize the text using the regex
-  // USE BOOST::REGEX_SEARCH
   while (boost::regex_search(text_to_search, match, llama_regex)) {
-    initial_units.push_back(match.str(0));
+    if (!match.str(0).empty()) { // Ensure no empty strings are added
+        initial_units.push_back(match.str(0));
+    }
     text_to_search = match.suffix().str();
   }
   if (!text_to_search.empty()) {  // Add any trailing part not matched
     initial_units.push_back(text_to_search);
   }
   
-  // Filter out standalone space units that might be artifacts of the regex
-  // (SentencePiece usually handles spaces by prefixing subsequent tokens)
-  std::vector<std::string> filtered_units;
-  int spaces_filtered = 0;
-  for (const std::string& unit : initial_units) {
-    if (unit == " ") { // Only filter exact single spaces
-      spaces_filtered++;
-    } else {
-      filtered_units.push_back(unit);
-    }
-  }
-  if (spaces_filtered > 0) {
-    Logger::debug("[BPE_SCORES] Filtered out " +
-                  std::to_string(spaces_filtered) + " standalone space units.");
-  }
-  
-  for (const std::string& unit_raw : filtered_units) {  // Process each pre-tokenized unit
-    if (unit_raw.empty()) continue;
-    
-    std::string unit = unit_raw;
-    const std::string sp_space = "\xE2\x96\x81";  // SentencePiece space U+2581
-    bool using_space_prefix = true;  // Assume SentencePiece model uses space prefix
+  Logger::debug("[BPE_SCORES] Regex pre-tokenization resulted in " + std::to_string(initial_units.size()) + " initial units.");
 
-    // If unit starts with a space, replace it with SentencePiece space prefix
-    if (using_space_prefix && unit.length() > 0 && unit[0] == ' ') {
-      unit.replace(0, 1, sp_space);
-      // Logger::debug("[BPE_SCORES] Prefixed unit: '" + unit_raw + "' -> '" + unit + "'");
-    } else if (using_space_prefix && unit == "\n") { // Special handling for newline if it's a distinct unit
-      Logger::debug("[BPE_TOKENIZE] Passing newline unit through: '" +
-                    unit_raw + "'");
-      // Newline usually is a token itself or handled correctly by character splitting.
+  const std::string sp_space_prefix = "\xE2\x96\x81";  // SentencePiece space U+2581
+  bool next_word_needs_prefix = true; // Mimic behavior: first word gets prefix unless text starts with space
+  // However, SentencePiece models usually expect the *first word of a sentence* to be prefixed if it's not BOS.
+  // If the input `text` is a fragment, the first word should generally be prefixed.
+
+  for (const std::string& unit_raw : initial_units) {  
+    if (unit_raw.empty()) continue;
+
+    // Check if the unit is purely whitespace
+    bool unit_is_whitespace = true;
+    for (char c : unit_raw) {
+        if (!std::isspace(static_cast<unsigned char>(c))) {
+            unit_is_whitespace = false;
+            break;
+        }
+    }
+
+    if (unit_is_whitespace) {
+        // Whitespace signals that the *next* non-whitespace unit needs the prefix.
+        next_word_needs_prefix = true;
+        Logger::debug("[BPE_SCORES] Unit '" + unit_raw + "' is whitespace. Setting prefix flag for next word.");
+        // Do not add whitespace itself as a token here. SentencePiece encodes it via the prefix.
+        continue; // Skip to the next unit
+    }
+
+    // --- Process non-whitespace unit ---
+    std::string unit_to_bpe = unit_raw;
+    if (next_word_needs_prefix) {
+        unit_to_bpe = sp_space_prefix + unit_to_bpe;
+        Logger::debug("[BPE_SCORES] Prefixed unit: '" + unit_raw + "' -> '" + unit_to_bpe + "'");
+        next_word_needs_prefix = false; // Reset flag after applying prefix
+    } else {
+         Logger::debug("[BPE_SCORES] Processing unit without prefix: '" + unit_to_bpe + "'");
     }
     
-    std::vector<std::string> chars; // Characters/sub-units of the current unit
-    // Split unit into UTF-8 characters
-    for (size_t i = 0; i < unit.size();) {
-      int bytes = 1;
-      if ((unit[i] & 0xE0) == 0xC0) bytes = 2;
-      else if ((unit[i] & 0xF0) == 0xE0) bytes = 3;
-      else if ((unit[i] & 0xF8) == 0xF0) bytes = 4;
+    // Handle newline: if the unit_to_bpe (potentially prefixed) is just the prefix + newline, or just newline
+    // This might need careful review based on how newlines are in the vocab (e.g. literal \n vs actual \n)
+    // For now, assume newlines are handled by character splitting if not prefixed.
+    if (unit_raw == "\n") {
+        Logger::debug("[BPE_SCORES] Raw unit is newline. It will be split into chars. Current unit_to_bpe: '" + unit_to_bpe + "'");
+        // If a newline is a standalone token, it should be found. If it's part of merges, it will be handled.
+    }
+
+    std::vector<std::string> chars; // Characters/sub-units of the current unit_to_bpe
+    // Split unit_to_bpe into UTF-8 characters
+    for (size_t i = 0; i < unit_to_bpe.size();) {
+      int bytes = unicode_char_len(unit_to_bpe[i]); // Using the helper (direct call for anonymous namespace function)
       
-      if (i + bytes <= unit.size()) {
-        chars.push_back(unit.substr(i, bytes));
+      if (i + bytes <= unit_to_bpe.size()) {
+        chars.push_back(unit_to_bpe.substr(i, bytes));
       } else {
-        chars.push_back(unit.substr(i));
+        // Should not happen with valid UTF-8 and correct unicode_char_len
+        Logger::warning("[BPE_SCORES] Invalid UTF-8 sequence or length error for: '" + unit_to_bpe.substr(i) + "'");
+        chars.push_back(unit_to_bpe.substr(i)); // Add remaining as is
+        break; 
       }
       i += bytes;
     }
 
-    if (chars.empty()) continue;
+    if (chars.empty()) {
+        Logger::warning("[BPE_SCORES] Unit '" + unit_to_bpe + "' (original: '" + unit_raw + "') produced no chars for BPE.");
+        continue;
+    }
     
     // Perform BPE merges based on scores (ranks in bpe_merges_)
     bool changes = true;
     while (changes && chars.size() > 1) {
       changes = false;
-      int best_score = std::numeric_limits<int>::max(); // For rank-based merges, lower is better
+      int best_rank = std::numeric_limits<int>::max(); // For rank-based merges, lower is better
       int best_i = -1;
 
       for (size_t i = 0; i < chars.size() - 1; ++i) {
         std::string pair = chars[i] + chars[i + 1];
-        auto it = bpe_merges_.find(pair); // bpe_merges_ should store ranks
-        if (it != bpe_merges_.end() && it->second < best_score) {
-          best_score = it->second;
+        auto it = bpe_merges_.find(pair); 
+        if (it != bpe_merges_.end() && it->second < best_rank) { // Using rank from bpe_merges_
+          best_rank = it->second;
           best_i = i;
         }
       }
@@ -245,6 +160,7 @@ std::vector<std::string> Tokenizer::bpe_tokenize_from_scores(
     all_tokens.insert(all_tokens.end(), chars.begin(), chars.end());
   } // End of for each unit_raw
 
+  Logger::debug("[BPE_SCORES] Final token count after BPE: " + std::to_string(all_tokens.size()));
   return all_tokens;
 }
 // --- END Tokenizer::bpe_tokenize_from_scores FUNCTION ---
@@ -257,6 +173,37 @@ std::vector<int> Tokenizer::tokens_to_ids(
   ids.reserve(tokens.size());
 
   for (const auto& token : tokens) {
+    // --- BEGIN NEWLINE DEBUGGING IN tokens_to_ids ---
+    if (token == "\n") {
+        Logger::debug("[TOK_TO_ID_NL_DEBUG] Processing token: '\n' (actual newline char). Length: " + std::to_string(token.length()));
+        bool found_in_added = false;
+        for (const auto& pair : added_tokens_) {
+            if (pair.first == "\n") {
+                Logger::debug("[TOK_TO_ID_NL_DEBUG] Found '\n' key in added_tokens_ map. ID: " + std::to_string(pair.second));
+                found_in_added = true;
+                break;
+            }
+        }
+        if (!found_in_added) {
+            Logger::debug("[TOK_TO_ID_NL_DEBUG] '\n' key NOT found in added_tokens_ map by direct string compare.");
+            // Log all keys in added_tokens_ if newline is not found, to see what IS there
+            std::string keys_in_map = "Keys in added_tokens_: ";
+            for (const auto& pair : added_tokens_) {
+                std::string key_escaped;
+                for (char c_key : pair.first) {
+                    if (c_key == '\n') key_escaped += "<NL>";
+                    else if (c_key == '\r') key_escaped += "<CR>";
+                    else if (c_key == '\t') key_escaped += "<TAB>";
+                    else if (std::isprint(static_cast<unsigned char>(c_key))) key_escaped += c_key;
+                    else { std::stringstream ss_hex; ss_hex << "<0x" << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(static_cast<unsigned char>(c_key)) << ">"; key_escaped += ss_hex.str(); }
+                }
+                keys_in_map += "['" + key_escaped + "' (len:" + std::to_string(pair.first.length()) + ")] ";
+            }
+            Logger::debug(keys_in_map);
+        }
+    }
+    // --- END NEWLINE DEBUGGING ---
+
     auto added_it = added_tokens_.find(token);
     if (added_it != added_tokens_.end()) { // Check added tokens first
       ids.push_back(added_it->second);
@@ -897,7 +844,7 @@ Tokenizer::Tokenizer(const GGUFData& gguf_data, const ModelConfig& config)
   }
   // --- END GENERAL BYTE FALLBACK ---
   
-  bos_token_id_ = config.bos_token_id;
+bos_token_id_ = config.bos_token_id;
   eos_token_id_ = config.eos_token_id;
   unk_token_id_ = config.unk_token_id;
   pad_token_id_ = config.pad_token_id;
@@ -1102,7 +1049,7 @@ std::vector<int> Tokenizer::bpe_tokenize_to_ids(const std::string& text) const {
         if (words_begin == words_end && !text.empty()) {
              Logger::warning("[bpe_tokenize_to_ids] Regex did not split the text. Treating as one word: '" + text + "'");
              word_collection.push_back(text);
-      } else {
+    } else {
             // Correctly find the end position of the last match without decrementing the end iterator
             long last_match_end_pos = 0;
             boost::smatch last_sm;
@@ -1160,7 +1107,7 @@ std::vector<int> Tokenizer::bpe_tokenize_to_ids(const std::string& text) const {
         for (char c : original_word) {
             if (c == ' ') {
                 encoded_word += BPE_SPACE_CHAR; // Append the multi-byte Ġ sequence
-                    } else {
+      } else {
                 encoded_word += c;
             }
         }
@@ -1282,7 +1229,7 @@ std::vector<int> Tokenizer::bpe_tokenize_to_ids(const std::string& text) const {
             if (token_it != token_to_id_.end()) {
                 output_ids.push_back(token_it->second);
                 Logger::debug("[bpe_tokenize_to_ids] Found final symbol '" + lookup_s + "' -> ID: " + std::to_string(token_it->second));
-        } else {
+    } else {
                 output_ids.push_back(unk_token_id_);
                 Logger::warning("[bpe_tokenize_to_ids] Final symbol '" + lookup_s + "' not found in vocab. Using UNK ID: " + std::to_string(unk_token_id_));
             }
@@ -1430,24 +1377,24 @@ std::vector<int> Tokenizer::encode(const std::string& text, bool add_bos,
             if (!this->eos_token_.empty()) all_special_tokens_set.insert(this->eos_token_);
             if (!this->unk_token_.empty()) all_special_tokens_set.insert(this->unk_token_); 
 
-            std::string special_pattern_str = "(";
-            bool first_special = true;
+      std::string special_pattern_str = "(";
+      bool first_special = true;
             for (const std::string& st : all_special_tokens_set) {
-                if (!first_special) special_pattern_str += "|";
+          if (!first_special) special_pattern_str += "|";
                 std::string escaped_st;
                 for (char c : st) {
                     if (strchr(".^$*+?()[{\\|", c)) escaped_st += '\\';
                     escaped_st += c;
                 }
                 special_pattern_str += escaped_st;
-                first_special = false;
-            }
-            special_pattern_str += ")";
+          first_special = false;
+      }
+      special_pattern_str += ")";
 
             if (all_special_tokens_set.empty()) { 
                 Logger::debug("[ENCODE SPM GGUF Path] No special tokens defined for DEFAULT pre-tok. Treating whole text as one segment.");
                 segments.push_back({text_to_process, false});
-            } else {
+      } else {
                 Logger::debug("[ENCODE SPM GGUF Path] Splitting by special tokens regex: " + special_pattern_str);
                 try {
                     boost::regex special_regex(special_pattern_str); 
@@ -1524,24 +1471,24 @@ std::vector<int> Tokenizer::encode(const std::string& text, bool add_bos,
 
             if (segment_str.empty()) continue;
 
-            if (is_special) {
+        if (is_special) {
                 auto it = this->token_to_id_.find(segment_str);
                 if (it != this->token_to_id_.end()) {
                     segment_ids.push_back(it->second);
                     Logger::debug("[ENCODE SPM GGUF Path] Found special segment: '" + segment_str + "' -> ID: " + std::to_string(it->second));
-                } else {
+                    } else {
                     Logger::warning("[ENCODE SPM GGUF Path] Special segment '" + segment_str +
                                   "' not in vocab. Using UNK ID: " + std::to_string(this->unk_token_id_));
                     segment_ids.push_back(this->unk_token_id_);
-                }
-            } else { 
+          }
+        } else {
                 std::vector<std::string> pieces = this->bpe_tokenize_from_scores(segment_str);
                 std::vector<int> piece_ids = this->tokens_to_ids(pieces);
                 segment_ids.insert(segment_ids.end(), piece_ids.begin(), piece_ids.end());
                 Logger::debug("[ENCODE SPM GGUF Path] BPE for non-special segment '" + segment_str + "' -> " + std::to_string(piece_ids.size()) + " IDs.");
             }
         }
-        final_ids.insert(final_ids.end(), segment_ids.begin(), segment_ids.end());
+            final_ids.insert(final_ids.end(), segment_ids.begin(), segment_ids.end());
 
         if (add_eos && this->eos_token_id_ != -1) {
             final_ids.push_back(this->eos_token_id_);
@@ -1568,7 +1515,7 @@ std::vector<int> Tokenizer::encode(const std::string& text, bool add_bos,
       Logger::warning("[ENCODE] Tokenization resulted in empty ID list for non-empty text: '" + text + "'");
   }
   
-  return final_ids; 
+        return final_ids;
 }
 
 
@@ -1631,17 +1578,17 @@ std::string Tokenizer::decode(const std::vector<int>& ids,
                 ss << " "; 
             }
             ss << token.substr(BPE_SPACE_CHAR.size()); // Append rest of the token
-            first_token = false;
+      first_token = false;
         }
         else {
             // No known space prefix (Ġ), append directly.
             // For Tiktoken, non-Ġ prefixed tokens are usually parts of words or special tokens.
             ss << token;
-            first_token = false;  
+             first_token = false;  
         }
     }
-    return ss.str();
-}
+  return ss.str();
+            }
 // --- END DECODE 
 // --- BEGIN PRIVATE HELPER: decode_sentencepiece ---
 // Contains the older decode logic suitable for SentencePiece/general BPE
@@ -1790,7 +1737,7 @@ std::string Tokenizer::apply_chat_template(const std::string& user_prompt,
      if (bos_token_id_ != -1 && static_cast<size_t>(bos_token_id_) < id_to_token_.size()) {
         bos_tok_str = id_to_token_[bos_token_id_];
         Logger::warning("apply_chat_template: Using configured BOS token '" + bos_tok_str + "' (ID: " + std::to_string(bos_token_id_) + ") as <|begin_of_text|> was not found in added tokens.");
-     } else {
+  } else {
         bos_tok_str = "<s>"; // Default fallback BOS
         Logger::warning("apply_chat_template: Neither <|begin_of_text|> nor a valid configured BOS token found. Using fallback '<s>'.");
      }
@@ -2121,3 +2068,134 @@ std::string Tokenizer::capitalize_first_letter(std::string s) const { // Added T
   return result;
 }
 // --- END CORRECTED Tokenizer::capitalize_first_letter FUNCTION ---
+
+// --- BEGIN REFACTORED Tokenizer::bpe_tokenize (for SentencePiece/Safetensors) ---
+std::vector<std::string> Tokenizer::bpe_tokenize(
+    const std::string& text) const {
+    std::vector<std::string> all_final_tokens; // Store the final BPE tokens
+    const std::string sp_space_prefix = "\xE2\x96\x81"; // SentencePiece space U+2581
+
+    // Simple word splitting based on whitespace. This regex finds sequences of non-space characters.
+    // boost::regex word_regex(R"(\\S+)"); // Find non-whitespace chunks
+    // Using a manual split might be more robust to capture spaces accurately.
+
+    std::vector<std::string> pieces;
+    std::string current_piece;
+    bool last_char_was_space = true; // Treat start of text as if preceded by space
+
+    for (char c : text) {
+        if (std::isspace(static_cast<unsigned char>(c))) {
+            if (!current_piece.empty()) {
+                pieces.push_back(current_piece);
+                current_piece.clear();
+            }
+            // Store the space itself as a piece - important signal
+            pieces.push_back(std::string(1, c));
+            last_char_was_space = true;
+        } else {
+            current_piece += c;
+            last_char_was_space = false;
+        }
+    }
+    if (!current_piece.empty()) {
+        pieces.push_back(current_piece);
+    }
+
+    Logger::debug("[Refactored bpe_tokenize] Split text into " + std::to_string(pieces.size()) + " pieces (words/spaces).");
+
+    bool next_word_needs_prefix = true; // Assume first word might need prefix if text doesn't start with space implicitly handled by SentencePiece logic
+
+    for (const std::string& piece : pieces) {
+        if (piece.empty()) continue;
+
+        // Check if the piece is purely whitespace
+        bool piece_is_whitespace = true;
+        for (char c : piece) {
+            if (!std::isspace(static_cast<unsigned char>(c))) {
+                piece_is_whitespace = false;
+                break;
+            }
+        }
+
+        if (piece_is_whitespace) {
+            // Whitespace signals that the *next* non-whitespace piece needs the prefix.
+            next_word_needs_prefix = true;
+            Logger::debug("[Refactored bpe_tokenize] Piece '" + piece + "' is whitespace. Setting prefix flag for next word.");
+            // Do not add whitespace itself as a token here. SentencePiece encodes it via the prefix.
+            continue; // Skip to the next piece
+        }
+
+        // --- Process non-whitespace piece ---
+        std::string word_to_process = piece;
+        if (next_word_needs_prefix) {
+            // Apply the SentencePiece space prefix
+            word_to_process = sp_space_prefix + word_to_process;
+            Logger::debug("[Refactored bpe_tokenize] Prefixed word: '" + piece + "' -> '" + word_to_process + "'");
+            next_word_needs_prefix = false; // Reset flag after applying prefix
+        } else {
+             Logger::debug("[Refactored bpe_tokenize] Processing word without prefix: '" + word_to_process + "'");
+        }
+
+        // --- BPE Merging Logic (same as before, applied to word_to_process) ---
+        std::vector<std::string> chars; // Characters/sub-units of the current word
+        // Split word into UTF-8 characters
+        for (size_t i = 0; i < word_to_process.size();) {
+            int bytes = 1;
+            // Basic UTF-8 byte length check (can be replaced with unicode_char_len if available/needed)
+            unsigned char first_byte = static_cast<unsigned char>(word_to_process[i]);
+            if ((first_byte & 0xE0) == 0xC0) bytes = 2;
+            else if ((first_byte & 0xF0) == 0xE0) bytes = 3;
+            else if ((first_byte & 0xF8) == 0xF0) bytes = 4;
+
+            // Ensure we don't read past the end of the string
+            if (i + bytes > word_to_process.size()) {
+                Logger::warning("[Refactored bpe_tokenize] Invalid UTF-8 sequence near end of word: '" + word_to_process.substr(i) + "'");
+                // Add remaining bytes individually as fallback
+                for (; i < word_to_process.size(); ++i) {
+                     chars.push_back(word_to_process.substr(i, 1));
+                }
+                break; // Exit outer loop
+            }
+            chars.push_back(word_to_process.substr(i, bytes));
+            i += bytes;
+        }
+
+        if (chars.empty()) {
+            Logger::warning("[Refactored bpe_tokenize] Word '" + word_to_process + "' (original piece: '" + piece + "') produced no characters for BPE.");
+            continue;
+        }
+
+        // Perform BPE merges based on ranks stored in bpe_merges_
+        bool changes = true;
+        while (changes && chars.size() > 1) {
+            changes = false;
+            int best_rank = std::numeric_limits<int>::max(); // Lower rank is better
+            int best_i = -1;
+
+            for (size_t i = 0; i < chars.size() - 1; ++i) {
+                std::string pair = chars[i] + chars[i + 1];
+                auto it = bpe_merges_.find(pair);
+                if (it != bpe_merges_.end() && it->second < best_rank) {
+                    best_rank = it->second;
+                    best_i = i;
+                }
+            }
+
+            if (best_i >= 0) { // If a merge was found
+                std::string merged = chars[best_i] + chars[best_i + 1];
+                chars[best_i] = merged;
+                chars.erase(chars.begin() + best_i + 1);
+                changes = true;
+                // Logger::debug("[Refactored bpe_tokenize] Merged pair at index " + std::to_string(best_i) + " -> '" + merged + "'");
+            }
+        } // End of while(changes) for BPE merges
+
+        // Add the resulting tokens for this word to the final list
+        all_final_tokens.insert(all_final_tokens.end(), chars.begin(), chars.end());
+
+    } // End loop over pieces
+
+    Logger::debug("[Refactored bpe_tokenize] Final token count: " + std::to_string(all_final_tokens.size()));
+    return all_final_tokens;
+}
+// --- END REFACTORED Tokenizer::bpe_tokenize ---
