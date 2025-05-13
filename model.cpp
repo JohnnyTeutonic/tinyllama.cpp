@@ -550,6 +550,45 @@ ModelConfig parse_model_config(const nlohmann::json& json) {
   cfg.bos_token_id = json.value("bos_token_id", 1);
   cfg.eos_token_id = json.value("eos_token_id", 2);
   cfg.unk_token_id = json.value("unk_token_id", -1);
+  // SafeTensors config.json often doesn't have pad_token_id, default to -1 or another sensible value.
+  cfg.pad_token_id = json.value("pad_token_id", -1); 
+
+  // Infer Architecture if available
+  if (json.contains("architectures") && json["architectures"].is_array() && !json["architectures"].empty()) {
+      // Take the first architecture string if multiple are listed
+      cfg.architecture = json["architectures"][0].get<std::string>();
+  } else {
+      // Fallback or default if architectures field is missing/empty
+      cfg.architecture = "unknown"; 
+      // Could add more heuristics here based on other fields if needed
+  }
+  cfg.model_name = json.value("model_type", cfg.architecture); // Use model_type or fallback to architecture
+
+  // --- BEGIN ADDED TOKENIZER FAMILY INFERENCE ---
+  Logger::info("[parse_json_config] Inferring tokenizer family for SafeTensors. Arch: '" + cfg.architecture + "', Vocab: " + std::to_string(cfg.vocab_size));
+  bool is_llama3_vocab_size_json = (cfg.vocab_size == 128256);
+  bool is_llama3_arch_hint_json = (cfg.architecture.find("LlamaForCausalLM") != std::string::npos && // Llama 3 often uses this
+                              cfg.architecture.find("Llama2") == std::string::npos); // Exclude Llama 2 explicitly if needed
+
+  if (is_llama3_vocab_size_json && is_llama3_arch_hint_json) {
+      cfg.tokenizer_family = ModelConfig::TokenizerFamily::LLAMA3_TIKTOKEN;
+      Logger::info("[parse_json_config] Result: Identified LLAMA3_TIKTOKEN (vocab size + arch hint).");
+       if (cfg.rope_theta == 10000.0f) { 
+            float llama3_rope_candidate = json.value("rope_theta", 500000.0f); // Check rope_theta in config.json
+            if (llama3_rope_candidate > 10000.0f) {
+                cfg.rope_theta = llama3_rope_candidate;
+                Logger::info("[parse_json_config] Adjusted rope_theta to " + std::to_string(cfg.rope_theta) + " for Llama 3 model (was 10000.0).");
+            }
+       }
+  } else if (cfg.vocab_size == 32000 || cfg.architecture.find("Llama") != std::string::npos) { // Common for Llama 1/2/TinyLlama
+      cfg.tokenizer_family = ModelConfig::TokenizerFamily::LLAMA_SENTENCEPIECE;
+      Logger::info("[parse_json_config] Result: Identified LLAMA_SENTENCEPIECE (vocab size or arch hint).");
+  } else {
+      cfg.tokenizer_family = ModelConfig::TokenizerFamily::UNKNOWN;
+      Logger::warning("[parse_json_config] Result: UNKNOWN tokenizer family.");
+  }
+  // --- END ADDED TOKENIZER FAMILY INFERENCE ---
+
   return cfg;
 }
 
@@ -1512,8 +1551,9 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
 
 TinyLlamaModel::TinyLlamaModel(const ModelConfig& config,
                                const SafeTensorsLoader& loader)
-    : config_(config) {
-  Logger::info("Constructing TinyLlamaModel from SafeTensorsLoader.");
+    : config_(config) { // Copies the potentially faulty config first
+  config_.is_gguf_file_loaded = false; // Explicitly set to false for SafeTensors path
+  Logger::info("Constructing TinyLlamaModel from SafeTensorsLoader (is_gguf_file_loaded set to false).");
   initialize_weights(&loader, nullptr);
   initialize_gpu_and_rope(); // Called unconditionally now
   Logger::info("TinyLlamaModel construction from SafeTensorsLoader complete.");

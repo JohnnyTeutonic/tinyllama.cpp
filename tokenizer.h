@@ -230,6 +230,14 @@ class Tokenizer {
 
   Type type_ = Type::UNKNOWN;
 
+  // SentencePiece specific helper methods (reinstated)
+  std::vector<std::string> bpe_tokenize(const std::string& text) const;
+  std::vector<std::string> bpe_tokenize_from_scores(const std::string& text) const;
+  std::vector<int> tokens_to_ids(const std::vector<std::string>& tokens) const;
+  std::string decode_sentencepiece(const std::vector<int>& ids, bool skip_special_tokens) const;
+  std::string capitalize_first_letter(std::string s) const;
+
+
   // --- BEGIN ADDED HELPER DECLARATION (Step 2) ---
   int find_bpe_rank(const std::string & token_left, const std::string & token_right) const;
   // --- END ADDED HELPER DECLARATION ---
