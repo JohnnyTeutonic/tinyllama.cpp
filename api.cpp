@@ -158,7 +158,7 @@ TinyLlamaSession::TinyLlamaSession(const std::string& model_path,
   Logger::info(std::string("Determined base_dir: ") + base_dir.string());
   Logger::info(std::string("Default external tokenizer.json path: ") + default_tokenizer_json_path);
 
-  // --- 1. Load Model and its definitive ModelConfig --- 
+  
   if (std::filesystem::is_directory(path_obj)) { // SafeTensors Path
     Logger::info(std::string("Loading SafeTensors model from directory: ") + model_path);
     std::string config_json_path_str = (base_dir / "config.json").string();
@@ -240,7 +240,7 @@ TinyLlamaSession::TinyLlamaSession(const std::string& model_path,
                ", Tokenizer Family: " + family_str_log +
                ", Vocab Size: " + std::to_string(config_.vocab_size));
 
-  // --- 2. Instantiate Tokenizer using the definitive config_ ---
+  
   Logger::info("[Tokenizer Init Check] config_.is_gguf_file_loaded = " + std::string(config_.is_gguf_file_loaded ? "true" : "false"));
   try {
     if (config_.is_gguf_file_loaded) {

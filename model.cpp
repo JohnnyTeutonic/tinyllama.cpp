@@ -564,7 +564,7 @@ ModelConfig parse_model_config(const nlohmann::json& json) {
   }
   cfg.model_name = json.value("model_type", cfg.architecture); // Use model_type or fallback to architecture
 
-  // --- BEGIN ADDED TOKENIZER FAMILY INFERENCE ---
+  
   Logger::info("[parse_json_config] Inferring tokenizer family for SafeTensors. Arch: '" + cfg.architecture + "', Vocab: " + std::to_string(cfg.vocab_size));
   bool is_llama3_vocab_size_json = (cfg.vocab_size == 128256);
   bool is_llama3_arch_hint_json = (cfg.architecture.find("LlamaForCausalLM") != std::string::npos && // Llama 3 often uses this
@@ -587,7 +587,7 @@ ModelConfig parse_model_config(const nlohmann::json& json) {
       cfg.tokenizer_family = ModelConfig::TokenizerFamily::UNKNOWN;
       Logger::warning("[parse_json_config] Result: UNKNOWN tokenizer family.");
   }
-  // --- END ADDED TOKENIZER FAMILY INFERENCE ---
+  
 
   return cfg;
 }
@@ -2089,7 +2089,7 @@ std::vector<float> TinyLlamaModel::forward(
     // only that it *is* a CPU layer.
     // We will copy the layer logic from the original function here, assuming it operates on `input` and `layers[l]`
     
-    // --- BEGIN COPIED/ADAPTED LAYER LOGIC (abbreviated for this example) ---
+    
     std::vector<float> q_vec(hs), k_vec(n_kv_heads * head_dim), v_vec(n_kv_heads * head_dim);
     // Example: Q-projection (adapt for other projections and quantization types)
     if (!lw.q_proj_f32.empty()) matvec_f32_f32_vector_cpu(lw.q_proj_f32, x_norm_vec1, q_vec, hs, hs);
@@ -2137,7 +2137,7 @@ std::vector<float> TinyLlamaModel::forward(
     // Attention calculation (simplified, refer to original for full detail)
     // This part is complex and involves iterating over heads, using KV cache, softmax etc.
     // For now, let's assume a placeholder or that the original logic is copied here.
-    // --- BEGIN ATTENTION (Conceptual) ---
+    
     std::vector<float> x_resid1_vec = input; // Store residual
     float att_scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
     std::fill(attn_out_vec.begin(), attn_out_vec.end(), 0.0f);
@@ -2169,7 +2169,7 @@ std::vector<float> TinyLlamaModel::forward(
         }
         std::copy(current_multihead_attn_out.begin(), current_multihead_attn_out.end(), attn_out_vec.begin() + h * head_dim);
     }
-    // --- END ATTENTION ---
+    
 
     std::vector<float> attn_proj_vec(hs);
     if(!lw.o_proj_f32.empty()) matvec_f32_f32_vector_cpu(lw.o_proj_f32, attn_out_vec, attn_proj_vec, hs, hs);
@@ -2223,7 +2223,7 @@ std::vector<float> TinyLlamaModel::forward(
     else throw std::runtime_error("Layer " + std::to_string(l) + ": No Down proj weights (f32, q8, q4k, q6k, bf16) for CPU");
 
     for(size_t i=0; i<input.size(); ++i) input[i] = x_resid2_vec[i] + mlp_out_vec[i]; // Update input by reference
-    // --- END COPIED/ADAPTED LAYER LOGIC ---
+    
 
     if (log_this_layer) {
       Logger::info("[CPU_FWD] ------ END Layer " + std::to_string(l) +
@@ -3123,7 +3123,7 @@ ModelConfig parse_model_config_from_gguf(const GGUFData& gguf) {
                ", Vocab Size: " + std::to_string(config.vocab_size) +
                ", Has Merges: " + (has_merges ? "Yes" : "No"));
 
-  // --- Tokenizer Family Identification ---
+  
   Logger::info("[parse_gguf_config] Identifying tokenizer family...");
   bool is_llama3_arch_hint = (config.architecture.find("llama3") != std::string::npos ||
                          config.architecture.find("Llama-3") != std::string::npos ||
@@ -3224,10 +3224,10 @@ ModelConfig parse_model_config_from_gguf(const GGUFData& gguf) {
     }
   }
 
-  // --- BEGIN FORCE SENTENCEPIECE TEST ---
+  
   // Logger::warning("[FORCE_SPM_TEST] OVERRIDING tokenizer_family to LLAMA_SENTENCEPIECE!"); // Removed
   // config.tokenizer_family = ModelConfig::TokenizerFamily::LLAMA_SENTENCEPIECE; // Removed
-  // --- END FORCE SENTENCEPIECE TEST ---
+  
 
   Logger::info(std::string("[parse_gguf_config] Finished parsing. Returning config. Family: ") + 
                 (config.tokenizer_family == ModelConfig::TokenizerFamily::LLAMA3_TIKTOKEN ? "L3_TIKTOKEN" : 
