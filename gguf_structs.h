@@ -7,10 +7,16 @@
 #include <vector>
 
 // mmap related includes
-#include <sys/mman.h>   // For mmap, munmap
+#ifndef _WIN32
+#include <sys/mman.h>   // For mmap, munmap, MAP_FAILED, posix_madvise
 #include <sys/stat.h>   // For fstat, stat
 #include <fcntl.h>      // For O_RDONLY
-#include <unistd.h>     // For close, fstat, read, lseek
+#include <unistd.h>     // For close, fstat, read, lseek, sysconf, _SC_PAGE_SIZE
+#else
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>    // For CreateFile, CreateFileMapping, MapViewOfFile, etc.
+                        // Also for GetSystemInfo, SYSTEM_INFO, PrefetchVirtualMemory (if used)
+#endif
 
 #include "ggml_types.h"
 
@@ -83,31 +89,56 @@ struct GGUFData {
   std::vector<uint32_t> tokenizer_token_types;         /**< Token type information */
   std::vector<std::string> tokenizer_merges;           /**< BPE merge rules */
 
-  // Memory-mapped tensor data instead of std::vector
-  int file_descriptor = -1;                          /**< File descriptor for the GGUF file */
+  // Memory-mapped tensor data related fields
+#ifndef _WIN32
+  int file_descriptor = -1;                          /**< File descriptor for POSIX mmap */
+  static const void* MMapFailure;                     /**< POSIX mmap failure indicator - DECLARED here, DEFINED in .cpp */
+#else
+  HANDLE h_file = INVALID_HANDLE_VALUE;             /**< File handle for Windows */
+  HANDLE h_map_file = NULL;                         /**< File mapping object handle for Windows */
+  static constexpr void* const MMapFailure = NULL;  /**< Windows MapViewOfFile failure indicator */
+#endif
   void* mapped_tensor_data = nullptr;                /**< Pointer to memory-mapped tensor data block */
   size_t mapped_tensor_data_size = 0;               /**< Size of the mapped tensor data block in bytes */
   uint64_t data_alignment = 32;                        /**< Alignment requirement for tensor data */
   size_t offset_diff_for_mmap = 0;                   /**< Difference between aligned mmap offset and actual data start */
 
   // Default constructor
+#ifndef _WIN32
   GGUFData() : file_descriptor(-1), mapped_tensor_data(nullptr), mapped_tensor_data_size(0), data_alignment(32), offset_diff_for_mmap(0) {}
+#else
+  GGUFData() : h_file(INVALID_HANDLE_VALUE), h_map_file(NULL), mapped_tensor_data(nullptr), mapped_tensor_data_size(0), data_alignment(32), offset_diff_for_mmap(0) {}
+#endif
 
-  // Destructor to clean up memory map and file descriptor
+  // Destructor to clean up memory map and file descriptor/handles
   ~GGUFData() {
-    if (mapped_tensor_data != nullptr && mapped_tensor_data != MAP_FAILED) {
+#ifndef _WIN32
+    if (mapped_tensor_data != nullptr && mapped_tensor_data != MMapFailure) { // MMapFailure will expand to MAP_FAILED
       munmap(mapped_tensor_data, mapped_tensor_data_size);
-      mapped_tensor_data = nullptr; // Avoid double-free on accidental copy
     }
     if (file_descriptor != -1) {
       close(file_descriptor);
-      file_descriptor = -1; // Avoid double-close on accidental copy
     }
+    file_descriptor = -1; 
+#else // _WIN32
+    if (mapped_tensor_data != nullptr) { // On Windows, MapViewOfFile returns NULL on failure
+      UnmapViewOfFile(mapped_tensor_data);
+    }
+    if (h_map_file != NULL) {
+      CloseHandle(h_map_file);
+    }
+    if (h_file != INVALID_HANDLE_VALUE) {
+      CloseHandle(h_file);
+    }
+    h_file = INVALID_HANDLE_VALUE;
+    h_map_file = NULL;
+#endif
+    mapped_tensor_data = nullptr; // Common for both
+    mapped_tensor_data_size = 0;  // Common for both
+    offset_diff_for_mmap = 0;     // Common for both
   }
 
-  // Prevent accidental copying which could lead to double free/close issues
-  // If copies are needed, a proper copy constructor/assignment operator
-  // that handles mmap duplication or remapping would be necessary.
+  // Prevent accidental copying
   GGUFData(const GGUFData&) = delete;
   GGUFData& operator=(const GGUFData&) = delete;
 
@@ -121,14 +152,25 @@ struct GGUFData {
     , tokenizer_scores(std::move(other.tokenizer_scores))
     , tokenizer_token_types(std::move(other.tokenizer_token_types))
     , tokenizer_merges(std::move(other.tokenizer_merges))
+    // Platform-specific handles
+#ifndef _WIN32
     , file_descriptor(other.file_descriptor)
+#else
+    , h_file(other.h_file)
+    , h_map_file(other.h_map_file)
+#endif
     , mapped_tensor_data(other.mapped_tensor_data)
     , mapped_tensor_data_size(other.mapped_tensor_data_size)
     , data_alignment(other.data_alignment)
     , offset_diff_for_mmap(other.offset_diff_for_mmap)
   {
     // Leave other in a valid but safe state (resources transferred)
+#ifndef _WIN32
     other.file_descriptor = -1;
+#else
+    other.h_file = INVALID_HANDLE_VALUE;
+    other.h_map_file = NULL;
+#endif
     other.mapped_tensor_data = nullptr;
     other.mapped_tensor_data_size = 0;
     other.offset_diff_for_mmap = 0;
@@ -136,14 +178,27 @@ struct GGUFData {
 
   GGUFData& operator=(GGUFData&& other) noexcept {
     if (this != &other) {
-      // Clean up existing resources first
-      if (mapped_tensor_data != nullptr && mapped_tensor_data != MAP_FAILED) {
+      // Clean up existing resources first (using this object's current platform state)
+#ifndef _WIN32
+      if (mapped_tensor_data != nullptr && mapped_tensor_data != MMapFailure) { // MMapFailure will expand to MAP_FAILED
         munmap(mapped_tensor_data, mapped_tensor_data_size);
       }
       if (file_descriptor != -1) {
         close(file_descriptor);
       }
+#else // _WIN32
+      if (mapped_tensor_data != nullptr) {
+        UnmapViewOfFile(mapped_tensor_data);
+      }
+      if (h_map_file != NULL) {
+        CloseHandle(h_map_file);
+      }
+      if (h_file != INVALID_HANDLE_VALUE) {
+        CloseHandle(h_file);
+      }
+#endif
 
+      // Move data members
       header = other.header;
       metadata = std::move(other.metadata);
       tensor_infos = std::move(other.tensor_infos);
@@ -152,14 +207,26 @@ struct GGUFData {
       tokenizer_scores = std::move(other.tokenizer_scores);
       tokenizer_token_types = std::move(other.tokenizer_token_types);
       tokenizer_merges = std::move(other.tokenizer_merges);
+      
+      // Move platform-specific handles and mmap data
+#ifndef _WIN32
       file_descriptor = other.file_descriptor;
+#else
+      h_file = other.h_file;
+      h_map_file = other.h_map_file;
+#endif
       mapped_tensor_data = other.mapped_tensor_data;
       mapped_tensor_data_size = other.mapped_tensor_data_size;
       data_alignment = other.data_alignment;
       offset_diff_for_mmap = other.offset_diff_for_mmap;
 
       // Leave other in a valid but safe state
+#ifndef _WIN32
       other.file_descriptor = -1;
+#else
+      other.h_file = INVALID_HANDLE_VALUE;
+      other.h_map_file = NULL;
+#endif
       other.mapped_tensor_data = nullptr;
       other.mapped_tensor_data_size = 0;
       other.offset_diff_for_mmap = 0;

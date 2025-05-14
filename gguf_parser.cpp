@@ -10,13 +10,26 @@
 #include <cerrno>  // For errno
 
 // mmap related includes are now in gguf_structs.h, but also here for clarity/safety
-#include <sys/mman.h>   // For mmap, munmap
+#ifndef _WIN32
+#include <sys/mman.h>   // For mmap, munmap, MAP_FAILED, posix_madvise
 #include <sys/stat.h>   // For fstat, stat
 #include <fcntl.h>      // For O_RDONLY
-#include <unistd.h>     // For close, fstat, read, lseek
+#include <unistd.h>     // For close, fstat, read, lseek, sysconf, _SC_PAGE_SIZE
+#else
+// gguf_structs.h already includes windows.h with WIN32_LEAN_AND_MEAN
+// No need for additional direct include of windows.h here if gguf_structs.h is included first
+// However, for explicitness if this file were compiled standalone:
+// #define WIN32_LEAN_AND_MEAN
+// #include <windows.h>
+#endif
 
 #include "logger.h"
 #include "quantization.h"
+
+// Definition for the static class member GGUFData::MMapFailure for POSIX systems
+#ifndef _WIN32
+const void* GGUFData::MMapFailure = MAP_FAILED;
+#endif
 
 size_t gguf_value_type_size(GGUFValueType type) {
   switch (type) {
@@ -91,6 +104,27 @@ std::string read_gguf_string(std::ifstream& file) {
     return "";
   }
 }
+
+#ifdef _WIN32
+// Helper function to get Windows error messages
+static std::string GetWindowsErrorString(DWORD errorCode) {
+    if (errorCode == 0) {
+        return "No error.";
+    }
+    LPSTR messageBuffer = nullptr;
+    size_t size = FormatMessageA(
+        FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+        NULL, errorCode, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPSTR)&messageBuffer, 0, NULL);
+    
+    std::string message(messageBuffer, size);
+    LocalFree(messageBuffer);
+    // Remove trailing newline characters often present in system messages
+    while (message.length() > 0 && (message.back() == '\r' || message.back() == '\n')) {
+        message.pop_back();
+    }
+    return message;
+}
+#endif
 
 GGUFData load_gguf_meta(const std::string& filename, bool use_mmap) {
   Logger::info("Attempting to load GGUF file: " + filename + (use_mmap ? " with mmap" : " without mmap"));
@@ -513,6 +547,7 @@ GGUFData load_gguf_meta(const std::string& filename, bool use_mmap) {
     return result; 
   }
 
+#ifndef _WIN32
   result.file_descriptor = open(filename.c_str(), O_RDONLY);
   if (result.file_descriptor == -1) {
       throw std::runtime_error("GGUF Error: Failed to open file for mmap: " + filename + " - " + strerror(errno));
@@ -526,10 +561,39 @@ GGUFData load_gguf_meta(const std::string& filename, bool use_mmap) {
       throw std::runtime_error("GGUF Error: Failed to fstat file for mmap: " + filename + " - " + strerror(errno));
   }
   uint64_t file_total_size = static_cast<uint64_t>(file_stat.st_size);
+#else // _WIN32
+  result.h_file = CreateFileA(
+      filename.c_str(),
+      GENERIC_READ,
+      FILE_SHARE_READ,
+      NULL,
+      OPEN_EXISTING,
+      FILE_ATTRIBUTE_NORMAL | FILE_FLAG_RANDOM_ACCESS, // Hint for mmap-like access
+      NULL
+  );
+  if (result.h_file == INVALID_HANDLE_VALUE) {
+      throw std::runtime_error("GGUF Error: Failed to open file for mmap (CreateFileA): " + filename + " - " + GetWindowsErrorString(GetLastError()));
+  }
+  Logger::info("[GGUF_LOAD] File opened for mmap with h_file: " + std::to_string(reinterpret_cast<uintptr_t>(result.h_file)));
+  
+  LARGE_INTEGER fileSizeWindows;
+  if (!GetFileSizeEx(result.h_file, &fileSizeWindows)) {
+      DWORD error_code = GetLastError();
+      CloseHandle(result.h_file);
+      result.h_file = INVALID_HANDLE_VALUE;
+      throw std::runtime_error("GGUF Error: Failed to GetFileSizeEx for mmap: " + filename + " - " + GetWindowsErrorString(error_code));
+  }
+  uint64_t file_total_size = static_cast<uint64_t>(fileSizeWindows.QuadPart);
+#endif
 
   if (file_total_size < actual_data_start_offset_in_file) {
+#ifndef _WIN32
     close(result.file_descriptor); 
     result.file_descriptor = -1;
+#else
+    CloseHandle(result.h_file);
+    result.h_file = INVALID_HANDLE_VALUE;
+#endif
     throw std::runtime_error(
         "GGUF Error: File total size (" + std::to_string(file_total_size) + 
         ") is less than calculated actual_data_start_offset_in_file (" + std::to_string(actual_data_start_offset_in_file) + ").");
@@ -539,39 +603,96 @@ GGUFData load_gguf_meta(const std::string& filename, bool use_mmap) {
   Logger::info("[GGUF_LOAD] Calculated tensor_data_block_size_on_disk (for mmap length calculation): " +
                std::to_string(tensor_data_block_size_on_disk) + " bytes.");
   
-  long page_size = sysconf(_SC_PAGE_SIZE);
+  long page_size;
+#ifndef _WIN32
+  page_size = sysconf(_SC_PAGE_SIZE);
   if (page_size == -1) {
       close(result.file_descriptor);
       result.file_descriptor = -1;
       throw std::runtime_error(std::string("GGUF Error: Failed to get page size using sysconf - ") + strerror(errno));
   }
-  Logger::info("[GGUF_LOAD] System page size: " + std::to_string(page_size));
+#else // _WIN32
+  SYSTEM_INFO sysInfo;
+  GetSystemInfo(&sysInfo);
+  // For MapViewOfFile, offsets must be aligned to dwAllocationGranularity.
+  // Page size (dwPageSize) might be smaller, but dwAllocationGranularity is the key for mmap view offsets.
+  page_size = static_cast<long>(sysInfo.dwAllocationGranularity); 
+  if (page_size <= 0) { // Sanity check
+      CloseHandle(result.h_file);
+      result.h_file = INVALID_HANDLE_VALUE;
+      throw std::runtime_error("GGUF Error: Failed to get valid system allocation granularity (page_size equivalent for mmap offset).");
+  }
+#endif
+  Logger::info("[GGUF_LOAD] System page/allocation granularity for mmap offset: " + std::to_string(page_size));
 
-  uint64_t mmap_offset = (actual_data_start_offset_in_file / page_size) * page_size;
+  uint64_t mmap_offset = (actual_data_start_offset_in_file / page_size) * page_size; // Align offset down to page boundary
   result.offset_diff_for_mmap = static_cast<size_t>(actual_data_start_offset_in_file - mmap_offset);
   size_t mmap_length = static_cast<size_t>(tensor_data_block_size_on_disk + result.offset_diff_for_mmap);
 
   Logger::info("[GGUF_LOAD] Aligning mmap: actual_data_start_offset_in_file=" + std::to_string(actual_data_start_offset_in_file) +
-               ", mmap_offset=" + std::to_string(mmap_offset) +
-               ", offset_diff_for_mmap=" + std::to_string(result.offset_diff_for_mmap) +
-               ", mmap_length=" + std::to_string(mmap_length));
+               ", mmap_offset=" + std::to_string(mmap_offset) + // This is the offset from file start for mmap view
+               ", offset_diff_for_mmap=" + std::to_string(result.offset_diff_for_mmap) + // Bytes from mmap view start to actual tensor data start
+               ", mmap_length=" + std::to_string(mmap_length)); // Total length of the mmap view
 
-  if (mmap_length > 0) { // Only mmap if there's something to map
-    result.mapped_tensor_data_size = mmap_length; // Store the actual mapped length
+  if (mmap_length > 0) {
+    result.mapped_tensor_data_size = mmap_length; 
+#ifndef _WIN32
     result.mapped_tensor_data = mmap(nullptr, result.mapped_tensor_data_size, 
                                          PROT_READ, MAP_SHARED, 
                                          result.file_descriptor, static_cast<off_t>(mmap_offset));
+#else // _WIN32
+    result.h_map_file = CreateFileMapping(
+        result.h_file,
+        NULL,
+        PAGE_READONLY,
+        0, 
+        0, 
+        NULL 
+    );
+    if (result.h_map_file == NULL) {
+        DWORD error_code = GetLastError();
+        CloseHandle(result.h_file);
+        result.h_file = INVALID_HANDLE_VALUE;
+        throw std::runtime_error("GGUF Error: CreateFileMapping failed - " + GetWindowsErrorString(error_code));
+    }
     
-    if (result.mapped_tensor_data == MAP_FAILED) {
-        int mmap_errno = errno; 
-        close(result.file_descriptor); 
-        result.file_descriptor = -1;
+    // MapViewOfFile's dwFileOffsetHigh/Low parameters form the 64-bit offset.
+    // This offset (mmap_offset) MUST be a multiple of dwAllocationGranularity (our page_size for Windows).
+    DWORD mmap_offset_low = static_cast<DWORD>(mmap_offset & 0xFFFFFFFF);
+    DWORD mmap_offset_high = static_cast<DWORD>((mmap_offset >> 32) & 0xFFFFFFFF);
+
+    result.mapped_tensor_data = MapViewOfFile(
+        result.h_map_file,
+        FILE_MAP_READ,
+        mmap_offset_high,
+        mmap_offset_low,
+        result.mapped_tensor_data_size // This is dwNumberOfBytesToMap
+    );
+#endif
+    
+    if (result.mapped_tensor_data == GGUFData::MMapFailure) { // Use platform-agnostic failure check
+        int last_error = 0;
+#ifndef _WIN32
+        last_error = errno;
+        // file_descriptor is closed by GGUFData destructor if it's still valid
+#else
+        last_error = GetLastError();
+        // h_map_file and h_file are closed by GGUFData destructor if they are still valid
+#endif
+        // Reset fields that GGUFData destructor would clean, as it might not run if we throw from constructor context
+        // However, GGUFData is constructed outside this mmap block. This specific part is about a failure after mmap attempt.
+        // The GGUFData destructor will handle cleanup of handles/fds set before this failure.
+        // We primarily need to nullify the mapping specific fields on failure here.
         result.mapped_tensor_data = nullptr; 
-        result.mapped_tensor_data_size = 0; // Reset on failure
-        result.offset_diff_for_mmap = 0;    // Reset on failure
-        throw std::runtime_error("GGUF Error: mmap failed for tensor data. Aligned Offset: " + std::to_string(mmap_offset) +
+        result.mapped_tensor_data_size = 0;
+        result.offset_diff_for_mmap = 0;   
+        throw std::runtime_error("GGUF Error: mmap/MapViewOfFile failed. Aligned Offset: " + std::to_string(mmap_offset) +
                                  ", Mmap Length: " + std::to_string(mmap_length) + 
-                                 " - Error: " + strerror(mmap_errno));
+#ifndef _WIN32
+                                 " - POSIX Error: " + strerror(last_error));
+#else
+                                 " - Windows Error: " + GetWindowsErrorString(last_error));
+#endif
     }
     Logger::info("[GGUF_LOAD] Successfully mmapped tensor data block. Mapped Address: " + 
                  std::to_string(reinterpret_cast<uintptr_t>(result.mapped_tensor_data)) + 
@@ -581,11 +702,55 @@ GGUFData load_gguf_meta(const std::string& filename, bool use_mmap) {
     if (result.mapped_tensor_data_size >= (result.offset_diff_for_mmap + 16)) {
       std::stringstream ss_bytes;
       ss_bytes << "[GGUF_LOAD] First 16 bytes of *actual* tensor data (after offset_diff) in mmap: ";
-      const uint8_t* actual_data_ptr = static_cast<const uint8_t*>(result.mapped_tensor_data) + result.offset_diff_for_mmap;
+      const uint8_t* actual_data_ptr_debug = static_cast<const uint8_t*>(result.mapped_tensor_data) + result.offset_diff_for_mmap;
       for (int i = 0; i < 16; ++i)
-        ss_bytes << "0x" << std::hex << static_cast<int>(actual_data_ptr[i]) << " ";
+        ss_bytes << "0x" << std::hex << static_cast<int>(actual_data_ptr_debug[i]) << " ";
       Logger::info(ss_bytes.str());
     }
+
+#ifndef _WIN32
+    // --- BEGIN Prefetching with posix_madvise ---
+    Logger::info("[GGUF_LOAD] Attempting to prefetch mmapped tensor data using posix_madvise(MADV_WILLNEED)...");
+    uint8_t* actual_tensor_data_block_start_in_mmap = static_cast<uint8_t*>(result.mapped_tensor_data) + result.offset_diff_for_mmap;
+    
+    if (page_size <= 0) {
+        Logger::error("[GGUF_LOAD] Invalid page_size for madvise alignment: " + std::to_string(page_size) + ". Skipping prefetch.");
+    } else {
+        for (const auto& tensor_info : result.tensor_infos) {
+            if (tensor_info.size_in_bytes > 0) {
+                uintptr_t exact_tensor_start_addr_val = reinterpret_cast<uintptr_t>(actual_tensor_data_block_start_in_mmap + tensor_info.offset);
+                void* page_aligned_madvise_addr = reinterpret_cast<void*>(exact_tensor_start_addr_val - (exact_tensor_start_addr_val % static_cast<uintptr_t>(page_size)));
+                size_t madvise_length = (exact_tensor_start_addr_val + tensor_info.size_in_bytes) - reinterpret_cast<uintptr_t>(page_aligned_madvise_addr);
+
+                uintptr_t advised_region_start_val = reinterpret_cast<uintptr_t>(page_aligned_madvise_addr);
+                uintptr_t advised_region_end_val = advised_region_start_val + madvise_length;
+                uintptr_t overall_mmap_start_val = reinterpret_cast<uintptr_t>(result.mapped_tensor_data);
+                uintptr_t overall_mmap_end_val = overall_mmap_start_val + result.mapped_tensor_data_size;
+
+                if (advised_region_start_val >= overall_mmap_start_val && advised_region_end_val <= overall_mmap_end_val && advised_region_start_val < advised_region_end_val) { // Added check start < end
+                    int ret = posix_madvise(page_aligned_madvise_addr, madvise_length, POSIX_MADV_WILLNEED);
+                    if (ret != 0) {
+                        Logger::warning("[GGUF_LOAD] posix_madvise failed for tensor '" + tensor_info.name + 
+                                        "' (addr: " + std::to_string(reinterpret_cast<uintptr_t>(page_aligned_madvise_addr)) +
+                                        ", len: " + std::to_string(madvise_length) +
+                                        ") with error code " + std::to_string(errno) + 
+                                        " (" + strerror(errno) + "). Skipping prefetch for this tensor.");
+                    }
+                } else {
+                     Logger::warning("[GGUF_LOAD] Tensor '" + tensor_info.name + 
+                                     "' calculated region for madvise is invalid or out of overall mmap bounds. Skipping prefetch. "
+                                     /* ... detailed log as before ... */ );
+                }
+            }
+        }
+    }
+    Logger::info("[GGUF_LOAD] Finished POSIX prefetching attempt with posix_madvise.");
+    // --- END Prefetching with posix_madvise ---
+#else // _WIN32
+    // PrefetchVirtualMemory could be added here for Windows if desired and available.
+    // For now, just a log message indicating it's a POSIX-specific optimization.
+    Logger::info("[GGUF_LOAD] Tensor prefetching (posix_madvise) is currently implemented for POSIX systems. Skipping for Windows for now.");
+#endif
 
   } else {
     Logger::info("[GGUF_LOAD] Tensor data block size (or mmap_length) is 0. Nothing to mmap.");

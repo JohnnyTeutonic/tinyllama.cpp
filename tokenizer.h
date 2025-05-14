@@ -15,7 +15,7 @@
 #include "logger.h"
 #include "model.h"
 
-// --- BEGIN MOVED STRUCTURES (Fixing compilation errors) ---
+
 
 // Helper struct to represent segments during BPE tokenization
 struct llm_symbol {
@@ -48,7 +48,7 @@ struct llm_bigram_bpe {
     size_t size;             // size of the merged text (for validation)
 };
 
-// --- END MOVED STRUCTURES ---
+
 
 /**
  * @brief A lightweight tokenizer implementation for text processing
@@ -238,18 +238,18 @@ class Tokenizer {
   std::string capitalize_first_letter(std::string s) const;
 
 
-  // --- BEGIN ADDED HELPER DECLARATION (Step 2) ---
+  
   int find_bpe_rank(const std::string & token_left, const std::string & token_right) const;
-  // --- END ADDED HELPER DECLARATION ---
+  
 
-  // --- BEGIN ADDED CORE TOKENIZATION FUNCTION DECLARATION (Step 3) ---
+  
   std::vector<int> bpe_tokenize_to_ids(const std::string& text) const;
-  // --- END ADDED CORE TOKENIZATION FUNCTION DECLARATION ---
+  
 
-  // --- BEGIN ADDED add_bigram_to_queue DECLARATION (Fixing error #4) ---
+  
   void add_bigram_to_queue(const std::vector<llm_symbol>& symbols, 
                              llm_symbol::index left, llm_symbol::index right, 
                              llm_bigram_bpe::queue& work_queue) const;
-  // --- END ADDED add_bigram_to_queue DECLARATION ---
+  
 
 };
