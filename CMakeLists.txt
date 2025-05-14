@@ -44,6 +44,18 @@ FetchContent_MakeAvailable(pybind11)
 find_package(Threads REQUIRED)
 find_package(OpenMP REQUIRED)
 
+# Find Boost (for Regex)
+# Look for Boost 1.65 or newer, specifically the regex component.
+# Use REQUIRED to make it an error if Boost or the regex component isn't found.
+find_package(Boost 1.65 REQUIRED COMPONENTS regex)
+if(Boost_FOUND)
+    message(STATUS "Found Boost version: ${Boost_VERSION_STRING}")
+    message(STATUS "Boost include directories: ${Boost_INCLUDE_DIRS}")
+    message(STATUS "Boost regex library: ${Boost_REGEX_LIBRARY}") # Variable might differ based on Boost/CMake version
+else()
+    message(FATAL_ERROR "Boost (version 1.65 or newer) with the regex component is required but was not found.")
+endif()
+
 # Handle CUDA
 OPTION(HAS_CUDA "Enable CUDA support (requires CUDA Toolkit and cuBLAS)" ON) # Default to ON, user can override with -DHAS_CUDA=OFF
 
@@ -95,12 +107,14 @@ target_include_directories(tinyllama_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     # ${CUDA_INCLUDE_DIRS}
     ${cpp-httplib_SOURCE_DIR}/
+    ${Boost_INCLUDE_DIRS} # Add Boost include directory
 )
 
 target_link_libraries(tinyllama_core PRIVATE
     Threads::Threads
     nlohmann_json::nlohmann_json
     OpenMP::OpenMP_CXX
+    Boost::regex # Add Boost regex library target
 )
 
 # Conditionally add CUDA definition and link CUDA libs for the library

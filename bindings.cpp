@@ -13,7 +13,8 @@ PYBIND11_MODULE(tinyllama_bindings, m) {
 
     py::add_ostream_redirect(m, "ostream_redirect");
 
-    py::class_<ModelConfig>(m, "ModelConfig")
+    py::class_<ModelConfig> model_config_class(m, "ModelConfig");
+    model_config_class
         .def(py::init<>())
         .def_readwrite("hidden_size", &ModelConfig::hidden_size)
         .def_readwrite("intermediate_size", &ModelConfig::intermediate_size)
@@ -34,13 +35,24 @@ PYBIND11_MODULE(tinyllama_bindings, m) {
         .def_readwrite("pre_tokenizer_type", &ModelConfig::pre_tokenizer_type)
         .def_readwrite("chat_template_string", &ModelConfig::chat_template_string)
         .def_readwrite("is_gguf_file_loaded", &ModelConfig::is_gguf_file_loaded)
+        .def_readonly("tokenizer_family", &ModelConfig::tokenizer_family)
         .def("__repr__",
              [](const ModelConfig &cfg) {
+                 std::string tf_str = "UNKNOWN";
+                 if (cfg.tokenizer_family == ModelConfig::TokenizerFamily::LLAMA_SENTENCEPIECE) tf_str = "LLAMA_SENTENCEPIECE";
+                 else if (cfg.tokenizer_family == ModelConfig::TokenizerFamily::LLAMA3_TIKTOKEN) tf_str = "LLAMA3_TIKTOKEN";
                  return "<ModelConfig: vocab_size=" + std::to_string(cfg.vocab_size) +
                         ", hidden_size=" + std::to_string(cfg.hidden_size) +
+                        ", tokenizer_family=" + tf_str +
                         ">";
              }
         );
+    
+    py::enum_<ModelConfig::TokenizerFamily>(model_config_class, "TokenizerFamily")
+        .value("UNKNOWN", ModelConfig::TokenizerFamily::UNKNOWN)
+        .value("LLAMA_SENTENCEPIECE", ModelConfig::TokenizerFamily::LLAMA_SENTENCEPIECE)
+        .value("LLAMA3_TIKTOKEN", ModelConfig::TokenizerFamily::LLAMA3_TIKTOKEN)
+        .export_values();
 
     py::class_<tinyllama::TinyLlamaSession>(m, "TinyLlamaSession")
         .def(py::init<const std::string &, const std::string &, int, int, bool>(), 

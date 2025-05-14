@@ -53,17 +53,18 @@ std::string trim_whitespace(const std::string& s) {
 void print_usage(const char* program_name) {
   std::cout << "Usage: " << program_name
             << " <model_path> <tokenizer_path> <num_threads> <prompt|chat> "
-               "[initial_prompt_string] [max_tokens] [n_gpu_layers] [use_mmap]"
+               "[initial_prompt_string] [max_tokens] [n_gpu_layers] [use_mmap] [temperature]"
             << std::endl;
   std::cout << "\nArguments:\n"
                "  model_path          : Path to the model file (.gguf) or directory (SafeTensors).\n"
-               "  tokenizer_path      : Path to the tokenizer file (for GGUF only).\n"
+               "  tokenizer_path      : Path to the tokenizer file.\n"
                "  num_threads         : Number of threads to use for generation.\n"
                "  prompt|chat         : 'prompt' for single prompt generation or 'chat' for chat mode.\n"
-               "  initial_prompt_string: (Optional) Initial prompt string for chat mode.\n"
+               "  initial_prompt_string: (Optional) Initial prompt string. Default: \"Hello, world!\".\n"
                "  max_tokens          : (Optional) Maximum number of tokens to generate. Default: 256.\n"
                "  n_gpu_layers        : (Optional) Number of layers to offload to GPU (-1 for all, 0 for none). Default: -1.\n"
                "  use_mmap            : (Optional) Use mmap for GGUF files ('true' or 'false'). Default: true.\n"
+               "  temperature         : (Optional) Sampling temperature. Default: 0.1.\n"
             << std::endl;
 }
 
@@ -95,10 +96,10 @@ int main(int argc, char** argv) {
   int n_gpu_layers = -1; // Default: all layers on GPU
   bool use_mmap = true; // Default: use mmap
   
-  // Default sampling params for generate, as their CLI args are now gone from this simple main
-  float temperature = 0.1f;
-  int top_k = 40;
-  float top_p = 0.9f;
+  // Default sampling params for generate
+  float temperature = 0.1f; // Default temperature
+  int top_k = 40;           // Default, not exposed via CLI in this version
+  float top_p = 0.9f;       // Default, not exposed via CLI in this version
 
   if (argc > 5) {
     initial_prompt_string = trim_whitespace(argv[5]);
@@ -136,6 +137,19 @@ int main(int argc, char** argv) {
     }
   }
 
+  if (argc > 9) { // Temperature is argv[9]
+    try {
+      temperature = std::stof(argv[9]);
+      if (temperature < 0.0f) {
+        Logger::warning("Temperature cannot be negative. Using default: 0.1");
+        temperature = 0.1f;
+      }
+    } catch (const std::exception& e) {
+      Logger::error("Invalid temperature argument: " + std::string(argv[9]) +
+                    ". Using default: " + std::to_string(temperature));
+    }
+  }
+
   Logger::info("Using model path/directory: " + model_path_or_dir);
   Logger::info("Tokenizer path: " + tokenizer_path);
   Logger::info("Num threads: " + std::to_string(num_threads));
@@ -144,22 +158,36 @@ int main(int argc, char** argv) {
   Logger::info("Max tokens: " + std::to_string(max_tokens));
   Logger::info("N GPU Layers: " + std::to_string(n_gpu_layers));
   Logger::info(std::string("Use mmap: ") + (use_mmap ? "true" : "false"));
+  Logger::info("Temperature: " + std::to_string(temperature));
 
   try {
     tinyllama::TinyLlamaSession session(model_path_or_dir, tokenizer_path, num_threads, n_gpu_layers, use_mmap);
     Logger::info("TinyLlamaSession initialized successfully.");
 
+    const ModelConfig& config = session.get_config();
+    bool apply_qa_formatting; // Explicitly set based on tokenizer family
+
+    if (config.tokenizer_family == ModelConfig::TokenizerFamily::LLAMA3_TIKTOKEN) {
+        apply_qa_formatting = false;
+        Logger::info("[Main.cpp] Llama 3 model detected (via tokenizer_family). Q&A prompt formatting will be DISABLED for this session.");
+    } else {
+        apply_qa_formatting = true; // Default for non-Llama 3 / other models in this CLI context
+        Logger::info("[Main.cpp] Non-Llama 3 model detected (via tokenizer_family). Q&A prompt formatting will be ENABLED for this session.");
+    }
+
+    // Log the final decision clearly, this combines previous [MAIN_CPP_DIAGNOSTIC] logs
+    Logger::info("[Main.cpp] Mode: '" + mode_str + "'. Final decision for apply_qa_formatting: " + std::string(apply_qa_formatting ? "true" : "false"));
+
     if (mode_str == "prompt") {
       std::string generated_text =
-          session.generate(initial_prompt_string, max_tokens, temperature, top_k, top_p, "", true);
+          session.generate(initial_prompt_string, max_tokens, temperature, top_k, top_p, "", apply_qa_formatting);
       std::cout << generated_text << std::endl;
     } else if (mode_str == "chat") {
       std::cout << "Entering chat mode. Type 'exit', 'quit' to end." << std::endl;
       std::string current_chat_prompt;
       if (!initial_prompt_string.empty() && initial_prompt_string != "Hello, world!") {
-          // Use initial_prompt_string for the first turn if it's not the default and provided
           current_chat_prompt = initial_prompt_string;
-          std::cout << "AI: " << session.generate(current_chat_prompt, max_tokens, temperature, top_k, top_p, "", true) << std::endl;
+          std::cout << "AI: " << session.generate(current_chat_prompt, max_tokens, temperature, top_k, top_p, "", apply_qa_formatting) << std::endl;
       }
       while (true) {
         std::cout << "You: ";
@@ -170,7 +198,7 @@ int main(int argc, char** argv) {
         if (current_chat_prompt.empty()) {
           continue;
         }
-        std::string ai_response = session.generate(current_chat_prompt, max_tokens, temperature, top_k, top_p, "", true);
+        std::string ai_response = session.generate(current_chat_prompt, max_tokens, temperature, top_k, top_p, "", apply_qa_formatting);
         std::cout << "AI: " << ai_response << std::endl;
       }
     } else {

@@ -549,6 +549,46 @@ ModelConfig parse_model_config(const nlohmann::json& json) {
   cfg.torch_dtype = json.value("torch_dtype", "bfloat16");
   cfg.bos_token_id = json.value("bos_token_id", 1);
   cfg.eos_token_id = json.value("eos_token_id", 2);
+  cfg.unk_token_id = json.value("unk_token_id", -1);
+  // SafeTensors config.json often doesn't have pad_token_id, default to -1 or another sensible value.
+  cfg.pad_token_id = json.value("pad_token_id", -1); 
+
+  // Infer Architecture if available
+  if (json.contains("architectures") && json["architectures"].is_array() && !json["architectures"].empty()) {
+      // Take the first architecture string if multiple are listed
+      cfg.architecture = json["architectures"][0].get<std::string>();
+  } else {
+      // Fallback or default if architectures field is missing/empty
+      cfg.architecture = "unknown"; 
+      // Could add more heuristics here based on other fields if needed
+  }
+  cfg.model_name = json.value("model_type", cfg.architecture); // Use model_type or fallback to architecture
+
+  // --- BEGIN ADDED TOKENIZER FAMILY INFERENCE ---
+  Logger::info("[parse_json_config] Inferring tokenizer family for SafeTensors. Arch: '" + cfg.architecture + "', Vocab: " + std::to_string(cfg.vocab_size));
+  bool is_llama3_vocab_size_json = (cfg.vocab_size == 128256);
+  bool is_llama3_arch_hint_json = (cfg.architecture.find("LlamaForCausalLM") != std::string::npos && // Llama 3 often uses this
+                              cfg.architecture.find("Llama2") == std::string::npos); // Exclude Llama 2 explicitly if needed
+
+  if (is_llama3_vocab_size_json && is_llama3_arch_hint_json) {
+      cfg.tokenizer_family = ModelConfig::TokenizerFamily::LLAMA3_TIKTOKEN;
+      Logger::info("[parse_json_config] Result: Identified LLAMA3_TIKTOKEN (vocab size + arch hint).");
+       if (cfg.rope_theta == 10000.0f) { 
+            float llama3_rope_candidate = json.value("rope_theta", 500000.0f); // Check rope_theta in config.json
+            if (llama3_rope_candidate > 10000.0f) {
+                cfg.rope_theta = llama3_rope_candidate;
+                Logger::info("[parse_json_config] Adjusted rope_theta to " + std::to_string(cfg.rope_theta) + " for Llama 3 model (was 10000.0).");
+            }
+       }
+  } else if (cfg.vocab_size == 32000 || cfg.architecture.find("Llama") != std::string::npos) { // Common for Llama 1/2/TinyLlama
+      cfg.tokenizer_family = ModelConfig::TokenizerFamily::LLAMA_SENTENCEPIECE;
+      Logger::info("[parse_json_config] Result: Identified LLAMA_SENTENCEPIECE (vocab size or arch hint).");
+  } else {
+      cfg.tokenizer_family = ModelConfig::TokenizerFamily::UNKNOWN;
+      Logger::warning("[parse_json_config] Result: UNKNOWN tokenizer family.");
+  }
+  // --- END ADDED TOKENIZER FAMILY INFERENCE ---
+
   return cfg;
 }
 
@@ -634,10 +674,11 @@ void KVCache::initialize(int num_layers, int max_seq_len, int num_kv_heads,
     gpuErrchk(cudaMalloc(&layers[l].k_dev, cache_bytes_per_layer));
     gpuErrchk(cudaMalloc(&layers[l].v_dev, cache_bytes_per_layer));
 
+    // Explicitly zero out the allocated GPU memory for the KV cache
     gpuErrchk(cudaMemset(layers[l].k_dev, 0, cache_bytes_per_layer));
     gpuErrchk(cudaMemset(layers[l].v_dev, 0, cache_bytes_per_layer));
   }
-  Logger::info("KVCache GPU allocation complete.");
+  Logger::info("KVCache GPU allocation and zeroing complete.");
 
 #else
 
@@ -1511,8 +1552,9 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
 
 TinyLlamaModel::TinyLlamaModel(const ModelConfig& config,
                                const SafeTensorsLoader& loader)
-    : config_(config) {
-  Logger::info("Constructing TinyLlamaModel from SafeTensorsLoader.");
+    : config_(config) { // Copies the potentially faulty config first
+  config_.is_gguf_file_loaded = false; // Explicitly set to false for SafeTensors path
+  Logger::info("Constructing TinyLlamaModel from SafeTensorsLoader (is_gguf_file_loaded set to false).");
   initialize_weights(&loader, nullptr);
   initialize_gpu_and_rope(); // Called unconditionally now
   Logger::info("TinyLlamaModel construction from SafeTensorsLoader complete.");
@@ -1520,70 +1562,32 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& config,
 
 TinyLlamaModel::TinyLlamaModel(const ModelConfig& initial_config,
                                const std::string& model_path)
-    : model_path_(model_path)
+    : model_path_(model_path) 
 #ifdef HAS_CUDA
-      ,
-      cublas_handle_(nullptr),
-      token_embedding_table_dev_(nullptr),
-      lm_head_dev_(nullptr),
-      final_norm_dev(nullptr),
-      w_q_dev_(nullptr),
-      w_k_dev_(nullptr),
-      w_v_dev_(nullptr),
-      w_o_dev_(nullptr),
-      w_gate_dev_(nullptr),
-      w_up_dev_(nullptr),
-      w_down_dev_(nullptr),
-      all_freqs_cis_dev(nullptr),
-      x_dev_(nullptr),
-      x_norm_dev_(nullptr),
-      x_resid1_dev_(nullptr),
-      x_resid2_dev_(nullptr),
-      q_dev_(nullptr),
-      k_dev_(nullptr),
-      v_dev_(nullptr),
-      attn_out_dev_(nullptr),
-      attn_proj_dev_(nullptr),
-      gate_vec_dev_(nullptr),
-      up_vec_dev_(nullptr),
-      swiglu_vec_dev_(nullptr),
-      mlp_down_dev_(nullptr),
-      logits_dev_(nullptr),
-      token_embedding_table_f32_dev_(nullptr),
-      lm_head_f32_dev_(nullptr),
-      w_q_f32_dev_(nullptr),
-      w_k_f32_dev_(nullptr),
-      w_v_f32_dev_(nullptr),
-      w_o_f32_dev_(nullptr),
-      w_gate_f32_dev_(nullptr),
-      w_up_f32_dev_(nullptr),
-      w_down_f32_dev_(nullptr)
+      // Initialize all CUDA pointers to nullptr as in the other constructor
+      , cublas_handle_(nullptr), token_embedding_table_dev_(nullptr), lm_head_dev_(nullptr), final_norm_dev(nullptr), w_q_dev_(nullptr), w_k_dev_(nullptr), w_v_dev_(nullptr), w_o_dev_(nullptr), w_gate_dev_(nullptr), w_up_dev_(nullptr), w_down_dev_(nullptr), all_freqs_cis_dev(nullptr), x_dev_(nullptr), x_norm_dev_(nullptr), x_resid1_dev_(nullptr), x_resid2_dev_(nullptr), q_dev_(nullptr), k_dev_(nullptr), v_dev_(nullptr), attn_out_dev_(nullptr), attn_proj_dev_(nullptr), gate_vec_dev_(nullptr), up_vec_dev_(nullptr), swiglu_vec_dev_(nullptr), mlp_down_dev_(nullptr), logits_dev_(nullptr), token_embedding_table_f32_dev_(nullptr), lm_head_f32_dev_(nullptr), w_q_f32_dev_(nullptr), w_k_f32_dev_(nullptr), w_v_f32_dev_(nullptr), w_o_f32_dev_(nullptr), w_gate_f32_dev_(nullptr), w_up_f32_dev_(nullptr), w_down_f32_dev_(nullptr)
 #endif
 {
-  Logger::info("TinyLlamaModel constructor entered. Model path: " + model_path);
-  // Store the requested CPU layers from the initial_config
+  Logger::info("TinyLlamaModel constructor entered. Model path (from string): " + model_path);
   int requested_cpu_layers = initial_config.num_cpu_offload_layers;
   bool requested_use_mmap = initial_config.use_mmap_for_gguf;
-  Logger::info("TinyLlamaModel constructor: initial_config requested_cpu_layers = " + std::to_string(requested_cpu_layers));
-  Logger::info("TinyLlamaModel constructor: initial_config requested_use_mmap = " + std::string(requested_use_mmap ? "true" : "false"));
+  Logger::info("TinyLlamaModel constructor (from string): initial_config requested_cpu_layers = " + std::to_string(requested_cpu_layers));
+  Logger::info("TinyLlamaModel constructor (from string): initial_config requested_use_mmap = " + std::string(requested_use_mmap ? "true" : "false"));
 
   this->config_ = initial_config; // Set initial config, this will be largely overwritten by file load
 
   std::unique_ptr<SafeTensorsLoader> loader = nullptr;
-  std::unique_ptr<GGUFData> gguf_data = nullptr;
+  // No local gguf_data unique_ptr here, use this->gguf_data_
 
   if (model_path.size() > 5 &&
       model_path.substr(model_path.size() - 5) == ".gguf") {
     Logger::info("GGUF file detected: " + model_path);
     try {
-      // Correctly load GGUF metadata, passing the mmap flag
-      // FORCE mmap to true for GGUF loading to ensure weights are mapped, regardless of user's cli_use_mmap for now.
-      // The cli_use_mmap was intended to control the TinyLlamaSession's GGUF peek, not the model's internal loading if it relies on mmap.
-      Logger::info("TinyLlamaModel GGUF path: Forcing mmap to true for weight loading. User requested_use_mmap was: " + std::string(requested_use_mmap ? "true" : "false"));
-      gguf_data = std::make_unique<GGUFData>(load_gguf_meta(model_path, true /* Force mmap for GGUF model data */));
-      this->config_ = parse_model_config_from_gguf(*gguf_data);
+      Logger::info("TinyLlamaModel GGUF path (by path string): Forcing mmap to true for weight loading. User requested_use_mmap was: " + std::string(requested_use_mmap ? "true" : "false"));
+      this->gguf_data_ = std::make_unique<GGUFData>(load_gguf_meta(model_path, true /* Force mmap for GGUF model data */));
+      this->config_ = parse_model_config_from_gguf(*(this->gguf_data_)); // Use the member gguf_data_
       this->config_.is_gguf_file_loaded = true;
-      this->config_.use_mmap_for_gguf = requested_use_mmap; // Still store user's preference in config for consistency/logging
+      this->config_.use_mmap_for_gguf = requested_use_mmap; // Still store user's preference
       Logger::info("Successfully parsed GGUF metadata. Model name: " + this->config_.model_name);
     } catch (const std::exception& e) {
       Logger::error("Failed to load or parse GGUF file: " + std::string(e.what()));
@@ -1592,47 +1596,37 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& initial_config,
   } else if (model_path.size() > 12 &&
              model_path.substr(model_path.size() - 12) == ".safetensors") {
     Logger::info("SafeTensors file detected: " + model_path);
-    Logger::info("Initial config (from Python/caller): hidden_size=" + std::to_string(this->config_.hidden_size));
-    
-    ModelConfig config_from_json; // Temporary config to be filled by JSON loader
+    ModelConfig config_from_json; 
     bool json_loaded_successfully = SafeTensorsLoader::load_model_config_from_json(model_path, config_from_json);
-
     if (json_loaded_successfully) {
         Logger::info("Successfully loaded and parsed config.json for SafeTensors model.");
-        this->config_ = config_from_json; // Update model's config with values from JSON
-        this->config_.is_gguf_file_loaded = false; // Ensure this is false for safetensors
-        this->config_.use_mmap_for_gguf = requested_use_mmap; // Also set for safetensors path, though it's only used for GGUF loading path
-        Logger::info("Updated config from JSON: hidden_size=" + std::to_string(this->config_.hidden_size) + ", vocab_size=" + std::to_string(this->config_.vocab_size));
+        this->config_ = config_from_json;
+        this->config_.is_gguf_file_loaded = false; 
+        this->config_.use_mmap_for_gguf = requested_use_mmap; 
     } else {
-        Logger::warning("Failed to load config.json or it was not found for SafeTensors model. "
-                        "Proceeding with the initial_config provided to the constructor.");
-        // this->config_ already holds initial_config, so no change needed here, just ensure the GGUF flag is false.
+        Logger::warning("Failed to load config.json or it was not found for SafeTensors model. Proceeding with initial_config.");
         this->config_.is_gguf_file_loaded = false;
-        this->config_.use_mmap_for_gguf = requested_use_mmap; // Also set for safetensors path, though it's only used for GGUF loading path
+        this->config_.use_mmap_for_gguf = requested_use_mmap; 
     }
-    
     try {
       loader = std::make_unique<SafeTensorsLoader>(model_path);
       Logger::info("SafeTensorsLoader initialized for: " + model_path);
     } catch (const std::exception& e) {
         Logger::error("Failed to initialize SafeTensorsLoader: " + std::string(e.what()));
-        throw; // Re-throw as this is critical for safetensors
+        throw; 
     }
-
   } else {
     throw std::runtime_error(
         "Unsupported model file type. Please use .gguf or .safetensors");
   }
 
-  // CRITICAL FIX: Re-apply and clamp num_cpu_offload_layers AFTER model file config is loaded
   this->config_.num_cpu_offload_layers = requested_cpu_layers;
-  this->config_.use_mmap_for_gguf = requested_use_mmap; // Re-affirm after all config loading
-  Logger::info("TinyLlamaModel constructor: Re-applied requested_cpu_layers = " + std::to_string(this->config_.num_cpu_offload_layers) + 
+  this->config_.use_mmap_for_gguf = requested_use_mmap;
+  Logger::info("TinyLlamaModel constructor (from string): Re-applied requested_cpu_layers = " + std::to_string(this->config_.num_cpu_offload_layers) + 
                " to model's internal config. Current num_hidden_layers: " + std::to_string(this->config_.num_hidden_layers));
-  Logger::info("TinyLlamaModel constructor: Re-applied requested_use_mmap = " + std::string(this->config_.use_mmap_for_gguf ? "true" : "false"));
+  Logger::info("TinyLlamaModel constructor (from string): Re-applied requested_use_mmap = " + std::string(this->config_.use_mmap_for_gguf ? "true" : "false"));
 
   if (this->config_.num_cpu_offload_layers < 0) {
-      Logger::info("num_cpu_offload_layers was < 0 (" + std::to_string(this->config_.num_cpu_offload_layers) + "), setting to 0 (all GPU unless no GPU).");
       this->config_.num_cpu_offload_layers = 0;
   }
   if (this->config_.num_hidden_layers > 0 && this->config_.num_cpu_offload_layers > this->config_.num_hidden_layers) {
@@ -1641,10 +1635,9 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& initial_config,
                       "). Clamping to " + std::to_string(this->config_.num_hidden_layers) + " layers on CPU (all CPU).");
       this->config_.num_cpu_offload_layers = this->config_.num_hidden_layers;
   }
-  Logger::info("TinyLlamaModel constructor: Final clamped num_cpu_offload_layers = " + std::to_string(this->config_.num_cpu_offload_layers));
+  Logger::info("TinyLlamaModel constructor (from string): Final clamped num_cpu_offload_layers = " + std::to_string(this->config_.num_cpu_offload_layers));
 
-  // Log final config to be used for model initialization
-  Logger::info("Final ModelConfig that will be used for initialize_weights and initialize_gpu_and_rope:");
+  Logger::info("Final ModelConfig (from string path) that will be used for initialize_weights and initialize_gpu_and_rope:");
   Logger::info("  hidden_size: " + std::to_string(config_.hidden_size));
   Logger::info("  intermediate_size: " + std::to_string(config_.intermediate_size));
   Logger::info("  num_attention_heads: " + std::to_string(config_.num_attention_heads));
@@ -1656,11 +1649,41 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& initial_config,
   Logger::info("  is_gguf_file_loaded: " + std::string(config_.is_gguf_file_loaded ? "true" : "false"));
   Logger::info("  use_mmap_for_gguf: " + std::string(config_.use_mmap_for_gguf ? "true" : "false"));
 
-
-  initialize_weights(loader.get(), gguf_data.get());
+  initialize_weights(loader.get(), this->gguf_data_.get()); // Pass member this->gguf_data_ if GGUF, or nullptr
   initialize_gpu_and_rope(); 
 
-  Logger::info("TinyLlamaModel constructed and initialized successfully.");
+  Logger::info("TinyLlamaModel (from path string) constructed and initialized successfully.");
+}
+
+// New constructor for pre-loaded GGUFData
+TinyLlamaModel::TinyLlamaModel(const ModelConfig& config_from_session,
+                               std::unique_ptr<GGUFData> gguf_data_from_session)
+    : config_(config_from_session), 
+      gguf_data_(std::move(gguf_data_from_session)), 
+      model_path_("loaded_from_gguf_data_memory") // Corrected: GGUFData does not store filepath directly
+#ifdef HAS_CUDA
+      // Initialize all CUDA pointers to nullptr as in the other constructor
+      , cublas_handle_(nullptr), token_embedding_table_dev_(nullptr), lm_head_dev_(nullptr), final_norm_dev(nullptr), w_q_dev_(nullptr), w_k_dev_(nullptr), w_v_dev_(nullptr), w_o_dev_(nullptr), w_gate_dev_(nullptr), w_up_dev_(nullptr), w_down_dev_(nullptr), all_freqs_cis_dev(nullptr), x_dev_(nullptr), x_norm_dev_(nullptr), x_resid1_dev_(nullptr), x_resid2_dev_(nullptr), q_dev_(nullptr), k_dev_(nullptr), v_dev_(nullptr), attn_out_dev_(nullptr), attn_proj_dev_(nullptr), gate_vec_dev_(nullptr), up_vec_dev_(nullptr), swiglu_vec_dev_(nullptr), mlp_down_dev_(nullptr), logits_dev_(nullptr), token_embedding_table_f32_dev_(nullptr), lm_head_f32_dev_(nullptr), w_q_f32_dev_(nullptr), w_k_f32_dev_(nullptr), w_v_f32_dev_(nullptr), w_o_f32_dev_(nullptr), w_gate_f32_dev_(nullptr), w_up_f32_dev_(nullptr), w_down_f32_dev_(nullptr)
+#endif
+{
+    Logger::info("TinyLlamaModel constructor entered (with pre-loaded GGUFData). Model path placeholder: " + model_path_);
+    this->config_.is_gguf_file_loaded = true; // Ensure this is set
+
+    // CRITICAL: Ensure num_cpu_offload_layers is correctly clamped based on *this* config's num_hidden_layers
+    if (this->config_.num_cpu_offload_layers < 0) {
+        this->config_.num_cpu_offload_layers = 0;
+    }
+    if (this->config_.num_hidden_layers > 0 && this->config_.num_cpu_offload_layers > this->config_.num_hidden_layers) {
+        Logger::warning("Requested CPU offload layers (" + std::to_string(this->config_.num_cpu_offload_layers) +
+                        ") exceeds total hidden layers (" + std::to_string(this->config_.num_hidden_layers) +
+                        "). Clamping to " + std::to_string(this->config_.num_hidden_layers) + " layers on CPU (all CPU).");
+        this->config_.num_cpu_offload_layers = this->config_.num_hidden_layers;
+    }
+    Logger::info("TinyLlamaModel (pre-loaded GGUF): Final clamped num_cpu_offload_layers = " + std::to_string(this->config_.num_cpu_offload_layers));
+
+    initialize_weights(nullptr, gguf_data_.get()); // Pass raw GGUFData pointer
+    initialize_gpu_and_rope();
+    Logger::info("TinyLlamaModel (with pre-loaded GGUFData) constructed and initialized successfully.");
 }
 
 TinyLlamaModel::~TinyLlamaModel() {
@@ -2993,6 +3016,7 @@ void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
 
 ModelConfig parse_model_config_from_gguf(const GGUFData& gguf) {
   ModelConfig config;
+  Logger::info("[parse_gguf_config] Entered function.");
 
   auto get_meta_string = [&](const std::string& key,
                              const std::string& default_val) -> std::string {
@@ -3084,13 +3108,58 @@ ModelConfig parse_model_config_from_gguf(const GGUFData& gguf) {
       get_meta_value("llama.attention.layer_norm_rms_epsilon", 1e-5f);
   config.rope_theta = get_meta_value("llama.rope.freq_base", 10000.0f);
   config.hidden_act = "silu";
-  config.bos_token_id = get_meta_value("tokenizer.ggml.bos_token_id", 1);
-  config.eos_token_id = get_meta_value("tokenizer.ggml.eos_token_id", 2);
+  // Correctly use GGUF specific keys for special tokens
+  config.bos_token_id = get_meta_value("tokenizer.ggml.bos_token_id", -1);
+  config.eos_token_id = get_meta_value("tokenizer.ggml.eos_token_id", -1);
+  config.unk_token_id = get_meta_value("tokenizer.ggml.unk_token_id", -1);
+  config.pad_token_id = get_meta_value("tokenizer.ggml.padding_token_id", -1);
 
   config.architecture = get_meta_string("general.architecture", "unknown");
   config.model_name = get_meta_string("general.name", "unknown");
   bool has_pre_key = gguf.metadata.count("tokenizer.ggml.pre");
+  bool has_merges = !gguf.tokenizer_merges.empty();
 
+  Logger::info("[parse_gguf_config] Architecture: " + config.architecture +
+               ", Vocab Size: " + std::to_string(config.vocab_size) +
+               ", Has Merges: " + (has_merges ? "Yes" : "No"));
+
+  // --- Tokenizer Family Identification ---
+  Logger::info("[parse_gguf_config] Identifying tokenizer family...");
+  bool is_llama3_arch_hint = (config.architecture.find("llama3") != std::string::npos ||
+                         config.architecture.find("Llama-3") != std::string::npos ||
+                         config.architecture.find("Meta-Llama-3") != std::string::npos);
+  bool is_llama3_vocab_size = (config.vocab_size == 128256);
+  std::string ggml_tokenizer_model = get_meta_string("tokenizer.ggml.model", "");
+  bool is_tiktoken_style_tokenizer_model = (ggml_tokenizer_model == "gpt2");
+
+  Logger::info("[parse_gguf_config] L3 Hints: arch_hint=" + std::string(is_llama3_arch_hint ? "Y":"N") +
+                 ", vocab_size_match=" + std::string(is_llama3_vocab_size ? "Y":"N") +
+                 ", has_merges=" + std::string(has_merges ? "Y":"N") +
+                 ", ggml_tokenizer_model_key='" + ggml_tokenizer_model + "' (is_tiktoken_style: " + std::string(is_tiktoken_style_tokenizer_model ? "Y":"N") + ")" );
+
+  if (has_merges && is_llama3_vocab_size && is_tiktoken_style_tokenizer_model) {
+    config.tokenizer_family = ModelConfig::TokenizerFamily::LLAMA3_TIKTOKEN;
+    Logger::info("[parse_gguf_config] Result: Identified LLAMA3_TIKTOKEN (merges + vocab_size + ggml_tokenizer_model='gpt2'). Architecture string was: '" + config.architecture + "'");
+    if (!is_llama3_arch_hint && config.architecture == "llama") {
+         Logger::info("[parse_gguf_config] Note: Classified as Llama 3 based on tokenizer/vocab, but arch string was 'llama'.");
+    }
+    if (config.rope_theta == 10000.0f) { 
+         float llama3_rope_candidate = get_meta_value("llama.rope.freq_base", 500000.0f); 
+         if (llama3_rope_candidate > 10000.0f) {
+             config.rope_theta = llama3_rope_candidate;
+             Logger::info("[parse_gguf_config] Adjusted rope_theta to " + std::to_string(config.rope_theta) + " for Llama 3 model (was 10000.0).");
+         }
+    }
+  } else if (config.architecture == "llama" || config.architecture.find("Llama-2") != std::string::npos || config.architecture.find("TinyLlama") != std::string::npos) {
+    config.tokenizer_family = ModelConfig::TokenizerFamily::LLAMA_SENTENCEPIECE;
+     Logger::info("[parse_gguf_config] Result: Identified LLAMA_SENTENCEPIECE based on architecture: '" + config.architecture + "'");
+  } else {
+    config.tokenizer_family = ModelConfig::TokenizerFamily::UNKNOWN;
+     Logger::info("[parse_gguf_config] Result: UNKNOWN tokenizer family for architecture: '" + config.architecture + "'");
+  }
+
+  // Existing chat_template_type and pre_tokenizer_type logic based on architecture and pre_key
+  // This might need refinement based on how Llama 3 GGUFs declare these.
   if (config.model_name.find("TinyLlama") != std::string::npos ||
       (config.architecture == "llama" && has_pre_key)) {
     config.chat_template_type = "tinyllama";
@@ -3141,9 +3210,28 @@ ModelConfig parse_model_config_from_gguf(const GGUFData& gguf) {
       Logger::info(
           "Inferred chat_template_type='llama2' based on model name and "
           "missing/different pre_tokenizer_type.");
+    } else if (config.tokenizer_family == ModelConfig::TokenizerFamily::LLAMA3_TIKTOKEN) {
+        // For Llama 3, we might rely more on the tokenizer.chat_template string directly
+        // or define a "llama3" chat_template_type if a common pattern emerges beyond the direct template string.
+        Logger::info("Llama 3 model identified. Chat template will primarily rely on 'tokenizer.chat_template' from GGUF if present.");
+        // Set a generic type for now, actual application will use the string.
+        if (gguf.metadata.count("tokenizer.chat_template")) {
+            config.chat_template_type = "llama3_gguf_direct"; 
+        } else {
+            config.chat_template_type = "llama3_fallback"; // Or some other indicator
+            Logger::warning("Llama 3 model detected, but 'tokenizer.chat_template' not found in GGUF metadata.");
+        }
     }
   }
 
+  // --- BEGIN FORCE SENTENCEPIECE TEST ---
+  // Logger::warning("[FORCE_SPM_TEST] OVERRIDING tokenizer_family to LLAMA_SENTENCEPIECE!"); // Removed
+  // config.tokenizer_family = ModelConfig::TokenizerFamily::LLAMA_SENTENCEPIECE; // Removed
+  // --- END FORCE SENTENCEPIECE TEST ---
+
+  Logger::info(std::string("[parse_gguf_config] Finished parsing. Returning config. Family: ") + 
+                (config.tokenizer_family == ModelConfig::TokenizerFamily::LLAMA3_TIKTOKEN ? "L3_TIKTOKEN" : 
+                 (config.tokenizer_family == ModelConfig::TokenizerFamily::LLAMA_SENTENCEPIECE ? "L2_SPM" : "UNKNOWN")));
   return config;
 }
 

@@ -140,161 +140,135 @@ TinyLlamaSession::TinyLlamaSession(const std::string& model_path,
                                    int num_gpu_layers_from_cli,
                                    bool cli_use_mmap)
     : tokenizer_(nullptr), model_(nullptr), kv_cache_() {
-  Logger::info("TinyLlamaSession constructor entered. Model path: " +
-               model_path + ", Tokenizer path: " + tokenizer_path +
+  Logger::info(std::string("TinyLlamaSession constructor entered. Model path: ") +
+               model_path + ", Tokenizer path (CLI hint): " + tokenizer_path +
                ", Threads: " + std::to_string(threads) +
                ", Num GPU Layers from CLI: " + std::to_string(num_gpu_layers_from_cli) +
                ", Use mmap from CLI: " + (cli_use_mmap ? "true" : "false"));
 
-  ModelConfig model_constructor_config; // This will be passed to TinyLlamaModel
-  model_constructor_config.num_cpu_offload_layers = 0; // Default, will be calculated
-  model_constructor_config.use_mmap_for_gguf = cli_use_mmap; // Set mmap flag
+  ModelConfig initial_model_constructor_config; 
+  initial_model_constructor_config.num_cpu_offload_layers = 0; 
+  initial_model_constructor_config.use_mmap_for_gguf = cli_use_mmap; 
 
-  // Determine total hidden layers from the model file first
   int total_hidden_layers_from_file = 0;
-
   std::filesystem::path path_obj(model_path);
-  std::filesystem::path base_dir;
+  std::filesystem::path base_dir = std::filesystem::is_directory(path_obj) ? path_obj : path_obj.parent_path();
+  std::string default_tokenizer_json_path = (base_dir / "tokenizer.json").string();
 
-  std::string tokenizer_path_str;
-  if (std::filesystem::is_directory(path_obj)) {
-    base_dir = path_obj;
-    tokenizer_path_str = (base_dir / "tokenizer.json").string();
-  } else if (std::filesystem::is_regular_file(path_obj) &&
-             path_obj.extension() == ".gguf") {
-    base_dir = path_obj.parent_path();
-    tokenizer_path_str = (base_dir / "tokenizer.json").string();
-  } else {
-    throw std::runtime_error(
-        "Invalid model_path: Must be a directory or a .gguf file. Path: " +
-        model_path);
-  }
-  Logger::info("Base directory: " + base_dir.string());
-  Logger::info("Attempting tokenizer: " + tokenizer_path_str);
+  Logger::info(std::string("Determined base_dir: ") + base_dir.string());
+  Logger::info(std::string("Default external tokenizer.json path: ") + default_tokenizer_json_path);
 
-  try {
-    tokenizer_ =
-        std::make_unique<Tokenizer>(tokenizer_path_str, tokenizer_path_str);
-    Logger::info("Tokenizer loaded successfully.");
-  } catch (const std::exception& e) {
-    throw std::runtime_error("Failed to load tokenizer from " +
-                             tokenizer_path_str + ": " + e.what());
-  }
+  // --- 1. Load Model and its definitive ModelConfig --- 
+  if (std::filesystem::is_directory(path_obj)) { // SafeTensors Path
+    Logger::info(std::string("Loading SafeTensors model from directory: ") + model_path);
+    std::string config_json_path_str = (base_dir / "config.json").string();
+    std::string safetensors_path_str = (base_dir / "model.safetensors").string();
 
-  if (std::filesystem::is_directory(path_obj)) {
-    Logger::info("Loading SafeTensors model from directory: " + model_path);
-    std::string config_path_str = (base_dir / "config.json").string();
-    std::string safetensors_path_str =
-        (base_dir / "model.safetensors").string();
-
-    if (!std::filesystem::exists(config_path_str)) {
-      throw std::runtime_error("config.json not found in directory: " +
-                               model_path);
+    if (!std::filesystem::exists(config_json_path_str)) {
+      throw std::runtime_error(std::string("config.json not found in directory: ") + model_path);
     }
     if (!std::filesystem::exists(safetensors_path_str)) {
-      throw std::runtime_error("model.safetensors not found in directory: " +
-                               model_path);
+      throw std::runtime_error(std::string("model.safetensors not found in directory: ") + model_path);
     }
 
     try {
-      Logger::info("Loading config for SafeTensors: " + config_path_str);
-      nlohmann::json config_json = nlohmann::json::parse(read_file_api(config_path_str));
-      model_constructor_config = parse_model_config(config_json);
-      total_hidden_layers_from_file = model_constructor_config.num_hidden_layers;
-      Logger::info("SafeTensors config.json: num_hidden_layers = " + std::to_string(total_hidden_layers_from_file));
+      nlohmann::json config_json = nlohmann::json::parse(read_file_api(config_json_path_str));
+      initial_model_constructor_config = parse_model_config(config_json);
+      total_hidden_layers_from_file = initial_model_constructor_config.num_hidden_layers;
+      initial_model_constructor_config.use_mmap_for_gguf = cli_use_mmap; 
+      Logger::info(std::string("SafeTensors config.json: num_hidden_layers = ") + std::to_string(total_hidden_layers_from_file));
 
-      // Calculate actual_cpu_offload_layers based on desired_gpu_layers and total_layers
       int actual_cpu_offload_layers = 0;
-      if (num_gpu_layers_from_cli == -1) { // -1 means all/max on GPU
-        actual_cpu_offload_layers = 0;
-        Logger::info("Desired GPU layers is -1 (all GPU), setting actual_cpu_offload_layers to 0.");
-      } else if (num_gpu_layers_from_cli == 0) { // 0 means all on CPU
-        actual_cpu_offload_layers = total_hidden_layers_from_file;
-        Logger::info("Desired GPU layers is 0 (all CPU), setting actual_cpu_offload_layers to " + std::to_string(total_hidden_layers_from_file));
-      } else {
-        actual_cpu_offload_layers = total_hidden_layers_from_file - num_gpu_layers_from_cli;
-        Logger::info("Desired GPU layers: " + std::to_string(num_gpu_layers_from_cli) + 
-                     ", Total layers: " + std::to_string(total_hidden_layers_from_file) + 
-                     ", Calculated actual_cpu_offload_layers: " + std::to_string(actual_cpu_offload_layers));
-      }
-
-      // Clamp actual_cpu_offload_layers
-      if (actual_cpu_offload_layers < 0) actual_cpu_offload_layers = 0;
-      if (actual_cpu_offload_layers > total_hidden_layers_from_file) actual_cpu_offload_layers = total_hidden_layers_from_file;
-      Logger::info("Clamped actual_cpu_offload_layers: " + std::to_string(actual_cpu_offload_layers));
+      if (num_gpu_layers_from_cli == -1) actual_cpu_offload_layers = 0;
+      else if (num_gpu_layers_from_cli == 0) actual_cpu_offload_layers = total_hidden_layers_from_file;
+      else actual_cpu_offload_layers = total_hidden_layers_from_file - num_gpu_layers_from_cli;
       
-      model_constructor_config.num_cpu_offload_layers = actual_cpu_offload_layers;
-      Logger::info("TinyLlamaSession (SafeTensors path): model_constructor_config set with num_cpu_offload_layers = " + std::to_string(model_constructor_config.num_cpu_offload_layers));
+      actual_cpu_offload_layers = std::max(0, std::min(actual_cpu_offload_layers, total_hidden_layers_from_file));
+      initial_model_constructor_config.num_cpu_offload_layers = actual_cpu_offload_layers;
+      Logger::info(std::string("SafeTensors path: initial_model_constructor_config num_cpu_offload_layers = ") + std::to_string(initial_model_constructor_config.num_cpu_offload_layers));
 
-      Logger::info("Loading model weights: " + safetensors_path_str);
       SafeTensorsLoader st_loader(safetensors_path_str);
-      model_ = std::make_unique<TinyLlamaModel>(model_constructor_config, st_loader);
-      Logger::info("SafeTensors Model loaded successfully.");
-
+      model_ = std::make_unique<TinyLlamaModel>(initial_model_constructor_config, st_loader);
     } catch (const std::exception& e) {
-      throw std::runtime_error(
-          "Failed during SafeTensors model loading from directory " +
-          model_path + ": " + e.what());
+      throw std::runtime_error(std::string("Failed during SafeTensors model loading: ") + e.what());
     }
-
-  } else {
-    Logger::info("Loading GGUF model from file: " + model_path);
+  } else if (std::filesystem::is_regular_file(path_obj) && path_obj.extension() == ".gguf") { // GGUF Path
+    Logger::info(std::string("Loading GGUF model from file: ") + model_path);
     try {
-      // For GGUF, we first need to know total_hidden_layers to correctly calculate num_cpu_offload_layers
-      Logger::info("Peeking into GGUF metadata to determine total_hidden_layers...");
-      GGUFData gguf_metadata = load_gguf_meta(model_path, cli_use_mmap);
-      ModelConfig temp_gguf_parsed_config = parse_model_config_from_gguf(gguf_metadata);
-      total_hidden_layers_from_file = temp_gguf_parsed_config.num_hidden_layers;
-      Logger::info("GGUF metadata: num_hidden_layers = " + std::to_string(total_hidden_layers_from_file));
+      Logger::info("[API GGUF Path] Before load_gguf_meta");
+      auto temp_gguf_data_uptr = std::make_unique<GGUFData>(load_gguf_meta(model_path, cli_use_mmap));
+      Logger::info("[API GGUF Path] After load_gguf_meta, before parse_model_config_from_gguf");
+      
+      ModelConfig config_parsed_from_gguf = parse_model_config_from_gguf(*temp_gguf_data_uptr);
+      Logger::info("[API GGUF Path] After parse_model_config_from_gguf");
+      
+      total_hidden_layers_from_file = config_parsed_from_gguf.num_hidden_layers;
+      Logger::info(std::string("GGUF metadata peek (from API session): num_hidden_layers = ") + std::to_string(total_hidden_layers_from_file));
+      
+      // Prepare the final config for the model constructor
+      ModelConfig final_model_constructor_config = config_parsed_from_gguf; // Start with GGUF parsed config
+      final_model_constructor_config.use_mmap_for_gguf = cli_use_mmap; // Apply CLI mmap preference
       
       int actual_cpu_offload_layers = 0;
-      if (num_gpu_layers_from_cli == -1) { // -1 means all/max on GPU
-        actual_cpu_offload_layers = 0;
-        Logger::info("Desired GPU layers is -1 (all GPU), setting actual_cpu_offload_layers to 0 for GGUF.");
-      } else if (num_gpu_layers_from_cli == 0) { // 0 means all on CPU
-        actual_cpu_offload_layers = total_hidden_layers_from_file;
-        Logger::info("Desired GPU layers is 0 (all CPU), setting actual_cpu_offload_layers to " + std::to_string(total_hidden_layers_from_file) + " for GGUF.");
-      } else {
-        actual_cpu_offload_layers = total_hidden_layers_from_file - num_gpu_layers_from_cli;
-        Logger::info("Desired GPU layers: " + std::to_string(num_gpu_layers_from_cli) + 
-                     ", Total layers from GGUF: " + std::to_string(total_hidden_layers_from_file) + 
-                     ", Calculated actual_cpu_offload_layers for GGUF: " + std::to_string(actual_cpu_offload_layers));
-      }
+      if (num_gpu_layers_from_cli == -1) actual_cpu_offload_layers = 0; // All GPU (or all CPU if no GPU support)
+      else if (num_gpu_layers_from_cli == 0) actual_cpu_offload_layers = total_hidden_layers_from_file; // All CPU
+      else actual_cpu_offload_layers = total_hidden_layers_from_file - num_gpu_layers_from_cli;
+      
+      actual_cpu_offload_layers = std::max(0, std::min(actual_cpu_offload_layers, total_hidden_layers_from_file));
+      final_model_constructor_config.num_cpu_offload_layers = actual_cpu_offload_layers;
+      Logger::info(std::string("GGUF path (API session): final_model_constructor_config num_cpu_offload_layers = ") + std::to_string(final_model_constructor_config.num_cpu_offload_layers));
 
-      if (actual_cpu_offload_layers < 0) actual_cpu_offload_layers = 0;
-      if (actual_cpu_offload_layers > total_hidden_layers_from_file) actual_cpu_offload_layers = total_hidden_layers_from_file;
-      Logger::info("Clamped actual_cpu_offload_layers for GGUF: " + std::to_string(actual_cpu_offload_layers));
-
-      // Use the already prepared model_constructor_config as a base
-      // to ensure cli_use_mmap is propagated, then set the GGUF specific cpu layers.
-      ModelConfig initial_config_for_gguf_model = model_constructor_config; 
-      initial_config_for_gguf_model.num_cpu_offload_layers = actual_cpu_offload_layers;
-      // The use_mmap_for_gguf is already set correctly in model_constructor_config
-      Logger::info("TinyLlamaSession (GGUF path): initial_config_for_gguf_model set with num_cpu_offload_layers = " + 
-                   std::to_string(initial_config_for_gguf_model.num_cpu_offload_layers) +
-                   " and use_mmap_for_gguf = " + (initial_config_for_gguf_model.use_mmap_for_gguf ? "true" : "false"));
-
-      model_ = std::make_unique<TinyLlamaModel>(initial_config_for_gguf_model, model_path);
-      Logger::info("GGUF Model loaded successfully.");
+      Logger::info("[API GGUF Path] Before TinyLlamaModel constructor call (with GGUFData uptr)");
+      model_ = std::make_unique<TinyLlamaModel>(final_model_constructor_config, std::move(temp_gguf_data_uptr));
+      Logger::info("[API GGUF Path] After TinyLlamaModel constructor call (with GGUFData uptr)");
     } catch (const std::exception& e) {
-      throw std::runtime_error("Failed to load GGUF model from " + model_path +
-                               ": " + e.what());
+      Logger::error("[API GGUF Path] Exception caught: " + std::string(e.what()));
+      throw std::runtime_error(std::string("Failed to load GGUF model from ") + model_path + ": " + e.what());
     }
+  } else {
+     throw std::runtime_error(std::string("Invalid model_path: Must be a directory (for SafeTensors) or a .gguf file. Path: ") + model_path);
   }
 
-  config_ = model_->get_config(); // Get the definitive config from the model instance
-  Logger::info("Model config loaded. Actual num_hidden_layers: " + std::to_string(config_.num_hidden_layers) +
-               ", Actual num_cpu_offload_layers FROM MODEL after construction: " + std::to_string(config_.num_cpu_offload_layers));
+  if (!model_) {
+    throw std::runtime_error("Model pointer is null after loading attempt.");
+  }
+  config_ = model_->get_config(); 
+  std::string family_str_log = "UNKNOWN";
+  if (config_.tokenizer_family == ModelConfig::TokenizerFamily::LLAMA3_TIKTOKEN) family_str_log = "LLAMA3_TIKTOKEN";
+  else if (config_.tokenizer_family == ModelConfig::TokenizerFamily::LLAMA_SENTENCEPIECE) family_str_log = "LLAMA_SENTENCEPIECE";
+  Logger::info(std::string("Model loaded. Definitive ModelConfig obtained. Architecture: ") + config_.architecture +
+               ", Tokenizer Family: " + family_str_log +
+               ", Vocab Size: " + std::to_string(config_.vocab_size));
 
-  // The session's config_.num_cpu_offload_layers is now authoritative from the model itself.
-  // No further adjustments needed here for that specific field.
-  Logger::info("TinyLlamaSession: Final confirmed num_cpu_offload_layers (from model): " + std::to_string(config_.num_cpu_offload_layers));
+  // --- 2. Instantiate Tokenizer using the definitive config_ ---
+  Logger::info("[Tokenizer Init Check] config_.is_gguf_file_loaded = " + std::string(config_.is_gguf_file_loaded ? "true" : "false"));
+  try {
+    if (config_.is_gguf_file_loaded) {
+      const GGUFData* gguf_data_ptr = model_->get_gguf_data();
+      if (!gguf_data_ptr) {
+        throw std::runtime_error("GGUF model loaded but GGUFData pointer is null from model.");
+      }
+      Logger::info("Attempting to initialize tokenizer from GGUF data directly.");
+      tokenizer_ = std::make_unique<Tokenizer>(*gguf_data_ptr, config_);
+      Logger::info("Tokenizer initialized from GGUF data.");
+    } else { // SafeTensors path - tokenizer is always external from tokenizer.json
+      Logger::info(std::string("SafeTensors model: Initializing tokenizer from external file: ") + default_tokenizer_json_path);
+      if (!std::filesystem::exists(default_tokenizer_json_path)) {
+        throw std::runtime_error(std::string("tokenizer.json not found at: ") + default_tokenizer_json_path);
+      }
+      tokenizer_ = std::make_unique<Tokenizer>(default_tokenizer_json_path, default_tokenizer_json_path, config_); 
+      Logger::info("Tokenizer initialized from external files for SafeTensors model.");
+    }
+  } catch (const std::exception& e) {
+    throw std::runtime_error(std::string("Failed to initialize Tokenizer: ") + e.what());
+  }
+  
+  if (!tokenizer_) {
+      throw std::runtime_error("Tokenizer pointer is null after instantiation attempt.");
+  }
 
   eos_token_id_ = config_.eos_token_id;
   int head_dim = config_.hidden_size / config_.num_attention_heads;
-
-  Logger::info("Initializing KVCache with max_pos_emb: " +
-               std::to_string(config_.max_position_embeddings));
   kv_cache_.initialize(config_.num_hidden_layers,
                        config_.max_position_embeddings,
                        config_.num_key_value_heads, head_dim);
@@ -324,7 +298,7 @@ std::string TinyLlamaSession::generate(const std::string& prompt_input,
     // For SafeTensors, prefer chat template if available.
     if (config_.is_gguf_file_loaded) {
         Logger::info("GGUF model detected. Using simple Q:A format for prompt.");
-        final_prompt_for_tokenization = "Q: " + prompt_input + "\\nA:";
+        final_prompt_for_tokenization = "Q: " + prompt_input + "\nA:";
         Logger::info("Applied Q:A format (GGUF). Prompt for tokenization: \"" +
                      final_prompt_for_tokenization + "\"");
     } else if (tokenizer_ && !config_.chat_template_string.empty()) {
@@ -335,14 +309,14 @@ std::string TinyLlamaSession::generate(const std::string& prompt_input,
             Logger::info("Formatted prompt using chat template: \"" + final_prompt_for_tokenization + "\"");
         } catch (const std::exception& e) {
             Logger::error("Error applying chat template (SafeTensors): " + std::string(e.what()) + ". Falling back to simple Q:A format.");
-            final_prompt_for_tokenization = "Q: " + prompt_input + "\\nA:"; 
+            final_prompt_for_tokenization = "Q: " + prompt_input + "\nA:"; 
             Logger::info("Applied Q:A: fallback format (SafeTensors). Prompt for tokenization: \"" +
                          final_prompt_for_tokenization + "\"");
         }
     } else {
         // Fallback for SafeTensors if no chat template string or no tokenizer
         Logger::warning("Chat template string empty or tokenizer not available (SafeTensors). Using simple Q:A format.");
-        final_prompt_for_tokenization = "Q: " + prompt_input + "\\nA:";
+        final_prompt_for_tokenization = "Q: " + prompt_input + "\nA:";
         Logger::info("Applied Q:A: format (SafeTensors, no template). Prompt for tokenization: \"" +
                      final_prompt_for_tokenization + "\"");
     }
@@ -352,9 +326,11 @@ std::string TinyLlamaSession::generate(const std::string& prompt_input,
                  final_prompt_for_tokenization + "\"");
   }
 
-  std::vector<std::string> token_strs =
-      tokenizer_->tokenize(final_prompt_for_tokenization);
-  std::vector<int> token_ids = tokenizer_->tokens_to_ids(token_strs);
+  // New way: Directly encode the prompt to IDs. 
+  // Assuming encode should not add BOS/EOS here as prompt handling is complex and might already include them.
+  // Or, if encode is meant to be the primary entry, it should handle BOS/EOS internally based on some logic.
+  // For now, matching the previous behavior of just getting IDs for the final_prompt_for_tokenization.
+  std::vector<int> token_ids = tokenizer_->encode(final_prompt_for_tokenization, false, false);
 
   if (token_ids.empty()) {
     Logger::warning("Tokenization resulted in empty ID list for prompt: " +
@@ -459,9 +435,10 @@ std::string TinyLlamaSession::generate(const std::string& prompt_input,
 
     if (pos >= num_prompt_tokens - 1) {
       next_token_id = sample_top_k_top_p_temperature(logits, temperature, top_k, top_p, rng_);
+      Logger::debug("[Generate Loop] Pos: " + std::to_string(pos) + ", Prompt Tokens: " + std::to_string(num_prompt_tokens) + ", Generated Token ID: " + std::to_string(next_token_id));
 
       if (next_token_id == eos_token_id_) {
-        Logger::info("EOS token generated. Stopping.");
+        Logger::info("EOS token generated (ID: " + std::to_string(next_token_id) + "). Stopping.");
         break;
       }
 
@@ -477,6 +454,14 @@ std::string TinyLlamaSession::generate(const std::string& prompt_input,
 
   std::vector<int> generated_only_ids(token_ids.begin() + num_prompt_tokens,
                                       token_ids.end());
+
+  // Log all generated IDs before decoding
+  std::string generated_ids_str = "[Generated IDs Pre-Decode] ";
+  for(int gen_id : generated_only_ids) {
+    generated_ids_str += std::to_string(gen_id) + " ";
+  }
+  Logger::debug(generated_ids_str);
+
   std::string result = tokenizer_->decode(generated_only_ids, true);
   Logger::info("Generated response: " + result);
   return result;

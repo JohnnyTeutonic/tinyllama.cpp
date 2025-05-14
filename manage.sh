@@ -78,6 +78,7 @@ usage() {
     echo "                 --prompt <text>             (default: ${CURRENT_INTERACTIVE_PROMPT})"
     echo "                 --steps <num>               (default: ${MAX_TOKENS_SERVER})"
     echo "                 --threads <num>             (default: ${DEFAULT_THREADS})"
+    echo "                 --temperature <float>       (default: ${DEFAULT_TEMPERATURE})"
     echo "                 --n-gpu-layers <int>        (default: ${DEFAULT_N_GPU_LAYERS}, -1 for all on GPU)"
     echo "                 --mmap <true|false>          (default: ${DEFAULT_USE_MMAP})"
     echo ""
@@ -291,6 +292,7 @@ do_run_prompt() {
     local prompt_arg="$DEFAULT_PROMPT"
     local steps_arg="$DEFAULT_STEPS"
     local threads_arg="$DEFAULT_THREADS"
+    local temperature_arg="$DEFAULT_TEMPERATURE"
     local n_gpu_layers_arg="$DEFAULT_N_GPU_LAYERS"
     local use_mmap_arg="$DEFAULT_USE_MMAP"
     # local model_dir_provided=false # Flag to track if --model-dir was used (optional if we simplify --model-dir handling)
@@ -337,6 +339,12 @@ do_run_prompt() {
                 if [ -z "$2" ]; then error "Missing value for --threads"; fi
                 threads_arg="$2"
                 shift # Consume --threads
+                shift # Consume its value
+                ;;
+            --temperature)
+                if [ -z "$2" ]; then error "Missing value for --temperature"; fi
+                temperature_arg="$2"
+                shift # Consume --temperature
                 shift # Consume its value
                 ;;
             --n-gpu-layers)
@@ -419,11 +427,12 @@ do_run_prompt() {
     echo "Threads: $threads_arg"
     echo "Prompt: $prompt_arg"
     echo "Steps: $steps_arg"
+    echo "Temperature: $temperature_arg"
     echo "N GPU Layers: $n_gpu_layers_arg"
     echo "Use Mmap: $use_mmap_arg"
 
-    # Order: model_path, tokenizer_path, num_threads, mode, initial_prompt_string, max_tokens, n_gpu_layers, use_mmap
-    local exec_args_for_cpp=("$executable_path" "$model_path_arg" "$tokenizer_path_arg" "$threads_arg" "prompt" "$prompt_arg" "$steps_arg" "$n_gpu_layers_arg" "$use_mmap_arg")
+    # Order: model_path, tokenizer_path, num_threads, mode, initial_prompt_string, max_tokens, n_gpu_layers, use_mmap, temperature
+    local exec_args_for_cpp=("$executable_path" "$model_path_arg" "$tokenizer_path_arg" "$threads_arg" "prompt" "$prompt_arg" "$steps_arg" "$n_gpu_layers_arg" "$use_mmap_arg" "$temperature_arg")
     
     echo "Executing: ${exec_args_for_cpp[@]}"
     LD_LIBRARY_PATH=./build/lib "${exec_args_for_cpp[@]}"
