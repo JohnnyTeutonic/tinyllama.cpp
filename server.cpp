@@ -140,10 +140,16 @@ int main(int argc, char** argv) {
           const Tokenizer* tokenizer = session->get_tokenizer(); 
 
           if (config.is_gguf_file_loaded) {
-        prompt_for_session_generate = user_input_from_client;
-        use_q_a_format_for_session_generate = true;
-        Logger::info(
-            "GGUF model detected. Using Q:A: format via session->generate.");
+            prompt_for_session_generate = user_input_from_client;
+            // Check for Llama 3 tokenizer family to disable Q&A for it
+            if (config.tokenizer_family == ModelConfig::TokenizerFamily::LLAMA3_TIKTOKEN) {
+                use_q_a_format_for_session_generate = false;
+                Logger::info("GGUF Llama 3 model detected (via tokenizer_family). Q&A prompt formatting will be DISABLED for session generate.");
+            } else {
+                use_q_a_format_for_session_generate = true;
+                Logger::info(
+                    "GGUF (Non-Llama 3) model detected. Using Q:A: format via session->generate.");
+            }
           } else {
         std::string system_prompt_text = "You are a helpful AI.";
             if (tokenizer) {

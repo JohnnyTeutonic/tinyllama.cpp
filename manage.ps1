@@ -91,6 +91,7 @@ function Show-Usage {
     Write-Host "                 -TokenizerPath <path>      (default: ${DefaultTokenizerPath})"
     Write-Host "                 -Prompt <text>             (default: ${DefaultPrompt})"
     Write-Host "                 -Steps <num>               (default: ${DefaultSteps})"
+    Write-Host "                 -Temperature <float>       (default: ${DefaultTemperature})"
     Write-Host "                 -NGpuLayers <int>         (default: ${DefaultNGpuLayers}, -1 for all on GPU)"
     Write-Host "                 -Mmap <true|false>        (default: ${DefaultUseMmap})"
     Write-Host ""
@@ -309,20 +310,20 @@ function Invoke-RunChat {
 
 function Invoke-RunPrompt {
     param (
-        # These params are defaults if not overridden by $script:Arguments
-        [string]$InitialModelPath = $DefaultModelDir, # Default to directory
+        [string]$InitialModelPath = $DefaultModelDir, 
         [string]$InitialPrompt = "",
-        [string]$InitialSteps = "64", # Default steps
+        [string]$InitialSteps = "64", 
+        [string]$InitialTemperature = $DefaultTemperature, # Added InitialTemperature
         [int]$InitialNGpuLayers = $DefaultNGpuLayers,
-        [string]$InitialTokenizerPath = $DefaultTokenizerPath, # Default tokenizer path
+        [string]$InitialTokenizerPath = $DefaultTokenizerPath, 
         [bool]$InitialUseMmap = $DefaultUseMmap,
         [int]$InitialThreads = $DefaultThreads
     )
 
-    # Resolved values after parsing
     [string]$ModelPath = $InitialModelPath
     [string]$Prompt = $InitialPrompt
     [string]$Steps = $InitialSteps
+    [string]$Temperature = $InitialTemperature # Added Temperature variable
     [int]$NGpuLayers = $InitialNGpuLayers
     [string]$TokenizerPath = $InitialTokenizerPath
     [bool]$UseMmap = $InitialUseMmap
@@ -374,6 +375,7 @@ function Invoke-RunPrompt {
 
     if ($NamedParams.ContainsKey('Prompt')) { $Prompt = $NamedParams['Prompt'] }
     if ($NamedParams.ContainsKey('Steps')) { $Steps = $NamedParams['Steps'] }
+    if ($NamedParams.ContainsKey('Temperature')) { $Temperature = $NamedParams['Temperature'] } # Parse Temperature
     if ($NamedParams.ContainsKey('NGpuLayers')) { $NGpuLayers = [int]$NamedParams['NGpuLayers'] }
     if ($NamedParams.ContainsKey('TokenizerPath')) { $TokenizerPath = $NamedParams['TokenizerPath'] }
     if ($NamedParams.ContainsKey('UseMmap')) { $UseMmap = [bool]::Parse($NamedParams['UseMmap']) } # Ensure boolean conversion
@@ -433,20 +435,22 @@ function Invoke-RunPrompt {
     Log-Message "  Tokenizer Path: $TokenizerPath"
     Log-Message "  Prompt: $Prompt"
     Log-Message "  Steps: $Steps"
+    Log-Message "  Temperature: $Temperature"
     Log-Message "  Threads: $Threads"
     Log-Message "  N GPU Layers: $NGpuLayers"
     Log-Message "  Use Mmap: $UseMmap"
 
-    # Arguments for main.exe: <model_path> <tokenizer_path> <num_threads> <mode> <initial_prompt_string> <max_tokens> <n_gpu_layers> <use_mmap>
+    # Arguments for main.exe: <model_path> <tokenizer_path> <num_threads> <mode> <initial_prompt_string> <max_tokens> <n_gpu_layers> <use_mmap> <temperature>
     $ScriptArgs = @(
         $ModelPath,
         $TokenizerPath,
-        [string]$Threads,  # Ensure it's a string for the process arguments
-        "prompt",          # Mode
+        [string]$Threads,  
+        "prompt",          
         $Prompt,
-        [string]$Steps,    # Ensure it's a string
-        [string]$NGpuLayers, # Ensure it's a string
-        [string]$UseMmap.ToString().ToLower() # Ensure it's "true" or "false" string
+        [string]$Steps,    
+        [string]$NGpuLayers, 
+        [string]$UseMmap.ToString().ToLower(), 
+        $Temperature # Added temperature argument
     )
 
     Log-Message "Executing: & `"$ExecutablePath`" $($ScriptArgs -join ' ')"

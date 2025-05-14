@@ -1,7 +1,7 @@
 # TinyLlama.cpp - A C++ Chat Inference
 #### Author: Jonathan Reich
 
-This codebase supports inference for Llama 2 architecture models (including TinyLlama variants) using Safetensors model format as well as GGUF format.
+This codebase supports inference for Llama 2/3 architecture models using Safetensors model format as well as GGUF format.
 
 The GGUF format support includes loading models with various tensor types such as BF16, FP16, FP32, and the quantised types: Q4_K_M, Q6_K and Q8_0.
 
@@ -122,9 +122,8 @@ This project has been tested with a number of different weights. You can downloa
 
 *   **For GGUF:**
     *   **TinyLlama 1.1B Chat v1.0 (Q8_0 GGUF):** [TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF - Q8_0.gguf](https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/blob/main/tinyllama-1.1b-chat-v1.0.Q8_0.gguf)
-        *   This is a quantized version and has been tested.
     *   **Llama 2 7B (Q8_0 GGUF):** [TheBloke/Llama-2-7B-GGUF - llama-2-7b.Q8_0.gguf](https://huggingface.co/TheBloke/Llama-2-7B-GGUF/blob/main/llama-2-7b.Q8_0.gguf)
-        *   This larger model has also been tested. Performance will vary based on your hardware.
+    *   **Llama 3 8B (Q4_K_M GGUF):** [QuantFactory/Llama-3-8B-GGUF - llama-3-8b.Q4_K_M.gguf](https://huggingface.co/QuantFactory/Meta-Llama-3-8B-GGUF/blob/main/Meta-Llama-3-8B.Q4_K_M.gguf)
     *   When using GGUF files, typically only the `.gguf` file itself is needed, as it should contain the necessary metadata. However, for some GGUF files or if using the `tinyllama` executable with a GGUF that doesn't fully embed tokenizer information, ensure a `tokenizer.json` (compatible with Llama 2) is present in the same directory or the model directory specified.
 
 
