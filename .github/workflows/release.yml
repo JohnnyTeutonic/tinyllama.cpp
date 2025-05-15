@@ -123,6 +123,12 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential doxygen graphviz libboost-all-dev
+          if [ "${{ matrix.build_type }}" == "cuda" ]; then
+            echo "Installing gcc-12 and g++-12 for CUDA build"
+            sudo apt-get install -y gcc-12 g++-12
+            echo "CC=/usr/bin/gcc-12" >> $GITHUB_ENV
+            echo "CXX=/usr/bin/g++-12" >> $GITHUB_ENV
+          fi
 
       - name: Install Dependencies (Windows)
         if: runner.os == 'Windows'
@@ -138,7 +144,7 @@ jobs:
             @{ Name = "doxygen.install"; LogName = "Doxygen" },
             @{ Name = "graphviz"; LogName = "Graphviz" },
             @{ Name = "openssl"; LogName = "OpenSSL" },
-            @{ Name = "boost-vc143"; LogName = "Boost (VC143)" }
+            @{ Name = "boost-msvc-14.2"; LogName = "Boost (MSVC 14.2)" }
           )
           $allSucceeded = $true
 
@@ -169,10 +175,14 @@ jobs:
 
       - name: Configure CMake (Linux)
         if: runner.os == 'Linux'
+        env: # Make CC and CXX available here explicitly from GITHUB_ENV for CUDA builds
+          CC: ${{ env.CC }}
+          CXX: ${{ env.CXX }}
         shell: bash -el {0} # Ensure conda env is active if it's a CUDA build
         run: |
           mkdir build
           cd build
+          CMAKE_EXTRA_ARGS="" # Renamed from CMAKE_ARGS to avoid conflicts
           if [ "${{ matrix.build_type }}" == "cuda" ]; then
             echo "Verifying nvcc path and CUDA_HOME / CUDA_TOOLKIT_ROOT_DIR:"
             which nvcc
@@ -184,10 +194,25 @@ jobs:
               echo "Error: CUDA_HOME is not correctly set or nvcc not found in $CUDA_HOME/bin/nvcc."
               exit 1
             fi
+            
+            # Determine host CXX for nvcc -ccbin
+            HOST_CXX_FOR_NVCC="/usr/bin/g++-12" # Default to g++-12 after installation
+            if [ -n "$CXX" ] && command -v $CXX &> /dev/null; then
+                echo "Using CXX from GITHUB_ENV: $CXX for nvcc -ccbin"
+                HOST_CXX_FOR_NVCC="$CXX"
+            elif command -v /usr/bin/g++-12 &> /dev/null; then
+                echo "GITHUB_ENV CXX not found or invalid, using /usr/bin/g++-12 for nvcc -ccbin"
+                HOST_CXX_FOR_NVCC="/usr/bin/g++-12"
+            else
+                echo "Warning: Neither GITHUB_ENV CXX nor /usr/bin/g++-12 found. nvcc might pick an incompatible host compiler."
+                # Let nvcc pick, or rely on -allow-unsupported-compiler if no specific g++-12 is found
+            fi
+            echo "Final host CXX for nvcc -ccbin: $HOST_CXX_FOR_NVCC"
+
             # CMAKE_ARGS for CUDA
-            export CMAKE_ARGS="-DCMAKE_CUDA_COMPILER=${CUDA_HOME}/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=all -DCMAKE_CUDA_FLAGS='-allow-unsupported-compiler'"
+            CMAKE_EXTRA_ARGS="-DCMAKE_CUDA_COMPILER=${CUDA_HOME}/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=all -DCMAKE_CUDA_FLAGS='-allow-unsupported-compiler -ccbin ${HOST_CXX_FOR_NVCC}'"
           fi
-          cmake .. -DCMAKE_BUILD_TYPE=Release ${{ matrix.cmake_flags }} $CMAKE_ARGS
+          cmake .. -DCMAKE_BUILD_TYPE=Release ${{ matrix.cmake_flags }} ${CMAKE_EXTRA_ARGS}
 
       - name: Configure CMake (Windows)
         if: runner.os == 'Windows'
