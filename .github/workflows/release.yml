@@ -60,6 +60,7 @@ jobs:
     needs: create-release
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
         include:
@@ -115,7 +116,7 @@ jobs:
       - name: Install Dependencies (Windows)
         if: runner.os == 'Windows'
         run: |
-          choco install doxygen.install graphviz openssl boost -y
+          choco install doxygen.install graphviz openssl boost-msvc-14.3 -y
 
       - name: Configure CMake (Linux)
         if: runner.os == 'Linux'
