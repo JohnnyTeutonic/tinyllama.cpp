@@ -124,7 +124,7 @@ jobs:
       - name: Install Dependencies (Windows)
         if: runner.os == 'Windows'
         run: |
-          choco install doxygen.install graphviz openssl boost-vc143 -y
+          choco install doxygen.install graphviz openssl boost-vc143 -y --source https://community.chocolatey.org/api/v2/
 
       - name: Configure CMake (Linux)
         if: runner.os == 'Linux'
