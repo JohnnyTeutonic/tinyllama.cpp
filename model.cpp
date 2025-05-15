@@ -825,49 +825,63 @@ static void apply_rope_vector(
     int head_dim,
     int current_token_pos,
     const std::vector<std::pair<float, float>>& all_freqs_cis, // e.g., model->precomputed_freqs_cis_
-    int max_pos_embeddings // e.g., config_.max_position_embeddings
+    int max_pos_embeddings, // e.g., config_.max_position_embeddings
+    bool use_adjacent_pairing // NEW FLAG
 ) {
   if (current_token_pos < 0 || current_token_pos >= max_pos_embeddings) {
     return;
   }
   if (head_dim % 2 != 0) { 
+    // This check is crucial as dim_half relies on it.
+    // Consider throwing an error or logging if this occurs, as it implies a config issue.
+    Logger::error("RoPE apply_rope_vector: head_dim must be even. head_dim: " + std::to_string(head_dim));
     return;
   }
 
   const int dim_half = head_dim / 2;
-
-  // CRITICAL FIX: In initialize_rope_freqs, the frequencies are indexed as:
-  // flat_idx = (pos * head_dim/2) + (i/2) where i is the dimension (0, 2, 4...)
-  // We must use the same formula here!
   size_t pos_offset = static_cast<size_t>(current_token_pos) * static_cast<size_t>(dim_half);
 
   for (int h = 0; h < num_heads; ++h) {
     size_t head_offset = static_cast<size_t>(h) * head_dim;
 
-    for (int i = 0; i < dim_half; ++i) {
-      // Get the proper frequency for this position and dimension
+    for (int i = 0; i < dim_half; ++i) { // i iterates 0 to (head_dim/2 - 1)
       size_t freq_idx = pos_offset + static_cast<size_t>(i);
       
       if (freq_idx >= all_freqs_cis.size()) {
-        // Safety check - this shouldn't happen with proper initialization
+            Logger::warning("RoPE apply_rope_vector: freq_idx out of bounds. pos: " + 
+                            std::to_string(current_token_pos) + ", head_dim/2: " + std::to_string(dim_half) +
+                            ", i: " + std::to_string(i) + ", calculated freq_idx: " + std::to_string(freq_idx) +
+                            ", all_freqs_cis.size(): " + std::to_string(all_freqs_cis.size()));
             continue;
-          }
+      }
 
-      // Get the complex rotation factors
       float cos_theta = all_freqs_cis[freq_idx].first;
       float sin_theta = all_freqs_cis[freq_idx].second;
       
-      // Get indices for the pair of dimensions to rotate
-      size_t idx_even = head_offset + (2 * i);
-      size_t idx_odd = head_offset + (2 * i + 1);
+      float x0_val, x1_val;
+      size_t x0_idx, x1_idx;
+
+      if (use_adjacent_pairing) {
+        // Adjacent pairing: (x_{2i}, x_{2i+1})
+        x0_idx = head_offset + (2 * i);
+        x1_idx = head_offset + (2 * i + 1);
+      } else {
+        // Split-half pairing: (x_i, x_{i + dim_half})
+        x0_idx = head_offset + i;
+        x1_idx = head_offset + i + dim_half;
+      }
+
+      if (x0_idx >= x.size() || x1_idx >= x.size()) {
+          Logger::warning("RoPE apply_rope_vector: x index out of bounds. x.size(): " + std::to_string(x.size()) +
+                          ", x0_idx: " + std::to_string(x0_idx) + ", x1_idx: " + std::to_string(x1_idx));
+          continue;
+      }
+
+      x0_val = x[x0_idx];
+      x1_val = x[x1_idx];
       
-      // Apply rotation by complex multiply:
-      // [cos_θ, sin_θ] * [x_i, x_i+1]
-      float x_even = x[idx_even];
-      float x_odd = x[idx_odd];
-      
-      x[idx_even] = x_even * cos_theta - x_odd * sin_theta;
-      x[idx_odd] = x_even * sin_theta + x_odd * cos_theta;
+      x[x0_idx] = x0_val * cos_theta - x1_val * sin_theta;
+      x[x1_idx] = x0_val * sin_theta + x1_val * cos_theta;
     }
   }
 }
@@ -1073,7 +1087,6 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
   }
   Logger::info("cuBLAS handle created successfully.");
   
-  // --- BEGINNING OF PROPOSED CHANGE ---
   if (config_.is_gguf_file_loaded) {
     cublas_status = cublasSetMathMode(cublas_handle_, CUBLAS_PEDANTIC_MATH);
     if (cublas_status != CUBLAS_STATUS_SUCCESS) {
@@ -1086,7 +1099,6 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
     // For now, we only explicitly change it for GGUF
     Logger::info("Skipping explicit cuBLAS math mode setting for non-GGUF model (using cuBLAS default).");
   }
-  // --- END OF PROPOSED CHANGE ---
   }
 
   // Final Norm (always on GPU if any GPU layers are active)
@@ -2186,8 +2198,8 @@ std::vector<float> TinyLlamaModel::forward(
     else if (!lw.v_proj.empty()) matvec_bf16_f32_vector_cpu(lw.v_proj, x_norm_vec1, v_vec, n_kv_heads * head_dim, hs);
     else throw std::runtime_error("Layer " + std::to_string(l) + ": No V proj weights (f32, q8, q4k, q6k, bf16) for CPU");
 
-    apply_rope_vector(q_vec, n_heads, head_dim, n_tokens, precomputed_freqs_cis_, max_pos_embeddings);
-    apply_rope_vector(k_vec, n_kv_heads, head_dim, n_tokens, precomputed_freqs_cis_, max_pos_embeddings);
+    apply_rope_vector(q_vec, n_heads, head_dim, n_tokens, precomputed_freqs_cis_, max_pos_embeddings, config_.is_gguf_file_loaded);
+    apply_rope_vector(k_vec, n_kv_heads, head_dim, n_tokens, precomputed_freqs_cis_, max_pos_embeddings, config_.is_gguf_file_loaded);
 
     // KV Cache update
     if (kv_cache) {
