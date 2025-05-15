@@ -523,23 +523,27 @@ void swiglu_cuda(const float* gate_dev, const float* up_dev, float* out_dev,
 }
 
 __global__ void rope_kernel(float* x, int num_heads, int head_dim,
-                            const float* all_freqs_cis_base, int pos) {
+                            const float* all_freqs_cis_base, int pos, bool use_adjacent_pairing) {
   int idx = blockIdx.x * blockDim.x + threadIdx.x; // Global thread index for pairs
-  int total_pairs = num_heads * (head_dim / 2);   // Total (dim_i, dim_{i+1}) pairs across all heads
+  int total_pairs = num_heads * (head_dim / 2);   // Total (dim_i, dim_{i+1}) or (dim_i, dim_{i+D/2}) pairs across all heads
   if (idx >= total_pairs) return;
 
-  // Determine which head and which dimension-pair within that head this thread handles
   int head_idx = idx / (head_dim / 2);        // The specific head this thread works on
-  int dim_pair_idx = idx % (head_dim / 2);  // The index of the (d, d+1) pair within this head (0 to head_dim/2 - 1)
+  int dim_pair_idx = idx % (head_dim / 2);  // The index of the pair within this head (0 to head_dim/2 - 1)
 
-  // Corrected RoPE frequency indexing (from previous fix)
   size_t freq_cos_sin_pair_idx = (size_t)pos * (head_dim / 2) + dim_pair_idx;
   size_t freq_base_offset = freq_cos_sin_pair_idx * 2; 
 
-  // Align x vector indexing with CPU version (apply_rope_vector):
-  // Rotate x[h*HD + 2*dim_pair_idx] with x[h*HD + 2*dim_pair_idx + 1]
-  int base_x0 = head_idx * head_dim + (dim_pair_idx * 2);
-  int base_x1 = head_idx * head_dim + (dim_pair_idx * 2 + 1);
+  int base_x0, base_x1;
+  if (use_adjacent_pairing) {
+    // Adjacent pairing: Rotate x[h*HD + 2*j] with x[h*HD + 2*j + 1]
+    base_x0 = head_idx * head_dim + (dim_pair_idx * 2);
+    base_x1 = head_idx * head_dim + (dim_pair_idx * 2 + 1);
+  } else {
+    // Split-half pairing: Rotate x[h*HD + j] with x[h*HD + j + head_dim/2]
+    base_x0 = head_idx * head_dim + dim_pair_idx;
+    base_x1 = head_idx * head_dim + dim_pair_idx + (head_dim / 2);
+  }
 
   float x0 = x[base_x0];
   float x1 = x[base_x1];
@@ -552,14 +556,13 @@ __global__ void rope_kernel(float* x, int num_heads, int head_dim,
 }
 
 void rope_cuda(float* x_dev, int num_heads, int head_dim,
-               const float* all_freqs_cis_dev_base, int pos,
-               cudaStream_t stream) {
+               const float* all_freqs_cis_dev_base, int pos, bool use_adjacent_pairing, cudaStream_t stream) {
   int total_pairs = num_heads * (head_dim / 2);
   int threads_per_block = 256;
   int num_blocks = (total_pairs + threads_per_block - 1) / threads_per_block;
 
   rope_kernel<<<num_blocks, threads_per_block, 0, stream>>>(
-      x_dev, num_heads, head_dim, all_freqs_cis_dev_base, pos);
+      x_dev, num_heads, head_dim, all_freqs_cis_dev_base, pos, use_adjacent_pairing);
   gpuErrchk(cudaGetLastError());
 }
 

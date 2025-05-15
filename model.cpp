@@ -2487,8 +2487,11 @@ std::vector<float> TinyLlamaModel::forward_device(
                                   temp_q_host_rope, pos, l_model_idx, 8);
     }
 
-    rope_cuda(q_dev_, n_heads, head_dim, all_freqs_cis_dev, pos, stream);
-    rope_cuda(k_dev_, n_kv_heads, head_dim, all_freqs_cis_dev, pos, stream);
+    // RoPE Application:
+    rope_cuda(q_dev_, n_heads, head_dim, all_freqs_cis_dev, pos, config_.is_gguf_file_loaded, stream);
+    rope_cuda(k_dev_, n_kv_heads, head_dim, all_freqs_cis_dev, pos, config_.is_gguf_file_loaded, stream);
+
+    // ... (Optional logging of q_dev_ after RoPE) ...
 
     for (int kvh = 0; kvh < n_kv_heads; ++kvh) {
       const float* current_k_head_ptr = k_dev_ + kvh * head_dim;
