@@ -105,7 +105,14 @@ For safetensors models, you need three files from a compatible TinyLlama model (
 
 Place these three files into a directory, for example, named `data/`.
 
-*(Note: This project expects BF16 weights in `model.safetensors`. Ensure your conversion script saves them in this format if converting from another source).*
+***Supported SafeTensors Data Types:***
+
+*This project's SafeTensors loader currently supports models with weights in the following formats:*
+    *   **`F32` (Single-precision Floating Point):** Loaded as is.
+    *   **`BF16` (BFloat16 Floating Point):** These tensors are automatically converted to `F32` upon loading.
+    *   **`F16` (Half-precision Floating Point):** These tensors are also automatically converted to `F32` upon loading.
+
+*The internal representation and computation for models loaded from SafeTensors will therefore use `F32` precision. Support for other data types (e.g., quantized integer types like `I8`) directly from SafeTensors is not yet implemented.*
 
 #### GGUF
 
@@ -295,7 +302,6 @@ Please refer to the `pytorch/README.md` for detailed usage instructions for this
 *   `.clang-format`: Configuration file for the `clang-format` C++ code formatter.
 *   `Doxyfile`: Configuration file for generating API documentation with Doxygen.
 *   Key C++, Header, and CUDA files (typically in the root or organized by CMake):
-    *   `main_gguf.cpp`: Main entry point for the `tinyllama` command-line chat client (supports GGUF and SafeTensors models).
     *   `server.cpp`: Implements the `tinyllama_server` HTTP server and its main entry point for web UI interaction.
     *   `api.cpp`/`api.h`: Defines the `TinyLlamaSession` class, providing a high-level API for loading models and generating text.
     *   `bindings.cpp`: Implements Python bindings for `TinyLlamaSession` and `ModelConfig` using `pybind11`.
@@ -453,5 +459,4 @@ Find `llama.cpp` on GitHub: [https://github.com/ggerganov/llama.cpp](https://git
 
 ## Known Limitations
 
-*   **SafeTensors Model Formats**: While the SafeTensors loading mechanism is in place, only BF16 (BFloat16) weight types have been extensively tested for these models. Other float types (like FP16 or FP32) in SafeTensors files may load but are not as thoroughly validated in this specific C++ implementation.
 *   **Windows Support**: Building and running on Windows is possible but is considered highly experimental. The primary development and testing focus has been on Linux. Users may encounter build issues or runtime instabilities on Windows that are not present on Linux.
