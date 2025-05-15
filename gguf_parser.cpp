@@ -709,7 +709,7 @@ GGUFData load_gguf_meta(const std::string& filename, bool use_mmap) {
     }
 
 #ifndef _WIN32
-    // --- BEGIN Prefetching with posix_madvise ---
+    
     Logger::info("[GGUF_LOAD] Attempting to prefetch mmapped tensor data using posix_madvise(MADV_WILLNEED)...");
     uint8_t* actual_tensor_data_block_start_in_mmap = static_cast<uint8_t*>(result.mapped_tensor_data) + result.offset_diff_for_mmap;
     
@@ -745,7 +745,7 @@ GGUFData load_gguf_meta(const std::string& filename, bool use_mmap) {
         }
     }
     Logger::info("[GGUF_LOAD] Finished POSIX prefetching attempt with posix_madvise.");
-    // --- END Prefetching with posix_madvise ---
+    
 #else // _WIN32
     // PrefetchVirtualMemory could be added here for Windows if desired and available.
     // For now, just a log message indicating it's a POSIX-specific optimization.

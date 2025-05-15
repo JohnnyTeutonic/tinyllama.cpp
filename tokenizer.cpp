@@ -17,6 +17,7 @@
 #include <limits>    // Ensure limits is included
 #include <utility>   // For std::pair
 #include <functional> // For std::less
+#include <filesystem>
 
 #include "logger.h"
 
@@ -308,15 +309,26 @@ Tokenizer::Tokenizer(const std::string& vocab_path,
       pad_token_("<pad>") {
   Logger::info("[Tokenizer Constructor JSON] vocab_path: '" + vocab_path + "', model_path: '" + model_path + "'"); // Diagnostic log
   try {
-    Logger::info(std::string("Loading tokenizer and vocab from: ") + vocab_path);
+    std::filesystem::path vocab_json_path_abs(vocab_path);
+    if (!std::filesystem::exists(vocab_json_path_abs)) {
+        throw std::runtime_error("Tokenizer vocab_path (tokenizer.json) does not exist: " + vocab_json_path_abs.string());
+    }
+
+    Logger::info(std::string("Loading tokenizer and vocab from: ") + vocab_json_path_abs.string());
     std::string family_str = "UNKNOWN";
     if (tokenizer_family_ == ModelConfig::TokenizerFamily::LLAMA_SENTENCEPIECE) family_str = "LLAMA_SENTENCEPIECE";
     else if (tokenizer_family_ == ModelConfig::TokenizerFamily::LLAMA3_TIKTOKEN) family_str = "LLAMA3_TIKTOKEN";
     Logger::info(std::string("Tokenizer family based on config: ") + family_str);
 
-    load_vocab_from_json(vocab_path, token_to_id_, id_to_token_);
+    load_vocab_from_json(vocab_json_path_abs.string(), token_to_id_, id_to_token_);
 
-    unk_token_id_ = (token_to_id_.count(unk_token_)) ? token_to_id_[unk_token_] : config.bos_token_id;
+    // After loading vocab, if it's a SentencePiece based model (not from GGUF), load its BPE merges.
+    if (tokenizer_family_ == ModelConfig::TokenizerFamily::LLAMA_SENTENCEPIECE) {
+        Logger::info("LLAMA_SENTENCEPIECE family detected for JSON constructor, attempting to load BPE merges from: " + vocab_json_path_abs.string());
+        load_bpe_merges_from_json(vocab_json_path_abs.string()); 
+    }
+
+    unk_token_id_ = (token_to_id_.count(unk_token_)) ? token_to_id_[unk_token_] : config.bos_token_id; // Fallback to BOS if UNK not in vocab
     bos_token_id_ = (token_to_id_.count(bos_token_)) ? token_to_id_[bos_token_] : config.bos_token_id;
     eos_token_id_ = (token_to_id_.count(eos_token_)) ? token_to_id_[eos_token_] : config.eos_token_id;
     pad_token_id_ = (token_to_id_.count(pad_token_)) ? token_to_id_[pad_token_] : -1;
@@ -511,7 +523,7 @@ Tokenizer::Tokenizer(const GGUFData& gguf_data, const ModelConfig& config)
                 part2 = merge_str.substr(space_pos + 1);
                 bpe_merges_[part1 + part2] = rank++; 
             } else {
-                Logger::warning("Malformed or unexpected Tiktoken merge rule encountered: '" + merge_str + "'. Skipping.");
+                Logger::warning("Skipping malformed Tiktoken merge rule from GGUF: '" + merge_str + "'");
             }
         }
         Logger::info("Processed " + std::to_string(bpe_merges_.size()) +
@@ -555,7 +567,7 @@ Tokenizer::Tokenizer(const GGUFData& gguf_data, const ModelConfig& config)
                 // Assuming space separator for now based on Tiktoken format. This might need adjustment.
                 bpe_merges_[part1 + part2] = rank++; 
             } else {
-                Logger::warning("Malformed or unexpected merge rule encountered in SentencePiece path: '" + merge_str + "'. Skipping.");
+                Logger::warning("Skipping malformed SentencePiece merge rule from GGUF: '" + merge_str + "'");
             }
         }
         Logger::info("Processed " + std::to_string(bpe_merges_.size()) +
@@ -1959,11 +1971,11 @@ void Tokenizer::load_sentencepiece_model(const std::string& model_path) {
 
 
 
-void Tokenizer::load_bpe_merges_from_json(const std::string& model_path) {
+void Tokenizer::load_bpe_merges_from_json(const std::string& tokenizer_json_path) {
   try {
-    std::ifstream file(model_path);
+    std::ifstream file(tokenizer_json_path);
     if (!file.is_open()) {
-      throw std::runtime_error("load_bpe_merges_from_json: Failed to open BPE model file: " + model_path);
+      throw std::runtime_error("load_bpe_merges_from_json: Failed to open BPE merges file: " + tokenizer_json_path);
     }
 
     json model_json;
@@ -1976,7 +1988,7 @@ void Tokenizer::load_bpe_merges_from_json(const std::string& model_path) {
     if (model_json.contains("model") && model_json["model"].is_object()) {
         const auto& model_section = model_json["model"];
         if (model_section.contains("merges") && model_section["merges"].is_array()) {
-            Logger::info("load_bpe_merges_from_json: Detected HuggingFace tokenizer.json format with BPE merges.");
+            Logger::info("load_bpe_merges_from_json: Detected HuggingFace tokenizer.json format with BPE merges from: " + tokenizer_json_path);
             const auto& merges = model_section["merges"];
             int rank = 0; // Use index as rank for merges from HF JSON
             for (const auto& merge_entry_json : merges) {
@@ -1992,20 +2004,20 @@ void Tokenizer::load_bpe_merges_from_json(const std::string& model_path) {
                         std::string pair_key = first + second;
                         bpe_merges_[pair_key] = rank++;
                      } else {
-                         Logger::warning("load_bpe_merges_from_json: Skipping malformed merge rule: '" + merge_entry + "'");
+                         Logger::warning("load_bpe_merges_from_json: Skipping malformed merge rule: '" + merge_entry + "' from " + tokenizer_json_path);
                      }
                 } else {
-                     Logger::warning("load_bpe_merges_from_json: Merge entry is not a string, skipping.");
+                     Logger::warning("load_bpe_merges_from_json: Merge entry is not a string, skipping. File: " + tokenizer_json_path);
                 }
             }
         } else {
             // Handle case where tokenizer.json doesn't have expected BPE structure
-            Logger::warning("load_bpe_merges_from_json: HuggingFace format detected, but no 'model.merges' array found in model section.");
+            Logger::warning("load_bpe_merges_from_json: HuggingFace format detected, but no 'model.merges' array found in model section of: " + tokenizer_json_path);
         }
     }
     // Fallback: Check for a simple top-level "merges" array (less common format)
     else if (model_json.contains("merges") && model_json["merges"].is_array()) {
-      Logger::info("load_bpe_merges_from_json: Detected simple top-level 'merges' array format.");
+      Logger::info("load_bpe_merges_from_json: Detected simple top-level 'merges' array format in: " + tokenizer_json_path);
       const auto& merges = model_json["merges"];
       int rank = 0;
        for (const auto& merge_entry_json : merges) {
@@ -2018,32 +2030,36 @@ void Tokenizer::load_bpe_merges_from_json(const std::string& model_path) {
                   std::string pair_key = first + second;
                   bpe_merges_[pair_key] = rank++;
                } else {
-                   Logger::warning("load_bpe_merges_from_json: Skipping malformed merge rule from top-level array: '" + merge_entry + "'");
+                   Logger::warning("load_bpe_merges_from_json: Skipping malformed merge rule from top-level array: '" + merge_entry + "' from " + tokenizer_json_path);
                }
            } else {
-               Logger::warning("load_bpe_merges_from_json: Merge entry in top-level array is not a string, skipping.");
+               Logger::warning("load_bpe_merges_from_json: Merge entry in top-level array is not a string, skipping. File: " + tokenizer_json_path);
         }
       }
     } else {
       // If neither format is found
       throw std::runtime_error(
-          "load_bpe_merges_from_json: Unsupported BPE model format: no 'model.merges' or top-level 'merges' array found in '" + model_path + "'");
+          "load_bpe_merges_from_json: Unsupported BPE model format: no 'model.merges' or top-level 'merges' array found in '" + tokenizer_json_path + "'");
     }
 
     if (bpe_merges_.empty()) {
-      Logger::warning("load_bpe_merges_from_json: No BPE merges were loaded from the file: " + model_path);
+      Logger::warning("load_bpe_merges_from_json: No BPE merges were loaded from the file: " + tokenizer_json_path);
     } else {
       Logger::info("load_bpe_merges_from_json: Loaded " + std::to_string(bpe_merges_.size()) +
-                   " BPE merges with ranks from " + model_path);
+                   " BPE merges with ranks from " + tokenizer_json_path);
     }
 
   } catch (const json::exception& e) {
-    throw std::runtime_error("Error parsing BPE merges JSON from " + model_path + ": " + e.what());
+    throw std::runtime_error("Error parsing BPE merges JSON from " + tokenizer_json_path + ": " + e.what());
   } catch (const std::exception& e) {
-    throw std::runtime_error("Error loading BPE merges from " + model_path + ": " + std::string(e.what()));
+    throw std::runtime_error("An unexpected error occurred while loading BPE merges from " + tokenizer_json_path + ": " + std::string(e.what()));
   }
 }
 
+void Tokenizer::load_tiktoken_merges_from_gguf(const GGUFData& gguf_data) {
+// ... existing code ...
+
+}
 
 std::string Tokenizer::capitalize_first_letter(std::string s) const { // Added Tokenizer:: scope and const
   if (s.empty()) return s;

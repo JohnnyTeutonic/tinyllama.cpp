@@ -240,13 +240,10 @@ void matvec_bf16_f32_cuda(cublasHandle_t handle, const uint16_t* mat_bf16_dev,
 
   gpuErrchk(cudaMalloc(&mat_fp32_dev, mat_size * sizeof(float)));
 
-  Logger::error(
-      "matvec_bf16_f32_cuda fallback was called, but conversion kernel is "
-      "removed! Zeroing output.");
-  gpuErrchk(
-      cudaMemsetAsync(out_f32_dev, 0, (size_t)rows * sizeof(float), stream));
-  gpuErrchk(cudaFree(mat_fp32_dev));
-  return;
+  const int threads_per_block_convert = 256;
+  const int num_blocks_convert = (mat_size + threads_per_block_convert - 1) / threads_per_block_convert;
+  convert_bf16_to_fp32_kernel<<<num_blocks_convert, threads_per_block_convert, 0, stream>>>(mat_bf16_dev, mat_fp32_dev, mat_size);
+  gpuErrchk(cudaGetLastError()); // Check for errors after kernel launch
 
   const float alpha = 1.0f;
   const float beta = 0.0f;
@@ -526,24 +523,32 @@ void swiglu_cuda(const float* gate_dev, const float* up_dev, float* out_dev,
 }
 
 __global__ void rope_kernel(float* x, int num_heads, int head_dim,
-                            const float* all_freqs_cis_base, int pos) {
-  int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  int total_pairs = num_heads * (head_dim / 2);
+                            const float* all_freqs_cis_base, int pos, bool use_adjacent_pairing) {
+  int idx = blockIdx.x * blockDim.x + threadIdx.x; // Global thread index for pairs
+  int total_pairs = num_heads * (head_dim / 2);   // Total (dim_i, dim_{i+1}) or (dim_i, dim_{i+D/2}) pairs across all heads
   if (idx >= total_pairs) return;
 
-  int head = idx / (head_dim / 2);
-  int pair_idx_in_head = idx % (head_dim / 2);
+  int head_idx = idx / (head_dim / 2);        // The specific head this thread works on
+  int dim_pair_idx = idx % (head_dim / 2);  // The index of the pair within this head (0 to head_dim/2 - 1)
 
-  size_t freq_base_offset =
-      (size_t)pos * head_dim + (size_t)pair_idx_in_head * 2;
+  size_t freq_cos_sin_pair_idx = (size_t)pos * (head_dim / 2) + dim_pair_idx;
+  size_t freq_base_offset = freq_cos_sin_pair_idx * 2; 
 
-  int base_x0 = head * head_dim + pair_idx_in_head;
-  int base_x1 = head * head_dim + pair_idx_in_head + head_dim / 2;
+  int base_x0, base_x1;
+  if (use_adjacent_pairing) {
+    // Adjacent pairing: Rotate x[h*HD + 2*j] with x[h*HD + 2*j + 1]
+    base_x0 = head_idx * head_dim + (dim_pair_idx * 2);
+    base_x1 = head_idx * head_dim + (dim_pair_idx * 2 + 1);
+  } else {
+    // Split-half pairing: Rotate x[h*HD + j] with x[h*HD + j + head_dim/2]
+    base_x0 = head_idx * head_dim + dim_pair_idx;
+    base_x1 = head_idx * head_dim + dim_pair_idx + (head_dim / 2);
+  }
 
   float x0 = x[base_x0];
   float x1 = x[base_x1];
+  
   float cos_val = all_freqs_cis_base[freq_base_offset];
-
   float sin_val = all_freqs_cis_base[freq_base_offset + 1];
 
   x[base_x0] = x0 * cos_val - x1 * sin_val;
@@ -551,14 +556,13 @@ __global__ void rope_kernel(float* x, int num_heads, int head_dim,
 }
 
 void rope_cuda(float* x_dev, int num_heads, int head_dim,
-               const float* all_freqs_cis_dev_base, int pos,
-               cudaStream_t stream) {
+               const float* all_freqs_cis_dev_base, int pos, bool use_adjacent_pairing, cudaStream_t stream) {
   int total_pairs = num_heads * (head_dim / 2);
   int threads_per_block = 256;
   int num_blocks = (total_pairs + threads_per_block - 1) / threads_per_block;
 
   rope_kernel<<<num_blocks, threads_per_block, 0, stream>>>(
-      x_dev, num_heads, head_dim, all_freqs_cis_dev_base, pos);
+      x_dev, num_heads, head_dim, all_freqs_cis_dev_base, pos, use_adjacent_pairing);
   gpuErrchk(cudaGetLastError());
 }
 
@@ -567,60 +571,149 @@ __global__ void attention_kernel(const float* Q_current,
                                  const float* V_layer_cache_base, float* out,
                                  int current_seq_len, int head_dim, float scale,
                                  int cache_num_kv_heads, int num_q_heads) {
-  int q_head = blockIdx.x;
-  if (q_head >= num_q_heads) return;
+  // Q_current: [num_q_heads, head_dim] (actually q_dev_ which is [hs])
+  // K_layer_cache_base: [max_seq_len, cache_num_kv_heads, head_dim]
+  // V_layer_cache_base: [max_seq_len, cache_num_kv_heads, head_dim]
+  // out: [num_q_heads, head_dim] (actually attn_out_dev_ which is [hs])
 
+  // Kernel launch: grid(num_q_heads), block(head_dim)
+  // blockIdx.x is q_head_idx
+  // threadIdx.x is d_idx (dimension index within head_dim)
+
+  int q_head_idx = blockIdx.x;
+  int d_idx = threadIdx.x; // dimension index for this thread
+
+  if (q_head_idx >= num_q_heads) return; // Should not happen with correct launch
+
+  // Determine the corresponding KV head for this Q head (for GQA/MQA)
   int heads_per_kv = num_q_heads / cache_num_kv_heads;
-  int kv_head_idx = q_head / heads_per_kv;
+  int kv_head_idx = q_head_idx / heads_per_kv;
 
-  extern __shared__ float shared_scores[];
-  float* scores = shared_scores;
+  // Shared memory for scores (one score per k_pos) and for dot product reduction
+  extern __shared__ float shared_data[];
+  float* scores = shared_data; // First part of shared_data: size current_seq_len
+  float* dot_product_terms = &shared_data[current_seq_len]; // Second part: size head_dim (blockDim.x)
 
-  float max_score = -INFINITY;
-  const float* q_head_ptr = Q_current + q_head * head_dim;
+  // Pointer to the current query head's data
+  const float* q_head_ptr = Q_current + q_head_idx * head_dim;
 
+  // --- 1. Calculate Scores (Q_head dot K_k) ---
+  // Each block (q_head) calculates all 'current_seq_len' scores.
+  // The 'head_dim' threads in the block cooperate to calculate each dot product.
   for (int k_pos = 0; k_pos < current_seq_len; ++k_pos) {
-    size_t k_cache_base_offset = (size_t)k_pos * cache_num_kv_heads * head_dim +
-                                 (size_t)kv_head_idx * head_dim;
-    const float* k_vec_ptr = K_layer_cache_base + k_cache_base_offset;
+    // Pointer to the k_pos-th key vector for the relevant kv_head
+    size_t k_vec_offset = (size_t)k_pos * cache_num_kv_heads * head_dim +
+                          (size_t)kv_head_idx * head_dim;
+    const float* k_vec_ptr = K_layer_cache_base + k_vec_offset;
 
-    float dot = 0.0f;
+    // Parallel dot product calculation
+    // Each thread d_idx computes one term of the dot product
+    dot_product_terms[d_idx] = q_head_ptr[d_idx] * k_vec_ptr[d_idx];
+    __syncthreads(); // Ensure all terms are written before reduction
 
-    for (int d = 0; d < head_dim; ++d) {
-      dot += q_head_ptr[d] * k_vec_ptr[d];
+    // Reduction in shared memory (e.g., by thread 0 or tree-based)
+    if (d_idx == 0) {
+      float current_dot = 0.0f;
+      for (int r = 0; r < head_dim; ++r) {
+        current_dot += dot_product_terms[r];
+      }
+      scores[k_pos] = current_dot * scale;
     }
-    dot *= scale;
-    scores[k_pos] = dot;
-    if (dot > max_score) max_score = dot;
+    __syncthreads(); // Ensure scores[k_pos] is written before next k_pos iteration (if reduction by d_idx==0)
+                     // or before softmax if reduction was parallel.
+                     // If d_idx == 0 writes, all other threads must wait for it to complete for this k_pos.
   }
+  // After this loop, 'scores' array (in shared memory) contains all dot products for the current q_head.
+  // All threads in the block have the same 'scores' array content due to __syncthreads.
 
-  float exp_sum = 0.0f;
-  for (int k_pos = 0; k_pos < current_seq_len; ++k_pos) {
-    float prob = expf(scores[k_pos] - max_score);
-    scores[k_pos] = prob;
-    exp_sum += prob;
-  }
-  float inv_sum = 1.0f / (exp_sum + 1e-9f);
-
-  for (int k_pos = 0; k_pos < current_seq_len; ++k_pos) {
-    scores[k_pos] *= inv_sum;
-  }
-
-  int d = threadIdx.x;
-  if (d < head_dim) {
-    double weighted_sum = 0.0;
-    for (int k_pos = 0; k_pos < current_seq_len; ++k_pos) {
-      size_t v_cache_base_offset =
-          (size_t)k_pos * cache_num_kv_heads * head_dim +
-          (size_t)kv_head_idx * head_dim;
-      const float* v_vec_ptr = V_layer_cache_base + v_cache_base_offset;
-
-      weighted_sum += static_cast<double>(scores[k_pos]) *
-                      static_cast<double>(v_vec_ptr[d]);
+  // --- 2. Softmax ---
+  // Parallel reduction to find max_score among scores[0...current_seq_len-1]
+  // Each thread handles a portion of 'scores' array for reduction.
+  float thread_max_score = -INFINITY;
+  for (int i = d_idx; i < current_seq_len; i += blockDim.x) { // blockDim.x is head_dim
+    if (scores[i] > thread_max_score) {
+      thread_max_score = scores[i];
     }
-
-    out[q_head * head_dim + d] = static_cast<float>(weighted_sum);
   }
+  // Reduce thread_max_score across the block
+  // Simple single-pass reduction (can be optimized with tree reduction if head_dim is large)
+  dot_product_terms[d_idx] = thread_max_score; // Repurpose dot_product_terms shared memory
+  __syncthreads();
+
+  float block_max_score = -INFINITY;
+  if (d_idx == 0) {
+    for (int r = 0; r < head_dim; ++r) { // head_dim might be > current_seq_len for first few tokens
+                                         // or if many threads are idle.
+                                         // This reduction should be over min(head_dim, current_seq_len) active reduction participants or up to head_dim if all threads had work
+      if (dot_product_terms[r] > block_max_score) { // Check if dot_product_terms[r] was validly written
+        block_max_score = dot_product_terms[r];
+      }
+    }
+  }
+  __syncthreads(); // Broadcast block_max_score (implicit as thread 0 wrote it, others read after sync)
+                  // To be safer, explicitly read from shared mem if other threads need it, or broadcast.
+                  // For now, assume thread 0 proceeds or block_max_score is copied to a register for all.
+  // A better reduction for block_max_score (if not all threads had work in the loop above):
+  // __shared__ float temp_max_val;
+  // if(d_idx == 0) temp_max_val = -INFINITY;
+  // __syncthreads();
+  // atomicMax(&temp_max_val, thread_max_score); // if current_seq_len is large
+  // __syncthreads();
+  // block_max_score = temp_max_val;
+  // For now, using the simpler reduction and assuming block_max_score is available to all after sync.
+  // Re-assign to register to ensure all threads have it after potential overwrite of dot_product_terms[0]
+  if(d_idx == 0) dot_product_terms[0] = block_max_score; // Store it.
+  __syncthreads();
+  block_max_score = dot_product_terms[0]; // All threads read it.
+
+
+  // Calculate exp scores and sum
+  float thread_exp_sum = 0.0f;
+  for (int i = d_idx; i < current_seq_len; i += blockDim.x) {
+    float prob = expf(scores[i] - block_max_score);
+    scores[i] = prob; // Update scores in-place with exp(val - max)
+    thread_exp_sum += prob;
+  }
+  // Reduce thread_exp_sum across the block
+  dot_product_terms[d_idx] = thread_exp_sum; // Repurpose again
+  __syncthreads();
+
+  float block_exp_sum = 0.0f;
+  if (d_idx == 0) {
+    for (int r = 0; r < head_dim; ++r) { // Similar concern as max_score reduction range
+      block_exp_sum += dot_product_terms[r];
+    }
+  }
+  __syncthreads();
+  // Store and reload block_exp_sum for all threads
+  if(d_idx == 0) dot_product_terms[0] = block_exp_sum;
+  __syncthreads();
+  block_exp_sum = dot_product_terms[0];
+
+
+  float inv_sum = 1.0f / (block_exp_sum + 1e-9f); // Add epsilon for stability
+
+  // Normalize scores in shared memory
+  for (int i = d_idx; i < current_seq_len; i += blockDim.x) {
+    scores[i] *= inv_sum;
+  }
+  __syncthreads(); // Ensure all scores are normalized before weighted sum
+
+  // --- 3. Weighted Sum of Values ---
+  // Each thread d_idx calculates one element of the output vector for this q_head.
+  // out_for_this_q_head[d_idx] = sum over k_pos ( scores[k_pos] * V_value_for_d_idx_at_k_pos )
+
+  double weighted_val_d = 0.0; // Use double for accumulation
+  for (int k_pos = 0; k_pos < current_seq_len; ++k_pos) {
+    size_t v_vec_offset = (size_t)k_pos * cache_num_kv_heads * head_dim +
+                          (size_t)kv_head_idx * head_dim;
+    const float* v_vec_ptr = V_layer_cache_base + v_vec_offset;
+    
+    weighted_val_d += static_cast<double>(scores[k_pos]) * static_cast<double>(v_vec_ptr[d_idx]);
+  }
+  
+  // Write the final result for this thread's dimension d_idx
+  out[q_head_idx * head_dim + d_idx] = static_cast<float>(weighted_val_d);
 }
 
 void attention_cuda(const float* Q_current_dev, const float* K_layer_cache_base,
@@ -628,10 +721,24 @@ void attention_cuda(const float* Q_current_dev, const float* K_layer_cache_base,
                     int num_q_heads, int current_seq_len, int head_dim,
                     float scale, int cache_max_seq_len, int cache_num_kv_heads,
                     cudaStream_t stream) {
-  dim3 grid(num_q_heads);
-  dim3 block(head_dim);
+  dim3 grid(num_q_heads);  // One block per Q head
+  dim3 block(head_dim);   // head_dim threads per block
 
-  size_t shared_mem_bytes = current_seq_len * sizeof(float);
+  // Shared memory: scores array (size current_seq_len) + dot_product_terms (size head_dim for reduction)
+  size_t shared_mem_bytes = (current_seq_len + head_dim) * sizeof(float);
+  
+  // Check if requested shared memory exceeds device limits (optional, good practice)
+  // int device;
+  // cudaGetDevice(&device);
+  // cudaDeviceProp prop;
+  // cudaGetDeviceProperties(&prop, device);
+  // if (shared_mem_bytes > prop.sharedMemPerBlock) {
+  //   // Handle error: request exceeds available shared memory
+  //   // This could involve logging, throwing an error, or using a different kernel version
+  //   printf("Requested shared memory (%zu bytes) exceeds device limit (%d bytes)\\n", shared_mem_bytes, prop.sharedMemPerBlock);
+  //   return; // Or throw
+  // }
+
 
   attention_kernel<<<grid, block, shared_mem_bytes, stream>>>(
       Q_current_dev, K_layer_cache_base, V_layer_cache_base, out_dev,
@@ -848,6 +955,16 @@ void lookup_embedding_cuda(const void* table_dev, float* output_dev,
       table_dev, output_dev, token_id, hidden_size, vocab_size, is_bf16);
 
   gpuErrchk(cudaGetLastError());
+}
+
+// Kernel definition for BF16 to FP32 conversion
+__global__ void convert_bf16_to_fp32_kernel(const uint16_t* __restrict__ bf16_in,
+                                            float* __restrict__ fp32_out,
+                                            size_t n_elements) {
+  size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx < n_elements) {
+    fp32_out[idx] = bf16_to_float32_device(bf16_in[idx]);
+  }
 }
 
 #endif

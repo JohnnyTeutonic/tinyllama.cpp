@@ -134,129 +134,194 @@ static int sample_top_k_top_p_temperature(const std::vector<float>& logits,
   return prob_idx[sampled_idx_in_filtered].second;
 }
 
-TinyLlamaSession::TinyLlamaSession(const std::string& model_path,
-                                   const std::string& tokenizer_path,
+TinyLlamaSession::TinyLlamaSession(const std::string& model_path_arg,
+                                   const std::string& tokenizer_path_arg,
                                    int threads,
                                    int num_gpu_layers_from_cli,
                                    bool cli_use_mmap)
-    : tokenizer_(nullptr), model_(nullptr), kv_cache_() {
-  Logger::info(std::string("TinyLlamaSession constructor entered. Model path: ") +
-               model_path + ", Tokenizer path (CLI hint): " + tokenizer_path +
+    : threads_(threads), rng_(std::random_device{}()) {
+  Logger::info("TinyLlamaSession constructor entered. Model path: " + model_path_arg +
+               ", Tokenizer path: " + tokenizer_path_arg +
                ", Threads: " + std::to_string(threads) +
-               ", Num GPU Layers from CLI: " + std::to_string(num_gpu_layers_from_cli) +
-               ", Use mmap from CLI: " + (cli_use_mmap ? "true" : "false"));
+               ", Num GPU Layers (CLI): " + std::to_string(num_gpu_layers_from_cli) +
+               ", Use MMAP (CLI): " + (cli_use_mmap ? "true" : "false"));
 
-  ModelConfig initial_model_constructor_config; 
-  initial_model_constructor_config.num_cpu_offload_layers = 0; 
-  initial_model_constructor_config.use_mmap_for_gguf = cli_use_mmap; 
+  std::string effective_model_file_path = model_path_arg; 
+  std::string path_for_config_json = model_path_arg;
 
-  int total_hidden_layers_from_file = 0;
-  std::filesystem::path path_obj(model_path);
-  std::filesystem::path base_dir = std::filesystem::is_directory(path_obj) ? path_obj : path_obj.parent_path();
-  std::string default_tokenizer_json_path = (base_dir / "tokenizer.json").string();
-
-  Logger::info(std::string("Determined base_dir: ") + base_dir.string());
-  Logger::info(std::string("Default external tokenizer.json path: ") + default_tokenizer_json_path);
-
-  
-  if (std::filesystem::is_directory(path_obj)) { // SafeTensors Path
-    Logger::info(std::string("Loading SafeTensors model from directory: ") + model_path);
-    std::string config_json_path_str = (base_dir / "config.json").string();
-    std::string safetensors_path_str = (base_dir / "model.safetensors").string();
-
-    if (!std::filesystem::exists(config_json_path_str)) {
-      throw std::runtime_error(std::string("config.json not found in directory: ") + model_path);
-    }
-    if (!std::filesystem::exists(safetensors_path_str)) {
-      throw std::runtime_error(std::string("model.safetensors not found in directory: ") + model_path);
-    }
-
-    try {
-      nlohmann::json config_json = nlohmann::json::parse(read_file_api(config_json_path_str));
-      initial_model_constructor_config = parse_model_config(config_json);
-      total_hidden_layers_from_file = initial_model_constructor_config.num_hidden_layers;
-      initial_model_constructor_config.use_mmap_for_gguf = cli_use_mmap; 
-      Logger::info(std::string("SafeTensors config.json: num_hidden_layers = ") + std::to_string(total_hidden_layers_from_file));
-
-      int actual_cpu_offload_layers = 0;
-      if (num_gpu_layers_from_cli == -1) actual_cpu_offload_layers = 0;
-      else if (num_gpu_layers_from_cli == 0) actual_cpu_offload_layers = total_hidden_layers_from_file;
-      else actual_cpu_offload_layers = total_hidden_layers_from_file - num_gpu_layers_from_cli;
-      
-      actual_cpu_offload_layers = std::max(0, std::min(actual_cpu_offload_layers, total_hidden_layers_from_file));
-      initial_model_constructor_config.num_cpu_offload_layers = actual_cpu_offload_layers;
-      Logger::info(std::string("SafeTensors path: initial_model_constructor_config num_cpu_offload_layers = ") + std::to_string(initial_model_constructor_config.num_cpu_offload_layers));
-
-      SafeTensorsLoader st_loader(safetensors_path_str);
-      model_ = std::make_unique<TinyLlamaModel>(initial_model_constructor_config, st_loader);
-    } catch (const std::exception& e) {
-      throw std::runtime_error(std::string("Failed during SafeTensors model loading: ") + e.what());
-    }
-  } else if (std::filesystem::is_regular_file(path_obj) && path_obj.extension() == ".gguf") { // GGUF Path
-    Logger::info(std::string("Loading GGUF model from file: ") + model_path);
-    try {
-      Logger::info("[API GGUF Path] Before load_gguf_meta");
-      auto temp_gguf_data_uptr = std::make_unique<GGUFData>(load_gguf_meta(model_path, cli_use_mmap));
-      Logger::info("[API GGUF Path] After load_gguf_meta, before parse_model_config_from_gguf");
-      
-      ModelConfig config_parsed_from_gguf = parse_model_config_from_gguf(*temp_gguf_data_uptr);
-      Logger::info("[API GGUF Path] After parse_model_config_from_gguf");
-      
-      total_hidden_layers_from_file = config_parsed_from_gguf.num_hidden_layers;
-      Logger::info(std::string("GGUF metadata peek (from API session): num_hidden_layers = ") + std::to_string(total_hidden_layers_from_file));
-      
-      // Prepare the final config for the model constructor
-      ModelConfig final_model_constructor_config = config_parsed_from_gguf; // Start with GGUF parsed config
-      final_model_constructor_config.use_mmap_for_gguf = cli_use_mmap; // Apply CLI mmap preference
-      
-      int actual_cpu_offload_layers = 0;
-      if (num_gpu_layers_from_cli == -1) actual_cpu_offload_layers = 0; // All GPU (or all CPU if no GPU support)
-      else if (num_gpu_layers_from_cli == 0) actual_cpu_offload_layers = total_hidden_layers_from_file; // All CPU
-      else actual_cpu_offload_layers = total_hidden_layers_from_file - num_gpu_layers_from_cli;
-      
-      actual_cpu_offload_layers = std::max(0, std::min(actual_cpu_offload_layers, total_hidden_layers_from_file));
-      final_model_constructor_config.num_cpu_offload_layers = actual_cpu_offload_layers;
-      Logger::info(std::string("GGUF path (API session): final_model_constructor_config num_cpu_offload_layers = ") + std::to_string(final_model_constructor_config.num_cpu_offload_layers));
-
-      Logger::info("[API GGUF Path] Before TinyLlamaModel constructor call (with GGUFData uptr)");
-      model_ = std::make_unique<TinyLlamaModel>(final_model_constructor_config, std::move(temp_gguf_data_uptr));
-      Logger::info("[API GGUF Path] After TinyLlamaModel constructor call (with GGUFData uptr)");
-    } catch (const std::exception& e) {
-      Logger::error("[API GGUF Path] Exception caught: " + std::string(e.what()));
-      throw std::runtime_error(std::string("Failed to load GGUF model from ") + model_path + ": " + e.what());
-    }
+  ModelConfig initial_model_config_for_model_ctor;
+  initial_model_config_for_model_ctor.use_mmap_for_gguf = cli_use_mmap;
+  if (num_gpu_layers_from_cli < 0) { 
+      initial_model_config_for_model_ctor.num_cpu_offload_layers = 0;
   } else {
-     throw std::runtime_error(std::string("Invalid model_path: Must be a directory (for SafeTensors) or a .gguf file. Path: ") + model_path);
+      initial_model_config_for_model_ctor.num_cpu_offload_layers = num_gpu_layers_from_cli;
+  }
+
+  std::filesystem::path fs_model_path(model_path_arg);
+  bool is_dir = std::filesystem::is_directory(fs_model_path);
+
+  if (is_dir) {
+    Logger::info("Model path is a directory. Assuming SafeTensors model directory: " + model_path_arg);
+    effective_model_file_path = (fs_model_path / "model.safetensors").string();
+    std::string config_json_path_in_dir = (fs_model_path / "config.json").string(); 
+
+    Logger::info("Derived SafeTensors model file path: " + effective_model_file_path);
+    Logger::info("Path for loading config.json: " + config_json_path_in_dir);
+
+    // Directly populate initial_model_config_for_model_ctor
+    // load_model_config_from_json returns bool and populates the passed ModelConfig&
+    bool st_config_loaded = SafeTensorsLoader::load_model_config_from_json(config_json_path_in_dir, initial_model_config_for_model_ctor);
+    
+    if (st_config_loaded) {
+        Logger::info("Successfully loaded config.json directly into initial_model_config_for_model_ctor.");
+        // Log tokenizer_family IMMEDIATELY after loading from config.json
+        std::string family_after_json_load = "UNKNOWN_POST_JSON_LOAD";
+        if (initial_model_config_for_model_ctor.tokenizer_family == ModelConfig::TokenizerFamily::LLAMA_SENTENCEPIECE) family_after_json_load = "LLAMA_SENTENCEPIECE";
+        else if (initial_model_config_for_model_ctor.tokenizer_family == ModelConfig::TokenizerFamily::LLAMA3_TIKTOKEN) family_after_json_load = "LLAMA3_TIKTOKEN";
+        Logger::info("[API_CPP_POST_JSON_LOAD_DIR_CASE] Tokenizer family in initial_model_config_for_model_ctor: " + family_after_json_load);
+        // tokenizer_family should now be set in initial_model_config_for_model_ctor
+        // num_hidden_layers is also now set from config.json
+    } else {
+        Logger::warning("Failed to load config.json for SafeTensors. initial_model_config_for_model_ctor will have defaults/CLI overrides for some fields, tokenizer_family likely UNKNOWN.");
+        // If config.json fails, num_hidden_layers might be 0 or default, which will affect cpu offload calculation.
+        // It's crucial config.json loads for correct layer counts.
+    }
+    
+    // Apply CLI overrides for mmap and GPU layers. GPU layer logic depends on total_hidden_layers from config.
+    initial_model_config_for_model_ctor.use_mmap_for_gguf = cli_use_mmap; 
+
+    int total_layers_from_config = initial_model_config_for_model_ctor.num_hidden_layers;
+    if (total_layers_from_config <= 0 && st_config_loaded) {
+        Logger::warning("config.json loaded but num_hidden_layers is <= 0. GPU offload logic might be incorrect.");
+    } else if (total_layers_from_config <= 0 && !st_config_loaded) {
+        Logger::warning("config.json NOT loaded and num_hidden_layers is <= 0 (default). GPU offload may not work as expected. Model load will likely fail.");
+        // If config.json didn't load, total_layers_from_config is likely 0 from default ModelConfig.
+        // The TinyLlamaModel constructor will ultimately use its own parsed config, but this intermediate step needs care.
+    }
+
+    if (num_gpu_layers_from_cli < 0) { // -1 signifies all layers on GPU
+        initial_model_config_for_model_ctor.num_cpu_offload_layers = 0;
+    } else if (num_gpu_layers_from_cli == 0) { // 0 signifies all layers on CPU
+        initial_model_config_for_model_ctor.num_cpu_offload_layers = total_layers_from_config; // All layers offloaded to CPU
+    } else { // N > 0 signifies N layers on GPU
+        if (total_layers_from_config > 0) {
+            initial_model_config_for_model_ctor.num_cpu_offload_layers = total_layers_from_config - num_gpu_layers_from_cli;
+        } else {
+            // Cannot determine actual GPU layer count if total_layers_from_config is unknown.
+            // Pass the CLI hint, TinyLlamaModel ctor will deal with it against its own parsed config.
+            initial_model_config_for_model_ctor.num_cpu_offload_layers = num_gpu_layers_from_cli; 
+            Logger::warning("Total hidden layers unknown from config.json before model load; passing num_gpu_layers_from_cli as num_cpu_offload_layers hint.");
+        }
+    }
+    // Clamp num_cpu_offload_layers
+    if (total_layers_from_config > 0) {
+         initial_model_config_for_model_ctor.num_cpu_offload_layers = std::max(0, std::min(initial_model_config_for_model_ctor.num_cpu_offload_layers, total_layers_from_config));
+    }
+
+    initial_model_config_for_model_ctor.is_gguf_file_loaded = false;
+
+    SafeTensorsLoader st_loader(effective_model_file_path); 
+    model_ = std::make_unique<TinyLlamaModel>(initial_model_config_for_model_ctor, st_loader);
+    config_ = model_->get_config(); 
+    config_.is_gguf_file_loaded = false; // Ensure this is set for session's copy too
+
+  } else { // Not a directory, assume it's a file path and check extension
+    std::string extension = fs_model_path.extension().string();
+    std::transform(extension.begin(), extension.end(), extension.begin(), ::tolower);
+
+    if (extension == ".gguf") {
+      Logger::info("GGUF model type detected by extension for Session constructor: " + model_path_arg);
+      // For GGUF, num_cpu_offload_layers is determined *after* parsing GGUF meta in TinyLlamaModel constructor.
+      // We pass num_gpu_layers_from_cli as a hint in initial_model_config_for_model_ctor.num_cpu_offload_layers.
+      // The TinyLlamaModel GGUF constructor will interpret it correctly against its loaded num_hidden_layers.
+      // If num_gpu_layers_from_cli is (e.g.) 0 (all CPU), it might be passed as num_cpu_offload_layers = 0 here,
+      // but the model constructor should override this to num_hidden_layers.
+      // This part is tricky; the model constructor has the final say for GGUF based on its own metadata.
+      // The initial_model_config_for_model_ctor.num_cpu_offload_layers set before this branch is used as a hint.
+      model_ = std::make_unique<TinyLlamaModel>(initial_model_config_for_model_ctor, model_path_arg);
+      config_ = model_->get_config(); 
+    } else if (extension == ".safetensors") {
+      Logger::info("SafeTensors model type detected by extension for Session constructor (file case): " + model_path_arg);
+      effective_model_file_path = model_path_arg;
+      
+      bool st_config_loaded = SafeTensorsLoader::load_model_config_from_json(effective_model_file_path, initial_model_config_for_model_ctor);
+      if (st_config_loaded) {
+          Logger::info("Successfully loaded config.json for SafeTensors in Session ctor (file case).");
+          // Log tokenizer_family IMMEDIATELY after loading from config.json (file case)
+          std::string family_after_json_load_file_case = "UNKNOWN_POST_JSON_LOAD_FILE_CASE";
+          if (initial_model_config_for_model_ctor.tokenizer_family == ModelConfig::TokenizerFamily::LLAMA_SENTENCEPIECE) family_after_json_load_file_case = "LLAMA_SENTENCEPIECE";
+          else if (initial_model_config_for_model_ctor.tokenizer_family == ModelConfig::TokenizerFamily::LLAMA3_TIKTOKEN) family_after_json_load_file_case = "LLAMA3_TIKTOKEN";
+          Logger::info("[API_CPP_POST_JSON_LOAD_FILE_CASE] Tokenizer family in initial_model_config_for_model_ctor: " + family_after_json_load_file_case);
+          // tokenizer_family and num_hidden_layers are now set in initial_model_config_for_model_ctor
+      } else {
+          Logger::warning("Failed to load config.json for SafeTensors in Session ctor (file case). Model will use defaults or CLI overrides.");
+      }
+      
+      initial_model_config_for_model_ctor.use_mmap_for_gguf = cli_use_mmap;
+      // Correctly calculate num_cpu_offload_layers based on total_layers_from_config
+      int total_layers_from_config_file_case = initial_model_config_for_model_ctor.num_hidden_layers;
+      if (num_gpu_layers_from_cli < 0) { 
+          initial_model_config_for_model_ctor.num_cpu_offload_layers = 0;
+      } else if (num_gpu_layers_from_cli == 0) { 
+          initial_model_config_for_model_ctor.num_cpu_offload_layers = total_layers_from_config_file_case;
+      } else { 
+          if (total_layers_from_config_file_case > 0) {
+            initial_model_config_for_model_ctor.num_cpu_offload_layers = total_layers_from_config_file_case - num_gpu_layers_from_cli;
+          } else {
+            initial_model_config_for_model_ctor.num_cpu_offload_layers = num_gpu_layers_from_cli; 
+            Logger::warning("Total hidden layers unknown from config.json (file case); passing num_gpu_layers_from_cli as num_cpu_offload_layers hint.");
+          }
+      }
+      if (total_layers_from_config_file_case > 0) {
+        initial_model_config_for_model_ctor.num_cpu_offload_layers = std::max(0, std::min(initial_model_config_for_model_ctor.num_cpu_offload_layers, total_layers_from_config_file_case));
+      }
+
+      initial_model_config_for_model_ctor.is_gguf_file_loaded = false;
+
+      SafeTensorsLoader st_loader(effective_model_file_path);
+      model_ = std::make_unique<TinyLlamaModel>(initial_model_config_for_model_ctor, st_loader);
+      config_ = model_->get_config(); 
+      config_.is_gguf_file_loaded = false; // Ensure this is set for session's copy too
+    } else {
+      throw std::runtime_error("Unsupported model file type or extension in Session constructor: " + model_path_arg +
+                               ". Please provide a directory for SafeTensors, a .gguf file, or a .safetensors file.");
+    }
   }
 
   if (!model_) {
-    throw std::runtime_error("Model pointer is null after loading attempt.");
+      throw std::runtime_error("Model pointer is null after instantiation attempt in Session constructor.");
   }
-  config_ = model_->get_config(); 
-  std::string family_str_log = "UNKNOWN";
-  if (config_.tokenizer_family == ModelConfig::TokenizerFamily::LLAMA3_TIKTOKEN) family_str_log = "LLAMA3_TIKTOKEN";
-  else if (config_.tokenizer_family == ModelConfig::TokenizerFamily::LLAMA_SENTENCEPIECE) family_str_log = "LLAMA_SENTENCEPIECE";
-  Logger::info(std::string("Model loaded. Definitive ModelConfig obtained. Architecture: ") + config_.architecture +
-               ", Tokenizer Family: " + family_str_log +
-               ", Vocab Size: " + std::to_string(config_.vocab_size));
+  // At this point, model_ is constructed, and model_->get_config() is the definitive one.
+  // config_ member of TinyLlamaSession is now synchronized with model_->get_config().
 
-  
-  Logger::info("[Tokenizer Init Check] config_.is_gguf_file_loaded = " + std::string(config_.is_gguf_file_loaded ? "true" : "false"));
   try {
     if (config_.is_gguf_file_loaded) {
-      const GGUFData* gguf_data_ptr = model_->get_gguf_data();
-      if (!gguf_data_ptr) {
-        throw std::runtime_error("GGUF model loaded but GGUFData pointer is null from model.");
+      const GGUFData* gguf_data = model_->get_gguf_data();
+      if (!gguf_data) {
+          throw std::runtime_error("GGUF model loaded but GGUFData is null in Session constructor.");
       }
-      Logger::info("Attempting to initialize tokenizer from GGUF data directly.");
-      tokenizer_ = std::make_unique<Tokenizer>(*gguf_data_ptr, config_);
-      Logger::info("Tokenizer initialized from GGUF data.");
-    } else { // SafeTensors path - tokenizer is always external from tokenizer.json
-      Logger::info(std::string("SafeTensors model: Initializing tokenizer from external file: ") + default_tokenizer_json_path);
-      if (!std::filesystem::exists(default_tokenizer_json_path)) {
-        throw std::runtime_error(std::string("tokenizer.json not found at: ") + default_tokenizer_json_path);
+      tokenizer_ = std::make_unique<Tokenizer>(*gguf_data, config_);
+      Logger::info("Tokenizer initialized from GGUF metadata.");
+    } else { // SafeTensors (either from directory or direct .safetensors file)
+      std::filesystem::path p_tokenizer_arg(tokenizer_path_arg);
+      std::string tokenizer_dir = p_tokenizer_arg.parent_path().string();
+      if (tokenizer_dir.empty()) { 
+          tokenizer_dir = "."; 
       }
-      tokenizer_ = std::make_unique<Tokenizer>(default_tokenizer_json_path, default_tokenizer_json_path, config_); 
+      
+      std::string vocab_json_path = (std::filesystem::path(tokenizer_dir) / "tokenizer.json").string();
+      // The model_path for the tokenizer constructor should be the actual sentencepiece model file, e.g. data/tokenizer.model
+      // tokenizer_path_arg already holds this (e.g. data/tokenizer.model)
+      std::string sp_model_path = tokenizer_path_arg; 
+
+      Logger::info("Initializing Tokenizer for SafeTensors. Vocab JSON path: " + vocab_json_path + ", SP Model path: " + sp_model_path);
+      // Log the tokenizer_family from the config_ that will be passed to the Tokenizer
+      std::string family_to_log = "UNKNOWN_IN_API_CPP";
+      if (config_.tokenizer_family == ModelConfig::TokenizerFamily::LLAMA_SENTENCEPIECE) family_to_log = "LLAMA_SENTENCEPIECE";
+      else if (config_.tokenizer_family == ModelConfig::TokenizerFamily::LLAMA3_TIKTOKEN) family_to_log = "LLAMA3_TIKTOKEN";
+      Logger::info("[API_CPP_TOKENIZER_INIT] Tokenizer family from session config for SafeTensors: " + family_to_log);
+
+      tokenizer_ = std::make_unique<Tokenizer>(vocab_json_path, sp_model_path, config_); 
       Logger::info("Tokenizer initialized from external files for SafeTensors model.");
     }
   } catch (const std::exception& e) {
@@ -267,12 +332,38 @@ TinyLlamaSession::TinyLlamaSession(const std::string& model_path,
       throw std::runtime_error("Tokenizer pointer is null after instantiation attempt.");
   }
 
-  eos_token_id_ = config_.eos_token_id;
-  int head_dim = config_.hidden_size / config_.num_attention_heads;
-  kv_cache_.initialize(config_.num_hidden_layers,
-                       config_.max_position_embeddings,
-                       config_.num_key_value_heads, head_dim);
-  Logger::info("TinyLlamaSession initialization complete.");
+  eos_token_id_ = config_.eos_token_id; // Use the session's config_ which is now model's config
+  
+  const ModelConfig& final_model_config = model_->get_config(); // Explicitly use model's config
+  int total_model_layers = final_model_config.num_hidden_layers;
+  
+  // Determine actual number of GPU layers based on model's final decision
+  // model_->initialize_gpu_and_rope() would have clamped num_cpu_offload_layers
+  // and thus determined the effective split.
+  int effective_cpu_offload_layers = final_model_config.num_cpu_offload_layers;
+  int gpu_layers_for_kvcache = total_model_layers - effective_cpu_offload_layers;
+  if (gpu_layers_for_kvcache < 0) gpu_layers_for_kvcache = 0; // Sanity check, should not happen if model ctor is correct
+  if (gpu_layers_for_kvcache > total_model_layers) gpu_layers_for_kvcache = total_model_layers; // Sanity
+
+  Logger::info("[Session KVCache Init] Total Layers: " + std::to_string(total_model_layers) +
+               ", Effective CPU Offload by Model: " + std::to_string(effective_cpu_offload_layers) +
+               ", GPU Layers for KVCache: " + std::to_string(gpu_layers_for_kvcache));
+
+  if (total_model_layers <= 0) {
+      throw std::runtime_error("Model config has zero or negative num_hidden_layers before KVCache init.");
+  }
+  if (final_model_config.num_attention_heads <= 0) {
+      throw std::runtime_error("Model config has zero or negative num_attention_heads before KVCache init.");
+  }
+
+  int head_dim = final_model_config.hidden_size / final_model_config.num_attention_heads;
+  
+  kv_cache_.initialize(total_model_layers,          // Total layers for CPU part of KVCache
+                       gpu_layers_for_kvcache,    // Actual GPU layers for device memory
+                       final_model_config.max_position_embeddings,
+                       final_model_config.num_key_value_heads, 
+                       head_dim);
+  Logger::info("TinyLlamaSession initialization complete (after KVCache init).");
 }
 
 TinyLlamaSession::~TinyLlamaSession() {

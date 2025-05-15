@@ -207,10 +207,11 @@ void softmax_vector_cuda(const std::vector<float>& x_host,
  * @param head_dim Dimension of each head
  * @param freqs_cis_dev Complex rotation frequencies (device pointer)
  * @param pos Current sequence position
+ * @param use_adjacent_pairing Whether to use adjacent pairing
  * @param stream CUDA stream (optional)
  */
 void rope_cuda(float* vec, int num_heads, int head_dim,
-               const float* freqs_cis_dev, int pos, cudaStream_t stream);
+               const float* freqs_cis_dev, int pos, bool use_adjacent_pairing, cudaStream_t stream);
 
 /**
  * @brief Computes attention scores and values on GPU
@@ -365,6 +366,21 @@ void matvec_bf16_f32_cuda(cublasHandle_t handle,
                          float* out_f32_dev,
                          int rows, int cols,
                          cudaStream_t stream = 0);
+
+/**
+ * @brief CUDA Kernel: Converts a block of BF16 values to FP32 values.
+ * 
+ * This kernel performs an element-wise conversion from Brain Floating Point 16 (BF16)
+ * format to standard IEEE 754 single-precision floating point (FP32) format.
+ * It is designed to be launched with enough threads to cover all elements in the input array.
+ *
+ * @param bf16_in Pointer to the input array of BF16 values (uint16_t) on the device.
+ * @param fp32_out Pointer to the output array for FP32 values (float) on the device.
+ * @param n_elements The total number of elements to convert.
+ */
+__global__ void convert_bf16_to_fp32_kernel(const uint16_t* __restrict__ bf16_in,
+                                            float* __restrict__ fp32_out,
+                                            size_t n_elements);
 
 #endif // HAS_CUDA
 

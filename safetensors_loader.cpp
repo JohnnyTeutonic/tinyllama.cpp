@@ -10,6 +10,85 @@
 #include <immintrin.h>
 #endif
 
+
+// (Similar to the one in cuda_kernels.cu but for CPU)
+inline float cpu_bf16_to_float32(uint16_t bf16_raw) {
+    // BF16 is essentially the top 16 bits of an FP32 number.
+    // So, we shift it left by 16 bits to align it with the FP32 format.
+    // The lower 16 bits (mantissa of FP32) will be zero.
+    unsigned int bits = ((unsigned int)bf16_raw) << 16;
+    float result;
+    memcpy(&result, &bits, sizeof(float));
+    return result;
+}
+
+
+
+inline float cpu_f16_to_float32(uint16_t f16_raw) {
+    // F16 format: 1 sign bit, 5 exponent bits, 10 mantissa bits
+    // FP32 format: 1 sign bit, 8 exponent bits, 23 mantissa bits
+
+    const uint32_t sign_mask_f16 = 0x8000;
+    const uint32_t exp_mask_f16 = 0x7C00;
+    const uint32_t mant_mask_f16 = 0x03FF;
+    const uint32_t exp_bias_f16 = 15;
+
+    // const uint32_t sign_mask_f32 = 0x80000000;
+    // const uint32_t exp_mask_f32 = 0x7F800000;
+    // const uint32_t mant_mask_f32 = 0x007FFFFF;
+    const uint32_t exp_bias_f32 = 127;
+
+    uint32_t sign_f16 = (f16_raw & sign_mask_f16);
+    uint32_t exp_f16 = (f16_raw & exp_mask_f16) >> 10;
+    uint32_t mant_f16 = (f16_raw & mant_mask_f16);
+
+    uint32_t f32_bits;
+
+    if (exp_f16 == 0x1F) { // F16 NaN or Inf
+        f32_bits = (sign_f16 << 16) | 0x7F800000 | (mant_f16 << 13); // Propagate mantissa for NaN
+    } else if (exp_f16 == 0) { // F16 zero or subnormal
+        if (mant_f16 == 0) { // Zero
+            f32_bits = (sign_f16 << 16);
+        } else { // Subnormal F16 to normal or subnormal F32
+            // Convert F16 subnormal to F32 normal if possible, or F32 subnormal.
+            // This involves counting leading zeros in mantissa and adjusting exponent.
+            // Simplified: treat as zero for now, or scale directly.
+            // A more precise conversion:
+            int32_t current_exp = 1 - exp_bias_f16; // Exponent for subnormals
+            uint32_t current_mant = mant_f16;
+            while (!(current_mant & 0x0400)) { // while leading bit (10th) is not 1
+                current_mant <<= 1;
+                current_exp--;
+                if (current_exp < (1 - exp_bias_f32 - 23) ) { // underflow to zero
+                    current_mant = 0; break;
+                }
+            }
+            current_mant &= mant_mask_f16; // Remove implicit leading 1 after normalization
+            
+            if (current_mant == 0) { // Result is zero
+                 f32_bits = (sign_f16 << 16);
+            } else {
+                int32_t f32_exp_val = current_exp + exp_bias_f32;
+                if (f32_exp_val <= 0) { // F32 subnormal or zero
+                    // requires shifting mantissa right by -f32_exp_val + 1
+                    int shift = 1 - f32_exp_val;
+                    f32_bits = (sign_f16 << 16) | ((current_mant << 13) >> shift) ;
+                } else { // F32 normal
+                     f32_bits = (sign_f16 << 16) | (static_cast<uint32_t>(f32_exp_val) << 23) | (current_mant << 13);
+                }
+            }
+        }
+    } else { // Normal F16
+        uint32_t f32_exp = exp_f16 - exp_bias_f16 + exp_bias_f32;
+        f32_bits = (sign_f16 << 16) | (f32_exp << 23) | (mant_f16 << 13);
+    }
+
+    float result;
+    memcpy(&result, &f32_bits, sizeof(float));
+    return result;
+}
+
+
 SafeTensorsLoader::SafeTensorsLoader(const std::string& path)
     : file_path_(path) {
   std::ifstream file(path, std::ios::binary);
@@ -171,40 +250,58 @@ const SafeTensorsLoader::TensorInfo& SafeTensorsLoader::get_tensor_info(
 }
 
 std::vector<uint8_t> SafeTensorsLoader::convert_tensor_data(
-    const uint8_t* data, size_t size, const std::string& dtype) const {
-  std::vector<uint8_t> result(size);
-
-  if (dtype == "F16") {
-#ifdef __AVX2__
-
-    if (__builtin_cpu_supports("avx2")) {
-      const size_t simd_size = 16;
-      size_t i = 0;
-      for (; i + simd_size <= size; i += simd_size) {
-        __m256i src =
-            _mm256_loadu_si256(reinterpret_cast<const __m256i*>(data + i));
-        __m256i dst = _mm256_shuffle_epi8(
-            src, _mm256_set_epi8(1, 0, 3, 2, 5, 4, 7, 6, 9, 8, 11, 10, 13, 12,
-                                 15, 14, 1, 0, 3, 2, 5, 4, 7, 6, 9, 8, 11, 10,
-                                 13, 12, 15, 14));
-        _mm256_storeu_si256(reinterpret_cast<__m256i*>(result.data() + i), dst);
-      }
-
-      for (; i < size; i++) {
-        result[i] = data[i];
-      }
-    } else {
-      std::copy(data, data + size, result.begin());
+    const uint8_t* data, size_t n_bytes_original, const std::string& dtype) const {
+  
+  if (dtype == "BF16") {
+    if (n_bytes_original % sizeof(uint16_t) != 0) {
+        throw std::runtime_error("BF16 tensor data size is not a multiple of sizeof(uint16_t)");
     }
-#else
+    size_t num_bf16_elements = n_bytes_original / sizeof(uint16_t);
+    size_t new_fp32_n_bytes = num_bf16_elements * sizeof(float);
+    std::vector<uint8_t> result_fp32_bytes(new_fp32_n_bytes);
+    
+    const uint16_t* bf16_data_ptr = reinterpret_cast<const uint16_t*>(data);
+    float* fp32_data_ptr = reinterpret_cast<float*>(result_fp32_bytes.data());
 
-    std::copy(data, data + size, result.begin());
-#endif
+    // Diagnostic: Log first few raw BF16 and converted FP32 values
+    static bool bf16_diag_logged = false; // Only log for the first BF16 tensor encountered
+    if (!bf16_diag_logged && dtype == "BF16" && num_bf16_elements > 5) {
+        std::stringstream ss_diag;
+        ss_diag << "[BF16_CONV_DIAG] First 5 BF16 values from tensor (name not available here). Raw uint16_t hex: ";
+        for (size_t k=0; k < 5; ++k) ss_diag << "0x" << std::hex << bf16_data_ptr[k] << " ";
+        ss_diag << "| Converted to FP32: ";
+        for (size_t k=0; k < 5; ++k) ss_diag << std::fixed << std::setprecision(7) << cpu_bf16_to_float32(bf16_data_ptr[k]) << " ";
+        Logger::debug(ss_diag.str());
+        bf16_diag_logged = true; // Set flag so we don't log again
+      }
+
+    for (size_t i = 0; i < num_bf16_elements; ++i) {
+        fp32_data_ptr[i] = cpu_bf16_to_float32(bf16_data_ptr[i]);
+      }
+    return result_fp32_bytes;
+
+  } else if (dtype == "F16") {
+    if (n_bytes_original % sizeof(uint16_t) != 0) {
+        throw std::runtime_error("F16 tensor data size is not a multiple of sizeof(uint16_t)");
+    }
+    size_t num_f16_elements = n_bytes_original / sizeof(uint16_t);
+    size_t new_fp32_n_bytes = num_f16_elements * sizeof(float);
+    std::vector<uint8_t> result_fp32_bytes(new_fp32_n_bytes);
+
+    const uint16_t* f16_data_ptr = reinterpret_cast<const uint16_t*>(data);
+    float* fp32_data_ptr = reinterpret_cast<float*>(result_fp32_bytes.data());
+
+    for (size_t i = 0; i < num_f16_elements; ++i) {
+        fp32_data_ptr[i] = cpu_f16_to_float32(f16_data_ptr[i]);
+    }
+    Logger::info("[SafeTensorsLoader] Converted F16 tensor data to FP32. Original bytes: " + std::to_string(n_bytes_original) + ", New FP32 bytes: " + std::to_string(new_fp32_n_bytes));
+    return result_fp32_bytes;
   } else {
-    std::copy(data, data + size, result.begin());
+    // For other dtypes (e.g., F32, I32), just copy bytes.
+    std::vector<uint8_t> result(n_bytes_original);
+    std::copy(data, data + n_bytes_original, result.begin());
+    return result;
   }
-
-  return result;
 }
 
 ThreadPool::ThreadPool(size_t num_threads) {
@@ -296,17 +393,65 @@ bool SafeTensorsLoader::load_model_config_from_json(const std::string& model_pat
         config_to_populate.bos_token_id = json_config.value("bos_token_id", 1);
         config_to_populate.eos_token_id = json_config.value("eos_token_id", 2);
         
-        // Handle 'architectures' field which is often a list
+        std::string model_architecture_str;
         if (json_config.contains("architectures") && json_config["architectures"].is_array() && !json_config["architectures"].empty()) {
-            config_to_populate.architecture = json_config["architectures"][0].get<std::string>();
+            model_architecture_str = json_config["architectures"][0].get<std::string>();
+            config_to_populate.architecture = model_architecture_str; // Keep this for info
         } else {
-            config_to_populate.architecture = json_config.value("architecture", ""); // Fallback if not a list or empty
+            // Fallback if "architectures" is not present or not a list
+            model_architecture_str = json_config.value("architecture", ""); 
+            config_to_populate.architecture = model_architecture_str;
         }
         
-        config_to_populate.model_name = json_config.value("model_type", ""); // Or model_name, varies by config
+        std::string model_type_str = json_config.value("model_type", "");
+        config_to_populate.model_name = model_type_str; // Populate model_name with model_type
         if (config_to_populate.model_name.empty()) {
+             // Fallback for model_name if model_type was empty
              config_to_populate.model_name = json_config.value("name_or_path", "");
         }
+
+        // Determine TokenizerFamily
+        // Default to UNKNOWN, will be overridden if specific conditions are met.
+        config_to_populate.tokenizer_family = ModelConfig::TokenizerFamily::UNKNOWN; 
+
+        std::string tokenizer_class_str = json_config.value("tokenizer_class", "");
+        Logger::info("[SafeTensorsLoader] Parsed from config.json - model_type: '" + model_type_str + 
+                     "', architecture: '" + model_architecture_str + 
+                     "', tokenizer_class: '" + tokenizer_class_str + "'");
+
+        if (model_type_str == "llama" || model_architecture_str == "LlamaForCausalLM") {
+            if (tokenizer_class_str == "LlamaTokenizer" || tokenizer_class_str == "CodeLlamaTokenizer") { // Llama 1/2 SentencePiece
+                config_to_populate.tokenizer_family = ModelConfig::TokenizerFamily::LLAMA_SENTENCEPIECE;
+            } else if (tokenizer_class_str == "LlamaHfTokenizer") { // Often seen with Tiktoken-based Llama tokenizers in HF format
+                 // Further check if it's really Llama 3 like. For now, assume Llama 3 if LlamaHfTokenizer.
+                 // This might need refinement if Llama 2 models also use LlamaHfTokenizer with SentencePiece vocab.
+                 // A more robust check might involve looking at specific vocab entries or merge rules.
+                 // For instance, Llama 3 tokenizers typically have a larger vocab size (e.g., 128256).
+                if (config_to_populate.vocab_size > 100000) { // Heuristic for Llama 3 / Tiktoken based
+                    config_to_populate.tokenizer_family = ModelConfig::TokenizerFamily::LLAMA3_TIKTOKEN;
+                     Logger::info("[SafeTensorsLoader] LlamaHfTokenizer with large vocab suggests LLAMA3_TIKTOKEN.");
+                } else {
+                    config_to_populate.tokenizer_family = ModelConfig::TokenizerFamily::LLAMA_SENTENCEPIECE;
+                    Logger::info("[SafeTensorsLoader] LlamaHfTokenizer with smaller vocab suggests LLAMA_SENTENCEPIECE.");
+                }
+            } else if (tokenizer_class_str.find("Llama3") != std::string::npos || tokenizer_class_str.find("llama3") != std::string::npos) { // Explicit Llama3 in class name
+                 config_to_populate.tokenizer_family = ModelConfig::TokenizerFamily::LLAMA3_TIKTOKEN;
+            } else if (tokenizer_class_str.empty() && (model_type_str == "llama" || model_architecture_str == "LlamaForCausalLM") ) {
+                // If tokenizer_class is not specified, but model_type is llama, assume SentencePiece for Llama 1/2
+                // This is a common case for original Llama models.
+                config_to_populate.tokenizer_family = ModelConfig::TokenizerFamily::LLAMA_SENTENCEPIECE;
+                Logger::info("[SafeTensorsLoader] model_type 'llama' and empty tokenizer_class, defaulting to LLAMA_SENTENCEPIECE.");
+            }
+        } else if (model_type_str.find("llama3") != std::string::npos || model_architecture_str.find("Llama3") != std::string::npos) {
+             config_to_populate.tokenizer_family = ModelConfig::TokenizerFamily::LLAMA3_TIKTOKEN;
+        }
+        // Add more specific checks if needed for other model types or tokenizer classes.
+
+        std::string family_log_str = "UNKNOWN_FAMILY";
+        if(config_to_populate.tokenizer_family == ModelConfig::TokenizerFamily::LLAMA_SENTENCEPIECE) family_log_str = "LLAMA_SENTENCEPIECE";
+        else if(config_to_populate.tokenizer_family == ModelConfig::TokenizerFamily::LLAMA3_TIKTOKEN) family_log_str = "LLAMA3_TIKTOKEN";
+        Logger::info("[SafeTensorsLoader] Deduced TokenizerFamily: " + family_log_str);
+        
 
         // GGUF specific fields, not typically in safetensors config.json, but ensure they are defaulted reasonably.
         config_to_populate.is_gguf_file_loaded = false; 
