@@ -36,8 +36,8 @@ class TinyLlamaSession {
    * @throws std::runtime_error if loading fails.
    */
   TinyLlamaSession(const std::string& model_path,
-                   const std::string& tokenizer_path, int threads,
-                   int num_gpu_layers_from_cli, bool cli_use_mmap);
+                   const std::string& tokenizer_path, int threads = 1,
+                   int num_gpu_layers_from_cli = 0, bool cli_use_mmap = true);
 
   /**
    * @brief Destructor to ensure proper cleanup (e.g., KVCache CUDA memory).
@@ -73,6 +73,7 @@ class TinyLlamaSession {
 
   const Tokenizer* get_tokenizer() const { return tokenizer_.get(); }
   const ModelConfig& get_config() const { return config_; }
+  KVCache& get_kv_cache() { return kv_cache_; }
 
  private:
   TinyLlamaSession(const TinyLlamaSession&) = delete;
@@ -84,6 +85,7 @@ class TinyLlamaSession {
   KVCache kv_cache_;
   int eos_token_id_;
   std::mt19937 rng_{std::random_device{}()};  // RNG for sampling
+  int threads_;
 };
 
 }  // namespace tinyllama

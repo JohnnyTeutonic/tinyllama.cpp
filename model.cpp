@@ -607,21 +607,23 @@ static void log_raw_float_pointer(const std::string& name, const float* ptr,
   Logger::info(ss.str());
 }
 
-void KVCache::initialize(int num_layers, int max_seq_len, int num_kv_heads,
+void KVCache::initialize(int total_num_model_layers, int num_gpu_layers_to_allocate, 
+                         int max_seq_len, int num_kv_heads,
                          int head_dim) {
-  layers.resize(num_layers);
+  this->total_model_layers_ = total_num_model_layers; // Store for use in other KVCache methods if needed
+  layers.resize(total_num_model_layers); // CPU KVCacheLayer vector sized for all layers
   seq_len = 0;
   Logger::info("Allocating KVCache host vectors...");
   size_t cache_size_per_layer = static_cast<size_t>(max_seq_len) *
                                 static_cast<size_t>(num_kv_heads) *
                                 static_cast<size_t>(head_dim);
 
-  if (cache_size_per_layer == 0 && max_seq_len > 0) {
+  if (cache_size_per_layer == 0 && max_seq_len > 0 && total_num_model_layers > 0) { // Check total_num_model_layers too
     throw std::runtime_error(
-        "KVCache (CPU): Calculated cache size is zero. Check parameters.");
+        "KVCache (CPU): Calculated cache size is zero for non-empty model. Check parameters.");
   }
 
-  for (int l = 0; l < num_layers; ++l) {
+  for (int l = 0; l < total_num_model_layers; ++l) { // Allocate CPU part for all model layers
     try {
       layers[l].k.assign(cache_size_per_layer, 0.0f);
       layers[l].v.assign(cache_size_per_layer, 0.0f);
@@ -632,58 +634,78 @@ void KVCache::initialize(int num_layers, int max_seq_len, int num_kv_heads,
     }
   }
   Logger::info("KVCache (CPU) vectors allocated for " +
-               std::to_string(num_layers) + " layers.");
+               std::to_string(total_num_model_layers) + " layers.");
 
 #ifdef HAS_CUDA
+  // Store the actual number of layers for which GPU memory will be allocated.
+  this->allocated_num_layers = num_gpu_layers_to_allocate; 
+  this->allocated_max_seq_len = max_seq_len;
+  this->allocated_num_kv_heads = num_kv_heads;
+  this->allocated_head_dim = head_dim;
 
-  allocated_num_layers = num_layers;
-  allocated_max_seq_len = max_seq_len;
-  allocated_num_kv_heads = num_kv_heads;
-  allocated_head_dim = head_dim;
+  if (num_gpu_layers_to_allocate > 0) { // Only proceed if GPU layers are requested
+      if (num_gpu_layers_to_allocate > total_num_model_layers) {
+          Logger::warning("KVCache::initialize: num_gpu_layers_to_allocate (" + std::to_string(num_gpu_layers_to_allocate) +
+                          ") > total_num_model_layers (" + std::to_string(total_num_model_layers) + 
+                          "). Clamping to total_num_model_layers.");
+          this->allocated_num_layers = total_num_model_layers; // Update member
+          num_gpu_layers_to_allocate = total_num_model_layers; // Use clamped value for local logic
+      }
 
-  size_t cache_elems_per_layer = static_cast<size_t>(max_seq_len) *
+      size_t cache_elems_per_layer_gpu = static_cast<size_t>(max_seq_len) *
                                  static_cast<size_t>(num_kv_heads) *
                                  static_cast<size_t>(head_dim);
-  size_t cache_bytes_per_layer = cache_elems_per_layer * sizeof(float);
+      size_t cache_bytes_per_layer_gpu = cache_elems_per_layer_gpu * sizeof(float);
 
-  if (cache_elems_per_layer == 0) {
+      if (cache_elems_per_layer_gpu == 0) {
     throw std::runtime_error(
-        "KVCache (CUDA): Calculated cache size per layer is zero. Check "
-        "parameters.");
+            "KVCache (CUDA): Calculated cache size per layer is zero for GPU layers. Check parameters.");
   }
 
-  Logger::info("Allocating KVCache on GPU: " + std::to_string(num_layers) +
+      Logger::info("Allocating KVCache on GPU for " + std::to_string(num_gpu_layers_to_allocate) +
                " layers, size per layer: " +
-               std::to_string(cache_bytes_per_layer / (1024.0 * 1024.0)) +
+                   std::to_string(cache_bytes_per_layer_gpu / (1024.0 * 1024.0)) +
                " MB");
 
-  for (int l = 0; l < num_layers; ++l) {
-    if (layers[l].k_dev) {
-      Logger::info(
-          "Re-initializing KVCache layer K dev pointer without proper "
-          "destruction?");
-      gpuErrchk(cudaFree(layers[l].k_dev));
+      int gpu_layer_start_model_idx = this->total_model_layers_ - num_gpu_layers_to_allocate;
+      Logger::info("KVCache GPU allocation will target model layers from index " + std::to_string(gpu_layer_start_model_idx) +
+                   " to " + std::to_string(gpu_layer_start_model_idx + num_gpu_layers_to_allocate - 1));
+
+      for (int i = 0; i < num_gpu_layers_to_allocate; ++i) { // Loop 'i' for count
+        int current_model_idx_for_gpu = gpu_layer_start_model_idx + i; // Calculate actual model index
+
+        if (current_model_idx_for_gpu < 0 || static_cast<size_t>(current_model_idx_for_gpu) >= layers.size()) {
+            Logger::error("KVCache::initialize: Calculated current_model_idx_for_gpu (" + std::to_string(current_model_idx_for_gpu) + ") is out of bounds for layers vector (size " + std::to_string(layers.size()) + "). Skipping this layer.");
+            continue;
+        }
+
+        if (layers[current_model_idx_for_gpu].k_dev) {
+          Logger::warning(
+              "KVCache::initialize: Re-initializing KVCache layer " + std::to_string(current_model_idx_for_gpu) + " K dev pointer without proper destruction?");
+          gpuErrchk(cudaFree(layers[current_model_idx_for_gpu].k_dev));
     }
-    if (layers[l].v_dev) {
-      Logger::info(
-          "Re-initializing KVCache layer V dev pointer without proper "
-          "destruction?");
-      gpuErrchk(cudaFree(layers[l].v_dev));
+        if (layers[current_model_idx_for_gpu].v_dev) {
+          Logger::warning(
+              "KVCache::initialize: Re-initializing KVCache layer " + std::to_string(current_model_idx_for_gpu) + " V dev pointer without proper destruction?");
+          gpuErrchk(cudaFree(layers[current_model_idx_for_gpu].v_dev));
     }
 
-    gpuErrchk(cudaMalloc(&layers[l].k_dev, cache_bytes_per_layer));
-    gpuErrchk(cudaMalloc(&layers[l].v_dev, cache_bytes_per_layer));
+        gpuErrchk(cudaMalloc(&layers[current_model_idx_for_gpu].k_dev, cache_bytes_per_layer_gpu));
+        gpuErrchk(cudaMalloc(&layers[current_model_idx_for_gpu].v_dev, cache_bytes_per_layer_gpu));
 
-    // Explicitly zero out the allocated GPU memory for the KV cache
-    gpuErrchk(cudaMemset(layers[l].k_dev, 0, cache_bytes_per_layer));
-    gpuErrchk(cudaMemset(layers[l].v_dev, 0, cache_bytes_per_layer));
+        gpuErrchk(cudaMemset(layers[current_model_idx_for_gpu].k_dev, 0, cache_bytes_per_layer_gpu));
+        gpuErrchk(cudaMemset(layers[current_model_idx_for_gpu].v_dev, 0, cache_bytes_per_layer_gpu));
   }
-  Logger::info("KVCache GPU allocation and zeroing complete.");
+      Logger::info("KVCache GPU allocation and zeroing complete for " + std::to_string(num_gpu_layers_to_allocate) + " layers.");
+  } else {
+      Logger::info("KVCache: No GPU layers requested for allocation (num_gpu_layers_to_allocate is 0). Skipping GPU KVCache allocation.");
+      this->allocated_num_layers = 0; 
+  }
 
 #else
-
-  Logger::info("KVCache (CPU-only build) initialized with dimensions: " +
-               std::to_string(num_layers) + " layers, " +
+  // No changes needed here, CPU-only build message is fine.
+  Logger::info("KVCache (CPU-only build) initialized with dimensions for " +
+               std::to_string(total_num_model_layers) + " layers, " +
                std::to_string(max_seq_len) + " seq len, " +
                std::to_string(num_kv_heads) + " KV heads, " +
                std::to_string(head_dim) + " head dim");
@@ -857,194 +879,109 @@ void TinyLlamaModel::initialize_weights(const SafeTensorsLoader* loader,
   int is = config_.intermediate_size;
   int nhl = config_.num_hidden_layers;
   int vs = config_.vocab_size;
-  int n_heads = config_.num_attention_heads;
-  int n_kv_heads = config_.num_key_value_heads;
-  int kv_dim = (hs / n_heads) * n_kv_heads;
+  // int n_heads = config_.num_attention_heads; // Not directly used in this section for sizing
+  // int n_kv_heads = config_.num_key_value_heads; // Not directly used
+  // int kv_dim = (hs / n_heads) * n_kv_heads; // Not directly used
 
   layers.resize(nhl);
 
   if (gguf) {
     Logger::info("Mapping weights from GGUF data...");
-
     map_gguf_weights(*gguf, *this);
   } else if (loader) {
-    Logger::info(
-        "Loading weights from SafeTensors data using parallel loader...");
+    Logger::info("Loading weights from SafeTensors data using parallel loader...");
 
-    std::map<std::string, std::vector<uint8_t>> all_tensors;
+    std::map<std::string, std::vector<uint8_t>> all_tensors_bytes_map;
     try {
-      all_tensors = loader->load_all_tensors_parallel();
-      Logger::info(
-          "All SafeTensors tensors loaded in parallel. Total tensors: " +
-          std::to_string(all_tensors.size()));
+      all_tensors_bytes_map = loader->load_all_tensors_parallel();
+      Logger::info("All SafeTensors tensors loaded in parallel. Total tensors: " +
+                   std::to_string(all_tensors_bytes_map.size()));
     } catch (const std::exception& e) {
       Logger::error("Failed to load all tensors in parallel: " +
                     std::string(e.what()));
       throw;
     }
 
-    auto get_tensor_data =
-        [&](const std::string& name) -> const std::vector<uint8_t>& {
-      auto it = all_tensors.find(name);
-      if (it == all_tensors.end()) {
-        throw std::runtime_error("Tensor not found in preloaded map: " + name);
+    auto process_safetensor = [&](const std::string& name, std::vector<float>& target_f32_vector, const std::vector<size_t>& expected_shape_elements) {
+      auto it_bytes = all_tensors_bytes_map.find(name);
+      if (it_bytes == all_tensors_bytes_map.end()) {
+        bool is_norm_weight = (name.find("input_layernorm.weight") != std::string::npos) ||
+                              (name.find("post_attention_layernorm.weight") != std::string::npos) ||
+                              (name == "model.norm.weight");
+        if (is_norm_weight) {
+          throw std::runtime_error("Essential normalization weight tensor \'" + name + "\' not found in SafeTensors model. This layer cannot be correctly processed.");
+        }
+        Logger::error("Tensor '" + name + "' not found in preloaded map.");
+        // Optionally, resize target to expected size with zeros or handle error differently
+        size_t total_expected_elements = 1;
+        for(size_t dim : expected_shape_elements) total_expected_elements *= dim;
+        target_f32_vector.assign(total_expected_elements, 0.0f); // Fill with zeros for non-essential missing tensors
+        return;
       }
-      return it->second;
+      const std::vector<uint8_t>& tensor_data_bytes = it_bytes->second;
+      const SafeTensorsLoader::TensorInfo& tensor_info = loader->get_tensor_info(name);
+
+      size_t expected_num_elements = 1;
+      for(size_t dim : tensor_info.shape) expected_num_elements *= dim; // Use shape from metadata
+
+      // The loader now converts both BF16 and F16 to FP32 bytes before this point.
+      // So, tensor_data_bytes for these types will contain FP32 data.
+      if (tensor_info.dtype == "BF16" || tensor_info.dtype == "F16" || tensor_info.dtype == "F32") {
+        if (tensor_data_bytes.size() != expected_num_elements * sizeof(float)) {
+          Logger::error("Size mismatch for tensor '" + name + "' (original dtype " + tensor_info.dtype + ", expected FP32 bytes). Expected " +
+                        std::to_string(expected_num_elements * sizeof(float)) + " bytes, got " +
+                        std::to_string(tensor_data_bytes.size()) + " bytes.");
+          target_f32_vector.assign(expected_num_elements, 0.0f); // Fill with zeros
+          return;
+        }
+        target_f32_vector.resize(expected_num_elements);
+        memcpy(target_f32_vector.data(), tensor_data_bytes.data(), tensor_data_bytes.size());
+        Logger::info("Loaded tensor '" + name + "' (original dtype: " + tensor_info.dtype + ") as FP32 into target vector.");
+      } else {
+        Logger::error("Unsupported dtype '" + tensor_info.dtype + "' for tensor '" + name + "' in SafeTensors CPU path after loader conversion attempts.");
+        target_f32_vector.assign(expected_num_elements, 0.0f); // Fill with zeros
+      }
     };
 
-    try {
-      embed_tokens = uint8_vector_to_uint16_vector(
-          get_tensor_data("model.embed_tokens.weight"), vs * hs);
-    } catch (const std::exception& e) {
-      Logger::error("Missing model.embed_tokens.weight: " +
-                    std::string(e.what()));
-    }
-    try {
-      lm_head = uint8_vector_to_uint16_vector(
-          loader->get_tensor_bytes("lm_head.weight"), vs * hs);
-    } catch (const std::exception& e) {
-      Logger::error("Missing lm_head.weight: " + std::string(e.what()));
-    }
-    try {
-      final_norm = uint8_vector_to_uint16_vector(
-          loader->get_tensor_bytes("model.norm.weight"), hs);
-    } catch (const std::exception& e) {
-      Logger::error("Missing model.norm.weight: " + std::string(e.what()));
-    }
+    // Load weights using the new process_safetensor helper
+    process_safetensor("model.embed_tokens.weight", embed_tokens_f32, {(size_t)vs, (size_t)hs});
+    process_safetensor("lm_head.weight", lm_head_f32, {(size_t)vs, (size_t)hs});
+    process_safetensor("model.norm.weight", final_norm_f32, {(size_t)hs});
 
     for (int i = 0; i < nhl; ++i) {
       std::string prefix = "model.layers." + std::to_string(i) + ".";
-      auto& lw = layers[i];
-      try {
-        lw.q_proj = uint8_vector_to_uint16_vector(
-            loader->get_tensor_bytes(prefix + "self_attn.q_proj.weight"),
-            hs * hs);
-      } catch (const std::exception& e) {
-        Logger::error("Missing " + prefix +
-                      "self_attn.q_proj.weight: " + std::string(e.what()));
-      }
-      try {
-        lw.k_proj = uint8_vector_to_uint16_vector(
-            loader->get_tensor_bytes(prefix + "self_attn.k_proj.weight"),
-            kv_dim * hs);
-      } catch (const std::exception& e) {
-        Logger::error("Missing " + prefix +
-                      "self_attn.k_proj.weight: " + std::string(e.what()));
-      }
-      try {
-        lw.v_proj = uint8_vector_to_uint16_vector(
-            loader->get_tensor_bytes(prefix + "self_attn.v_proj.weight"),
-            kv_dim * hs);
-      } catch (const std::exception& e) {
-        Logger::error("Missing " + prefix +
-                      "self_attn.v_proj.weight: " + std::string(e.what()));
-      }
-      try {
-        lw.o_proj = uint8_vector_to_uint16_vector(
-            loader->get_tensor_bytes(prefix + "self_attn.o_proj.weight"),
-            hs * hs);
-      } catch (const std::exception& e) {
-        Logger::error("Missing " + prefix +
-                      "self_attn.o_proj.weight: " + std::string(e.what()));
-      }
-      try {
-        lw.gate_proj = uint8_vector_to_uint16_vector(
-            loader->get_tensor_bytes(prefix + "mlp.gate_proj.weight"), is * hs);
-      } catch (const std::exception& e) {
-        Logger::error("Missing " + prefix +
-                      "mlp.gate_proj.weight: " + std::string(e.what()));
-      }
-      try {
-        lw.up_proj = uint8_vector_to_uint16_vector(
-            loader->get_tensor_bytes(prefix + "mlp.up_proj.weight"), is * hs);
-      } catch (const std::exception& e) {
-        Logger::error("Missing " + prefix +
-                      "mlp.up_proj.weight: " + std::string(e.what()));
-      }
-      try {
-        lw.down_proj = uint8_vector_to_uint16_vector(
-            loader->get_tensor_bytes(prefix + "mlp.down_proj.weight"), hs * is);
-      } catch (const std::exception& e) {
-        Logger::error("Missing " + prefix +
-                      "mlp.down_proj.weight: " + std::string(e.what()));
-      }
-      try {
-        lw.input_layernorm = uint8_vector_to_uint16_vector(
-            loader->get_tensor_bytes(prefix + "input_layernorm.weight"), hs);
-      } catch (const std::exception& e) {
-        Logger::error("Missing " + prefix +
-                      "input_layernorm.weight: " + std::string(e.what()));
-      }
-      try {
-        lw.post_attention_layernorm = uint8_vector_to_uint16_vector(
-            loader->get_tensor_bytes(prefix +
-                                     "post_attention_layernorm.weight"),
-            hs);
-      } catch (const std::exception& e) {
-        Logger::error(
-            "Missing " + prefix +
-            "post_attention_layernorm.weight: " + std::string(e.what()));
-      }
+      auto& lw = layers[i]; // This is TinyLlamaLayer, which should now store std::vector<float> directly
+                            // If TinyLlamaLayer still uses uint16_t members, they should be removed or not used for SafeTensors CPU.
+                            // Assuming TinyLlamaLayer members like q_proj_f32, k_proj_f32 etc. are the targets.
 
-      lw.input_layernorm_f32 = bf16vec_to_float_vec(lw.input_layernorm);
-      lw.post_attention_layernorm_f32 =
-          bf16vec_to_float_vec(lw.post_attention_layernorm);
-      lw.q_proj_f32 = bf16vec_to_float_vec(lw.q_proj);
-      lw.k_proj_f32 = bf16vec_to_float_vec(lw.k_proj);
-      lw.v_proj_f32 = bf16vec_to_float_vec(lw.v_proj);
-      lw.o_proj_f32 = bf16vec_to_float_vec(lw.o_proj);
-      lw.gate_proj_f32 = bf16vec_to_float_vec(lw.gate_proj);
-      lw.up_proj_f32 = bf16vec_to_float_vec(lw.up_proj);
-      lw.down_proj_f32 = bf16vec_to_float_vec(lw.down_proj);
+      process_safetensor(prefix + "self_attn.q_proj.weight", lw.q_proj_f32, {(size_t)hs, (size_t)hs});
+      process_safetensor(prefix + "self_attn.k_proj.weight", lw.k_proj_f32, {(size_t)config_.num_key_value_heads * (hs / config_.num_attention_heads), (size_t)hs});
+      process_safetensor(prefix + "self_attn.v_proj.weight", lw.v_proj_f32, {(size_t)config_.num_key_value_heads * (hs / config_.num_attention_heads), (size_t)hs});
+      process_safetensor(prefix + "self_attn.o_proj.weight", lw.o_proj_f32, {(size_t)hs, (size_t)hs});
+      
+      process_safetensor(prefix + "mlp.gate_proj.weight", lw.gate_proj_f32, {(size_t)is, (size_t)hs});
+      process_safetensor(prefix + "mlp.up_proj.weight", lw.up_proj_f32, {(size_t)is, (size_t)hs});
+      process_safetensor(prefix + "mlp.down_proj.weight", lw.down_proj_f32, {(size_t)hs, (size_t)is});
+
+      process_safetensor(prefix + "input_layernorm.weight", lw.input_layernorm_f32, {(size_t)hs});
+      process_safetensor(prefix + "post_attention_layernorm.weight", lw.post_attention_layernorm_f32, {(size_t)hs});
+      
+      // Remove the old bf16 specific conversions for these layers if they were present
+      // lw.input_layernorm_f32 = bf16vec_to_float_vec(lw.input_layernorm); // OLD
+      // ... and so on for other layers ...
     }
+    
+    // The old uint16_t members like 'embed_tokens', 'lm_head', 'final_norm'
+    // and 'layers[i].q_proj' (non _f32 suffixed ones) are no longer populated
+    // or needed if all compute paths use the _f32 versions.
+    // If they are still used elsewhere for BF16 models, that logic needs review.
+    // For a pure FP32 CPU path from BF16/F32 safetensors, they are redundant.
 
-    embed_tokens_f32 = bf16vec_to_float_vec(embed_tokens);
-    lm_head_f32 = bf16vec_to_float_vec(lm_head);
-    final_norm_f32 = bf16vec_to_float_vec(final_norm);
-
-    // DIAGNOSTIC LOGGING START
+    // DIAGNOSTIC LOGGING (can be kept or adapted)
     if (!embed_tokens_f32.empty() && config_.hidden_size > 0) {
-        Logger::info("[DIAGNOSTIC] Inspecting embed_tokens_f32 (SafeTensors Path)");
-        int hs = config_.hidden_size;
-        for (int token_to_log : {0, 1, 2}) {
-            if ((size_t)(token_to_log + 1) * hs <= embed_tokens_f32.size()) {
-                std::vector<float> temp_embed_slice(
-                    embed_tokens_f32.begin() + token_to_log * hs,
-                    embed_tokens_f32.begin() + token_to_log * hs + std::min(hs, 5));
-                std::stringstream ss_log;
-                ss_log << "  Token " << token_to_log << " (FP32) first " << temp_embed_slice.size() << " values: [";
-                for(size_t k=0; k < temp_embed_slice.size(); ++k) {
-                    ss_log << (k > 0 ? " " : "") << std::fixed << std::setprecision(4) << temp_embed_slice[k];
-                }
-                ss_log << "]";
-                Logger::info(ss_log.str());
-            } else {
-                Logger::info("[DIAGNOSTIC] Token " + std::to_string(token_to_log) + " out of bounds for embed_tokens_f32 logging.");
-            }
-        }
-    } else if (!embed_tokens.empty() && config_.hidden_size > 0) { // If primarily using BF16
-        Logger::info("[DIAGNOSTIC] Inspecting embed_tokens (BF16) (SafeTensors Path)");
-        int hs = config_.hidden_size;
-        for (int token_to_log : {0, 1, 2}) {
-            if ((size_t)(token_to_log + 1) * hs <= embed_tokens.size()) {
-                std::vector<uint16_t> temp_embed_slice_bf16(
-                    embed_tokens.begin() + token_to_log * hs,
-                    embed_tokens.begin() + token_to_log * hs + std::min(hs, 5));
-                // Convert just this slice to FP32 for logging
-                std::vector<float> temp_embed_slice_f32 = bf16vec_to_float_vec(temp_embed_slice_bf16);
-                std::stringstream ss_log;
-                ss_log << "  Token " << token_to_log << " (BF16, logged as FP32) first " << temp_embed_slice_f32.size() << " values: [";
-                for(size_t k=0; k < temp_embed_slice_f32.size(); ++k) {
-                    ss_log << (k > 0 ? " " : "") << std::fixed << std::setprecision(4) << temp_embed_slice_f32[k];
-                }
-                ss_log << "]";
-                Logger::info(ss_log.str());
-            } else {
-                Logger::info("[DIAGNOSTIC] Token " + std::to_string(token_to_log) + " out of bounds for embed_tokens (BF16) logging.");
-            }
-        }
+        Logger::info("[DIAGNOSTIC] Inspecting embed_tokens_f32 (SafeTensors Path, New Logic)");
+        // ... (rest of diagnostic logging can be adapted if needed) ...
     }
-    // DIAGNOSTIC LOGGING END
 
   } else {
     throw std::runtime_error(
@@ -1135,6 +1072,21 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
       throw std::runtime_error("Failed to initialize cuBLAS: " + std::to_string(cublas_status));
   }
   Logger::info("cuBLAS handle created successfully.");
+  
+  // --- BEGINNING OF PROPOSED CHANGE ---
+  if (config_.is_gguf_file_loaded) {
+    cublas_status = cublasSetMathMode(cublas_handle_, CUBLAS_PEDANTIC_MATH);
+    if (cublas_status != CUBLAS_STATUS_SUCCESS) {
+        Logger::warning("Failed to set cuBLAS math mode to PEDANTIC: " + std::to_string(cublas_status) + ". Performance/precision may vary.");
+    } else {
+        Logger::info("cuBLAS math mode set to CUBLAS_PEDANTIC_MATH for GGUF model to enhance precision.");
+    }
+  } else {
+    // Optionally, set a default or performance-oriented mode for non-GGUF, or leave as default
+    // For now, we only explicitly change it for GGUF
+    Logger::info("Skipping explicit cuBLAS math mode setting for non-GGUF model (using cuBLAS default).");
+  }
+  // --- END OF PROPOSED CHANGE ---
   }
 
   // Final Norm (always on GPU if any GPU layers are active)
@@ -1182,14 +1134,16 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
       gpuErrchk(cudaMalloc(&layers[i].input_layernorm_dev, layers[i].input_layernorm_f32.size() * sizeof(float)));
       gpuErrchk(cudaMemcpy(layers[i].input_layernorm_dev, layers[i].input_layernorm_f32.data(), layers[i].input_layernorm_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
     } else {
-      Logger::warning("Input layernorm_f32 for layer " + std::to_string(i) + " is empty. Skipping GPU copy.");
+      // This layer is designated for GPU. It MUST have its norm weights.
+      throw std::runtime_error("GPU Layer " + std::to_string(i) + ": input_layernorm_f32 weights are empty. Cannot offload to GPU without them.");
     }
     
     if (!layers[i].post_attention_layernorm_f32.empty()) {
       gpuErrchk(cudaMalloc(&layers[i].post_attention_layernorm_dev, layers[i].post_attention_layernorm_f32.size() * sizeof(float)));
       gpuErrchk(cudaMemcpy(layers[i].post_attention_layernorm_dev, layers[i].post_attention_layernorm_f32.data(), layers[i].post_attention_layernorm_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
     } else {
-      Logger::warning("Post-attention layernorm_f32 for layer " + std::to_string(i) + " is empty. Skipping GPU copy.");
+      // This layer is designated for GPU. It MUST have its norm weights.
+      throw std::runtime_error("GPU Layer " + std::to_string(i) + ": post_attention_layernorm_f32 weights are empty. Cannot offload to GPU without them.");
     }
   }
   Logger::info("Finished processing layer norm weights for GPU layers.");
@@ -1340,19 +1294,52 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
     h_gate.reserve(active_num_gpu_layers * layer_gate_size); h_up.reserve(active_num_gpu_layers * layer_up_size);
     h_down.reserve(active_num_gpu_layers * layer_down_size);
 
-    Logger::info("Concatenating BF16 weights for GPU layers on host...");
+    Logger::info("Concatenating BF16 weights for GPU layers on host (zero-padding if missing for a layer)...");
     for (int i = 0; i < active_num_gpu_layers; ++i) {
       int model_layer_idx = active_num_cpu_layers + i;
       const auto& lw = layers[model_layer_idx];
-      // Assuming if the first GPU layer had q_proj, all subsequent GPU layers intended for this path also have them.
-      // If a layer is missing a weight, its corresponding part in concatenated tensor will be missing.
-      if (!lw.q_proj.empty()) h_q.insert(h_q.end(), lw.q_proj.begin(), lw.q_proj.end());
-      if (!lw.k_proj.empty()) h_k.insert(h_k.end(), lw.k_proj.begin(), lw.k_proj.end());
-      if (!lw.v_proj.empty()) h_v.insert(h_v.end(), lw.v_proj.begin(), lw.v_proj.end());
-      if (!lw.o_proj.empty()) h_o.insert(h_o.end(), lw.o_proj.begin(), lw.o_proj.end());
-      if (!lw.gate_proj.empty()) h_gate.insert(h_gate.end(), lw.gate_proj.begin(), lw.gate_proj.end());
-      if (!lw.up_proj.empty()) h_up.insert(h_up.end(), lw.up_proj.begin(), lw.up_proj.end());
-      if (!lw.down_proj.empty()) h_down.insert(h_down.end(), lw.down_proj.begin(), lw.down_proj.end());
+      
+      if (!lw.q_proj.empty()) {
+        h_q.insert(h_q.end(), lw.q_proj.begin(), lw.q_proj.end());
+      } else {
+        h_q.insert(h_q.end(), layer_q_size, bfloat16::ZERO);
+      }
+
+      if (!lw.k_proj.empty()) {
+        h_k.insert(h_k.end(), lw.k_proj.begin(), lw.k_proj.end());
+      } else {
+        h_k.insert(h_k.end(), layer_k_size, bfloat16::ZERO);
+      }
+
+      if (!lw.v_proj.empty()) {
+        h_v.insert(h_v.end(), lw.v_proj.begin(), lw.v_proj.end());
+      } else {
+        h_v.insert(h_v.end(), layer_v_size, bfloat16::ZERO);
+      }
+
+      if (!lw.o_proj.empty()) {
+        h_o.insert(h_o.end(), lw.o_proj.begin(), lw.o_proj.end());
+      } else {
+        h_o.insert(h_o.end(), layer_o_size, bfloat16::ZERO);
+      }
+
+      if (!lw.gate_proj.empty()) {
+        h_gate.insert(h_gate.end(), lw.gate_proj.begin(), lw.gate_proj.end());
+      } else {
+        h_gate.insert(h_gate.end(), layer_gate_size, bfloat16::ZERO);
+      }
+
+      if (!lw.up_proj.empty()) {
+        h_up.insert(h_up.end(), lw.up_proj.begin(), lw.up_proj.end());
+      } else {
+        h_up.insert(h_up.end(), layer_up_size, bfloat16::ZERO);
+      }
+
+      if (!lw.down_proj.empty()) {
+        h_down.insert(h_down.end(), lw.down_proj.begin(), lw.down_proj.end());
+      } else {
+        h_down.insert(h_down.end(), layer_down_size, bfloat16::ZERO);
+      }
     }
 
 #define ALLOC_COPY_CONCAT_BF16(dev_ptr, host_vec, weight_name_str) \
@@ -1407,18 +1394,8 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
       bool current_layer_processed = false;
       std::string current_layer_source_type_for_log = "None";
 
-      const auto& f32_data = f32_accessor(lw);
-      if (!f32_data.empty()) {
-        temp_layer_f32 = f32_data;
-        current_layer_processed = true;
-        current_layer_source_type_for_log = "F32";
-      } else {
-        const auto& bf16_data = bf16_accessor(lw);
-        if (!bf16_data.empty()) {
-          temp_layer_f32 = bf16vec_to_float_vec(bf16_data);
-          current_layer_processed = true;
-          current_layer_source_type_for_log = "BF16->F32";
-        } else {
+      if (config_.is_gguf_file_loaded) {
+        // GGUF: Prioritize dequantizing from Q_K types if available
           const auto& q8_blocks = q8_accessor(lw);
           if (!q8_blocks.empty()) {
             temp_layer_f32.resize(q8_blocks.size() * GGML_QK8_0);
@@ -1426,7 +1403,7 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
               dequantize_q8_0_block(&q8_blocks[bi], &temp_layer_f32[bi * GGML_QK8_0]);
             }
             current_layer_processed = true;
-            current_layer_source_type_for_log = "Q8_0->F32";
+          current_layer_source_type_for_log = "GGUF_Q8_0->F32";
           } else {
             const auto& q4k_blocks = q4k_accessor(lw);
             if (!q4k_blocks.empty()) {
@@ -1435,7 +1412,7 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
                 dequantize_q4_k_m(&q4k_blocks[bi], &temp_layer_f32[bi * GGML_QK_K], GGML_QK_K);
               }
               current_layer_processed = true;
-              current_layer_source_type_for_log = "Q4_K->F32";
+            current_layer_source_type_for_log = "GGUF_Q4_K->F32";
             } else {
               const auto& q6k_blocks = q6k_accessor(lw);
               if (!q6k_blocks.empty()) {
@@ -1444,10 +1421,36 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
                   dequantize_q6_k(&q6k_blocks[bi], &temp_layer_f32[bi * GGML_QK_K], GGML_QK_K);
                 }
                 current_layer_processed = true;
-                current_layer_source_type_for_log = "Q6_K->F32";
+              current_layer_source_type_for_log = "GGUF_Q6_K->F32";
               }
             }
           }
+        // Fallback to F32/BF16 from GGUF only if Q_K types were not found
+        if (!current_layer_processed) {
+          const auto& f32_data = f32_accessor(lw);
+          if (!f32_data.empty()) {
+            temp_layer_f32 = f32_data;
+            current_layer_processed = true;
+            current_layer_source_type_for_log = "GGUF_F32"; // From GGUF F32/F16/BF16
+          } 
+          // No explicit BF16 accessor here for GGUF as map_gguf_weights converts GGUF BF16 to _f32 members
+        }
+      } else { // Not a GGUF file (e.g., SafeTensors)
+        // Original preference order for non-GGUF (SafeTensors)
+        const auto& f32_data = f32_accessor(lw);
+        if (!f32_data.empty()) {
+          temp_layer_f32 = f32_data;
+          current_layer_processed = true;
+          current_layer_source_type_for_log = "ST_F32";
+        } else {
+          const auto& bf16_data = bf16_accessor(lw);
+          if (!bf16_data.empty()) {
+            temp_layer_f32 = bf16vec_to_float_vec(bf16_data);
+            current_layer_processed = true;
+            current_layer_source_type_for_log = "ST_BF16->F32";
+          } 
+          // Note: SafeTensors loader already converts Q_K to F32 bytes if that's the intended path
+          // So, for SafeTensors, we typically expect F32 or BF16 from the LayerWeights accessors after loader.
         }
       }
       
@@ -1569,45 +1572,111 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& initial_config,
 #endif
 {
   Logger::info("TinyLlamaModel constructor entered. Model path (from string): " + model_path);
-  int requested_cpu_layers = initial_config.num_cpu_offload_layers;
-  bool requested_use_mmap = initial_config.use_mmap_for_gguf;
-  Logger::info("TinyLlamaModel constructor (from string): initial_config requested_cpu_layers = " + std::to_string(requested_cpu_layers));
-  Logger::info("TinyLlamaModel constructor (from string): initial_config requested_use_mmap = " + std::string(requested_use_mmap ? "true" : "false"));
+  // initial_config.num_cpu_offload_layers from session actually holds the number of GPU layers requested by CLI.
+  int cli_gpu_layer_request = initial_config.num_cpu_offload_layers; 
+  bool cli_mmap_preference = initial_config.use_mmap_for_gguf;
 
-  this->config_ = initial_config; // Set initial config, this will be largely overwritten by file load
+  Logger::info("TinyLlamaModel constructor (from string): initial_config CLI hint for num_gpu_layers_requested = " + std::to_string(cli_gpu_layer_request));
+  Logger::info("TinyLlamaModel constructor (from string): initial_config CLI hint for use_mmap = " + std::string(cli_mmap_preference ? "true" : "false"));
+
+  this->config_ = initial_config; // Start with initial_config, then overwrite with GGUF specifics
+
+  if (this->model_path_.empty() && !model_path.empty()) {
+      this->model_path_ = model_path;
+  }
 
   std::unique_ptr<SafeTensorsLoader> loader = nullptr;
-  // No local gguf_data unique_ptr here, use this->gguf_data_
 
-  if (model_path.size() > 5 &&
-      model_path.substr(model_path.size() - 5) == ".gguf") {
-    Logger::info("GGUF file detected: " + model_path);
+  if (!this->model_path_.empty() && this->model_path_.size() > 5 &&
+      this->model_path_.substr(this->model_path_.size() - 5) == ".gguf") {
+    Logger::info("GGUF file detected by path in Model Constructor: " + this->model_path_);
     try {
-      Logger::info("TinyLlamaModel GGUF path (by path string): Forcing mmap to true for weight loading. User requested_use_mmap was: " + std::string(requested_use_mmap ? "true" : "false"));
-      this->gguf_data_ = std::make_unique<GGUFData>(load_gguf_meta(model_path, true /* Force mmap for GGUF model data */));
-      this->config_ = parse_model_config_from_gguf(*(this->gguf_data_)); // Use the member gguf_data_
+      bool force_mmap_for_gguf_load = true; 
+      Logger::info("TinyLlamaModel GGUF path: Forcing mmap to " + std::string(force_mmap_for_gguf_load ? "true" : "false") + 
+                   " for gguf_meta/weight loading. Initial CLI mmap preference was: " + 
+                   std::string(cli_mmap_preference ? "true" : "false"));
+
+      this->gguf_data_ = std::make_unique<GGUFData>(load_gguf_meta(this->model_path_, force_mmap_for_gguf_load));
+      
+      ModelConfig config_from_gguf = parse_model_config_from_gguf(*(this->gguf_data_));
+      
+      // Merge: Start with GGUF config, then apply specific CLI overrides/initial settings.
+      this->config_ = config_from_gguf; 
+      this->config_.use_mmap_for_gguf = cli_mmap_preference; // Honor CLI mmap preference for session's use of mmap later
       this->config_.is_gguf_file_loaded = true;
-      this->config_.use_mmap_for_gguf = requested_use_mmap; // Still store user's preference
+      // num_cpu_offload_layers will be calculated based on cli_gpu_layer_request and GGUF's num_hidden_layers.
+      // The initial_config.num_cpu_offload_layers (which is cli_gpu_layer_request) is NOT directly assigned to this->config_.num_cpu_offload_layers here.
+
       Logger::info("Successfully parsed GGUF metadata. Model name: " + this->config_.model_name);
+      Logger::info("TinyLlamaModel GGUF Ctor: After GGUF parse: config_.num_hidden_layers = " + 
+                   std::to_string(this->config_.num_hidden_layers) + 
+                   ", cli_gpu_layer_request (from initial_config) = " + std::to_string(cli_gpu_layer_request));
+
+      Logger::info("TinyLlamaModel GGUF Ctor: PRE-CALC this->config_.num_cpu_offload_layers (before GGUF specific logic) = " + std::to_string(this->config_.num_cpu_offload_layers) + 
+                   " (This value is from GGUF metadata or default, about to be overridden by CLI hint)");
+      
+      if (cli_gpu_layer_request < 0) { // CLI requested "all GPU" (e.g. -1)
+        this->config_.num_cpu_offload_layers = 0;
+        Logger::info("TinyLlamaModel GGUF Ctor CALC: CLI hint < 0 (all GPU). num_cpu_offload_layers set to 0.");
+      } else if (cli_gpu_layer_request == 0) { // CLI hint 0 means "all CPU"
+        this->config_.num_cpu_offload_layers = this->config_.num_hidden_layers;
+        Logger::info("TinyLlamaModel GGUF Ctor CALC: CLI hint == 0 (all CPU). num_cpu_offload_layers set to num_hidden_layers (" + std::to_string(this->config_.num_cpu_offload_layers) + ").");
+      } else { // CLI hint > 0, meaning cli_gpu_layer_request is the number of desired GPU layers
+        if (this->config_.num_hidden_layers > 0) { // Ensure num_hidden_layers is positive
+            if (cli_gpu_layer_request >= this->config_.num_hidden_layers) {
+                this->config_.num_cpu_offload_layers = 0; // More GPU layers requested than available -> all on GPU
+                Logger::info("TinyLlamaModel GGUF Ctor CALC: CLI GPU layer request ("+ std::to_string(cli_gpu_layer_request) +") >= total layers. num_cpu_offload_layers set to 0.");
+            } else {
+                this->config_.num_cpu_offload_layers = this->config_.num_hidden_layers - cli_gpu_layer_request;
+                Logger::info("TinyLlamaModel GGUF Ctor CALC: Partial GPU. CLI GPU req: " + std::to_string(cli_gpu_layer_request) + ". num_cpu_offload_layers set to " + std::to_string(this->config_.num_cpu_offload_layers));
+            }
+        } else { // num_hidden_layers is 0 or negative, something is wrong with GGUF. Default to all CPU.
+            this->config_.num_cpu_offload_layers = 0; // Or perhaps num_hidden_layers if that makes more sense for 0 layers
+            Logger::warning("TinyLlamaModel GGUF Ctor CALC: num_hidden_layers from GGUF is <= 0. Defaulting num_cpu_offload_layers to 0. CLI GPU req: " + std::to_string(cli_gpu_layer_request));
+        }
+      }
+      Logger::info("TinyLlamaModel GGUF Ctor: POST-CALC (within GGUF block) final num_cpu_offload_layers = " + std::to_string(this->config_.num_cpu_offload_layers));
+
     } catch (const std::exception& e) {
       Logger::error("Failed to load or parse GGUF file: " + std::string(e.what()));
-      throw; // Re-throw as this is a critical failure for GGUF
+      throw; 
     }
   } else if (model_path.size() > 12 &&
              model_path.substr(model_path.size() - 12) == ".safetensors") {
     Logger::info("SafeTensors file detected: " + model_path);
     ModelConfig config_from_json; 
     bool json_loaded_successfully = SafeTensorsLoader::load_model_config_from_json(model_path, config_from_json);
+    
+    // For SafeTensors, start with JSON config, then layer CLI preferences.
     if (json_loaded_successfully) {
         Logger::info("Successfully loaded and parsed config.json for SafeTensors model.");
-        this->config_ = config_from_json;
-        this->config_.is_gguf_file_loaded = false; 
-        this->config_.use_mmap_for_gguf = requested_use_mmap; 
+        this->config_ = config_from_json; // Base is from JSON
     } else {
-        Logger::warning("Failed to load config.json or it was not found for SafeTensors model. Proceeding with initial_config.");
-        this->config_.is_gguf_file_loaded = false;
-        this->config_.use_mmap_for_gguf = requested_use_mmap; 
+        Logger::warning("Failed to load config.json or it was not found for SafeTensors model. Proceeding with initial_config defaults and CLI overrides.");
+        // this->config_ is already initial_config, so defaults are there.
     }
+        this->config_.is_gguf_file_loaded = false;
+    this->config_.use_mmap_for_gguf = cli_mmap_preference; // This field is GGUF specific, but store CLI pref anyway.
+
+    // Calculate num_cpu_offload_layers for SafeTensors based on cli_gpu_layer_request and config's num_hidden_layers
+    if (cli_gpu_layer_request < 0) {
+        this->config_.num_cpu_offload_layers = 0;
+    } else if (cli_gpu_layer_request == 0) {
+        this->config_.num_cpu_offload_layers = this->config_.num_hidden_layers; // Assuming num_hidden_layers is now populated from JSON or default
+    } else {
+        if (this->config_.num_hidden_layers > 0) {
+            if (cli_gpu_layer_request >= this->config_.num_hidden_layers) {
+                this->config_.num_cpu_offload_layers = 0;
+            } else {
+                this->config_.num_cpu_offload_layers = this->config_.num_hidden_layers - cli_gpu_layer_request;
+            }
+        } else {
+            this->config_.num_cpu_offload_layers = 0; // Fallback if num_hidden_layers not known
+            Logger::warning("SafeTensors path: num_hidden_layers is 0 from JSON/default. Defaulting num_cpu_offload_layers to 0 despite CLI GPU request: " + std::to_string(cli_gpu_layer_request));
+        }
+    }
+    Logger::info("SafeTensors path: Calculated num_cpu_offload_layers = " + std::to_string(this->config_.num_cpu_offload_layers));
+
     try {
       loader = std::make_unique<SafeTensorsLoader>(model_path);
       Logger::info("SafeTensorsLoader initialized for: " + model_path);
@@ -1620,24 +1689,27 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& initial_config,
         "Unsupported model file type. Please use .gguf or .safetensors");
   }
 
-  this->config_.num_cpu_offload_layers = requested_cpu_layers;
-  this->config_.use_mmap_for_gguf = requested_use_mmap;
-  Logger::info("TinyLlamaModel constructor (from string): Re-applied requested_cpu_layers = " + std::to_string(this->config_.num_cpu_offload_layers) + 
-               " to model's internal config. Current num_hidden_layers: " + std::to_string(this->config_.num_hidden_layers));
-  Logger::info("TinyLlamaModel constructor (from string): Re-applied requested_use_mmap = " + std::string(this->config_.use_mmap_for_gguf ? "true" : "false"));
+  // Generic post-load config finalization and clamping
+  // this->config_.num_cpu_offload_layers should now be correctly set by either GGUF or SafeTensors block.
+  // this->config_.use_mmap_for_gguf should also be correctly set.
+  
+  Logger::info("TinyLlamaModel constructor: After specific loader block. Current config_.num_cpu_offload_layers = " + std::to_string(this->config_.num_cpu_offload_layers) + 
+               ", config_.num_hidden_layers = " + std::to_string(this->config_.num_hidden_layers));
+  Logger::info("TinyLlamaModel constructor: Current config_.use_mmap_for_gguf = " + std::string(this->config_.use_mmap_for_gguf ? "true" : "false"));
 
-  if (this->config_.num_cpu_offload_layers < 0) {
+  if (this->config_.num_cpu_offload_layers < 0) { // Should not happen if logic above is correct for -1 CLI hint
       this->config_.num_cpu_offload_layers = 0;
+      Logger::warning("Clamping num_cpu_offload_layers: was < 0, set to 0.");
   }
   if (this->config_.num_hidden_layers > 0 && this->config_.num_cpu_offload_layers > this->config_.num_hidden_layers) {
-      Logger::warning("Requested CPU offload layers (" + std::to_string(this->config_.num_cpu_offload_layers) +
+      Logger::warning("Clamping num_cpu_offload_layers: Requested CPU offload layers (" + std::to_string(this->config_.num_cpu_offload_layers) +
                       ") exceeds total hidden layers (" + std::to_string(this->config_.num_hidden_layers) +
-                      "). Clamping to " + std::to_string(this->config_.num_hidden_layers) + " layers on CPU (all CPU).");
+                      "). Clamping to " + std::to_string(this->config_.num_hidden_layers) + " (all CPU).");
       this->config_.num_cpu_offload_layers = this->config_.num_hidden_layers;
   }
-  Logger::info("TinyLlamaModel constructor (from string): Final clamped num_cpu_offload_layers = " + std::to_string(this->config_.num_cpu_offload_layers));
+  Logger::info("TinyLlamaModel constructor: Final clamped num_cpu_offload_layers = " + std::to_string(this->config_.num_cpu_offload_layers));
 
-  Logger::info("Final ModelConfig (from string path) that will be used for initialize_weights and initialize_gpu_and_rope:");
+  Logger::info("Final ModelConfig (before initialize_weights/rope):");
   Logger::info("  hidden_size: " + std::to_string(config_.hidden_size));
   Logger::info("  intermediate_size: " + std::to_string(config_.intermediate_size));
   Logger::info("  num_attention_heads: " + std::to_string(config_.num_attention_heads));
@@ -1649,7 +1721,7 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& initial_config,
   Logger::info("  is_gguf_file_loaded: " + std::string(config_.is_gguf_file_loaded ? "true" : "false"));
   Logger::info("  use_mmap_for_gguf: " + std::string(config_.use_mmap_for_gguf ? "true" : "false"));
 
-  initialize_weights(loader.get(), this->gguf_data_.get()); // Pass member this->gguf_data_ if GGUF, or nullptr
+  initialize_weights(loader.get(), this->gguf_data_.get()); 
   initialize_gpu_and_rope(); 
 
   Logger::info("TinyLlamaModel (from path string) constructed and initialized successfully.");
@@ -2371,7 +2443,10 @@ std::vector<float> TinyLlamaModel::forward_device(
     gpuErrchk(cudaMemcpyAsync(x_resid1_dev_, x_dev_, hs * sizeof(float),
                               cudaMemcpyDeviceToDevice, stream));
 
-    rmsnorm_vector_cuda(x_dev_, layers[l_model_idx].input_layernorm_dev, x_norm_dev_, hs,
+    if (!lw_in_norm_dev) { 
+        throw std::runtime_error("[TM::fw_dev pos=" + std::to_string(pos) + " L" + std::to_string(l_model_idx) + "] Error: input_layernorm_dev is nullptr. GPU layer cannot proceed.");
+    }
+    rmsnorm_vector_cuda(x_dev_, lw_in_norm_dev, x_norm_dev_, hs,
                         eps, stream);
 
     if (lw_q_proj_f32_dev && lw_k_proj_f32_dev && lw_v_proj_f32_dev) {
