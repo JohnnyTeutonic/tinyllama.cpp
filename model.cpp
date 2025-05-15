@@ -1087,7 +1087,6 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
   }
   Logger::info("cuBLAS handle created successfully.");
   
-  // --- BEGINNING OF PROPOSED CHANGE ---
   if (config_.is_gguf_file_loaded) {
     cublas_status = cublasSetMathMode(cublas_handle_, CUBLAS_PEDANTIC_MATH);
     if (cublas_status != CUBLAS_STATUS_SUCCESS) {
@@ -1100,7 +1099,6 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
     // For now, we only explicitly change it for GGUF
     Logger::info("Skipping explicit cuBLAS math mode setting for non-GGUF model (using cuBLAS default).");
   }
-  // --- END OF PROPOSED CHANGE ---
   }
 
   // Final Norm (always on GPU if any GPU layers are active)
