@@ -105,7 +105,14 @@ For safetensors models, you need three files from a compatible TinyLlama model (
 
 Place these three files into a directory, for example, named `data/`.
 
-*(Note: This project expects BF16 weights in `model.safetensors`. Ensure your conversion script saves them in this format if converting from another source).*
+***Supported SafeTensors Data Types:***
+
+*This project's SafeTensors loader currently supports models with weights in the following formats:*
+    *   **`F32` (Single-precision Floating Point):** Loaded as is.
+    *   **`BF16` (BFloat16 Floating Point):** These tensors are automatically converted to `F32` upon loading.
+    *   **`F16` (Half-precision Floating Point):** These tensors are also automatically converted to `F32` upon loading.
+
+*The internal representation and computation for models loaded from SafeTensors will therefore use `F32` precision. Support for other data types (e.g., quantized integer types like `I8`) directly from SafeTensors is not yet implemented.*
 
 #### GGUF
 
@@ -118,7 +125,8 @@ This project has been tested with a number of different weights. You can downloa
 
 *   **For SafeTensors (BF16 format expected):**
     *   **TinyLlama 1.1B Chat v1.0:** [TinyLlama/TinyLlama-1.1B-Chat-v1.0 on Hugging Face](https://huggingface.co/TinyLlama/TinyLlama-1.1B-Chat-v1.0)
-        *   Ensure you download `config.json`, `tokenizer.json`, and `model.safetensors` (which should be BF16).
+    *   **Llama-2-7-b-hf:** [meta-llama/Llama-2-7b-hf on Hugging Face](https://huggingface.co/meta-llama/Llama-2-7b-hf/)
+    *   Ensure you download `config.json`, `tokenizer.json`, and `model.safetensors`
 
 *   **For GGUF:**
     *   **TinyLlama 1.1B Chat v1.0 (Q8_0 GGUF):** [TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF - Q8_0.gguf](https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/blob/main/tinyllama-1.1b-chat-v1.0.Q8_0.gguf)
@@ -189,7 +197,7 @@ chmod +x manage.sh
 *   `./manage.sh run-server [--model-dir <path>] [--tokenizer <path>] [--threads <num>] [--host <hostname>] [--port <num>] [--n-gpu-layers <num>] [--mmap <true|false>] [--no-log]`
 *   `./manage.sh run-chat [--model-dir <path>] [--tokenizer <path>] [--threads <num>] [--prompt <text>] [--n-gpu-layers <num>] [--mmap <true|false>]`
     *   (Note: `run-chat` specific sampling parameters like temperature, top-k, top-p are set to defaults in the C++ `main`.)
-*   `./manage.sh run-prompt [--model-dir <path>] [--tokenizer <path>] [--prompt <text>] [--steps <num>] [--threads <num>] [--n-gpu-layers <num>] [--mmap <true|false>]`
+*   `./manage.sh run-prompt [--model-dir <path>] [--tokenizer <path>] [--prompt <text>] [--steps <num>] [--threads <num>] [--n-gpu-layers <num>] [--mmap <true|false>][--temperature <num>]`
     *   This command runs the model with a single provided prompt and then exits.
     *   If `--model-dir` is not provided, you can specify the model directory/GGUF file path as a single positional argument after `run-prompt`.
     *   Example: `./manage.sh run-prompt path/to/your/model --prompt "Translate to French: Hello"`
@@ -213,7 +221,7 @@ This script provides equivalent functionality to `manage.sh` for Windows users.
 *   `.\\manage.ps1 run-server [-ModelDir <path>] [-TokenizerPath <path>] [-Threads <num>] [-Host <hostname>] [-Port <num>] [-NGpuLayers <num>] [-Mmap <$true|$false>] [-NoLog]`
 *   `.\\manage.ps1 run-chat [-ModelDir <path>] [-TokenizerPath <path>] [-Threads <num>] [-Prompt <text>] [-NGpuLayers <num>] [-Mmap <$true|$false>]`
     *   (Note: `run-chat` specific sampling parameters like temperature, top-k, top-p are set to defaults in the C++ `main`.)
-*   `.\\manage.ps1 run-prompt [-ModelDir <path>] [-TokenizerPath <path>] [-Prompt <text>] [-Steps <num>] [-Threads <num>] [-NGpuLayers <num>] [-Mmap <$true|$false>]`
+*   `.\\manage.ps1 run-prompt [-ModelDir <path>] [-TokenizerPath <path>] [-Prompt <text>] [-Steps <num>] [-Threads <num>] [-NGpuLayers <num>] [-Mmap <$true|$false>][-Temperature <num>]`
     *   This command runs the model with a single provided prompt and then exits.
     *   If `-ModelDir` is not provided, you can specify the model directory/GGUF file path as a single positional argument after `run-prompt`.
     *   Example: `.\\manage.ps1 run-prompt -ModelDir path\\to\\your\\model -Prompt "What is the capital of France?"`
@@ -295,7 +303,6 @@ Please refer to the `pytorch/README.md` for detailed usage instructions for this
 *   `.clang-format`: Configuration file for the `clang-format` C++ code formatter.
 *   `Doxyfile`: Configuration file for generating API documentation with Doxygen.
 *   Key C++, Header, and CUDA files (typically in the root or organized by CMake):
-    *   `main_gguf.cpp`: Main entry point for the `tinyllama` command-line chat client (supports GGUF and SafeTensors models).
     *   `server.cpp`: Implements the `tinyllama_server` HTTP server and its main entry point for web UI interaction.
     *   `api.cpp`/`api.h`: Defines the `TinyLlamaSession` class, providing a high-level API for loading models and generating text.
     *   `bindings.cpp`: Implements Python bindings for `TinyLlamaSession` and `ModelConfig` using `pybind11`.
@@ -453,5 +460,4 @@ Find `llama.cpp` on GitHub: [https://github.com/ggerganov/llama.cpp](https://git
 
 ## Known Limitations
 
-*   **SafeTensors Model Formats**: While the SafeTensors loading mechanism is in place, only BF16 (BFloat16) weight types have been extensively tested for these models. Other float types (like FP16 or FP32) in SafeTensors files may load but are not as thoroughly validated in this specific C++ implementation.
 *   **Windows Support**: Building and running on Windows is possible but is considered highly experimental. The primary development and testing focus has been on Linux. Users may encounter build issues or runtime instabilities on Windows that are not present on Linux.
