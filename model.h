@@ -133,12 +133,6 @@ struct KVCache {
     int seq_len = 0;                  /**< Current sequence length */
     int total_model_layers_ = 0;       /**< Total number of layers in the model */
 
-#ifdef HAS_CUDA
-    int allocated_num_layers = 0;     /**< Number of GPU layers for which device memory was actually allocated */
-    int allocated_max_seq_len = 0;    /**< Maximum sequence length allocated */
-    int allocated_num_kv_heads = 0;   /**< Number of key/value heads allocated */
-    int allocated_head_dim = 0;       /**< Dimension of each head allocated */
-
     /**
      * @brief Initializes the KV cache with given dimensions
      * @param total_num_model_layers Total number of layers in the model (for sizing CPU cache vectors)
@@ -149,6 +143,12 @@ struct KVCache {
      */
     void initialize(int total_num_model_layers, int num_gpu_layers_to_allocate, 
                     int max_seq_len, int num_kv_heads, int head_dim);
+
+#ifdef HAS_CUDA
+    int allocated_num_layers = 0;     /**< Number of GPU layers for which device memory was actually allocated */
+    int allocated_max_seq_len = 0;    /**< Maximum sequence length allocated */
+    int allocated_num_kv_heads = 0;   /**< Number of key/value heads allocated */
+    int allocated_head_dim = 0;       /**< Dimension of each head allocated */
 
     void destroy_gpu_resources() {
         Logger::info("KVCache::destroy_gpu_resources: Freeing KVCache CUDA memory for " + 
