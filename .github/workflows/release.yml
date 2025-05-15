@@ -95,7 +95,7 @@ jobs:
         if: runner.os == 'Linux' && matrix.build_type == 'cuda'
         uses: Jimver/cuda-toolkit@v0.2.23
         with:
-          cuda: '11.8'
+          cuda: '11.8.0'
 
       - name: Install Dependencies (Linux)
         if: runner.os == 'Linux'
