@@ -125,7 +125,8 @@ This project has been tested with a number of different weights. You can downloa
 
 *   **For SafeTensors (BF16 format expected):**
     *   **TinyLlama 1.1B Chat v1.0:** [TinyLlama/TinyLlama-1.1B-Chat-v1.0 on Hugging Face](https://huggingface.co/TinyLlama/TinyLlama-1.1B-Chat-v1.0)
-        *   Ensure you download `config.json`, `tokenizer.json`, and `model.safetensors` (which should be BF16).
+    *   **Llama-2-7-b-hf:** [meta-llama/Llama-2-7b-hf on Hugging Face](https://huggingface.co/meta-llama/Llama-2-7b-hf/)
+    *   Ensure you download `config.json`, `tokenizer.json`, and `model.safetensors`
 
 *   **For GGUF:**
     *   **TinyLlama 1.1B Chat v1.0 (Q8_0 GGUF):** [TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF - Q8_0.gguf](https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/blob/main/tinyllama-1.1b-chat-v1.0.Q8_0.gguf)
@@ -196,7 +197,7 @@ chmod +x manage.sh
 *   `./manage.sh run-server [--model-dir <path>] [--tokenizer <path>] [--threads <num>] [--host <hostname>] [--port <num>] [--n-gpu-layers <num>] [--mmap <true|false>] [--no-log]`
 *   `./manage.sh run-chat [--model-dir <path>] [--tokenizer <path>] [--threads <num>] [--prompt <text>] [--n-gpu-layers <num>] [--mmap <true|false>]`
     *   (Note: `run-chat` specific sampling parameters like temperature, top-k, top-p are set to defaults in the C++ `main`.)
-*   `./manage.sh run-prompt [--model-dir <path>] [--tokenizer <path>] [--prompt <text>] [--steps <num>] [--threads <num>] [--n-gpu-layers <num>] [--mmap <true|false>]`
+*   `./manage.sh run-prompt [--model-dir <path>] [--tokenizer <path>] [--prompt <text>] [--steps <num>] [--threads <num>] [--n-gpu-layers <num>] [--mmap <true|false>][--temperature <num>]`
     *   This command runs the model with a single provided prompt and then exits.
     *   If `--model-dir` is not provided, you can specify the model directory/GGUF file path as a single positional argument after `run-prompt`.
     *   Example: `./manage.sh run-prompt path/to/your/model --prompt "Translate to French: Hello"`
@@ -220,7 +221,7 @@ This script provides equivalent functionality to `manage.sh` for Windows users.
 *   `.\\manage.ps1 run-server [-ModelDir <path>] [-TokenizerPath <path>] [-Threads <num>] [-Host <hostname>] [-Port <num>] [-NGpuLayers <num>] [-Mmap <$true|$false>] [-NoLog]`
 *   `.\\manage.ps1 run-chat [-ModelDir <path>] [-TokenizerPath <path>] [-Threads <num>] [-Prompt <text>] [-NGpuLayers <num>] [-Mmap <$true|$false>]`
     *   (Note: `run-chat` specific sampling parameters like temperature, top-k, top-p are set to defaults in the C++ `main`.)
-*   `.\\manage.ps1 run-prompt [-ModelDir <path>] [-TokenizerPath <path>] [-Prompt <text>] [-Steps <num>] [-Threads <num>] [-NGpuLayers <num>] [-Mmap <$true|$false>]`
+*   `.\\manage.ps1 run-prompt [-ModelDir <path>] [-TokenizerPath <path>] [-Prompt <text>] [-Steps <num>] [-Threads <num>] [-NGpuLayers <num>] [-Mmap <$true|$false>][-Temperature <num>]`
     *   This command runs the model with a single provided prompt and then exits.
     *   If `-ModelDir` is not provided, you can specify the model directory/GGUF file path as a single positional argument after `run-prompt`.
     *   Example: `.\\manage.ps1 run-prompt -ModelDir path\\to\\your\\model -Prompt "What is the capital of France?"`
