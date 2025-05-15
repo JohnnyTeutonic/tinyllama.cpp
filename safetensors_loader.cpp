@@ -1,86 +1,85 @@
 #include "safetensors_loader.h"
+#include "model.h" // Required for ModelConfig definition (was model_config.h)
+#include "logger.h"
+#include "model_macros.h" // For SAFE_MIN, SAFE_MAX (may be needed by cpu_f16_to_float32)
 
-#include <algorithm>
 #include <fstream>
-#include <filesystem> // For path manipulation
-#include "model.h"      // For ModelConfig definition and parse_model_config
-#include "logger.h"     // For Logger
+#include <stdexcept>
+#include <nlohmann/json.hpp>
+#include <algorithm> 
+#include <cctype>    
+#include <vector>
+#include <string>
+#include <map>
+#include <memory>
+#include <filesystem>
+
+
+#ifndef _WIN32
+#include <sys/stat.h> 
+#include <cerrno> // For strerror
+#else
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h> 
+#endif
 
 #ifdef __AVX2__
 #include <immintrin.h>
 #endif
 
-
+// CPU data type conversion utilities (ensure these are robust)
 // (Similar to the one in cuda_kernels.cu but for CPU)
 inline float cpu_bf16_to_float32(uint16_t bf16_raw) {
-    // BF16 is essentially the top 16 bits of an FP32 number.
-    // So, we shift it left by 16 bits to align it with the FP32 format.
-    // The lower 16 bits (mantissa of FP32) will be zero.
     unsigned int bits = ((unsigned int)bf16_raw) << 16;
     float result;
     memcpy(&result, &bits, sizeof(float));
     return result;
 }
 
-
-
+// A more robust FP16 to FP32 conversion
 inline float cpu_f16_to_float32(uint16_t f16_raw) {
-    // F16 format: 1 sign bit, 5 exponent bits, 10 mantissa bits
-    // FP32 format: 1 sign bit, 8 exponent bits, 23 mantissa bits
-
     const uint32_t sign_mask_f16 = 0x8000;
     const uint32_t exp_mask_f16 = 0x7C00;
     const uint32_t mant_mask_f16 = 0x03FF;
-    const uint32_t exp_bias_f16 = 15;
+    const int32_t exp_bias_f16 = 15;
+    const int32_t exp_bias_f32 = 127;
 
-    // const uint32_t sign_mask_f32 = 0x80000000;
-    // const uint32_t exp_mask_f32 = 0x7F800000;
-    // const uint32_t mant_mask_f32 = 0x007FFFFF;
-    const uint32_t exp_bias_f32 = 127;
-
-    uint32_t sign_f16 = (f16_raw & sign_mask_f16);
-    uint32_t exp_f16 = (f16_raw & exp_mask_f16) >> 10;
+    uint32_t sign_f32 = (static_cast<uint32_t>(f16_raw & sign_mask_f16)) << 16;
+    int32_t exp_f16 = (f16_raw & exp_mask_f16) >> 10;
     uint32_t mant_f16 = (f16_raw & mant_mask_f16);
 
     uint32_t f32_bits;
 
     if (exp_f16 == 0x1F) { // F16 NaN or Inf
-        f32_bits = (sign_f16 << 16) | 0x7F800000 | (mant_f16 << 13); // Propagate mantissa for NaN
+        f32_bits = sign_f32 | 0x7F800000U | (mant_f16 << 13); // Propagate mantissa for NaN
     } else if (exp_f16 == 0) { // F16 zero or subnormal
         if (mant_f16 == 0) { // Zero
-            f32_bits = (sign_f16 << 16);
+            f32_bits = sign_f32;
         } else { // Subnormal F16 to normal or subnormal F32
-            // Convert F16 subnormal to F32 normal if possible, or F32 subnormal.
-            // This involves counting leading zeros in mantissa and adjusting exponent.
-            // Simplified: treat as zero for now, or scale directly.
-            // A more precise conversion:
-            int32_t current_exp = 1 - exp_bias_f16; // Exponent for subnormals
-            uint32_t current_mant = mant_f16;
-            while (!(current_mant & 0x0400)) { // while leading bit (10th) is not 1
-                current_mant <<= 1;
-                current_exp--;
-                if (current_exp < (1 - exp_bias_f32 - 23) ) { // underflow to zero
-                    current_mant = 0; break;
-                }
+            int32_t s = -1;
+            mant_f16 <<= 1;
+            while ((mant_f16 & 0x0400) == 0) {
+                mant_f16 <<= 1;
+                s--;
             }
-            current_mant &= mant_mask_f16; // Remove implicit leading 1 after normalization
-            
-            if (current_mant == 0) { // Result is zero
-                 f32_bits = (sign_f16 << 16);
-            } else {
-                int32_t f32_exp_val = current_exp + exp_bias_f32;
-                if (f32_exp_val <= 0) { // F32 subnormal or zero
-                    // requires shifting mantissa right by -f32_exp_val + 1
-                    int shift = 1 - f32_exp_val;
-                    f32_bits = (sign_f16 << 16) | ((current_mant << 13) >> shift) ;
-                } else { // F32 normal
-                     f32_bits = (sign_f16 << 16) | (static_cast<uint32_t>(f32_exp_val) << 23) | (current_mant << 13);
+            mant_f16 &= 0x03FF; // Clear leading 1
+            int32_t f32_exp_val = (1 - exp_bias_f16) + s + exp_bias_f32;
+            if (f32_exp_val <= 0) { // Result is subnormal F32 or zero
+                int32_t shift = 1 - f32_exp_val;
+                if (shift > 23) { // Underflow to zero
+                     f32_bits = sign_f32;
+                } else {
+                     f32_bits = sign_f32 | ((mant_f16 << 13) >> shift) ; 
                 }
+            } else { // Result is normal F32
+                 f32_bits = sign_f32 | (static_cast<uint32_t>(f32_exp_val) << 23) | (mant_f16 << 13);
             }
         }
     } else { // Normal F16
-        uint32_t f32_exp = exp_f16 - exp_bias_f16 + exp_bias_f32;
-        f32_bits = (sign_f16 << 16) | (f32_exp << 23) | (mant_f16 << 13);
+        int32_t f32_exp = exp_f16 - exp_bias_f16 + exp_bias_f32;
+        f32_bits = sign_f32 | (static_cast<uint32_t>(f32_exp) << 23) | (mant_f16 << 13);
     }
 
     float result;
@@ -89,385 +88,635 @@ inline float cpu_f16_to_float32(uint16_t f16_raw) {
 }
 
 
-SafeTensorsLoader::SafeTensorsLoader(const std::string& path)
-    : file_path_(path) {
-  std::ifstream file(path, std::ios::binary);
-  if (!file)
-    throw std::runtime_error("Failed to open safetensors file: " + path);
+// --- Shard Implementation ---
 
-  file.seekg(0, std::ios::end);
-  file_size_ = file.tellg();
-  file.seekg(0, std::ios::beg);
-
-  uint64_t header_len = 0;
-  file.read(reinterpret_cast<char*>(&header_len), sizeof(header_len));
-  if (file.gcount() != sizeof(header_len))
-    throw std::runtime_error("Failed to read safetensors header length");
-
-  std::vector<char> header_buf(header_len);
-  file.read(header_buf.data(), header_len);
-  if (file.gcount() != static_cast<std::streamsize>(header_len))
-    throw std::runtime_error("Failed to read safetensors header");
-  std::string header_json(header_buf.begin(), header_buf.end());
-  nlohmann::json header = nlohmann::json::parse(header_json);
-
-  for (auto it = header.begin(); it != header.end(); ++it) {
-    const std::string& key = it.key();
-    if (key == "__metadata__") continue;
-    const auto& meta = it.value();
-    TensorInfo info;
-    info.name = key;
-    info.dtype = meta["dtype"].get<std::string>();
-    info.shape = meta["shape"].get<std::vector<size_t>>();
-    info.data_offset = meta["data_offsets"][0].get<size_t>();
-    info.nbytes = meta["data_offsets"][1].get<size_t>() - info.data_offset;
-    tensors_[key] = info;
-  }
-
-  data_start_ = 8 + header_len;
-  file.close();
-
-  initialize_memory_mapping();
-}
-
-SafeTensorsLoader::~SafeTensorsLoader() { cleanup_memory_mapping(); }
-
-void SafeTensorsLoader::initialize_memory_mapping() {
+Shard::Shard(const std::string& fp) : file_path(fp) {
+    Logger::info("Shard: Initializing for file: " + file_path);
 #ifdef _WIN32
-  file_handle_ = CreateFileA(file_path_.c_str(), GENERIC_READ, FILE_SHARE_READ,
-                            NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-  if (file_handle_ == INVALID_HANDLE_VALUE) {
-    throw std::runtime_error("Failed to open file for memory mapping: " + file_path_);
-  }
+    file_handle = CreateFileA(file_path.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                               NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file_handle == INVALID_HANDLE_VALUE) {
+        throw std::runtime_error("Shard: Failed to open file (Windows): " + file_path + " Error: " + std::to_string(GetLastError()));
+    }
 
-  mapping_handle_ = CreateFileMappingA(file_handle_, NULL, PAGE_READONLY,
-                                      0, 0, NULL);
-  if (mapping_handle_ == NULL) {
-    CloseHandle(file_handle_);
-    throw std::runtime_error("Failed to create file mapping: " + file_path_);
-  }
+    LARGE_INTEGER size_li;
+    if (!GetFileSizeEx(file_handle, &size_li)) {
+        CloseHandle(file_handle);
+        file_handle = INVALID_HANDLE_VALUE; 
+        throw std::runtime_error("Shard: Failed to get file size (Windows): " + file_path);
+    }
+    file_size = static_cast<size_t>(size_li.QuadPart);
+    if (file_size == 0) { 
+        CloseHandle(file_handle);
+        file_handle = INVALID_HANDLE_VALUE;
+        throw std::runtime_error("Shard: File is empty: " + file_path);
+    }
 
-  mapped_data_ = MapViewOfFile(mapping_handle_, FILE_MAP_READ, 0, 0, 0);
-  if (mapped_data_ == NULL) {
-    CloseHandle(mapping_handle_);
-    CloseHandle(file_handle_);
-    throw std::runtime_error("Failed to map view of file: " + file_path_);
-  }
-#else
-  fd_ = open(file_path_.c_str(), O_RDONLY);
-  if (fd_ == -1) {
-    throw std::runtime_error("Failed to open file for memory mapping: " + file_path_);
-  }
+    mapping_handle = CreateFileMapping(file_handle, NULL, PAGE_READONLY, 0, 0, NULL);
+    if (mapping_handle == NULL) {
+        CloseHandle(file_handle);
+        file_handle = INVALID_HANDLE_VALUE;
+        throw std::runtime_error("Shard: Failed to create file mapping (Windows): " + file_path + " Error: " + std::to_string(GetLastError()));
+    }
 
-  mapped_data_ = mmap(nullptr, file_size_, PROT_READ, MAP_PRIVATE, fd_, 0);
-  if (mapped_data_ == MAP_FAILED) {
-    close(fd_);
-    throw std::runtime_error("Failed to memory map file: " + file_path_);
-  }
+    mapped_data = MapViewOfFile(mapping_handle, FILE_MAP_READ, 0, 0, file_size);
+    if (mapped_data == nullptr) {
+        CloseHandle(mapping_handle);
+        mapping_handle = NULL;
+        CloseHandle(file_handle);
+        file_handle = INVALID_HANDLE_VALUE;
+        throw std::runtime_error("Shard: Failed to map view of file (Windows): " + file_path + " Error: " + std::to_string(GetLastError()));
+    }
+#else // POSIX
+    fd_ = open(file_path.c_str(), O_RDONLY);
+    if (fd_ == -1) {
+        throw std::runtime_error("Shard: Failed to open file: " + file_path + " Error: " + strerror(errno));
+    }
+
+    struct stat sb;
+    if (fstat(fd_, &sb) == -1) {
+        close(fd_);
+        fd_ = -1; 
+        throw std::runtime_error("Shard: Failed to get file size: " + file_path + " Error: " + strerror(errno));
+    }
+    file_size = sb.st_size;
+    if (file_size == 0) { 
+        close(fd_);
+        fd_ = -1;
+        throw std::runtime_error("Shard: File is empty: " + file_path);
+    }
+
+    mapped_data = mmap(NULL, file_size, PROT_READ, MAP_SHARED, fd_, 0);
+    if (mapped_data == MAP_FAILED) {
+        close(fd_);
+        fd_ = -1;
+        mapped_data = nullptr; 
+        throw std::runtime_error("Shard: Failed to memory map file: " + file_path + " Error: " + strerror(errno));
+    }
 #endif
+    Logger::debug("Shard: Successfully mapped file: " + file_path + ", size: " + std::to_string(file_size));
+
+    if (file_size < 8) { 
+        throw std::runtime_error("Shard: File too small (" + std::to_string(file_size) + " bytes) to be a valid SafeTensors shard (min 8 bytes for metadata length): " + file_path);
+    }
+    metadata_size = *reinterpret_cast<const uint64_t*>(mapped_data);
+    
+    if (metadata_size == 0) {
+        throw std::runtime_error("Shard: Metadata size is 0 in file header: " + file_path);
+    }
+    if (8 + metadata_size > file_size) {
+        throw std::runtime_error("Shard: Declared metadata size (" + std::to_string(metadata_size) + ") plus header (8 bytes) exceeds file size (" + std::to_string(file_size) + ") in: " + file_path);
+    }
+    metadata_ptr = static_cast<const uint8_t*>(mapped_data) + 8;
+    tensor_data_block_ptr = metadata_ptr + metadata_size;
+    Logger::debug("Shard: Metadata size from header: " + std::to_string(metadata_size) + " for " + file_path);
 }
 
-void SafeTensorsLoader::cleanup_memory_mapping() {
+Shard::~Shard() {
+    Logger::debug("Shard: Cleaning up for file: " + (file_path.empty() ? "(moved or uninitialized)" : file_path) ); 
 #ifdef _WIN32
-  if (mapped_data_ != nullptr) {
-    UnmapViewOfFile(mapped_data_);
-    mapped_data_ = nullptr;
-  }
-  if (mapping_handle_ != NULL) {
-    CloseHandle(mapping_handle_);
-    mapping_handle_ = NULL;
-  }
-  if (file_handle_ != INVALID_HANDLE_VALUE) {
-    CloseHandle(file_handle_);
-    file_handle_ = INVALID_HANDLE_VALUE;
-  }
-#else
-  if (mapped_data_ != nullptr) {
-    munmap(mapped_data_, file_size_);
-    mapped_data_ = nullptr;
-  }
-  if (fd_ != -1) {
-    close(fd_);
+    if (mapped_data != nullptr) {
+        if (!UnmapViewOfFile(mapped_data)) {
+            Logger::error("Shard: Failed to unmap view of file (Windows) for \"" + file_path + "\" Error: " + std::to_string(GetLastError()));
+        }
+    }
+    if (mapping_handle != NULL) {
+        if (!CloseHandle(mapping_handle)) {
+             Logger::error("Shard: Failed to close mapping handle (Windows) for \"" + file_path + "\" Error: " + std::to_string(GetLastError()));
+        }
+    }
+    if (file_handle != INVALID_HANDLE_VALUE) {
+        if (!CloseHandle(file_handle)) {
+            Logger::error("Shard: Failed to close file handle (Windows) for \"" + file_path + "\" Error: " + std::to_string(GetLastError()));
+        }
+    }
+    mapped_data = nullptr; 
+    file_handle = INVALID_HANDLE_VALUE; 
+    mapping_handle = NULL; 
+#else // POSIX
+    if (mapped_data != nullptr && mapped_data != MAP_FAILED) {
+        if (munmap(mapped_data, file_size) == -1) {
+            Logger::error("Shard: Failed to munmap file: \"" + file_path + "\" Error: " + strerror(errno));
+        }
+    }
+    if (fd_ != -1) {
+        if (close(fd_) == -1) {
+             Logger::error("Shard: Failed to close file descriptor for \"" + file_path + "\" Error: " + strerror(errno));
+        }
+    }
+    mapped_data = nullptr;
     fd_ = -1;
-  }
 #endif
+}
+
+Shard::Shard(Shard&& other) noexcept
+    : file_path(std::move(other.file_path)),
+      mapped_data(other.mapped_data),
+      file_size(other.file_size),
+      metadata_size(other.metadata_size),
+      metadata_ptr(other.metadata_ptr),
+      tensor_data_block_ptr(other.tensor_data_block_ptr)
+#ifdef _WIN32
+      , file_handle(other.file_handle)
+      , mapping_handle(other.mapping_handle)
+#else
+      , fd_(other.fd_)
+#endif
+{
+    other.mapped_data = nullptr;
+    other.file_size = 0;
+    other.metadata_size = 0;
+    other.metadata_ptr = nullptr;
+    other.tensor_data_block_ptr = nullptr;
+#ifdef _WIN32
+    other.file_handle = INVALID_HANDLE_VALUE;
+    other.mapping_handle = NULL;
+#else
+    other.fd_ = -1;
+#endif
+}
+
+Shard& Shard::operator=(Shard&& other) noexcept {
+    if (this != &other) {
+        this->~Shard(); 
+        file_path = std::move(other.file_path);
+        mapped_data = other.mapped_data;
+        file_size = other.file_size;
+        metadata_size = other.metadata_size;
+        metadata_ptr = other.metadata_ptr;
+        tensor_data_block_ptr = other.tensor_data_block_ptr;
+#ifdef _WIN32
+        file_handle = other.file_handle;
+        mapping_handle = other.mapping_handle;
+#else
+        fd_ = other.fd_;
+#endif
+        other.mapped_data = nullptr;
+        other.file_size = 0; 
+        other.metadata_size = 0;
+        other.metadata_ptr = nullptr;
+        other.tensor_data_block_ptr = nullptr;
+#ifdef _WIN32
+        other.file_handle = INVALID_HANDLE_VALUE;
+        other.mapping_handle = NULL;
+#else
+        other.fd_ = -1;
+#endif
+    }
+    return *this;
+}
+
+const uint8_t* Shard::get_tensor_raw_data(size_t local_offset, size_t n_bytes) const {
+    if (!mapped_data || (mapped_data == MAP_FAILED && fd_ != -1) || !tensor_data_block_ptr) { 
+        throw std::logic_error("Shard not properly mapped or initialized to get tensor data: " + file_path);
+    }
+    const uint8_t* data_start = tensor_data_block_ptr + local_offset;
+    const uint8_t* shard_data_block_end = tensor_data_block_ptr + (file_size - (8 + metadata_size));
+
+    if (data_start < tensor_data_block_ptr || data_start + n_bytes > shard_data_block_end || n_bytes > (file_size - (8 + metadata_size))) { 
+        throw std::out_of_range(
+            "Tensor data (local_offset: " + std::to_string(local_offset) +
+            ", n_bytes: " + std::to_string(n_bytes) +
+            ") out of bounds for data block of shard: " + file_path +
+            ". Shard data block size: " + std::to_string(file_size - (8 + metadata_size)) + " bytes."
+        );
+    }
+    return data_start;
+}
+
+
+// --- SafeTensorsLoader Implementation ---
+
+SafeTensorsLoader::SafeTensorsLoader(const std::string& model_load_path)
+    : model_load_path_(model_load_path), is_sharded_(false) {
+    Logger::info("SafeTensorsLoader: Initializing for path: " + model_load_path_);
+    std::filesystem::path path_obj(model_load_path_);
+
+    if (!std::filesystem::exists(path_obj)){
+        throw std::runtime_error("SafeTensorsLoader: Provided model_load_path does not exist: " + model_load_path_);
+    }
+
+    if (std::filesystem::is_directory(path_obj)) {
+        Logger::info("SafeTensorsLoader: Path is a directory. Attempting to load from directory.");
+        load_from_directory(model_load_path_); 
+    } else if (std::filesystem::is_regular_file(path_obj)) {
+        Logger::info("SafeTensorsLoader: Path is a single file. Loading single file.");
+        std::string file_key = path_obj.filename().string();
+        load_single_file(model_load_path_, file_key);
+        is_sharded_ = false; 
+    } else {
+        throw std::runtime_error("SafeTensorsLoader: model_load_path is not a valid file or directory: " + model_load_path_);
+    }
+
+    if (tensors_.empty() && loaded_shards_.empty()) {
+        Logger::warning("SafeTensorsLoader: Initialization complete, but no tensors were loaded and no shards mapped. Check model path and format: " + model_load_path_);
+    } else {
+        Logger::info("SafeTensorsLoader: Initialization complete. Total unique tensors mapped: " + std::to_string(tensors_.size()) +
+                     " from " + std::to_string(loaded_shards_.size()) + " shard(s).");
+    }
+}
+
+SafeTensorsLoader::~SafeTensorsLoader() {
+    Logger::info("SafeTensorsLoader: Destructing. Clearing " + std::to_string(loaded_shards_.size()) + " loaded shards.");
+    loaded_shards_.clear(); 
+    Logger::info("SafeTensorsLoader: All shards cleared.");
+}
+
+void SafeTensorsLoader::load_from_directory(const std::string& directory_path_str) {
+    Logger::debug("SafeTensorsLoader::load_from_directory for '" + directory_path_str + "'.");
+    std::filesystem::path dir_p(directory_path_str);
+    std::filesystem::path index_json_path_v1 = dir_p / "model.safetensors.index.json";
+    std::filesystem::path index_json_path_v2 = dir_p / "pytorch_model.bin.index.json"; 
+    std::filesystem::path actual_index_path;
+
+    bool index_found = false;
+    if (std::filesystem::exists(index_json_path_v1) && std::filesystem::is_regular_file(index_json_path_v1)) {
+        actual_index_path = index_json_path_v1;
+        index_found = true;
+    } else if (std::filesystem::exists(index_json_path_v2) && std::filesystem::is_regular_file(index_json_path_v2)) {
+        actual_index_path = index_json_path_v2;
+        index_found = true;
+    }
+
+    if (index_found) {
+        Logger::info("SafeTensorsLoader: Found index file: " + actual_index_path.string());
+        is_sharded_ = true; 
+        std::ifstream f(actual_index_path.string());
+        if (!f.is_open()) {
+            throw std::runtime_error("SafeTensorsLoader: Failed to open index file: " + actual_index_path.string());
+        }
+        nlohmann::json index_json_data;
+        try {
+            index_json_data = nlohmann::json::parse(f);
+        } catch (const nlohmann::json::parse_error& e) {
+            f.close();
+            throw std::runtime_error("SafeTensorsLoader: Failed to parse index JSON from " + actual_index_path.string() + ": " + e.what());
+        }
+        f.close();
+
+        if (index_json_data.count("weight_map") && index_json_data["weight_map"].is_object()) {
+            // First pass: populate tensor_name_to_shard_key_map_ and identify unique shards to load
+            std::map<std::string, std::string> unique_shards_to_load; // shard_filename -> full_path
+            for (auto const& [tensor_name, shard_filename_json] : index_json_data["weight_map"].items()) {
+                if (!shard_filename_json.is_string()) {
+                    Logger::warning("SafeTensorsLoader: Shard filename for tensor '" + tensor_name + "' in index is not a string. Skipping.");
+                    continue;
+                }
+                std::string shard_filename = shard_filename_json.get<std::string>();
+                tensor_name_to_shard_key_map_[tensor_name] = shard_filename; 
+                if (unique_shards_to_load.find(shard_filename) == unique_shards_to_load.end()) {
+                     unique_shards_to_load[shard_filename] = (dir_p / shard_filename).string();
+                }
+            }
+           
+            // Second pass: load each unique shard and parse its metadata
+            for(const auto& pair : unique_shards_to_load){
+                const std::string& shard_filename = pair.first;
+                const std::string& full_shard_path = pair.second;
+                if (loaded_shards_.find(shard_filename) == loaded_shards_.end()) {
+                    Logger::info("SafeTensorsLoader: Loading and parsing shard (from index): " + full_shard_path + " (key:"+ shard_filename + ")");
+                    load_single_file(full_shard_path, shard_filename); 
+                } else {
+                     Logger::debug("SafeTensorsLoader: Shard '" + shard_filename + "' already loaded/parsed (should not happen if unique_shards logic is correct).");
+                }
+            }
+
+        } else {
+            throw std::runtime_error("SafeTensorsLoader: Index file " + actual_index_path.string() + " does not contain a valid 'weight_map'.");
+        }
+    } else {
+        Logger::info("SafeTensorsLoader: No index file found in " + directory_path_str + ". Scanning for *.safetensors files.");
+        std::vector<std::filesystem::path> shard_files;
+        for (const auto& entry : std::filesystem::directory_iterator(dir_p)) {
+            if (entry.is_regular_file() && entry.path().extension() == ".safetensors") {
+                shard_files.push_back(entry.path());
+            }
+        }
+
+        if (shard_files.empty()) {
+             Logger::warning("SafeTensorsLoader: No .safetensors files found directly in directory: " + directory_path_str + ". Checking for model.safetensors as last resort.");
+            std::filesystem::path single_model_file = dir_p / "model.safetensors";
+            if(std::filesystem::exists(single_model_file) && std::filesystem::is_regular_file(single_model_file)){
+                Logger::info("SafeTensorsLoader: Found 'model.safetensors' in directory, loading it as a single non-sharded model.");
+                load_single_file(single_model_file.string(), single_model_file.filename().string());
+                is_sharded_ = false;
+            } else {
+                 Logger::info("SafeTensorsLoader: No .safetensors files or index.json found in directory: " + directory_path_str + ". No model weights will be loaded from this path directly.");
+            }
+        } else if (shard_files.size() == 1) {
+            Logger::info("SafeTensorsLoader: Found single .safetensors file: " + shard_files[0].string() + ". Loading as non-sharded.");
+            load_single_file(shard_files[0].string(), shard_files[0].filename().string());
+            is_sharded_ = false;
+        } else {
+            Logger::info("SafeTensorsLoader: Found " + std::to_string(shard_files.size()) + " .safetensors files (no index). Loading all as individual shards.");
+            is_sharded_ = true;
+            for (const auto& p : shard_files) {
+                load_single_file(p.string(), p.filename().string());
+            }
+        }
+    }
+}
+
+void SafeTensorsLoader::load_single_file(const std::string& file_path, const std::string& shard_key_override) {
+    std::string key_to_use = shard_key_override.empty() ? std::filesystem::path(file_path).filename().string() : shard_key_override;
+    if (key_to_use.empty()) key_to_use = file_path; 
+
+    if (loaded_shards_.count(key_to_use)) {
+        Logger::debug("SafeTensorsLoader: Shard/file '" + key_to_use + "' (path: " + file_path + ") already processed/loaded.");
+        return;
+    }
+    Logger::info("SafeTensorsLoader: Loading single file/shard: " + file_path + " with key: " + key_to_use);
+    try {
+        auto shard = std::make_unique<Shard>(file_path);
+        parse_shard_metadata(*shard, key_to_use); 
+        loaded_shards_[key_to_use] = std::move(shard);
+    } catch (const std::exception& e) {
+        throw std::runtime_error("SafeTensorsLoader: Error processing file/shard '" + file_path + "' (key: " + key_to_use + "): " + e.what());
+    }
+}
+
+void SafeTensorsLoader::parse_shard_metadata(Shard& shard, const std::string& shard_key) {
+    Logger::debug("SafeTensorsLoader: Parsing metadata for shard: " + shard_key + " (file: " + shard.file_path + ")");
+    if (!shard.metadata_ptr || shard.metadata_size == 0) {
+        throw std::runtime_error("Shard metadata is not available for parsing (nullptr or zero size): " + shard.file_path);
+    }
+    std::string metadata_json_str;
+    try {
+        metadata_json_str.assign(reinterpret_cast<const char*>(shard.metadata_ptr), shard.metadata_size);
+    } catch (const std::length_error& le) {
+        throw std::runtime_error("Error constructing metadata string for shard " + shard.file_path + ": " + le.what());
+    }
+    
+    nlohmann::json metadata_root;
+    try {
+        metadata_root = nlohmann::json::parse(metadata_json_str);
+    } catch (const nlohmann::json::parse_error& e) {
+        throw std::runtime_error("Failed to parse metadata JSON for shard " + shard.file_path + " (key: " + shard_key + ") at offset 8, metadata_size: " + 
+                                 std::to_string(shard.metadata_size) + ". Error: " + e.what() + 
+                                 "\nJSON content snippet (first 200 chars): " + metadata_json_str.substr(0, 200));
+    }
+
+    size_t tensors_in_this_shard_count = 0;
+    for (auto const& [tensor_name_str, info_json] : metadata_root.items()) {
+        if (tensor_name_str == "__metadata__") continue; 
+
+        TensorInfo tensor_info;
+        tensor_info.name = tensor_name_str;
+        try {
+            tensor_info.dtype = info_json.at("dtype").get<std::string>();
+            std::transform(tensor_info.dtype.begin(), tensor_info.dtype.end(), tensor_info.dtype.begin(),
+                           [](unsigned char c){ return static_cast<char>(std::toupper(c)); });
+
+            for (const auto& dim : info_json.at("shape")) {
+                tensor_info.shape.push_back(dim.get<size_t>());
+            }
+            const auto& data_offsets_json = info_json.at("data_offsets");
+            if (!data_offsets_json.is_array() || data_offsets_json.size() != 2) {
+                 throw std::runtime_error("Tensor '" + tensor_name_str + "' 'data_offsets' must be an array of two numbers.");
+            }
+            size_t start_offset_in_data_block = data_offsets_json[0].get<size_t>();
+            size_t end_offset_in_data_block = data_offsets_json[1].get<size_t>();
+            
+            tensor_info.data_offset = start_offset_in_data_block; 
+            tensor_info.nbytes = end_offset_in_data_block - start_offset_in_data_block;
+            tensor_info.shard_key = shard_key;
+
+            if (tensors_.count(tensor_info.name)) {
+                 Logger::warning("SafeTensorsLoader: Duplicate tensor name '" + tensor_info.name + "' encountered. " + 
+                                 "Previous shard key: '" + tensors_[tensor_info.name].shard_key + "', New shard key: '" + shard_key + "'. " +
+                                 "Overwriting with info from current shard being parsed. This can happen with unindexed multi-file loads or inconsistent index files.");
+            }
+            tensors_[tensor_info.name] = tensor_info;
+            if (tensor_name_to_shard_key_map_.find(tensor_info.name) == tensor_name_to_shard_key_map_.end()){
+                tensor_name_to_shard_key_map_[tensor_info.name] = shard_key;
+            }
+
+            tensors_in_this_shard_count++;
+
+        } catch (const nlohmann::json::exception& e) {
+            throw std::runtime_error("Failed to parse tensor info for '" + tensor_name_str + "' in shard " +
+                                     shard.file_path + " (key: " + shard_key + "): " + e.what());
+        }
+    }
+     Logger::debug("SafeTensorsLoader: Finished parsing metadata for shard: " + shard_key + ". Parsed " + std::to_string(tensors_in_this_shard_count) + " tensor entries from this shard.");
 }
 
 std::vector<std::string> SafeTensorsLoader::tensor_names() const {
-  std::vector<std::string> names;
-  for (const auto& kv : tensors_) names.push_back(kv.first);
-  return names;
-}
-
-std::vector<uint8_t> SafeTensorsLoader::get_tensor_bytes(
-    const std::string& name) const {
-  auto it = tensors_.find(name);
-  if (it == tensors_.end())
-    throw std::runtime_error("Tensor not found: " + name);
-
-  const auto& info = it->second;
-  const uint8_t* data = static_cast<const uint8_t*>(mapped_data_) +
-                        data_start_ + info.data_offset;
-  return convert_tensor_data(data, info.nbytes, info.dtype);
-}
-
-std::vector<uint8_t> SafeTensorsLoader::get_tensor_bytes_parallel(
-    const std::string& name) const {
-  return get_tensor_bytes(name);
-}
-
-std::map<std::string, std::vector<uint8_t>>
-SafeTensorsLoader::load_all_tensors_parallel() const {
-  std::map<std::string, std::vector<uint8_t>> result;
-  std::vector<std::future<std::pair<std::string, std::vector<uint8_t>>>>
-      futures;
-
-  unsigned int num_threads = std::thread::hardware_concurrency();
-  if (num_threads == 0) num_threads = 4;
-
-  ThreadPool pool(num_threads);
-
-  for (const auto& kv : tensors_) {
-    futures.push_back(pool.submit([this, &kv]() {
-      return std::make_pair(kv.first, get_tensor_bytes(kv.first));
-    }));
-  }
-
-  for (auto& future : futures) {
-    auto [name, data] = future.get();
-    result[name] = std::move(data);
-  }
-
-  return result;
-}
-
-const SafeTensorsLoader::TensorInfo& SafeTensorsLoader::get_tensor_info(
-    const std::string& name) const {
-  auto it = tensors_.find(name);
-  if (it == tensors_.end())
-    throw std::runtime_error("Tensor not found: " + name);
-  return it->second;
-}
-
-std::vector<uint8_t> SafeTensorsLoader::convert_tensor_data(
-    const uint8_t* data, size_t n_bytes_original, const std::string& dtype) const {
-  
-  if (dtype == "BF16") {
-    if (n_bytes_original % sizeof(uint16_t) != 0) {
-        throw std::runtime_error("BF16 tensor data size is not a multiple of sizeof(uint16_t)");
+    std::vector<std::string> names;
+    names.reserve(tensors_.size());
+    for (const auto& pair : tensors_) {
+        names.push_back(pair.first);
     }
-    size_t num_bf16_elements = n_bytes_original / sizeof(uint16_t);
-    size_t new_fp32_n_bytes = num_bf16_elements * sizeof(float);
-    std::vector<uint8_t> result_fp32_bytes(new_fp32_n_bytes);
+    return names;
+}
+
+const SafeTensorsLoader::TensorInfo& SafeTensorsLoader::get_tensor_info(const std::string& name) const {
+    auto it = tensors_.find(name);
+    if (it == tensors_.end()) {
+        throw std::runtime_error("Tensor not found in SafeTensorsLoader metadata: " + name);
+    }
+    return it->second;
+}
+
+const Shard* SafeTensorsLoader::get_shard_for_tensor(const std::string& tensor_name) const {
+    auto map_it = tensor_name_to_shard_key_map_.find(tensor_name);
+    std::string determined_shard_key;
+
+    if (map_it != tensor_name_to_shard_key_map_.end()){
+        determined_shard_key = map_it->second;
+    } else {
+        const auto& tensor_info_direct = get_tensor_info(tensor_name);
+        determined_shard_key = tensor_info_direct.shard_key;
+    }
     
-    const uint16_t* bf16_data_ptr = reinterpret_cast<const uint16_t*>(data);
-    float* fp32_data_ptr = reinterpret_cast<float*>(result_fp32_bytes.data());
-
-    // Diagnostic: Log first few raw BF16 and converted FP32 values
-    static bool bf16_diag_logged = false; // Only log for the first BF16 tensor encountered
-    if (!bf16_diag_logged && dtype == "BF16" && num_bf16_elements > 5) {
-        std::stringstream ss_diag;
-        ss_diag << "[BF16_CONV_DIAG] First 5 BF16 values from tensor (name not available here). Raw uint16_t hex: ";
-        for (size_t k=0; k < 5; ++k) ss_diag << "0x" << std::hex << bf16_data_ptr[k] << " ";
-        ss_diag << "| Converted to FP32: ";
-        for (size_t k=0; k < 5; ++k) ss_diag << std::fixed << std::setprecision(7) << cpu_bf16_to_float32(bf16_data_ptr[k]) << " ";
-        Logger::debug(ss_diag.str());
-        bf16_diag_logged = true; // Set flag so we don't log again
-      }
-
-    for (size_t i = 0; i < num_bf16_elements; ++i) {
-        fp32_data_ptr[i] = cpu_bf16_to_float32(bf16_data_ptr[i]);
-      }
-    return result_fp32_bytes;
-
-  } else if (dtype == "F16") {
-    if (n_bytes_original % sizeof(uint16_t) != 0) {
-        throw std::runtime_error("F16 tensor data size is not a multiple of sizeof(uint16_t)");
+    if (determined_shard_key.empty()){
+         throw std::logic_error("Internal inconsistency: Could not determine shard key for tensor '" + tensor_name + "'.");
     }
-    size_t num_f16_elements = n_bytes_original / sizeof(uint16_t);
-    size_t new_fp32_n_bytes = num_f16_elements * sizeof(float);
-    std::vector<uint8_t> result_fp32_bytes(new_fp32_n_bytes);
 
-    const uint16_t* f16_data_ptr = reinterpret_cast<const uint16_t*>(data);
-    float* fp32_data_ptr = reinterpret_cast<float*>(result_fp32_bytes.data());
-
-    for (size_t i = 0; i < num_f16_elements; ++i) {
-        fp32_data_ptr[i] = cpu_f16_to_float32(f16_data_ptr[i]);
+    auto shard_it = loaded_shards_.find(determined_shard_key);
+    if (shard_it == loaded_shards_.end()) {
+        throw std::logic_error("Internal inconsistency: Shard key '" + determined_shard_key + "' for tensor '" + tensor_name + "' not found in loaded_shards_ map. Tensors map has it, but shard object itself is missing.");
     }
-    Logger::info("[SafeTensorsLoader] Converted F16 tensor data to FP32. Original bytes: " + std::to_string(n_bytes_original) + ", New FP32 bytes: " + std::to_string(new_fp32_n_bytes));
-    return result_fp32_bytes;
-  } else {
-    // For other dtypes (e.g., F32, I32), just copy bytes.
-    std::vector<uint8_t> result(n_bytes_original);
-    std::copy(data, data + n_bytes_original, result.begin());
-    return result;
-  }
+    return shard_it->second.get();
 }
 
-ThreadPool::ThreadPool(size_t num_threads) {
-  for (size_t i = 0; i < num_threads; ++i) {
-    workers_.emplace_back([this] {
-      while (true) {
-        std::function<void()> task;
-        {
-          std::unique_lock<std::mutex> lock(queue_mutex_);
-          condition_.wait(lock, [this] { return stop_ || !tasks_.empty(); });
-          if (stop_ && tasks_.empty()) return;
-          task = std::move(tasks_.front());
-          tasks_.pop();
+std::vector<uint8_t> SafeTensorsLoader::get_tensor_bytes(const std::string& name) const {
+    const TensorInfo& info = get_tensor_info(name); 
+    const Shard* shard = get_shard_for_tensor(name); 
+    
+    const uint8_t* raw_data_ptr = shard->get_tensor_raw_data(info.data_offset, info.nbytes);
+    return convert_tensor_data(raw_data_ptr, info.nbytes, info.dtype);
+}
+
+std::map<std::string, std::vector<uint8_t>> SafeTensorsLoader::load_all_tensors_parallel() const {
+    std::map<std::string, std::vector<uint8_t>> result_map;
+    if (tensors_.empty()) {
+        Logger::debug("SafeTensorsLoader::load_all_tensors_parallel: No tensors to load.");
+        return result_map;
+    }
+
+    std::vector<std::future<std::pair<std::string, std::vector<uint8_t>>>> futures;
+    unsigned int n_threads = std::max(1u, std::thread::hardware_concurrency());
+    n_threads = std::min(n_threads, static_cast<unsigned int>(tensors_.size())); 
+    if (n_threads > 16) n_threads = 16; 
+    
+    ThreadPool pool(n_threads);
+    Logger::info("SafeTensorsLoader: Loading all " + std::to_string(tensors_.size()) + " tensors in parallel using " + std::to_string(n_threads) + " threads.");
+
+    for (const auto& pair : tensors_) {
+        const std::string& tensor_name = pair.first;
+        futures.push_back(pool.submit([this, tensor_name]() {
+            std::vector<uint8_t> data = this->get_tensor_bytes(tensor_name); 
+            return std::make_pair(tensor_name, std::move(data));
+        }));
+    }
+
+    for (auto& fut : futures) {
+        try {
+            std::pair<std::string, std::vector<uint8_t>> tensor_pair = fut.get();
+            result_map[tensor_pair.first] = std::move(tensor_pair.second);
+        } catch (const std::exception& e) {
+            Logger::error("SafeTensorsLoader: Error loading a tensor in parallel task: " + std::string(e.what()));
+            throw; 
         }
-        task();
-      }
-    });
-  }
+    }
+    Logger::info("SafeTensorsLoader: Finished loading all tensors in parallel.");
+    return result_map;
 }
 
-ThreadPool::~ThreadPool() {
-  {
-    std::unique_lock<std::mutex> lock(queue_mutex_);
-    stop_ = true;
-  }
-  condition_.notify_all();
-  for (std::thread& worker : workers_) {
-    worker.join();
-  }
+std::vector<uint8_t> SafeTensorsLoader::convert_tensor_data(const uint8_t* data_ptr, size_t n_bytes, const std::string& dtype_str_upper) const {
+    if (dtype_str_upper == "F32") {
+        return std::vector<uint8_t>(data_ptr, data_ptr + n_bytes);
+    } else if (dtype_str_upper == "F16") {
+        size_t num_elements = n_bytes / 2;
+        std::vector<float> f32_vec(num_elements);
+        const uint16_t* f16_ptr = reinterpret_cast<const uint16_t*>(data_ptr);
+        for (size_t i = 0; i < num_elements; ++i) {
+             f32_vec[i] = cpu_f16_to_float32(f16_ptr[i]);
+        }
+        std::vector<uint8_t> bytes_out(num_elements * sizeof(float));
+        memcpy(bytes_out.data(), f32_vec.data(), bytes_out.size());
+        return bytes_out;
+    } else if (dtype_str_upper == "BF16") {
+        size_t num_elements = n_bytes / 2;
+        std::vector<float> f32_vec(num_elements);
+        const uint16_t* bf16_ptr = reinterpret_cast<const uint16_t*>(data_ptr);
+        for (size_t i = 0; i < num_elements; ++i) {
+            f32_vec[i] = cpu_bf16_to_float32(bf16_ptr[i]);
+        }
+        std::vector<uint8_t> bytes_out(num_elements * sizeof(float));
+        memcpy(bytes_out.data(), f32_vec.data(), bytes_out.size());
+        return bytes_out;
+    }
+    throw std::runtime_error("SafeTensorsLoader: Unsupported tensor dtype for conversion: " + dtype_str_upper);
 }
 
-template <class F, class... Args>
-std::future<typename std::result_of<F(Args...)>::type> ThreadPool::submit(
-    F&& f, Args&&... args) {
-  using return_type = typename std::result_of<F(Args...)>::type;
-  auto task = std::make_shared<std::packaged_task<return_type()>>(
-      std::bind(std::forward<F>(f), std::forward<Args>(args)...));
-  std::future<return_type> res = task->get_future();
-  {
-    std::unique_lock<std::mutex> lock(queue_mutex_);
-    if (stop_) throw std::runtime_error("submit on stopped ThreadPool");
-    tasks_.emplace([task]() { (*task)(); });
-  }
-  condition_.notify_one();
-  return res;
-}
+bool SafeTensorsLoader::load_model_config_from_json(const std::string& model_path_or_dir_str, ModelConfig& config_to_populate) {
+    std::filesystem::path model_fs_path(model_path_or_dir_str);
+    std::filesystem::path config_json_path;
 
-// Implementation of the new static method
-bool SafeTensorsLoader::load_model_config_from_json(const std::string& model_path, ModelConfig& config_to_populate) {
-    std::filesystem::path sf_path(model_path);
-    std::filesystem::path config_json_path = sf_path.parent_path() / "config.json";
-
-    Logger::info("[SafeTensorsLoader] Attempting to load model config from: " + config_json_path.string());
-
-    if (!std::filesystem::exists(config_json_path)) {
-        Logger::warning("[SafeTensorsLoader] config.json not found at " + config_json_path.string());
+    if (std::filesystem::is_directory(model_fs_path)) {
+        config_json_path = model_fs_path / "config.json";
+    } else if (std::filesystem::is_regular_file(model_fs_path)) {
+        config_json_path = model_fs_path.parent_path() / "config.json";
+    } else {
+        Logger::error("SafeTensorsLoader::load_model_config_from_json: Provided model path is not a valid file or directory: " + model_path_or_dir_str);
         return false;
     }
+    std::string config_json_path_str = config_json_path.string();
 
-    std::ifstream config_file(config_json_path);
-    if (!config_file.is_open()) {
-        Logger::error("[SafeTensorsLoader] Failed to open config.json at " + config_json_path.string());
+    std::ifstream f(config_json_path_str);
+    if (!f.is_open()) {
+        Logger::warning("SafeTensorsLoader: config.json not found at: " + config_json_path_str);
         return false;
     }
 
     try {
-        nlohmann::json json_config;
-        config_file >> json_config;
-        config_file.close();
-
-        // Use the existing parse_model_config function (it needs to be callable here)
-        // If parse_model_config is not static or part of a class accessible here, 
-        // we'll need to duplicate its logic or make it accessible.
-        // For now, assuming parse_model_config from model.cpp can be used or adapted.
-        // Let's replicate the relevant parts of parse_model_config directly here for simplicity,
-        // as parse_model_config itself is not part of SafeTensorsLoader.
-
-        config_to_populate.hidden_size = json_config.value("hidden_size", 0);
-        config_to_populate.intermediate_size = json_config.value("intermediate_size", 0);
-        config_to_populate.num_attention_heads = json_config.value("num_attention_heads", 0);
-        config_to_populate.num_key_value_heads = json_config.value("num_key_value_heads", config_to_populate.num_attention_heads); // Default to num_attention_heads if not present
-        config_to_populate.num_hidden_layers = json_config.value("num_hidden_layers", 0);
-        config_to_populate.vocab_size = json_config.value("vocab_size", 0);
-        config_to_populate.max_position_embeddings = json_config.value("max_position_embeddings", 0);
-        config_to_populate.rms_norm_eps = json_config.value("rms_norm_eps", 1e-5f);
-        config_to_populate.rope_theta = json_config.value("rope_theta", 10000.0f);
-        config_to_populate.hidden_act = json_config.value("hidden_act", "silu");
-        config_to_populate.torch_dtype = json_config.value("torch_dtype", "float16"); // Safetensors often bf16 or f16
-        config_to_populate.bos_token_id = json_config.value("bos_token_id", 1);
-        config_to_populate.eos_token_id = json_config.value("eos_token_id", 2);
+        nlohmann::json data = nlohmann::json::parse(f);
+        f.close();
         
-        std::string model_architecture_str;
-        if (json_config.contains("architectures") && json_config["architectures"].is_array() && !json_config["architectures"].empty()) {
-            model_architecture_str = json_config["architectures"][0].get<std::string>();
-            config_to_populate.architecture = model_architecture_str; // Keep this for info
+        config_to_populate.hidden_size = data.value("hidden_size", 0);
+        config_to_populate.intermediate_size = data.value("intermediate_size", 0);
+        config_to_populate.num_attention_heads = data.value("num_attention_heads", 0);
+        config_to_populate.num_key_value_heads = data.value("num_key_value_heads", config_to_populate.num_attention_heads);
+        config_to_populate.num_hidden_layers = data.value("num_hidden_layers", 0);
+        config_to_populate.vocab_size = data.value("vocab_size", 0);
+        config_to_populate.max_position_embeddings = data.value("max_position_embeddings", 2048); 
+        config_to_populate.rms_norm_eps = data.value("rms_norm_eps", 1e-5f);
+        config_to_populate.rope_theta = data.value("rope_theta", 10000.0f);
+        config_to_populate.bos_token_id = data.value("bos_token_id", 1);
+        config_to_populate.eos_token_id = data.value("eos_token_id", 2); 
+        config_to_populate.pad_token_id = data.value("pad_token_id", -1); 
+        config_to_populate.unk_token_id = data.value("unk_token_id", 0); 
+
+        if (data.contains("architectures") && data["architectures"].is_array() && !data["architectures"].empty()) {
+            config_to_populate.architecture = data["architectures"][0].get<std::string>();
         } else {
-            // Fallback if "architectures" is not present or not a list
-            model_architecture_str = json_config.value("architecture", ""); 
-            config_to_populate.architecture = model_architecture_str;
+            config_to_populate.architecture = data.value("model_type", "unknown");
         }
-        
-        std::string model_type_str = json_config.value("model_type", "");
-        config_to_populate.model_name = model_type_str; // Populate model_name with model_type
-        if (config_to_populate.model_name.empty()) {
-             // Fallback for model_name if model_type was empty
-             config_to_populate.model_name = json_config.value("name_or_path", "");
-        }
+        config_to_populate.model_name = data.value("model_type", config_to_populate.architecture);
 
-        // Determine TokenizerFamily
-        // Default to UNKNOWN, will be overridden if specific conditions are met.
-        config_to_populate.tokenizer_family = ModelConfig::TokenizerFamily::UNKNOWN; 
+        bool is_llama3_vocab_size_json = (config_to_populate.vocab_size == 128256);
+        bool is_llama3_arch_hint_json = (config_to_populate.architecture.find("LlamaForCausalLM") != std::string::npos &&
+                               config_to_populate.architecture.find("Llama2") == std::string::npos);
 
-        std::string tokenizer_class_str = json_config.value("tokenizer_class", "");
-        Logger::info("[SafeTensorsLoader] Parsed from config.json - model_type: '" + model_type_str + 
-                     "', architecture: '" + model_architecture_str + 
-                     "', tokenizer_class: '" + tokenizer_class_str + "'");
-
-        if (model_type_str == "llama" || model_architecture_str == "LlamaForCausalLM") {
-            if (tokenizer_class_str == "LlamaTokenizer" || tokenizer_class_str == "CodeLlamaTokenizer") { // Llama 1/2 SentencePiece
-                config_to_populate.tokenizer_family = ModelConfig::TokenizerFamily::LLAMA_SENTENCEPIECE;
-            } else if (tokenizer_class_str == "LlamaHfTokenizer") { // Often seen with Tiktoken-based Llama tokenizers in HF format
-                 // Further check if it's really Llama 3 like. For now, assume Llama 3 if LlamaHfTokenizer.
-                 // This might need refinement if Llama 2 models also use LlamaHfTokenizer with SentencePiece vocab.
-                 // A more robust check might involve looking at specific vocab entries or merge rules.
-                 // For instance, Llama 3 tokenizers typically have a larger vocab size (e.g., 128256).
-                if (config_to_populate.vocab_size > 100000) { // Heuristic for Llama 3 / Tiktoken based
-                    config_to_populate.tokenizer_family = ModelConfig::TokenizerFamily::LLAMA3_TIKTOKEN;
-                     Logger::info("[SafeTensorsLoader] LlamaHfTokenizer with large vocab suggests LLAMA3_TIKTOKEN.");
-                } else {
-                    config_to_populate.tokenizer_family = ModelConfig::TokenizerFamily::LLAMA_SENTENCEPIECE;
-                    Logger::info("[SafeTensorsLoader] LlamaHfTokenizer with smaller vocab suggests LLAMA_SENTENCEPIECE.");
+        if (is_llama3_vocab_size_json && is_llama3_arch_hint_json) {
+            config_to_populate.tokenizer_family = ModelConfig::TokenizerFamily::LLAMA3_TIKTOKEN;
+             if (config_to_populate.rope_theta == 10000.0f) { 
+                float llama3_rope_candidate = data.value("rope_theta", 500000.0f);
+                if (llama3_rope_candidate > 10000.0f) { 
+                    config_to_populate.rope_theta = llama3_rope_candidate;
+                } else if (config_to_populate.rope_theta == 10000.0f) { 
+                     config_to_populate.rope_theta = 500000.0f;
                 }
-            } else if (tokenizer_class_str.find("Llama3") != std::string::npos || tokenizer_class_str.find("llama3") != std::string::npos) { // Explicit Llama3 in class name
-                 config_to_populate.tokenizer_family = ModelConfig::TokenizerFamily::LLAMA3_TIKTOKEN;
-            } else if (tokenizer_class_str.empty() && (model_type_str == "llama" || model_architecture_str == "LlamaForCausalLM") ) {
-                // If tokenizer_class is not specified, but model_type is llama, assume SentencePiece for Llama 1/2
-                // This is a common case for original Llama models.
-                config_to_populate.tokenizer_family = ModelConfig::TokenizerFamily::LLAMA_SENTENCEPIECE;
-                Logger::info("[SafeTensorsLoader] model_type 'llama' and empty tokenizer_class, defaulting to LLAMA_SENTENCEPIECE.");
             }
-        } else if (model_type_str.find("llama3") != std::string::npos || model_architecture_str.find("Llama3") != std::string::npos) {
-             config_to_populate.tokenizer_family = ModelConfig::TokenizerFamily::LLAMA3_TIKTOKEN;
+        } else if (config_to_populate.vocab_size == 32000 || config_to_populate.architecture.find("Llama") != std::string::npos) {
+            config_to_populate.tokenizer_family = ModelConfig::TokenizerFamily::LLAMA_SENTENCEPIECE;
+        } else {
+            config_to_populate.tokenizer_family = ModelConfig::TokenizerFamily::UNKNOWN;
         }
-        // Add more specific checks if needed for other model types or tokenizer classes.
-
-        std::string family_log_str = "UNKNOWN_FAMILY";
-        if(config_to_populate.tokenizer_family == ModelConfig::TokenizerFamily::LLAMA_SENTENCEPIECE) family_log_str = "LLAMA_SENTENCEPIECE";
-        else if(config_to_populate.tokenizer_family == ModelConfig::TokenizerFamily::LLAMA3_TIKTOKEN) family_log_str = "LLAMA3_TIKTOKEN";
-        Logger::info("[SafeTensorsLoader] Deduced TokenizerFamily: " + family_log_str);
-        
-
-        // GGUF specific fields, not typically in safetensors config.json, but ensure they are defaulted reasonably.
         config_to_populate.is_gguf_file_loaded = false; 
-        // chat_template_type, pre_tokenizer_type, chat_template_string might not be in all safetensor configs
-        config_to_populate.chat_template_type = json_config.value("chat_template_type", "");
-        config_to_populate.pre_tokenizer_type = json_config.value("pre_tokenizer_type", "");
-        config_to_populate.chat_template_string = json_config.value("chat_template", ""); // often 'chat_template'
 
-        Logger::info("[SafeTensorsLoader] Successfully parsed config.json. Hidden size: " + std::to_string(config_to_populate.hidden_size));
+        Logger::info("SafeTensorsLoader: Successfully loaded and parsed model config from: " + config_json_path_str);
         return true;
 
     } catch (const nlohmann::json::exception& e) {
-        Logger::error("[SafeTensorsLoader] Failed to parse config.json: " + std::string(e.what()));
+        Logger::error("SafeTensorsLoader: Failed to parse config.json: " + config_json_path_str + ". Error: " + e.what());
         return false;
-    } catch (const std::exception& e) {
-        Logger::error("[SafeTensorsLoader] An unexpected error occurred while parsing config.json: " + std::string(e.what()));
-        return false;
+    }
+    return false; 
+}
+
+
+ThreadPool::ThreadPool(size_t num_threads) : stop_(false) {
+    for (size_t i = 0; i < num_threads; ++i) {
+        workers_.emplace_back([this] {
+            while (true) {
+                std::function<void()> task;
+                {
+                    std::unique_lock<std::mutex> lock(this->queue_mutex_);
+                    this->condition_.wait(lock, [this] {
+                        return this->stop_ || !this->tasks_.empty();
+                    });
+                    if (this->stop_ && this->tasks_.empty()) return;
+                    task = std::move(this->tasks_.front());
+                    this->tasks_.pop();
+                }
+                if(task) task(); 
+            }
+        });
+    }
+}
+
+ThreadPool::~ThreadPool() {
+    {
+        std::unique_lock<std::mutex> lock(queue_mutex_);
+        stop_ = true;
+    }
+    condition_.notify_all();
+    for (std::thread& worker : workers_) {
+        if (worker.joinable()) { 
+            worker.join();
+        }
     }
 }
