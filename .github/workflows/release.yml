@@ -222,7 +222,7 @@ jobs:
             echo "Final host CXX for nvcc -ccbin: $HOST_CXX_FOR_NVCC"
 
             # CMAKE_ARGS for CUDA
-            CMAKE_EXTRA_ARGS="-DCMAKE_CUDA_COMPILER=${CUDA_HOME}/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=all -DCMAKE_CUDA_FLAGS=\\"-allow-unsupported-compiler -ccbin ${HOST_CXX_FOR_NVCC}\\""
+            CMAKE_EXTRA_ARGS="-DCMAKE_CUDA_COMPILER=${CUDA_HOME}/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=all -DCMAKE_CUDA_FLAGS='-allow-unsupported-compiler -ccbin ${HOST_CXX_FOR_NVCC}'"
           fi
           cmake .. -DCMAKE_BUILD_TYPE=Release ${{ matrix.cmake_flags }} ${CMAKE_EXTRA_ARGS}
 
