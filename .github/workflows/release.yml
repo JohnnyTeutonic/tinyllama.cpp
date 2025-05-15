@@ -92,28 +92,31 @@ jobs:
         with:
           cmake-version: '3.27.0'
 
-      - name: Install CUDA Toolkit 11.8 (Linux CUDA Build)
+      - name: Setup Mamba (Linux CUDA Build)
         if: runner.os == 'Linux' && matrix.build_type == 'cuda'
+        uses: conda-incubator/setup-miniconda@v3.1.0
+        with:
+          activate-environment: "cuda-env"
+          python-version: ${{ matrix.python-version || '3.10' }} # Default or from matrix if you add python versions
+          miniforge-version: latest
+          add-pip-as-python-dependency: true
+          auto-activate-base: false
+
+      - name: Install CUDA Toolkit 12.1.1 via Mamba (Linux CUDA Build)
+        if: runner.os == 'Linux' && matrix.build_type == 'cuda'
+        shell: bash -el {0} # Important for conda activation
         run: |
-          sudo apt-get update
-          sudo apt-get install -y wget gnupg
-          wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
-          sudo dpkg -i cuda-keyring_1.1-1_all.deb
-          sudo apt-get update
-          # Install CUDA drivers and then specific core CUDA development components
-          # to avoid pulling in Nsight Systems and its libtinfo5 dependency.
-          sudo apt-get -y install --no-install-recommends cuda-drivers
-          sudo apt-get -y install --no-install-recommends \
-            cuda-compiler-11-8 \
-            cuda-libraries-11-8 \
-            cuda-libraries-dev-11-8 \
-            cuda-cudart-dev-11-8 \
-            cuda-driver-dev-11-8 \
-            cuda-tools-11-8
-          rm cuda-keyring_1.1-1_all.deb
-          # Set environment variables for CMake and compilation
-          echo "CUDAToolkit_ROOT=/usr/local/cuda-11.8" >> $GITHUB_ENV
-          echo "/usr/local/cuda-11.8/bin" >> $GITHUB_PATH
+          echo "Installing CUDA 12.1.1 toolkit using Mamba..."
+          mamba install -y -n cuda-env -c nvidia/label/cuda-12.1.1 cuda-toolkit
+          echo "CONDA_PREFIX_1=$CONDA_PREFIX_1" # For debugging
+          echo "CONDA_PREFIX=$CONDA_PREFIX" # For debugging
+          echo "CUDA_HOME=${CONDA_PREFIX}" >> $GITHUB_ENV
+          echo "CUDA_TOOLKIT_ROOT_DIR=${CONDA_PREFIX}" >> $GITHUB_ENV
+          echo "LD_LIBRARY_PATH=${CONDA_PREFIX}/lib:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
+          echo "${CONDA_PREFIX}/bin" >> $GITHUB_PATH
+          # Verify nvcc
+          which nvcc
+          nvcc --version
 
       - name: Install Dependencies (Linux)
         if: runner.os == 'Linux'
@@ -123,26 +126,61 @@ jobs:
 
       - name: Install Dependencies (Windows)
         if: runner.os == 'Windows'
+        shell: pwsh
         run: |
-          choco install doxygen.install graphviz openssl boost-vc143 -y --source https://community.chocolatey.org/api/v2/
+          Write-Host "Attempting to upgrade Chocolatey..."
+          choco upgrade chocolatey -y --source https://community.chocolatey.org/api/v2/
+          if ($LASTEXITCODE -ne 0) {
+            Write-Warning "Chocolatey upgrade failed or was not necessary. Continuing..."
+          }
+
+          $packagesToInstall = @(
+            @{ Name = "doxygen.install"; LogName = "Doxygen" },
+            @{ Name = "graphviz"; LogName = "Graphviz" },
+            @{ Name = "openssl"; LogName = "OpenSSL" },
+            @{ Name = "boost-vc143"; LogName = "Boost (VC143)" }
+          )
+          $sourceUrl = "https://community.chocolatey.org/api/v2/"
+          $allSucceeded = $true
+
+          foreach ($package in $packagesToInstall) {
+            Write-Host "Attempting to install $($package.LogName)..."
+            choco install $($package.Name) -y --source $sourceUrl --debug --verbose
+            if ($LASTEXITCODE -ne 0) {
+              Write-Error "Failed to install $($package.LogName). Exit code: $LASTEXITCODE"
+              $allSucceeded = $false
+            } else {
+              Write-Host "$($package.LogName) installed successfully."
+            }
+          }
+
+          if (-not $allSucceeded) {
+            Write-Error "One or more Chocolatey packages failed to install."
+            exit 1
+          }
+          Write-Host "All Chocolatey packages installed successfully."
 
       - name: Configure CMake (Linux)
         if: runner.os == 'Linux'
+        shell: bash -el {0} # Ensure conda env is active if it's a CUDA build
         run: |
           mkdir build
           cd build
-          # CUDAToolkit_ROOT and PATH should now be set by the previous step for CUDA builds
-          # We verify nvcc's presence here for CUDA builds
           if [ "${{ matrix.build_type }}" == "cuda" ]; then
-            echo "Verifying nvcc path and CUDAToolkit_ROOT:"
+            echo "Verifying nvcc path and CUDA_HOME / CUDA_TOOLKIT_ROOT_DIR:"
             which nvcc
-            echo "CUDAToolkit_ROOT is: $CUDAToolkit_ROOT"
-            if [ -z "$CUDAToolkit_ROOT" ] || [ ! -f "$CUDAToolkit_ROOT/bin/nvcc" ]; then
-              echo "Error: CUDAToolkit_ROOT is not correctly set or nvcc not found."
+            nvcc --version
+            echo "CUDA_HOME is: $CUDA_HOME"
+            echo "CUDA_TOOLKIT_ROOT_DIR is: $CUDA_TOOLKIT_ROOT_DIR"
+            echo "LD_LIBRARY_PATH is: $LD_LIBRARY_PATH"
+            if [ -z "$CUDA_HOME" ] || [ ! -f "$CUDA_HOME/bin/nvcc" ]; then
+              echo "Error: CUDA_HOME is not correctly set or nvcc not found in $CUDA_HOME/bin/nvcc."
               exit 1
             fi
+            # CMAKE_ARGS for CUDA
+            export CMAKE_ARGS="-DCMAKE_CUDA_COMPILER=${CUDA_HOME}/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=all"
           fi
-          cmake .. -DCMAKE_BUILD_TYPE=Release ${{ matrix.cmake_flags }}
+          cmake .. -DCMAKE_BUILD_TYPE=Release ${{ matrix.cmake_flags }} $CMAKE_ARGS
 
       - name: Configure CMake (Windows)
         if: runner.os == 'Windows'
