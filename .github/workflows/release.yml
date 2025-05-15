@@ -69,7 +69,7 @@ jobs:
             artifact_name: tinyllama-linux-cpu
             asset_name: tinyllama-linux-cpu.tar.gz
             cmake_flags: "-DHAS_CUDA=OFF"
-          - os: ubuntu-20.04
+          - os: ubuntu-latest
             build_type: cuda
             artifact_name: tinyllama-linux-cuda
             asset_name: tinyllama-linux-cuda.tar.gz
@@ -96,16 +96,15 @@ jobs:
         if: runner.os == 'Linux' && matrix.build_type == 'cuda'
         run: |
           sudo apt-get update
-          sudo apt-get install -y gnupg wget
-          wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2004/x86_64/cuda-keyring_1.0-1_all.deb
-          sudo dpkg -i cuda-keyring_1.0-1_all.deb
+          sudo apt-get install -y wget gnupg
+          wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
           sudo apt-get update
-          sudo apt-get -y install cuda-toolkit-11-8
-          # Set environment variables for subsequent steps
+          sudo apt-get -y install cuda-11-8 # Installs CUDA 11.8.x components
+          rm cuda-keyring_1.1-1_all.deb
+          # Set environment variables for CMake and compilation
           echo "CUDAToolkit_ROOT=/usr/local/cuda-11.8" >> $GITHUB_ENV
           echo "/usr/local/cuda-11.8/bin" >> $GITHUB_PATH
-          rm cuda-keyring_1.0-1_all.deb
-        shell: bash
 
       - name: Install Dependencies (Linux)
         if: runner.os == 'Linux'
