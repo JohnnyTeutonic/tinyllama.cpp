@@ -100,8 +100,16 @@ jobs:
           wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
           sudo dpkg -i cuda-keyring_1.1-1_all.deb
           sudo apt-get update
-          # Install CUDA toolkit and drivers without recommended packages to avoid libtinfo5 issues
-          sudo apt-get -y install --no-install-recommends cuda-toolkit-11-8 cuda-drivers
+          # Install CUDA drivers and then specific core CUDA development components
+          # to avoid pulling in Nsight Systems and its libtinfo5 dependency.
+          sudo apt-get -y install --no-install-recommends cuda-drivers
+          sudo apt-get -y install --no-install-recommends \
+            cuda-compiler-11-8 \
+            cuda-libraries-11-8 \
+            cuda-libraries-dev-11-8 \
+            cuda-cudart-dev-11-8 \
+            cuda-driver-dev-11-8 \
+            cuda-tools-11-8
           rm cuda-keyring_1.1-1_all.deb
           # Set environment variables for CMake and compilation
           echo "CUDAToolkit_ROOT=/usr/local/cuda-11.8" >> $GITHUB_ENV
