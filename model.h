@@ -64,10 +64,10 @@ static std::string tensor_name_to_string(TensorName tn) {
 }
 
 /**
- * @brief Configuration parameters for the TinyLlama model
- * 
- * This structure holds all the hyperparameters and configuration settings
- * needed to initialize and run the TinyLlama model.
+ * @brief Model configuration structure holding architecture and hyperparameters.
+ *
+ * Contains all key parameters needed to construct and run a transformer model, including
+ * hidden size, number of layers, attention heads, vocabulary size, special token IDs, etc.
  */
 struct ModelConfig {
     int hidden_size;              /**< Size of the hidden layers */
@@ -197,10 +197,9 @@ using ForwardDiagCallback = std::function<void(
     int layer, const std::string& name, const std::vector<float>& v)>;
 
 /**
- * @brief Weights for a single transformer layer
- * 
- * Contains all the weight matrices and normalization parameters for
- * a transformer layer, supporting multiple quantization formats.
+ * @brief Structure holding all weights for a single transformer layer.
+ *
+ * Contains projections for attention and MLP, as well as normalization weights, in various formats.
  */
 struct LayerWeights {
   std::vector<uint16_t> input_layernorm;
@@ -234,34 +233,50 @@ struct LayerWeights {
 };
 
 /**
- * @brief Main TinyLlama model class
- * 
- * Implements the TinyLlama language model, providing methods for
- * initialization, inference, and weight management.
+ * @brief Main transformer model class for TinyLlama.
+ *
+ * Handles weight loading, forward pass, and GPU/CPU offloading logic. Supports both GGUF and SafeTensors formats.
  */
 class TinyLlamaModel {
  public:
   /**
-   * @brief Constructs a TinyLlama model from SafeTensors format
-   * @param config Model configuration
-   * @param loader SafeTensors loader containing weights
+   * @brief Construct a TinyLlamaModel from a SafeTensorsLoader.
+   * @param config Model configuration.
+   * @param loader SafeTensorsLoader instance.
    */
   TinyLlamaModel(const ModelConfig& config, const SafeTensorsLoader& loader);
-  TinyLlamaModel(const ModelConfig& config, const std::string& weights_path);
-  TinyLlamaModel(const ModelConfig& config, std::unique_ptr<GGUFData> gguf_data);
+
+  /**
+   * @brief Construct a TinyLlamaModel from a model path (GGUF or SafeTensors).
+   * @param initial_config Initial model configuration (may be overridden by file metadata).
+   * @param model_path Path to the model file or directory.
+   */
+  TinyLlamaModel(const ModelConfig& initial_config, const std::string& model_path);
+
+  /**
+   * @brief Construct a TinyLlamaModel from pre-loaded GGUFData.
+   * @param config_from_session Model configuration.
+   * @param gguf_data_from_session Unique pointer to GGUFData.
+   */
+  TinyLlamaModel(const ModelConfig& config_from_session, std::unique_ptr<GGUFData> gguf_data_from_session);
+
+  /**
+   * @brief Destructor. Cleans up all allocated resources.
+   */
   ~TinyLlamaModel();
 
   /**
-   * @brief Performs forward pass on CPU
-   * @param x_vec Input tensor
-   * @param pos Position in the sequence
-   * @param cache Optional KV cache
-   * @param attention_mask Optional attention mask
-   * @return Output logits
+   * @brief Run the forward pass for the model on CPU layers.
+   * @param input Input vector (modified in-place).
+   * @param n_tokens Current token position.
+   * @param kv_cache Pointer to the key-value cache.
+   * @param attention_mask Optional attention mask.
+   * @return Output logits or intermediate activations.
    */
-  std::vector<float> forward(std::vector<float>& x_vec, int pos,
-                             KVCache* cache = nullptr,
-                             const std::vector<int>* attention_mask = nullptr);
+  std::vector<float> forward(
+      std::vector<float>& input,
+      int n_tokens, KVCache* kv_cache,
+      const std::vector<int>* attention_mask);
 
 #ifdef HAS_CUDA
   /**
@@ -291,8 +306,17 @@ class TinyLlamaModel {
 
   std::vector<LayerWeights>& get_layers() { return layers; }
 
+  /**
+   * @brief Lookup the embedding vector for a given token ID.
+   * @param token_id The token ID to lookup.
+   * @return The embedding vector as a std::vector<float>.
+   */
   std::vector<float> lookup_embedding(int token_id);
 
+  /**
+   * @brief Get the vocabulary size for the model.
+   * @return Vocabulary size.
+   */
   int get_vocab_size() const;
 
   const GGUFData* get_gguf_data() const {

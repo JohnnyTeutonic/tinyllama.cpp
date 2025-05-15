@@ -28,30 +28,86 @@
 #include "model_macros.h"
 #include "safetensors_loader.h"
 
+/**
+ * @brief Converts a float32 value to bfloat16 representation.
+ * @param val The float32 value to convert.
+ * @return The bfloat16 representation as uint16_t.
+ */
+inline uint16_t float32_to_bfloat16(float val);
+
+/**
+ * @brief Matrix-vector multiplication for Q6_K quantized weights and float32 vector.
+ * @param mat_q6k The quantized matrix.
+ * @param vec_f32 The input float32 vector.
+ * @param out_f32 The output float32 vector.
+ * @param rows Number of rows in the matrix.
+ * @param cols Number of columns in the matrix.
+ * @param log_first_block Whether to log the first block for debugging.
+ */
 static void matvec_q6k_f32_vector_cpu(const std::vector<block_q6_K>& mat_q6k,
                                       const std::vector<float>& vec_f32,
                                       std::vector<float>& out_f32, int rows,
                                       int cols, bool log_first_block = false);
 
+/**
+ * @brief Matrix-vector multiplication for Q4_K quantized weights and float32 vector.
+ * @param mat_q4k The quantized matrix.
+ * @param vec_f32 The input float32 vector.
+ * @param out_f32 The output float32 vector.
+ * @param rows Number of rows in the matrix.
+ * @param cols Number of columns in the matrix.
+ * @param log_first_block Whether to log the first block for debugging.
+ */
 static void matvec_q4k_f32_vector_cpu(const std::vector<block_q4_K>& mat_q4k,
                                       const std::vector<float>& vec_f32,
                                       std::vector<float>& out_f32, int rows,
                                       int cols, bool log_first_block = false);
 
+/**
+ * @brief Matrix-vector multiplication for Q8_0 quantized weights and float32 vector.
+ * @param mat_q8_0 The quantized matrix.
+ * @param vec_f32 The input float32 vector.
+ * @param out_f32 The output float32 vector.
+ * @param rows Number of rows in the matrix.
+ * @param cols Number of columns in the matrix.
+ * @param log_first_block Whether to log the first block for debugging.
+ */
 static void matvec_q8_0_f32_vector_cpu(const std::vector<block_q8_0>& mat_q8_0,
                                       const std::vector<float>& vec_f32,
                                       std::vector<float>& out_f32, int rows,
                                       int cols, bool log_first_block = false);
 
-inline uint16_t float32_to_bfloat16(float val);
-
+/**
+ * @brief Matrix-vector multiplication for float32 matrix and float32 vector.
+ * @param mat_f32 The float32 matrix.
+ * @param vec_f32 The input float32 vector.
+ * @param out_f32 The output float32 vector.
+ * @param rows Number of rows in the matrix.
+ * @param cols Number of columns in the matrix.
+ */
 static void matvec_f32_f32_vector_cpu(const std::vector<float>& mat_f32,
                                       const std::vector<float>& vec_f32,
                                       std::vector<float>& out_f32, int rows,
                                       int cols);
 
+/**
+ * @brief Dequantizes a vector of Q8_K blocks to float32.
+ * @param q8k_vec The quantized vector.
+ * @param out_f32 The output float32 vector.
+ * @param n Number of elements.
+ * @param log_this_block Whether to log this block for debugging.
+ */
 void dequantize_q8_k(const std::vector<block_q8_K>& q8k_vec,
                      std::vector<float>& out_f32, int n, bool log_this_block);
+
+/**
+ * @brief Logs a detailed summary of a float vector for debugging.
+ * @param name Name for the log entry.
+ * @param v The vector to log.
+ * @param current_pos Current position (e.g., token position).
+ * @param current_layer Current layer index.
+ * @param N Number of elements to log.
+ */
 static void log_vector_summary_detailed(const std::string& name,
                                         const std::vector<float>& v,
                                         int current_pos, int current_layer,
@@ -355,6 +411,11 @@ void log_vector_summary_with_tail(const std::string& name,
   Logger::info(ss.str());
 }
 
+/**
+ * @brief Converts a bfloat16 value to float32.
+ * @param bf16 The bfloat16 value.
+ * @return The float32 representation.
+ */
 float bfloat16_to_float32(uint16_t bf16) {
   if (bf16 == bfloat16::ZERO) return 0.0f;
   if (bf16 == bfloat16::NEG_ZERO) return -0.0f;
@@ -376,6 +437,11 @@ float bfloat16_to_float32(uint16_t bf16) {
   return result;
 }
 
+/**
+ * @brief Converts a vector of bfloat16 values to float32.
+ * @param bf16_vec The input vector of bfloat16 values.
+ * @return The output vector of float32 values.
+ */
 std::vector<float> bfloat16_vector_to_float32(
     const std::vector<uint16_t>& bf16_vec) {
   std::vector<float> f32_vec(bf16_vec.size());
@@ -388,6 +454,13 @@ std::vector<float> bfloat16_vector_to_float32(
   return f32_vec;
 }
 
+/**
+ * @brief Converts a vector of uint8_t bytes to a vector of uint16_t values.
+ * @param bytes The input byte vector.
+ * @param numel The number of uint16_t elements expected.
+ * @return The output vector of uint16_t values.
+ * @throws std::runtime_error if the byte vector size does not match numel * 2.
+ */
 std::vector<uint16_t> uint8_vector_to_uint16_vector(
     const std::vector<uint8_t>& bytes, size_t numel) {
   if (bytes.size() != numel * 2) {
@@ -400,6 +473,11 @@ std::vector<uint16_t> uint8_vector_to_uint16_vector(
   return out;
 }
 
+/**
+ * @brief Returns the index of the maximum value in a float vector.
+ * @param v The input vector.
+ * @return The index of the maximum value, or -1 if the vector is empty.
+ */
 int argmax(const std::vector<float>& v) {
   if (v.empty()) {
     Logger::error("Cannot perform argmax on empty vector");
