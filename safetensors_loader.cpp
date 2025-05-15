@@ -1,5 +1,5 @@
 #include "safetensors_loader.h"
-#include "model.h" // Required for ModelConfig definition (was model_config.h)
+#include "model.h"
 #include "logger.h"
 #include "model_macros.h" // For SAFE_MIN, SAFE_MAX (may be needed by cpu_f16_to_float32)
 
@@ -28,17 +28,12 @@
 #ifdef __AVX2__
 #include <immintrin.h>
 #endif
-
-// CPU data type conversion utilities (ensure these are robust)
-// (Similar to the one in cuda_kernels.cu but for CPU)
 inline float cpu_bf16_to_float32(uint16_t bf16_raw) {
     unsigned int bits = ((unsigned int)bf16_raw) << 16;
     float result;
     memcpy(&result, &bits, sizeof(float));
     return result;
 }
-
-// A more robust FP16 to FP32 conversion
 inline float cpu_f16_to_float32(uint16_t f16_raw) {
     const uint32_t sign_mask_f16 = 0x8000;
     const uint32_t exp_mask_f16 = 0x7C00;
@@ -86,9 +81,6 @@ inline float cpu_f16_to_float32(uint16_t f16_raw) {
     memcpy(&result, &f32_bits, sizeof(float));
     return result;
 }
-
-
-// --- Shard Implementation ---
 
 Shard::Shard(const std::string& fp) : file_path(fp) {
     Logger::info("Shard: Initializing for file: " + file_path);
@@ -283,9 +275,6 @@ const uint8_t* Shard::get_tensor_raw_data(size_t local_offset, size_t n_bytes) c
     }
     return data_start;
 }
-
-
-// --- SafeTensorsLoader Implementation ---
 
 SafeTensorsLoader::SafeTensorsLoader(const std::string& model_load_path)
     : model_load_path_(model_load_path), is_sharded_(false) {

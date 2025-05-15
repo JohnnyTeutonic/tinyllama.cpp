@@ -151,9 +151,6 @@ static inline void get_scale_min_k4(int j, const uint8_t * q, uint8_t * d_val, u
         *d_val = q[j] & 63;     // Takes lower 6 bits from q[j] (scales[0..3])
         *m_val = q[j + 4] & 63; // Takes lower 6 bits from q[j+4] (scales[4..7])
     } else { // For next 4 groups of 32 (i.e., next 128 elements, using scales[8..11] and bits from scales[0..7])
-        // q[j+4] here would be q[8..11] for j=4..7
-        // q[j-4] here would be q[0..3] for j=4..7
-        // q[j-0] (mistake in comment, should be q[j]) here would be q[4..7] for j=4..7
         *d_val = (q[j+4] & 0x0F) | ((q[j-4] >> 6) << 4); // Lower 4 bits from q[8..11] and upper 2 bits from q[0..3]
         *m_val = (q[j+4] >>  4) | ((q[j-0] >> 6) << 4); // Upper 4 bits from q[8..11] and upper 2 bits from q[4..7]
     }
@@ -172,26 +169,6 @@ static inline void get_scale_min_indices_q4_K(
   *min_index = scales[j % 4 + 8] >> (4 * (j / 4));
   *min_index &= 0x0F;
 }
-
-/* --- OLD INCORRECT HELPER ---
-static inline void get_scale_min_indices_q4_K(
-    int j,
-    const uint8_t* scales,
-block_q4_K uint8_t* scale_index,
-min_index
-    int scale_byte_index = j / 2;
-LOGIC int min_byte_index = j / 2 + 6;
-WRONG LOGIC
-
-    if (j % 2 == 0) {
-        *scale_index = scales[scale_byte_index] & 0x0F;
-        *min_index   = scales[min_byte_index] & 0x0F;
-    } else {
-        *scale_index = scales[scale_byte_index] >> 4;
-        *min_index   = scales[min_byte_index] >> 4;
-    }
-}
-*/
 
 void dequantize_q4_k_m(const block_q4_K* qblock, float* output,
                        int num_weights_in_block, bool log_this_block) {
@@ -233,10 +210,6 @@ void dequantize_q4_k_m(const block_q4_K* qblock, float* output,
       uint8_t quant_nibble = (q_bytes_ptr[l] & 0x0F); // First nibble for first element
       *y_ptr++ = d1 * static_cast<float>(quant_nibble) - m1;
     }
-    // q_bytes_ptr is NOT advanced yet here in the reference, it uses q[l] and q[l] >> 4 for the two sets of 32.
-    // So the above loop dequantized y[0..31] using lower nibbles of q_bytes_ptr[0..31]
-    // Now, dequantize y[32..63] using upper nibbles of q_bytes_ptr[0..31]
-    // This means the y_ptr has already advanced by 32 from the previous loop.
 
     // Dequantize the second 32 elements of this 64-element chunk
     for (int l = 0; l < 32; ++l) {
@@ -285,13 +258,6 @@ void dequantize_q6_k(const block_q6_K* qblock, float* output,
           const int8_t q2 = (int8_t)(((ql[l + 32] & 0x0F) | (((qh[l] >> 2) & 0x03) << 4))) - 32;
           const int8_t q3 = (int8_t)(((ql[l +  0]  >> 4) | (((qh[l] >> 4) & 0x03) << 4))) - 32;
           const int8_t q4 = (int8_t)(((ql[l + 32]  >> 4) | (((qh[l] >> 6) & 0x03) << 4))) - 32;
-
-          // Apply scales and dequantize
-          // sc points to the 8 scales for the current 128-element half.
-          // is = 0 means l is 0-15, so we use sc[0], sc[2], sc[4], sc[6]
-          // is = 1 means l is 16-31, so we use sc[1], sc[3], sc[5], sc[7]
-          // This is effectively sc[is + 0], sc[is + 2], sc[is + 4], sc[is + 6] relative to the start of the 8 scales for this half
-          // when considering the two sets of scales used across the 32 iterations of l.
 
           y[l +  0] = d * sc[is + 0] * q1;
           y[l + 32] = d * sc[is + 2] * q2;

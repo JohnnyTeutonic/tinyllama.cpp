@@ -571,10 +571,6 @@ __global__ void attention_kernel(const float* Q_current,
                                  const float* V_layer_cache_base, float* out,
                                  int current_seq_len, int head_dim, float scale,
                                  int cache_num_kv_heads, int num_q_heads) {
-  // Q_current: [num_q_heads, head_dim] (actually q_dev_ which is [hs])
-  // K_layer_cache_base: [max_seq_len, cache_num_kv_heads, head_dim]
-  // V_layer_cache_base: [max_seq_len, cache_num_kv_heads, head_dim]
-  // out: [num_q_heads, head_dim] (actually attn_out_dev_ which is [hs])
 
   // Kernel launch: grid(num_q_heads), block(head_dim)
   // blockIdx.x is q_head_idx
@@ -623,8 +619,6 @@ __global__ void attention_kernel(const float* Q_current,
                      // or before softmax if reduction was parallel.
                      // If d_idx == 0 writes, all other threads must wait for it to complete for this k_pos.
   }
-  // After this loop, 'scores' array (in shared memory) contains all dot products for the current q_head.
-  // All threads in the block have the same 'scores' array content due to __syncthreads.
 
   // --- 2. Softmax ---
   // Parallel reduction to find max_score among scores[0...current_seq_len-1]
@@ -643,25 +637,12 @@ __global__ void attention_kernel(const float* Q_current,
   float block_max_score = -INFINITY;
   if (d_idx == 0) {
     for (int r = 0; r < head_dim; ++r) { // head_dim might be > current_seq_len for first few tokens
-                                         // or if many threads are idle.
-                                         // This reduction should be over min(head_dim, current_seq_len) active reduction participants or up to head_dim if all threads had work
       if (dot_product_terms[r] > block_max_score) { // Check if dot_product_terms[r] was validly written
         block_max_score = dot_product_terms[r];
       }
     }
   }
-  __syncthreads(); // Broadcast block_max_score (implicit as thread 0 wrote it, others read after sync)
-                  // To be safer, explicitly read from shared mem if other threads need it, or broadcast.
-                  // For now, assume thread 0 proceeds or block_max_score is copied to a register for all.
-  // A better reduction for block_max_score (if not all threads had work in the loop above):
-  // __shared__ float temp_max_val;
-  // if(d_idx == 0) temp_max_val = -INFINITY;
-  // __syncthreads();
-  // atomicMax(&temp_max_val, thread_max_score); // if current_seq_len is large
-  // __syncthreads();
-  // block_max_score = temp_max_val;
-  // For now, using the simpler reduction and assuming block_max_score is available to all after sync.
-  // Re-assign to register to ensure all threads have it after potential overwrite of dot_product_terms[0]
+  __syncthreads();
   if(d_idx == 0) dot_product_terms[0] = block_max_score; // Store it.
   __syncthreads();
   block_max_score = dot_product_terms[0]; // All threads read it.
@@ -727,18 +708,6 @@ void attention_cuda(const float* Q_current_dev, const float* K_layer_cache_base,
   // Shared memory: scores array (size current_seq_len) + dot_product_terms (size head_dim for reduction)
   size_t shared_mem_bytes = (current_seq_len + head_dim) * sizeof(float);
   
-  // Check if requested shared memory exceeds device limits (optional, good practice)
-  // int device;
-  // cudaGetDevice(&device);
-  // cudaDeviceProp prop;
-  // cudaGetDeviceProperties(&prop, device);
-  // if (shared_mem_bytes > prop.sharedMemPerBlock) {
-  //   // Handle error: request exceeds available shared memory
-  //   // This could involve logging, throwing an error, or using a different kernel version
-  //   printf("Requested shared memory (%zu bytes) exceeds device limit (%d bytes)\\n", shared_mem_bytes, prop.sharedMemPerBlock);
-  //   return; // Or throw
-  // }
-
 
   attention_kernel<<<grid, block, shared_mem_bytes, stream>>>(
       Q_current_dev, K_layer_cache_base, V_layer_cache_base, out_dev,
@@ -957,7 +926,6 @@ void lookup_embedding_cuda(const void* table_dev, float* output_dev,
   gpuErrchk(cudaGetLastError());
 }
 
-// Kernel definition for BF16 to FP32 conversion
 __global__ void convert_bf16_to_fp32_kernel(const uint16_t* __restrict__ bf16_in,
                                             float* __restrict__ fp32_out,
                                             size_t n_elements) {

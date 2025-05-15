@@ -175,7 +175,6 @@ int main(int argc, char** argv) {
         Logger::info("[Main.cpp] Non-Llama 3 model detected (via tokenizer_family). Q&A prompt formatting will be ENABLED for this session.");
     }
 
-    // Log the final decision clearly, this combines previous [MAIN_CPP_DIAGNOSTIC] logs
     Logger::info("[Main.cpp] Mode: '" + mode_str + "'. Final decision for apply_qa_formatting: " + std::string(apply_qa_formatting ? "true" : "false"));
 
     if (mode_str == "prompt") {

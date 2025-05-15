@@ -3,14 +3,6 @@ import os
 import sys
 import argparse
 
-# Import ModelConfig to access TokenizerFamily enum directly if needed by the user
-# This assumes it's made available by the bindings in the tinyllama_bindings module scope
-# If it's nested, it would be tinyllama_bindings.ModelConfig.TokenizerFamily
-# For now, let's try accessing it via an instance if the direct module path isn't set up.
-# It's better to import it if pybind11 makes it available at the module level.
-# Actual import might be: from tinyllama_bindings import ModelConfig 
-# but pybind11 usually registers it so tinyllama_bindings.ModelConfig.TokenizerFamily works.
-
 def print_config(config_obj, source_msg="Config"):
     print(f"--- {source_msg} ---")
     print(f"  Hidden size: {config_obj.hidden_size}")
@@ -27,13 +19,7 @@ def print_config(config_obj, source_msg="Config"):
     print(f"  Architecture: {config_obj.architecture}")
     print(f"  Model name: {config_obj.model_name}")
     print(f"  Is GGUF loaded: {config_obj.is_gguf_file_loaded}")
-    # Access tokenizer_family via the bound ModelConfig object
-    # The enum values would be like config_obj.TokenizerFamily.LLAMA3_TIKTOKEN but comparison is direct
     tf_str = "UNKNOWN_IN_PYTHON_TEST"
-    # We need a way to access the enum values for comparison if we want to print the string repr
-    # For now, just print the raw enum value from Python's perspective
-    # This will be improved once we confirm how pybind11 exposes enums for direct comparison and string representation.
-    # Temporarily, we will rely on the C++ __repr__ for ModelConfig to show this.
     print(f"  Tokenizer Family (raw value): {config_obj.tokenizer_family}") # This will print something like <TokenizerFamily.LLAMA3_TIKTOKEN: 2>
     print(f"  (See C++ repr for ModelConfig for stringified tokenizer_family)")
     print(f"  BOS token ID: {config_obj.bos_token_id}")
@@ -71,19 +57,7 @@ def run_model_test(model_path, tokenizer_path_arg=None, threads_arg=1, n_gpu_lay
         print_config(cpp_loaded_config, "Config from TinyLlamaSession")
         print(f"Config C++ Repr: {repr(cpp_loaded_config)}") # Test the __repr__ we enhanced
 
-        # Test TokenizerFamily enum access (assuming it's bound to ModelConfig class)
         print("\n--- Testing ModelConfig.TokenizerFamily Enum Access ---")
-        # The following assumes pybind11 makes ModelConfig available at module level or we import it.
-        # For now, let's assume we can construct/access it via the module after bindings.cpp is compiled.
-        # This part might need adjustment based on how pybind11 structures the module.
-        # It's more typical to access like: tinyllama_bindings.ModelConfig.TokenizerFamily.LLAMA3_TIKTOKEN
-        # Let's try to instantiate the enum or check its members if possible - this is tricky without running.
-        # For now, we'll rely on comparing cpp_loaded_config.tokenizer_family with these values.
-        
-        # We expect these to be accessible via the module if `ModelConfig` class itself is properly bound with `TokenizerFamily` as a nested enum.
-        # Example: unknown_val = tinyllama_bindings.ModelConfig.TokenizerFamily.UNKNOWN
-        # This is a placeholder for how to test enum values directly.
-        # We will test by comparing the instance's tokenizer_family value.
         print(f"Attempting to compare config.tokenizer_family with known enum values...")
         is_llama3_detected = False
         if cpp_loaded_config.tokenizer_family == tinyllama_bindings.ModelConfig.TokenizerFamily.LLAMA3_TIKTOKEN:

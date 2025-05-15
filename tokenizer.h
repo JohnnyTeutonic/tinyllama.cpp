@@ -194,12 +194,6 @@ class Tokenizer {
   void load_bpe_merges_from_json(const std::string& model_path);
 
   /**
-   * @brief Loads Tiktoken BPE merge rules from GGUF data structures.
-   *        Populates bpe_merges_ or tiktoken_merges_list_.
-   */
-  void load_tiktoken_merges_from_gguf(const GGUFData& gguf_data);
-
-  /**
    * @brief Loads a SentencePiece model
    */
   void load_sentencepiece_model(const std::string& model_path);

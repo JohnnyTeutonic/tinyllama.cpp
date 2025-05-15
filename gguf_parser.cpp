@@ -9,18 +9,12 @@
 #include <cstring> // For strerror
 #include <cerrno>  // For errno
 
-// mmap related includes are now in gguf_structs.h, but also here for clarity/safety
 #ifndef _WIN32
 #include <sys/mman.h>   // For mmap, munmap, MAP_FAILED, posix_madvise
 #include <sys/stat.h>   // For fstat, stat
 #include <fcntl.h>      // For O_RDONLY
 #include <unistd.h>     // For close, fstat, read, lseek, sysconf, _SC_PAGE_SIZE
 #else
-// gguf_structs.h already includes windows.h with WIN32_LEAN_AND_MEAN
-// No need for additional direct include of windows.h here if gguf_structs.h is included first
-// However, for explicitness if this file were compiled standalone:
-// #define WIN32_LEAN_AND_MEAN
-// #include <windows.h>
 #endif
 
 #include "logger.h"
@@ -541,9 +535,6 @@ GGUFData load_gguf_meta(const std::string& filename, bool use_mmap) {
 
   if (!use_mmap) {
     Logger::info("[GGUF_LOAD] mmap is disabled by configuration. Tensor data will not be memory-mapped from GGUF.");
-    // GGUFData members (file_descriptor, mapped_tensor_data, etc.) are already defaulted
-    // to safe values (-1, nullptr) by its constructor.
-    // map_gguf_weights function in model.cpp already checks for mapped_tensor_data == nullptr.
     return result; 
   }
 
@@ -679,10 +670,6 @@ GGUFData load_gguf_meta(const std::string& filename, bool use_mmap) {
         last_error = GetLastError();
         // h_map_file and h_file are closed by GGUFData destructor if they are still valid
 #endif
-        // Reset fields that GGUFData destructor would clean, as it might not run if we throw from constructor context
-        // However, GGUFData is constructed outside this mmap block. This specific part is about a failure after mmap attempt.
-        // The GGUFData destructor will handle cleanup of handles/fds set before this failure.
-        // We primarily need to nullify the mapping specific fields on failure here.
         result.mapped_tensor_data = nullptr; 
         result.mapped_tensor_data_size = 0;
         result.offset_diff_for_mmap = 0;   
@@ -747,8 +734,6 @@ GGUFData load_gguf_meta(const std::string& filename, bool use_mmap) {
     Logger::info("[GGUF_LOAD] Finished POSIX prefetching attempt with posix_madvise.");
     
 #else // _WIN32
-    // PrefetchVirtualMemory could be added here for Windows if desired and available.
-    // For now, just a log message indicating it's a POSIX-specific optimization.
     Logger::info("[GGUF_LOAD] Tensor prefetching (posix_madvise) is currently implemented for POSIX systems. Skipping for Windows for now.");
 #endif
 
@@ -757,7 +742,6 @@ GGUFData load_gguf_meta(const std::string& filename, bool use_mmap) {
     result.mapped_tensor_data = nullptr; // Ensure it's null if not mapped
     result.mapped_tensor_data_size = 0;
     result.offset_diff_for_mmap = 0;
-    // fd will be closed by GGUFData destructor if not already closed by an error path.
   }
   
   Logger::info("GGUF metadata loaded and tensor data (if any) mmapped successfully.");

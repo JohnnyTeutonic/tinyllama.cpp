@@ -7,7 +7,7 @@
 #include <iostream>  
 #include <map>
 #include <nlohmann/json.hpp>
-#include <queue> // Already included, but good to ensure
+#include <queue>
 #include <boost/regex.hpp> 
 #include <sstream>
 #include <stdexcept>  
@@ -59,7 +59,6 @@ std::vector<std::string> Tokenizer::bpe_tokenize_from_scores(
 
   // Llama-like regex for pre-tokenization
   boost::regex llama_regex(
-      // Added \r to character classes, and ensured \s+ handles various whitespace correctly.
       // This pattern is common for SentencePiece-like splitting by words, numbers, symbols, and whitespace.
       R"([\r\n]+|[[:space:]]+|[^\r\n[:space:][:alnum:]]+|[[:alnum:]]+)"); 
   boost::smatch match;
@@ -79,9 +78,7 @@ std::vector<std::string> Tokenizer::bpe_tokenize_from_scores(
   Logger::debug("[BPE_SCORES] Regex pre-tokenization resulted in " + std::to_string(initial_units.size()) + " initial units.");
 
   const std::string sp_space_prefix = "\xE2\x96\x81";  // SentencePiece space U+2581
-  bool next_word_needs_prefix = true; // Mimic behavior: first word gets prefix unless text starts with space
-  // However, SentencePiece models usually expect the *first word of a sentence* to be prefixed if it's not BOS.
-  // If the input `text` is a fragment, the first word should generally be prefixed.
+  bool next_word_needs_prefix = true;
 
   for (const std::string& unit_raw : initial_units) {  
     if (unit_raw.empty()) continue;
@@ -99,7 +96,6 @@ std::vector<std::string> Tokenizer::bpe_tokenize_from_scores(
         // Whitespace signals that the *next* non-whitespace unit needs the prefix.
         next_word_needs_prefix = true;
         Logger::debug("[BPE_SCORES] Unit '" + unit_raw + "' is whitespace. Setting prefix flag for next word.");
-        // Do not add whitespace itself as a token here. SentencePiece encodes it via the prefix.
         continue; // Skip to the next unit
     }
 
@@ -113,9 +109,6 @@ std::vector<std::string> Tokenizer::bpe_tokenize_from_scores(
          Logger::debug("[BPE_SCORES] Processing unit without prefix: '" + unit_to_bpe + "'");
     }
     
-    // Handle newline: if the unit_to_bpe (potentially prefixed) is just the prefix + newline, or just newline
-    // This might need careful review based on how newlines are in the vocab (e.g. literal \n vs actual \n)
-    // For now, assume newlines are handled by character splitting if not prefixed.
     if (unit_raw == "\n") {
         Logger::debug("[BPE_SCORES] Raw unit is newline. It will be split into chars. Current unit_to_bpe: '" + unit_to_bpe + "'");
         // If a newline is a standalone token, it should be found. If it's part of merges, it will be handled.
@@ -124,14 +117,13 @@ std::vector<std::string> Tokenizer::bpe_tokenize_from_scores(
     std::vector<std::string> chars; // Characters/sub-units of the current unit_to_bpe
     // Split unit_to_bpe into UTF-8 characters
     for (size_t i = 0; i < unit_to_bpe.size();) {
-      int bytes = unicode_char_len(unit_to_bpe[i]); // Using the helper (direct call for anonymous namespace function)
+      int bytes = unicode_char_len(unit_to_bpe[i]);
       
       if (i + bytes <= unit_to_bpe.size()) {
         chars.push_back(unit_to_bpe.substr(i, bytes));
       } else {
-        // Should not happen with valid UTF-8 and correct unicode_char_len
         Logger::warning("[BPE_SCORES] Invalid UTF-8 sequence or length error for: '" + unit_to_bpe.substr(i) + "'");
-        chars.push_back(unit_to_bpe.substr(i)); // Add remaining as is
+        chars.push_back(unit_to_bpe.substr(i));
         break; 
       }
       i += bytes;
@@ -164,18 +156,14 @@ std::vector<std::string> Tokenizer::bpe_tokenize_from_scores(
         chars.erase(chars.begin() + best_i + 1);
         changes = true;
       }
-    } // End of while(changes) for BPE merges
+    }
     
     all_tokens.insert(all_tokens.end(), chars.begin(), chars.end());
-  } // End of for each unit_raw
+  }
 
   Logger::debug("[BPE_SCORES] Final token count after BPE: " + std::to_string(all_tokens.size()));
   return all_tokens;
 }
-
-
-
-// (Content of Tokenizer::tokens_to_ids as provided by user)
 std::vector<int> Tokenizer::tokens_to_ids(
     const std::vector<std::string>& tokens) const {
   std::vector<int> ids;
@@ -263,10 +251,6 @@ std::vector<int> Tokenizer::tokens_to_ids(
 
   return ids;
 }
-
-
-
-// (Content of Tokenizer::ids_to_tokens as provided by user)
 std::vector<std::string> Tokenizer::ids_to_tokens(
     const std::vector<int>& ids) const {
   std::vector<std::string> tokens;
@@ -276,14 +260,10 @@ std::vector<std::string> Tokenizer::ids_to_tokens(
     auto added_it = id_to_added_token_.find(id); // Check added tokens first
     if (added_it != id_to_added_token_.end()) {
       tokens.push_back(added_it->second);
-      // Logger::debug("[ID_TO_TOK] Found added token for ID: " + std::to_string(id) + " -> '" + added_it->second + "'");
     } else if (id >= 0 && static_cast<size_t>(id) < id_to_token_.size()) { // Check base vocabulary
       if (!id_to_token_[id].empty()) {  // Ensure token string is not empty
         tokens.push_back(id_to_token_[id]);
-        // Logger::debug("[ID_TO_TOK] Found base token for ID: " + std::to_string(id) + " -> '" + id_to_token_[id] + "'");
       } else {
-        // This case implies an ID within vocab range points to an empty string.
-        // This is unusual and should ideally be handled by mapping to UNK earlier.
         tokens.push_back(unk_token_); // Fallback to UNK string
         Logger::warning(
             "ID " + std::to_string(id) +
@@ -291,7 +271,6 @@ std::vector<std::string> Tokenizer::ids_to_tokens(
       }
     } else { // ID is out of bounds or negative (and not an added token)
       tokens.push_back(unk_token_); // Fallback to UNK string
-      // Logger::debug("[ID_TO_TOK] ID " + std::to_string(id) + " is out of bounds or invalid. Using UNK token string: '" + unk_token_ + "'.");
     }
   }
 
@@ -322,7 +301,6 @@ Tokenizer::Tokenizer(const std::string& vocab_path,
 
     load_vocab_from_json(vocab_json_path_abs.string(), token_to_id_, id_to_token_);
 
-    // After loading vocab, if it's a SentencePiece based model (not from GGUF), load its BPE merges.
     if (tokenizer_family_ == ModelConfig::TokenizerFamily::LLAMA_SENTENCEPIECE) {
         Logger::info("LLAMA_SENTENCEPIECE family detected for JSON constructor, attempting to load BPE merges from: " + vocab_json_path_abs.string());
         load_bpe_merges_from_json(vocab_json_path_abs.string()); 
@@ -344,11 +322,9 @@ Tokenizer::Tokenizer(const std::string& vocab_path,
                      unk_token_ + "'), PAD=" + std::to_string(pad_token_id_) + " ('" +
                      pad_token_ + "')"); // Removed extra backslashes from PAD log
 
-    // Construct the full log message before calling Logger::info - CORRECTED MESSAGE
     std::string init_log_message = "Tokenizer successfully initialized from JSON/Config. Detected type based on config: ";
     init_log_message += (tokenizer_family_ == ModelConfig::TokenizerFamily::LLAMA3_TIKTOKEN ? "LLAMA3_TIKTOKEN (assumed BPE)" :
                         (tokenizer_family_ == ModelConfig::TokenizerFamily::LLAMA_SENTENCEPIECE ? "LLAMA_SENTENCEPIECE (assumed BPE/SPM)" : "UNKNOWN"));
-    // TODO: Determine actual 'type_' (TIKTOKEN_BPE vs SENTENCEPIECE_BPE) based on loaded files later if needed.
     Logger::info(init_log_message);
 
     if (model_path.size() > 0) {
@@ -381,7 +357,6 @@ Tokenizer::Tokenizer(const std::string& vocab_path,
         "Failed to initialize tokenizer vocabulary from: " + vocab_path);
   }
 
-  // CORRECTED Log message for token count
   Logger::info("Loaded " + std::to_string(id_to_token_.size()) +
                " tokens from vocabulary file: " + vocab_path);
 
@@ -393,10 +368,10 @@ Tokenizer::Tokenizer(const std::string& vocab_path,
         // Safely print token, escaping non-printables for logging
         std::string escaped_token;
         for (char c_tok : id_to_token_[i]) {
-            if (c_tok == '\\') { // Corrected: Compare char to backslash char literal
-                escaped_token += "\\\\"; // Append two backslashes
-            } else if (c_tok == '\'') { // Corrected: Compare char to single quote char literal
-                escaped_token += "\\'";  // Corrected: Append backslash and single quote
+            if (c_tok == '\\') {
+                escaped_token += "\\\\";
+            } else if (c_tok == '\'') {
+                escaped_token += "\\'";
             } else if (std::isprint(static_cast<unsigned char>(c_tok))) {
                 escaped_token += c_tok;
             } else {
@@ -534,9 +509,6 @@ Tokenizer::Tokenizer(const GGUFData& gguf_data, const ModelConfig& config)
         Logger::info("Llama 3 GGUF contains " + std::to_string(gguf_data.tokenizer_scores.size()) + " scores. Loaded.");
         token_scores_ = gguf_data.tokenizer_scores; 
     }
-    // Byte token population will now primarily rely on token_types_ if available.
-    // The old loop checking for <0xNN> or literal byte strings becomes a fallback or can be removed
-    // if token_types_ is comprehensive.
 
   } else if (tokenizer_family_ == ModelConfig::TokenizerFamily::LLAMA_SENTENCEPIECE) {
     type_ = Type::SENTENCEPIECE_BPE; 
@@ -563,8 +535,6 @@ Tokenizer::Tokenizer(const GGUFData& gguf_data, const ModelConfig& config)
             if (space_pos != std::string::npos && space_pos > 0 && space_pos < merge_str.length() - 1) {
                 part1 = merge_str.substr(0, space_pos);
                 part2 = merge_str.substr(space_pos + 1);
-                // NOTE: SentencePiece merges might use different separators or formats than Tiktoken merges.
-                // Assuming space separator for now based on Tiktoken format. This might need adjustment.
                 bpe_merges_[part1 + part2] = rank++; 
             } else {
                 Logger::warning("Skipping malformed SentencePiece merge rule from GGUF: '" + merge_str + "'");
@@ -595,8 +565,8 @@ Tokenizer::Tokenizer(const GGUFData& gguf_data, const ModelConfig& config)
 
     // Populate byte_char_to_id_ and added_tokens_ using token_types_
     byte_char_to_id_.clear();
-  added_tokens_.clear();
-  id_to_added_token_.clear();
+    added_tokens_.clear();
+    id_to_added_token_.clear();
     int byte_tokens_from_type = 0;
     int special_tokens_from_type = 0;
 
@@ -606,8 +576,6 @@ Tokenizer::Tokenizer(const GGUFData& gguf_data, const ModelConfig& config)
       int token_id = static_cast<int>(i);
         bool processed_as_byte = false; // Flag to track if token was handled as byte
 
-        // Check if token type is BYTE (6) or USER_DEFINED (4) that might be a byte token
-        // llama.cpp only considers LLAMA_TOKEN_TYPE_BYTE (6) for byte_char_to_id
         if (tt == 6) { // LLAMA_TOKEN_TYPE_BYTE
             bool added_byte = false;
             if (token_str.length() == 1) {
@@ -631,13 +599,6 @@ Tokenizer::Tokenizer(const GGUFData& gguf_data, const ModelConfig& config)
                  processed_as_byte = true; 
             }
         }
-        // USER_DEFINED (4) tokens are generally not byte tokens for byte_char_to_id_ map.
-        // They are for special markers like [USER], [ASSISTANT] etc.
-        // We will add them to added_tokens_ map if they are not byte tokens.
-
-        // Process other special types (CONTROL=3, UNKNOWN=2, UNUSED=5) OR
-        // USER_DEFINED (4) tokens that were *not* processed as bytes (which they shouldn't be).
-        // NORMAL (1) tokens are not added to added_tokens_.
         if (!processed_as_byte && (tt == 2 || tt == 3 || tt == 4 || tt == 5)) {
         if (added_tokens_.find(token_str) == added_tokens_.end()) {
             added_tokens_[token_str] = token_id;
@@ -727,14 +688,12 @@ Tokenizer::Tokenizer(const GGUFData& gguf_data, const ModelConfig& config)
         }
         Logger::info("Fallback byte_char_to_id_ map population: Found representations for " + std::to_string(bytes_found_in_vocab_fallback) +
                      " byte values in GGUF vocab (using <0xNN> or literal). Intended for Tiktoken BPE.");
-        // Overwrite the previous count with the fallback count for clarity in subsequent logs/logic if needed
         byte_tokens_from_type = bytes_found_in_vocab_fallback; 
     }
     
 
   } else {
     Logger::warning("GGUF tokenizer_token_types array missing or size mismatch. Byte token and special token identification will be limited.");
-    // The original fallback logic remains here for when token_types is missing entirely.
     if (tokenizer_family_ == ModelConfig::TokenizerFamily::LLAMA3_TIKTOKEN) {
         byte_char_to_id_.clear();
         int bytes_found_in_vocab_fallback = 0;
@@ -876,7 +835,6 @@ bos_token_id_ = config.bos_token_id;
       Logger::warning("[Tokenizer GGUF Init] UNK token ID from config was invalid (" + std::to_string(unk_token_id_) + "). Forcing to 0.");
       unk_token_id_ = 0; 
   }
-  // We might also want similar checks for BOS/EOS depending on requirements, but UNK is critical for fallback.
   
 
   auto setup_special_token = [&](const std::string& name, int& id_field, std::string& str_field, const std::string& default_str_val) {
@@ -1047,8 +1005,7 @@ std::vector<int> Tokenizer::bpe_tokenize_to_ids(const std::string& text) const {
 
     boost::regex pre_tokenize_regex;
     try {
-        // Use boost::regex::perl | boost::regex::icase for case-insensitivity if needed by pattern
-        pre_tokenize_regex.assign(pattern_str, boost::regex::perl); // Assuming perl compatibility, no icase flag unless pattern demands it
+        pre_tokenize_regex.assign(pattern_str, boost::regex::perl);
     } catch (const boost::regex_error& e) {
         Logger::fatal("[bpe_tokenize_to_ids] Failed to compile Boost.Regex pattern: " + std::string(e.what()) + ". Pattern: '" + pattern_str + "'. Returning empty.");
         return {};
@@ -1134,13 +1091,11 @@ std::vector<int> Tokenizer::bpe_tokenize_to_ids(const std::string& text) const {
         }
         Logger::debug("[bpe_tokenize_to_ids] Encoded word (' ' -> '\xC4\xA0'): '" + encoded_word + "'");
         
-
-        
         work_queue = llm_bigram_bpe::queue(); // Clear queue for new word
         symbols.clear();                     // Clear symbols for new word
 
         // 1. Create initial llm_symbol list (respecting UTF-8 character boundaries)
-        int sym_index = 0; // Renamed variable from 'index' to 'sym_index'
+        int sym_index = 0;
         size_t offset = 0;
         while (offset < encoded_word.size()) {
             llm_symbol sym;
@@ -1185,7 +1140,7 @@ std::vector<int> Tokenizer::bpe_tokenize_to_ids(const std::string& text) const {
         // 3. Run merge loop
         while (!work_queue.empty()) {
             // Use custom pop_move equivalent if available, otherwise standard pop
-            #ifdef LLAMA_PRIORITY_QUEUE_H // Assuming llama_priority_queue might be defined elsewhere
+            #ifdef LLAMA_PRIORITY_QUEUE_H
                 llm_bigram_bpe bigram = work_queue.pop_move();
             #else
                 // Standard library priority_queue doesn't have pop_move easily
@@ -1539,8 +1494,6 @@ std::vector<int> Tokenizer::encode(const std::string& text, bool add_bos,
         return final_ids;
 }
 
-
-
 std::string Tokenizer::decode(const std::vector<int>& ids,
                               bool skip_special_tokens) const {
     // Dispatch based on tokenizer family
@@ -1553,8 +1506,6 @@ std::string Tokenizer::decode(const std::vector<int>& ids,
     Logger::debug("[decode] Decoding using Llama 3 / Tiktoken logic.");
     std::stringstream ss;
     bool first_token = true;  
-    // Llama 3 primarily uses BPE_SPACE_CHAR (Ġ)
-    // const std::string BPE_SPACE_CHAR = "\\xC4\\xA0"; // Already defined globally or accessible
 
     for (int id : ids) {
         // Handle potential invalid IDs first
@@ -1589,7 +1540,6 @@ std::string Tokenizer::decode(const std::vector<int>& ids,
                  continue; // Skip if skipping specials or no UNK defined
              }
         }
-
         
         // Check for our primary space prefix Ġ
         // BPE_SPACE_CHAR is defined globally in this file
@@ -1610,9 +1560,6 @@ std::string Tokenizer::decode(const std::vector<int>& ids,
     }
   return ss.str();
             }
-
-
-// Contains the older decode logic suitable for SentencePiece/general BPE
 std::string Tokenizer::decode_sentencepiece(const std::vector<int>& ids,
                                             bool skip_special_tokens) const {
     Logger::debug("[decode_sentencepiece] Decoding using SentencePiece logic.");
@@ -1645,9 +1592,6 @@ std::string Tokenizer::decode_sentencepiece(const std::vector<int>& ids,
             auto added_it = id_to_added_token_.find(id);
             if (added_it != id_to_added_token_.end()) {
                 token_str = added_it->second; // It's an added token (might be special)
-                // Re-check skip_special_tokens here if added tokens can be non-special (unlikely for SPM)
-                // If an added token like [USER] should be skipped, the logic above handles it.
-                // If it *shouldn't* be skipped, we proceed.
             } else { // Truly invalid ID
                 // Don't output if skipping specials/invalid
                 if (!skip_special_tokens) {
@@ -1659,8 +1603,6 @@ std::string Tokenizer::decode_sentencepiece(const std::vector<int>& ids,
             }
         }
 
-        // Handle potentially empty token string from vocab (use UNK if available)
-        // Skip if it was already marked special/invalid or empty from invalid ID handling above
         if (token_str.empty() && !is_special_or_invalid) {
             if (unk_token_id_ != -1) {
                  // Check if UNK should be skipped
@@ -1683,7 +1625,6 @@ std::string Tokenizer::decode_sentencepiece(const std::vector<int>& ids,
                  Logger::warning("[decode_sentencepiece] Encountered empty token string for valid ID " + std::to_string(id) +
                                ". Using: '" + token_str + "'");
             }
-            // Treat this like a non-prefixed token for spacing.
         }
 
 
@@ -1710,9 +1651,6 @@ std::string Tokenizer::decode_sentencepiece(const std::vector<int>& ids,
                 first_token = false;
             }
             else { // Token does not start with a known space prefix
-                // Append directly. No space is added before non-prefixed tokens unless it's the very first token
-                // (which shouldn't happen with typical SPM encoding, but as a fallback)
-                // However, standard behavior is just to append.
                 ss << token_str;
                 first_token = false; // Mark that we've outputted content
             }
@@ -1927,17 +1865,12 @@ void Tokenizer::load_vocab_from_json(
       throw std::runtime_error("load_vocab_from_json: Vocabulary JSON has an unsupported format.");
     }
 
-    // Fill any gaps in id_to_token_vec, though resize should handle this
-    // This is more of a sanity check or for extremely sparse vocabs.
     for (size_t i = 0; i < id_to_token_vec.size(); ++i) {
       if (id_to_token_vec[i].empty() || id_to_token_vec[i] == "<unk>") { 
         auto added_it = this->id_to_added_token_.find(static_cast<int>(i));
         if (added_it != this->id_to_added_token_.end()) {
             id_to_token_vec[i] = added_it->second;
         } else if (id_to_token_vec[i].empty()) { 
-             // Only log if truly missing after checking added_tokens, not just the initial placeholder
-             // Logger::debug("load_vocab_from_json: Token ID " + std::to_string(i) +
-             //              " is missing in vocabulary. Kept as placeholder or default.");
              if (id_to_token_vec[i].empty()) id_to_token_vec[i] = "<missing_id_" + std::to_string(i) + ">";
         }
       }
@@ -1962,10 +1895,7 @@ void Tokenizer::load_vocab_from_json(
 
 
 void Tokenizer::load_sentencepiece_model(const std::string& model_path) {
-  // Log that loading is attempted but not implemented
   Logger::warning("load_sentencepiece_model: Loading from SentencePiece model file ('" + model_path + "') is currently not implemented.");
-  // We should ensure any relevant state reflects that loading didn't succeed.
-  // Assuming a member variable like 'sentencepiece_model_loaded_' exists based on previous context.
   sentencepiece_model_loaded_ = false;
 }
 
@@ -2056,16 +1986,9 @@ void Tokenizer::load_bpe_merges_from_json(const std::string& tokenizer_json_path
   }
 }
 
-void Tokenizer::load_tiktoken_merges_from_gguf(const GGUFData& gguf_data) {
-// ... existing code ...
-
-}
-
 std::string Tokenizer::capitalize_first_letter(std::string s) const { // Added Tokenizer:: scope and const
   if (s.empty()) return s;
 
-  // Note: Removed result = s; unnecessary copy if passing by value
-  // If passing std::string s by const reference instead, need: std::string result = s;
 
   size_t first_letter_pos = 0;
   const std::string sp_space = "\xE2\x96\x81";  // SentencePiece space U+2581
@@ -2093,17 +2016,11 @@ std::string Tokenizer::capitalize_first_letter(std::string s) const { // Added T
   return result;
 }
 
-
-
 std::vector<std::string> Tokenizer::bpe_tokenize(
     const std::string& text) const {
     Logger::debug("[Refactored bpe_tokenize] Entered. bpe_merges_ size: " + std::to_string(bpe_merges_.size())); // Diagnostic log
     std::vector<std::string> all_final_tokens; // Store the final BPE tokens
     const std::string sp_space_prefix = "\xE2\x96\x81"; // SentencePiece space U+2581
-
-    // Simple word splitting based on whitespace. This regex finds sequences of non-space characters.
-    // boost::regex word_regex(R"(\\S+)"); // Find non-whitespace chunks
-    // Using a manual split might be more robust to capture spaces accurately.
 
     std::vector<std::string> pieces;
     std::string current_piece;
@@ -2212,7 +2129,6 @@ std::vector<std::string> Tokenizer::bpe_tokenize(
                 chars[best_i] = merged;
                 chars.erase(chars.begin() + best_i + 1);
                 changes = true;
-                // Logger::debug("[Refactored bpe_tokenize] Merged pair at index " + std::to_string(best_i) + " -> '" + merged + "'");
             }
         } // End of while(changes) for BPE merges
 
