@@ -100,7 +100,8 @@ jobs:
           wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
           sudo dpkg -i cuda-keyring_1.1-1_all.deb
           sudo apt-get update
-          sudo apt-get -y install cuda-11-8 # Installs CUDA 11.8.x components
+          # Install CUDA toolkit and drivers without recommended packages to avoid libtinfo5 issues
+          sudo apt-get -y install --no-install-recommends cuda-toolkit-11-8 cuda-drivers
           rm cuda-keyring_1.1-1_all.deb
           # Set environment variables for CMake and compilation
           echo "CUDAToolkit_ROOT=/usr/local/cuda-11.8" >> $GITHUB_ENV
@@ -115,7 +116,7 @@ jobs:
       - name: Install Dependencies (Windows)
         if: runner.os == 'Windows'
         run: |
-          choco install doxygen.install graphviz openssl boost-msvc-14.3 -y
+          choco install doxygen.install graphviz openssl boost-vc143 -y
 
       - name: Configure CMake (Linux)
         if: runner.os == 'Linux'
