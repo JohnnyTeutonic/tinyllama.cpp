@@ -87,6 +87,18 @@ jobs:
           fetch-depth: 0
           ref: ${{ needs.create-release.outputs.version }}
 
+      - name: Cache Chocolatey packages and Boost (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: |
+            C:\ProgramData\chocolatey\lib
+            C:\ProgramData\Boost\boost_1.87.0
+            C:\Boost
+          key: ${{ runner.os }}-choco-boost-${{ hashFiles('**/release.yml') }} # Change if you modify the package list
+          restore-keys: |
+            ${{ runner.os }}-choco-boost-
+
       - name: Setup CMake
         uses: jwlawson/actions-setup-cmake@v1.14
         with:
@@ -151,11 +163,11 @@ jobs:
           foreach ($package in $packagesToInstall) {
             Write-Host "Attempting to install $($package.LogName) (default sources first)..."
             # Try without explicit source first
-            choco install $($package.Name) -y --debug --verbose
+            choco install $($package.Name) -y --debug --verbose # Consider removing --debug --verbose later
             if ($LASTEXITCODE -ne 0) {
               Write-Warning "Failed to install $($package.LogName) with default sources. Exit code: $LASTEXITCODE. Retrying with explicit community source..."
               # Retry with explicit source
-              choco install $($package.Name) -y --source https://community.chocolatey.org/api/v2/ --debug --verbose
+              choco install $($package.Name) -y --source https://community.chocolatey.org/api/v2/ --debug --verbose # Consider removing --debug --verbose later
               if ($LASTEXITCODE -ne 0) {
                 Write-Error "Failed to install $($package.LogName) even with explicit community source. Exit code: $LASTEXITCODE"
                 $allSucceeded = $false
@@ -210,7 +222,7 @@ jobs:
             echo "Final host CXX for nvcc -ccbin: $HOST_CXX_FOR_NVCC"
 
             # CMAKE_ARGS for CUDA
-            CMAKE_EXTRA_ARGS="-DCMAKE_CUDA_COMPILER=${CUDA_HOME}/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=all -DCMAKE_CUDA_FLAGS='-allow-unsupported-compiler -ccbin ${HOST_CXX_FOR_NVCC}'"
+            CMAKE_EXTRA_ARGS="-DCMAKE_CUDA_COMPILER=${CUDA_HOME}/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=all -DCMAKE_CUDA_FLAGS=\\"-allow-unsupported-compiler -ccbin ${HOST_CXX_FOR_NVCC}\\""
           fi
           cmake .. -DCMAKE_BUILD_TYPE=Release ${{ matrix.cmake_flags }} ${CMAKE_EXTRA_ARGS}
 
@@ -218,9 +230,17 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path build
-          Set-Location build
-          cmake .. -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release ${{ matrix.cmake_flags }}
+          $BOOST_ROOT_DIR = "C:\ProgramData\Boost\boost_1.87.0"
+          if (-not (Test-Path $BOOST_ROOT_DIR)) {
+            # Fallback if the primary path doesn't exist, try the other cached path
+            $BOOST_ROOT_DIR = "C:\local\boost_1_87_0"
+            if (-not (Test-Path $BOOST_ROOT_DIR)) {
+               $BOOST_ROOT_DIR = "C:\Boost" # Final fallback
+            }
+          }
+          Write-Host "Setting BOOST_ROOT to $BOOST_ROOT_DIR"
+          echo "BOOST_ROOT=$BOOST_ROOT_DIR" >> $env:GITHUB_ENV
+          cmake .. -DCMAKE_BUILD_TYPE=Release -DBOOST_ROOT="$BOOST_ROOT_DIR" ${{ matrix.cmake_flags }}
 
       - name: Build
         run: |
