@@ -1,5 +1,4 @@
 # TinyLlama.cpp - A C++ Chat Inference
-#### Author: Jonathan Reich
 
 This codebase supports inference for Llama 2/3 architecture models using Safetensors model format as well as GGUF format.
 
