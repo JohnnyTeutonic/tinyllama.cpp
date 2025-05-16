@@ -22,10 +22,11 @@ These are needed to **build and run** the C++ application:
 
 1.  **CMake (>= 3.11):** Used for building the project.
 2.  **C++17 Compliant Compiler:** Such as g++, Clang, or MSVC.
-3.  **nlohmann/json:** For parsing JSON configuration files. (Fetched automatically by CMake if not found system-wide).
-4.  **cpp-httplib:** For the web server backend. (Fetched automatically by CMake).
-5.  **OpenMP (Optional):** For multi-threading CPU acceleration. CMake will try to find it; performance will be lower without it.
-6.  **CUDA Toolkit (Optional):** Required **only** if you want GPU-accelerated inference. CMake will detect it if available and build the CUDA kernels. You'll need a compatible NVIDIA GPU and drivers.
+3.  **Boost.Regex:** For regular expression support. Only the `regex` component of Boost is required. (Handled by `find_package` in CMake; system installation needed).
+4.  **nlohmann/json:** For parsing JSON configuration files. (Fetched automatically by CMake if not found system-wide).
+5.  **cpp-httplib:** For the web server backend. (Fetched automatically by CMake).
+6.  **OpenMP (Optional but Recommended):** For multi-threading CPU acceleration. CMake will try to find it; performance will be lower without it.
+7.  **CUDA Toolkit (Optional):** Required **only** if you want GPU-accelerated inference. CMake will detect it if available and build the CUDA kernels. You'll need a compatible NVIDIA GPU and drivers.
 
 #### Installing C++ Dependencies on Linux (Debian/Ubuntu Example)
 
@@ -38,13 +39,20 @@ sudo apt update
 # 2. Essential build tools (includes g++ compiler) and CMake
 sudo apt install build-essential cmake
 
-# 3. OpenMP (for parallel processing)
+# 3. Boost.Regex library
+sudo apt install libboost-regex-dev
+
+# 4. OpenMP (for parallel processing)
 #    Usually comes with modern g++, but can be installed explicitly if needed.
 sudo apt install libomp-dev
 
 ```
-*   **cpp-httplib:** This library is fetched directly by CMake ...
-*   **Other Distributions:** For non-Debian/Ubuntu systems, please use your distribution's package manager ...
+*   **Boost.Regex on other systems:**
+    *   **Fedora/RHEL:** `sudo dnf install boost-regex` (or `boost-devel` which includes regex)
+    *   **macOS (Homebrew):** `brew install boost` (this installs multiple Boost libraries)
+    *   **Windows:** If using Chocolatey, `boost-msvc-14.2` (or a similar versioned package) includes regex. If using `vcpkg`, install `boost-regex`. If building Boost from source, ensure the regex library is built.
+*   **nlohmann/json & cpp-httplib:** These libraries are fetched directly by CMake if not found system-wide, so no separate installation step is typically needed for them.
+*   **Other Distributions:** For non-Debian/Ubuntu systems, please use your distribution's package manager to find the equivalent packages for `build-essential`, `cmake`, `libboost-regex-dev`, and `libomp-dev`.
 
 ##### CUDA Toolkit (Optional - For GPU Acceleration)
 
@@ -184,10 +192,13 @@ In addition to building and running the C++ executables, you can install `tinyll
 
 **Prerequisites:**
 
-*   Ensure you have the C++ build dependencies installed (CMake, C++17 compiler, OpenMP, Boost). Refer to the "C++ Runtime Dependencies" section above.
+*   Ensure you have the C++ build dependencies installed as listed in the "C++ Runtime Dependencies" section above (CMake, C++17 compiler, OpenMP, and crucially **Boost.Regex**).
 *   If you are using a Conda environment, it's highly recommended to install the C++ compilers and other dependencies from Conda channels to ensure ABI compatibility:
     ```bash
-    conda install -c conda-forge cxx-compiler openmp boost
+    conda install -c conda-forge cxx-compiler openmp 'boost<1.83' # Specify boost version if needed for compatibility
+    # Note: 'boost' in conda-forge usually includes the regex component. 
+    # If you encounter issues, you might need to be more specific or ensure the installed boost version is compatible.
+    # For older boost versions, you might need 'conda install -c conda-forge boost-cpp'
     ```
 
 **Installation Steps:**
@@ -203,12 +214,31 @@ In addition to building and running the C++ executables, you can install `tinyll
     ```bash
     pip install .
     ```
-    This command will build the C++ core library and the Python bindings, then install them as a package named `tinyllama_cpp` in your current Python environment.
 
-    For an editable install (useful for development, where changes to Python files are reflected immediately, though C++ changes still require a rebuild):
-    ```bash
-    pip install -e .
-    ```
+**Building with CUDA Support (Optional):**
+
+By default, `pip install .` builds the CPU-only version of the package. To build the version with CUDA acceleration, you must have the NVIDIA CUDA Toolkit installed (see "CUDA Toolkit (Optional - For GPU Acceleration)" under C++ dependencies).
+
+Then, set the `TINYLLAMA_CPP_BUILD_CUDA` environment variable to `1` before running pip:
+
+```bash
+# On Linux / macOS
+TINYLLAMA_CPP_BUILD_CUDA=1 pip install .
+
+# For an editable install with CUDA:
+TINYLLAMA_CPP_BUILD_CUDA=1 pip install -e .
+```
+
+```powershell
+# On Windows (PowerShell)
+$env:TINYLLAMA_CPP_BUILD_CUDA="1"
+pip install .
+
+# For an editable install with CUDA:
+$env:TINYLLAMA_CPP_BUILD_CUDA="1"
+pip install -e .
+```
+If the `TINYLLAMA_CPP_BUILD_CUDA` variable is not set, or set to any other value than `1`, the CPU version will be built.
 
 **Usage in Python:**
 
@@ -369,41 +399,4 @@ Please refer to the `pytorch/README.md` for detailed usage instructions for this
     *   `tokenizer.cpp`/`tokenizer.h`: Handles loading of `tokenizer.json`, BPE encoding/decoding, and chat template application.
     *   `safetensors_loader.cpp`/`safetensors_loader.h`: Logic for parsing metadata and loading tensor data from `.safetensors` files.
     *   `gguf_parser.cpp`/`gguf_parser.h`: Logic for parsing metadata and loading tensor data from `.gguf` files.
-    *   `cuda_kernels.cu` (and potentially `cuda_utils.h`): Contains CUDA kernels for GPU-accelerated operations and supporting utility functions (compiled if `HAS_CUDA=ON`).
-    *   `logger.cpp`/`logger.h`: A simple utility for logging messages to `debugging.log`.
-    *   `quantization.h`: Defines data structures and functions for handling various GGUF quantization types (e.g., Q8_0, Q4_K).
-*   `www/`: Directory containing static web assets (HTML, CSS, JavaScript) for the chat interface served by `tinyllama_server`.
-*   `data/` (Example Directory): Conventionally used for placing SafeTensors model directories, which include `config.json`, `model.safetensors`, and `tokenizer.json`.
-*   `models/` (Example Directory): Conventionally used for storing GGUF model files (e.g., `my_model.Q8_0.gguf`).
-
-## Documentation
-
-For detailed API documentation, including class references, function signatures, and implementation details, please visit my documentation website:
-
-[https://johnnyteutonic.github.io/tinyllama.cpp/](https://johnnyteutonic.github.io/tinyllama.cpp/)
-
-The documentation is automatically generated from the source code using Doxygen and includes:
-* Complete API reference for all classes and functions
-* Detailed explanations of the model architecture
-* Implementation details for both CPU and CUDA backends
-* Examples and usage patterns
-* Configuration options and build parameters
-
-You can also generate the documentation locally using the management scripts:
-```bash
-# Using manage.sh (Linux/macOS)
-./manage.sh docs
-
-# Using manage.ps1 (Windows)
-.\manage.ps1 docs
-```
-
-## Acknowledgements
-
-This project has drawn significant inspiration and architectural insights from the excellent `llama.cpp` project by Georgi Gerganov and its contributors. Many of the core concepts for GGUF parsing, quantization, and efficient inference are based on the pioneering work done in `llama.cpp`.
-
-Find `llama.cpp` on GitHub: [https://github.com/ggerganov/llama.cpp](https://github.com/ggerganov/llama.cpp) 
-
-## Known Limitations
-
-*   **Windows Support**: Building and running on Windows is possible but is considered highly experimental. The primary development and testing focus has been on Linux. Users may encounter build issues or runtime instabilities on Windows that are not present on Linux.
+    *   `cuda_kernels.cu`
