@@ -1212,92 +1212,177 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
   // Embeddings and LM head (BF16 and FP32 versions to GPU if active_num_gpu_layers > 0)
   // These are global, so they are needed if any layers are on GPU.
 
-  // BF16 versions first (if they exist)
-  SAFE_CUDA_FREE(token_embedding_table_dev_);
-  if (!embed_tokens.empty()) {
-    gpuErrchk(cudaMalloc(&token_embedding_table_dev_, embed_tokens.size() * sizeof(uint16_t)));
-    gpuErrchk(cudaMemcpy(token_embedding_table_dev_, embed_tokens.data(), embed_tokens.size() * sizeof(uint16_t), cudaMemcpyHostToDevice));
-    Logger::info("Copied token_embedding_table (bf16) to GPU.");
-  }
-  SAFE_CUDA_FREE(lm_head_dev_);
-  if (!lm_head.empty()) {
-    gpuErrchk(cudaMalloc(&lm_head_dev_, lm_head.size() * sizeof(uint16_t)));
-    gpuErrchk(cudaMemcpy(lm_head_dev_, lm_head.data(), lm_head.size() * sizeof(uint16_t), cudaMemcpyHostToDevice));
-    Logger::info("Copied lm_head (bf16) to GPU.");
+  // --- TOKEN EMBEDDING TABLE to GPU (as BF16) ---
+  SAFE_CUDA_FREE(token_embedding_table_dev_);    // Target for BF16
+  SAFE_CUDA_FREE(token_embedding_table_f32_dev_); // Ensure this is cleared and not used by new embedding logic
+
+  bool token_embeddings_processed_to_gpu_bf16 = false;
+
+  if (active_num_gpu_layers > 0) { // Only process if GPU layers are active
+    // Path 1: Source is already BF16 (model.embed_tokens is std::vector<uint16_t>)
+    if (!embed_tokens.empty()) {
+      gpuErrchk(cudaMalloc(&token_embedding_table_dev_, embed_tokens.size() * sizeof(uint16_t)));
+      gpuErrchk(cudaMemcpy(token_embedding_table_dev_, embed_tokens.data(), embed_tokens.size() * sizeof(uint16_t), cudaMemcpyHostToDevice));
+      Logger::info("Copied token_embedding_table (bf16 direct from model.embed_tokens) to GPU.");
+      token_embeddings_processed_to_gpu_bf16 = true;
+    }
+    // Path 2: Source is FP32 (model.embed_tokens_f32) -> convert to BF16
+    else if (!embed_tokens_f32.empty()) {
+      std::vector<uint16_t> bf16_data(embed_tokens_f32.size());
+      #pragma omp parallel for
+      for (size_t i = 0; i < embed_tokens_f32.size(); ++i) {
+        bf16_data[i] = float32_to_bfloat16(embed_tokens_f32[i]);
+      }
+      gpuErrchk(cudaMalloc(&token_embedding_table_dev_, bf16_data.size() * sizeof(uint16_t)));
+      gpuErrchk(cudaMemcpy(token_embedding_table_dev_, bf16_data.data(), bf16_data.size() * sizeof(uint16_t), cudaMemcpyHostToDevice));
+      Logger::info("Converted token_embedding_table (fp32 source -> bf16) to GPU.");
+      token_embeddings_processed_to_gpu_bf16 = true;
+    }
+    // Path 3: Source is Q8_0 (model.embed_tokens_q8_0) -> dequantize to FP32, then convert to BF16
+    else if (!embed_tokens_q8_0.empty()) {
+      std::vector<float> temp_f32_data(embed_tokens_q8_0.size() * GGML_QK8_0);
+      #pragma omp parallel for
+      for (size_t i = 0; i < embed_tokens_q8_0.size(); ++i) {
+        dequantize_q8_0_block(&embed_tokens_q8_0[i], &temp_f32_data[i * GGML_QK8_0]);
+      }
+      std::vector<uint16_t> bf16_data(temp_f32_data.size());
+      #pragma omp parallel for
+      for (size_t i = 0; i < temp_f32_data.size(); ++i) {
+        bf16_data[i] = float32_to_bfloat16(temp_f32_data[i]);
+      }
+      gpuErrchk(cudaMalloc(&token_embedding_table_dev_, bf16_data.size() * sizeof(uint16_t)));
+      gpuErrchk(cudaMemcpy(token_embedding_table_dev_, bf16_data.data(), bf16_data.size() * sizeof(uint16_t), cudaMemcpyHostToDevice));
+      Logger::info("Dequantized token_embedding_table (Q8_0 -> fp32 -> bf16) to GPU.");
+      token_embeddings_processed_to_gpu_bf16 = true;
+    }
+    // Path 4: Source is Q4_K (model.embed_tokens_q4k) -> dequantize to FP32, then convert to BF16
+    else if (!embed_tokens_q4k.empty()) {
+      std::vector<float> temp_f32_data(embed_tokens_q4k.size() * GGML_QK_K);
+      #pragma omp parallel for
+      for (size_t i = 0; i < embed_tokens_q4k.size(); ++i) {
+        dequantize_q4_k_m(&embed_tokens_q4k[i], &temp_f32_data[i * GGML_QK_K], GGML_QK_K);
+      }
+      std::vector<uint16_t> bf16_data(temp_f32_data.size());
+      #pragma omp parallel for
+      for (size_t i = 0; i < temp_f32_data.size(); ++i) {
+        bf16_data[i] = float32_to_bfloat16(temp_f32_data[i]);
+      }
+      gpuErrchk(cudaMalloc(&token_embedding_table_dev_, bf16_data.size() * sizeof(uint16_t)));
+      gpuErrchk(cudaMemcpy(token_embedding_table_dev_, bf16_data.data(), bf16_data.size() * sizeof(uint16_t), cudaMemcpyHostToDevice));
+      Logger::info("Dequantized token_embedding_table (Q4_K -> fp32 -> bf16) to GPU.");
+      token_embeddings_processed_to_gpu_bf16 = true;
+    }
+    // Path 5: Source is Q6_K (model.embed_tokens_q6k) -> dequantize to FP32, then convert to BF16
+    else if (!embed_tokens_q6k.empty()) {
+      std::vector<float> temp_f32_data(embed_tokens_q6k.size() * GGML_QK_K);
+      #pragma omp parallel for
+      for (size_t i = 0; i < embed_tokens_q6k.size(); ++i) {
+        dequantize_q6_k(&embed_tokens_q6k[i], &temp_f32_data[i * GGML_QK_K], GGML_QK_K);
+      }
+      std::vector<uint16_t> bf16_data(temp_f32_data.size());
+      #pragma omp parallel for
+      for (size_t i = 0; i < temp_f32_data.size(); ++i) {
+        bf16_data[i] = float32_to_bfloat16(temp_f32_data[i]);
+      }
+      gpuErrchk(cudaMalloc(&token_embedding_table_dev_, bf16_data.size() * sizeof(uint16_t)));
+      gpuErrchk(cudaMemcpy(token_embedding_table_dev_, bf16_data.data(), bf16_data.size() * sizeof(uint16_t), cudaMemcpyHostToDevice));
+      Logger::info("Dequantized token_embedding_table (Q6_K -> fp32 -> bf16) to GPU.");
+      token_embeddings_processed_to_gpu_bf16 = true;
+    }
+
+    if (!token_embeddings_processed_to_gpu_bf16) {
+        Logger::warning("Token embeddings were not processed to GPU as BF16, despite GPU layers being active. This might indicate missing source embedding data in the model structure or an unhandled GGUF type for embeddings.");
+    }
+  } else {
+    Logger::info("No GPU layers active, skipping token embedding table processing for GPU.");
   }
 
-  // FP32 versions (either direct or converted from BF16, or dequantized from Q8/Q4K)
-  SAFE_CUDA_FREE(token_embedding_table_f32_dev_);
-  if (!embed_tokens_f32.empty()) { // Prefer direct F32
-    gpuErrchk(cudaMalloc(&token_embedding_table_f32_dev_, embed_tokens_f32.size() * sizeof(float)));
-    gpuErrchk(cudaMemcpy(token_embedding_table_f32_dev_, embed_tokens_f32.data(), embed_tokens_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
-    Logger::info("Copied token_embedding_table (fp32) to GPU.");
-  } else if (!embed_tokens.empty()) { // Fallback: BF16 to FP32 if no direct FP32
-    std::vector<float> temp_f32 = bf16vec_to_float_vec(embed_tokens);
-    gpuErrchk(cudaMalloc(&token_embedding_table_f32_dev_, temp_f32.size() * sizeof(float)));
-    gpuErrchk(cudaMemcpy(token_embedding_table_f32_dev_, temp_f32.data(), temp_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
-    Logger::info("Converted and copied token_embedding_table (bf16->fp32) to GPU.");
-  }
-  // Fallback: Dequantized Q8_0 to FP32 if still no FP32 table
-  if (!token_embedding_table_f32_dev_ && !embed_tokens_q8_0.empty()) {
-    std::vector<float> f32_data(embed_tokens_q8_0.size() * GGML_QK8_0);
-    for (size_t i=0; i < embed_tokens_q8_0.size(); ++i) dequantize_q8_0_block(&embed_tokens_q8_0[i], &f32_data[i * GGML_QK8_0]);
-    gpuErrchk(cudaMalloc(&token_embedding_table_f32_dev_, f32_data.size() * sizeof(float)));
-    gpuErrchk(cudaMemcpy(token_embedding_table_f32_dev_, f32_data.data(), f32_data.size() * sizeof(float), cudaMemcpyHostToDevice));
-    Logger::info("Dequantized token_embedding_table (Q8_0->fp32) to GPU.");
-  }
-  // Fallback: Dequantized Q4_K to FP32 if still no FP32 table
-  if (!token_embedding_table_f32_dev_ && !embed_tokens_q4k.empty()) {
-    std::vector<float> f32_data(embed_tokens_q4k.size() * GGML_QK_K);
-    for (size_t i=0; i < embed_tokens_q4k.size(); ++i) dequantize_q4_k_m(&embed_tokens_q4k[i], &f32_data[i * GGML_QK_K], GGML_QK_K);
-    gpuErrchk(cudaMalloc(&token_embedding_table_f32_dev_, f32_data.size() * sizeof(float)));
-    gpuErrchk(cudaMemcpy(token_embedding_table_f32_dev_, f32_data.data(), f32_data.size() * sizeof(float), cudaMemcpyHostToDevice));
-    Logger::info("Dequantized token_embedding_table (Q4_K->fp32) to GPU.");
-  }
-  // Fallback: Dequantized Q6_K to FP32 if still no FP32 table
-  if (!token_embedding_table_f32_dev_ && !embed_tokens_q6k.empty()) {
-    std::vector<float> f32_data(embed_tokens_q6k.size() * GGML_QK_K);
-    for (size_t i=0; i < embed_tokens_q6k.size(); ++i) dequantize_q6_k(&embed_tokens_q6k[i], &f32_data[i * GGML_QK_K], GGML_QK_K);
-    gpuErrchk(cudaMalloc(&token_embedding_table_f32_dev_, f32_data.size() * sizeof(float)));
-    gpuErrchk(cudaMemcpy(token_embedding_table_f32_dev_, f32_data.data(), f32_data.size() * sizeof(float), cudaMemcpyHostToDevice));
-    Logger::info("Dequantized token_embedding_table (Q6_K->fp32) to GPU.");
-  }
+  // --- LM HEAD to GPU (as BF16) ---
+  SAFE_CUDA_FREE(lm_head_dev_);    // Target for BF16
+  SAFE_CUDA_FREE(lm_head_f32_dev_); // Ensure this is cleared and not used by new LM head logic
 
-  SAFE_CUDA_FREE(lm_head_f32_dev_);
-  if (!lm_head_f32.empty()) { // Prefer direct F32
-    gpuErrchk(cudaMalloc(&lm_head_f32_dev_, lm_head_f32.size() * sizeof(float)));
-    gpuErrchk(cudaMemcpy(lm_head_f32_dev_, lm_head_f32.data(), lm_head_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
-    Logger::info("Copied lm_head (fp32) to GPU.");
-  } else if (!lm_head.empty()) { // Fallback: BF16 to FP32
-    std::vector<float> temp_f32 = bf16vec_to_float_vec(lm_head);
-    gpuErrchk(cudaMalloc(&lm_head_f32_dev_, temp_f32.size() * sizeof(float)));
-    gpuErrchk(cudaMemcpy(lm_head_f32_dev_, temp_f32.data(), temp_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
-    Logger::info("Converted and copied lm_head (bf16->fp32) to GPU.");
+  bool lm_head_processed_to_gpu_bf16 = false;
+
+  if (active_num_gpu_layers > 0) { // Only process if GPU layers are active
+    // Path 1: Source is already BF16 (model.lm_head is std::vector<uint16_t>)
+    if (!lm_head.empty()) {
+      gpuErrchk(cudaMalloc(&lm_head_dev_, lm_head.size() * sizeof(uint16_t)));
+      gpuErrchk(cudaMemcpy(lm_head_dev_, lm_head.data(), lm_head.size() * sizeof(uint16_t), cudaMemcpyHostToDevice));
+      Logger::info("Copied lm_head (bf16 direct from model.lm_head) to GPU.");
+      lm_head_processed_to_gpu_bf16 = true;
+    }
+    // Path 2: Source is FP32 (model.lm_head_f32) -> convert to BF16
+    else if (!lm_head_f32.empty()) {
+      std::vector<uint16_t> bf16_data(lm_head_f32.size());
+      #pragma omp parallel for
+      for (size_t i = 0; i < lm_head_f32.size(); ++i) {
+        bf16_data[i] = float32_to_bfloat16(lm_head_f32[i]);
+      }
+      gpuErrchk(cudaMalloc(&lm_head_dev_, bf16_data.size() * sizeof(uint16_t)));
+      gpuErrchk(cudaMemcpy(lm_head_dev_, bf16_data.data(), bf16_data.size() * sizeof(uint16_t), cudaMemcpyHostToDevice));
+      Logger::info("Converted lm_head (fp32 source -> bf16) to GPU.");
+      lm_head_processed_to_gpu_bf16 = true;
+    }
+    // Path 3: Source is Q8_0 (model.lm_head_q8_0) -> dequantize to FP32, then convert to BF16
+    else if (!lm_head_q8_0.empty()) {
+      std::vector<float> temp_f32_data(lm_head_q8_0.size() * GGML_QK8_0);
+      #pragma omp parallel for
+      for (size_t i = 0; i < lm_head_q8_0.size(); ++i) {
+        dequantize_q8_0_block(&lm_head_q8_0[i], &temp_f32_data[i * GGML_QK8_0]);
+      }
+      std::vector<uint16_t> bf16_data(temp_f32_data.size());
+      #pragma omp parallel for
+      for (size_t i = 0; i < temp_f32_data.size(); ++i) {
+        bf16_data[i] = float32_to_bfloat16(temp_f32_data[i]);
+      }
+      gpuErrchk(cudaMalloc(&lm_head_dev_, bf16_data.size() * sizeof(uint16_t)));
+      gpuErrchk(cudaMemcpy(lm_head_dev_, bf16_data.data(), bf16_data.size() * sizeof(uint16_t), cudaMemcpyHostToDevice));
+      Logger::info("Dequantized lm_head (Q8_0 -> fp32 -> bf16) to GPU.");
+      lm_head_processed_to_gpu_bf16 = true;
+    }
+    // Path 4: Source is Q4_K (model.lm_head_q4k) -> dequantize to FP32, then convert to BF16
+    else if (!lm_head_q4k.empty()) {
+      std::vector<float> temp_f32_data(lm_head_q4k.size() * GGML_QK_K);
+      #pragma omp parallel for
+      for (size_t i = 0; i < lm_head_q4k.size(); ++i) {
+        dequantize_q4_k_m(&lm_head_q4k[i], &temp_f32_data[i * GGML_QK_K], GGML_QK_K);
+      }
+      std::vector<uint16_t> bf16_data(temp_f32_data.size());
+      #pragma omp parallel for
+      for (size_t i = 0; i < temp_f32_data.size(); ++i) {
+        bf16_data[i] = float32_to_bfloat16(temp_f32_data[i]);
+      }
+      gpuErrchk(cudaMalloc(&lm_head_dev_, bf16_data.size() * sizeof(uint16_t)));
+      gpuErrchk(cudaMemcpy(lm_head_dev_, bf16_data.data(), bf16_data.size() * sizeof(uint16_t), cudaMemcpyHostToDevice));
+      Logger::info("Dequantized lm_head (Q4_K -> fp32 -> bf16) to GPU.");
+      lm_head_processed_to_gpu_bf16 = true;
+    }
+    // Path 5: Source is Q6_K (model.lm_head_q6k) -> dequantize to FP32, then convert to BF16
+    else if (!lm_head_q6k.empty()) {
+      std::vector<float> temp_f32_data(lm_head_q6k.size() * GGML_QK_K);
+      #pragma omp parallel for
+      for (size_t i = 0; i < lm_head_q6k.size(); ++i) {
+        dequantize_q6_k(&lm_head_q6k[i], &temp_f32_data[i * GGML_QK_K], GGML_QK_K);
+      }
+      std::vector<uint16_t> bf16_data(temp_f32_data.size());
+      #pragma omp parallel for
+      for (size_t i = 0; i < temp_f32_data.size(); ++i) {
+        bf16_data[i] = float32_to_bfloat16(temp_f32_data[i]);
+      }
+      gpuErrchk(cudaMalloc(&lm_head_dev_, bf16_data.size() * sizeof(uint16_t)));
+      gpuErrchk(cudaMemcpy(lm_head_dev_, bf16_data.data(), bf16_data.size() * sizeof(uint16_t), cudaMemcpyHostToDevice));
+      Logger::info("Dequantized lm_head (Q6_K -> fp32 -> bf16) to GPU.");
+      lm_head_processed_to_gpu_bf16 = true;
+    }
+
+    if (!lm_head_processed_to_gpu_bf16) {
+        Logger::warning("LM head was not processed to GPU as BF16, despite GPU layers being active. This might indicate missing source LM head data in the model structure or an unhandled GGUF type for LM head.");
+    }
+  } else {
+    Logger::info("No GPU layers active, skipping LM head processing for GPU.");
   }
-  // Fallback: Dequantized Q8_0 to FP32 for LM Head
-  if (!lm_head_f32_dev_ && !lm_head_q8_0.empty()) {
-    std::vector<float> f32_data(lm_head_q8_0.size() * GGML_QK8_0);
-    for (size_t i=0; i < lm_head_q8_0.size(); ++i) dequantize_q8_0_block(&lm_head_q8_0[i], &f32_data[i * GGML_QK8_0]);
-    gpuErrchk(cudaMalloc(&lm_head_f32_dev_, f32_data.size() * sizeof(float)));
-    gpuErrchk(cudaMemcpy(lm_head_f32_dev_, f32_data.data(), f32_data.size() * sizeof(float), cudaMemcpyHostToDevice));
-    Logger::info("Dequantized lm_head (Q8_0->fp32) to GPU.");
-  }
-  // Fallback: Dequantized Q4_K to FP32 for LM Head
-  if (!lm_head_f32_dev_ && !lm_head_q4k.empty()) {
-    std::vector<float> f32_data(lm_head_q4k.size() * GGML_QK_K);
-    for (size_t i=0; i < lm_head_q4k.size(); ++i) dequantize_q4_k_m(&lm_head_q4k[i], &f32_data[i * GGML_QK_K], GGML_QK_K);
-    gpuErrchk(cudaMalloc(&lm_head_f32_dev_, f32_data.size() * sizeof(float)));
-    gpuErrchk(cudaMemcpy(lm_head_f32_dev_, f32_data.data(), f32_data.size() * sizeof(float), cudaMemcpyHostToDevice));
-    Logger::info("Dequantized lm_head (Q4_K->fp32) to GPU.");
-  }
-  // Fallback: Dequantized Q6_K to FP32 for LM Head
-  if (!lm_head_f32_dev_ && !lm_head_q6k.empty()) {
-    std::vector<float> f32_data(lm_head_q6k.size() * GGML_QK_K);
-    for (size_t i=0; i < lm_head_q6k.size(); ++i) dequantize_q6_k(&lm_head_q6k[i], &f32_data[i * GGML_QK_K], GGML_QK_K);
-    gpuErrchk(cudaMalloc(&lm_head_f32_dev_, f32_data.size() * sizeof(float)));
-    gpuErrchk(cudaMemcpy(lm_head_f32_dev_, f32_data.data(), f32_data.size() * sizeof(float), cudaMemcpyHostToDevice));
-    Logger::info("Dequantized lm_head (Q6_K->fp32) to GPU.");
-  }
+  // --- END LM HEAD ---
+  
   Logger::info("Finished processing embedding and LM head tables for GPU.");
 
   // RoPE GPU Buffer
@@ -2631,16 +2716,15 @@ std::vector<float> TinyLlamaModel::forward_device(
     Logger::info("[TM::fw_dev pos=" + std::to_string(pos) +
                  "] Processing LM Head.");
 
-  if (lm_head_f32_dev_) {
-    matvec_f32_f32_cuda(cublas_handle_, lm_head_f32_dev_, x_norm_dev_,
-                        logits_dev_, vs, hs, stream);
-  } else if (lm_head_dev_) {
-    Logger::warning("Using BF16 matvec path (less efficient) for LM Head.");
+  if (lm_head_dev_) { // This is now the primary path, expecting BF16 weights
+    // x_norm_dev_ is FP32, lm_head_dev_ is BF16. Output logits_dev_ should be FP32.
     matvec_bf16_f32_cuda(cublas_handle_, lm_head_dev_, x_norm_dev_, logits_dev_,
                          vs, hs, stream);
   } else {
-    Logger::error("No valid LM head weights found on GPU (FP32 or BF16).");
-    return {};
+    Logger::error("LM head (lm_head_dev_ for BF16) is null. Cannot calculate logits on GPU.");
+    // Returning an empty vector or throwing an exception might be appropriate here
+    // For now, to match previous structure if no weights, return empty.
+    return {}; 
   }
 
   gpuErrchk(cudaStreamSynchronize(stream));
