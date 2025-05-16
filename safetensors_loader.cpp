@@ -85,38 +85,38 @@ inline float cpu_f16_to_float32(uint16_t f16_raw) {
 Shard::Shard(const std::string& fp) : file_path(fp) {
     Logger::info("Shard: Initializing for file: " + file_path);
 #ifdef _WIN32
-    file_handle = CreateFileA(file_path.c_str(), GENERIC_READ, FILE_SHARE_READ,
+    file_handle_ = CreateFileA(file_path.c_str(), GENERIC_READ, FILE_SHARE_READ,
                                NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (file_handle == INVALID_HANDLE_VALUE) {
+    if (file_handle_ == INVALID_HANDLE_VALUE) {
         throw std::runtime_error("Shard: Failed to open file (Windows): " + file_path + " Error: " + std::to_string(GetLastError()));
     }
 
     LARGE_INTEGER size_li;
-    if (!GetFileSizeEx(file_handle, &size_li)) {
-        CloseHandle(file_handle);
-        file_handle = INVALID_HANDLE_VALUE; 
+    if (!GetFileSizeEx(file_handle_, &size_li)) {
+        CloseHandle(file_handle_);
+        file_handle_ = INVALID_HANDLE_VALUE; 
         throw std::runtime_error("Shard: Failed to get file size (Windows): " + file_path);
     }
     file_size = static_cast<size_t>(size_li.QuadPart);
     if (file_size == 0) { 
-        CloseHandle(file_handle);
-        file_handle = INVALID_HANDLE_VALUE;
+        CloseHandle(file_handle_);
+        file_handle_ = INVALID_HANDLE_VALUE;
         throw std::runtime_error("Shard: File is empty: " + file_path);
     }
 
-    mapping_handle = CreateFileMapping(file_handle, NULL, PAGE_READONLY, 0, 0, NULL);
-    if (mapping_handle == NULL) {
-        CloseHandle(file_handle);
-        file_handle = INVALID_HANDLE_VALUE;
+    mapping_handle_ = CreateFileMapping(file_handle_, NULL, PAGE_READONLY, 0, 0, NULL);
+    if (mapping_handle_ == NULL) {
+        CloseHandle(file_handle_);
+        file_handle_ = INVALID_HANDLE_VALUE;
         throw std::runtime_error("Shard: Failed to create file mapping (Windows): " + file_path + " Error: " + std::to_string(GetLastError()));
     }
 
-    mapped_data = MapViewOfFile(mapping_handle, FILE_MAP_READ, 0, 0, file_size);
+    mapped_data = MapViewOfFile(mapping_handle_, FILE_MAP_READ, 0, 0, file_size);
     if (mapped_data == nullptr) {
-        CloseHandle(mapping_handle);
-        mapping_handle = NULL;
-        CloseHandle(file_handle);
-        file_handle = INVALID_HANDLE_VALUE;
+        CloseHandle(mapping_handle_);
+        mapping_handle_ = NULL;
+        CloseHandle(file_handle_);
+        file_handle_ = INVALID_HANDLE_VALUE;
         throw std::runtime_error("Shard: Failed to map view of file (Windows): " + file_path + " Error: " + std::to_string(GetLastError()));
     }
 #else // POSIX
@@ -169,22 +169,22 @@ Shard::~Shard() {
 #ifdef _WIN32
     if (mapped_data != nullptr) {
         if (!UnmapViewOfFile(mapped_data)) {
-            Logger::error("Shard: Failed to unmap view of file (Windows) for \"" + file_path + "\" Error: " + std::to_string(GetLastError()));
+            Logger::error("Shard: Failed to unmap view of file (Windows) for \\"" + file_path + "\\" Error: " + std::to_string(GetLastError()));
         }
     }
-    if (mapping_handle != NULL) {
-        if (!CloseHandle(mapping_handle)) {
-             Logger::error("Shard: Failed to close mapping handle (Windows) for \"" + file_path + "\" Error: " + std::to_string(GetLastError()));
+    if (mapping_handle_ != NULL) {
+        if (!CloseHandle(mapping_handle_)) {
+             Logger::error("Shard: Failed to close mapping handle (Windows) for \\"" + file_path + "\\" Error: " + std::to_string(GetLastError()));
         }
     }
-    if (file_handle != INVALID_HANDLE_VALUE) {
-        if (!CloseHandle(file_handle)) {
-            Logger::error("Shard: Failed to close file handle (Windows) for \"" + file_path + "\" Error: " + std::to_string(GetLastError()));
+    if (file_handle_ != INVALID_HANDLE_VALUE) {
+        if (!CloseHandle(file_handle_)) {
+            Logger::error("Shard: Failed to close file handle (Windows) for \\"" + file_path + "\\" Error: " + std::to_string(GetLastError()));
         }
     }
     mapped_data = nullptr; 
-    file_handle = INVALID_HANDLE_VALUE; 
-    mapping_handle = NULL; 
+    file_handle_ = INVALID_HANDLE_VALUE; 
+    mapping_handle_ = NULL; 
 #else // POSIX
     if (mapped_data != nullptr && mapped_data != MAP_FAILED) {
         if (munmap(mapped_data, file_size) == -1) {
@@ -209,8 +209,8 @@ Shard::Shard(Shard&& other) noexcept
       metadata_ptr(other.metadata_ptr),
       tensor_data_block_ptr(other.tensor_data_block_ptr)
 #ifdef _WIN32
-      , file_handle(other.file_handle)
-      , mapping_handle(other.mapping_handle)
+      , file_handle_(other.file_handle_)
+      , mapping_handle_(other.mapping_handle_)
 #else
       , fd_(other.fd_)
 #endif
@@ -221,8 +221,8 @@ Shard::Shard(Shard&& other) noexcept
     other.metadata_ptr = nullptr;
     other.tensor_data_block_ptr = nullptr;
 #ifdef _WIN32
-    other.file_handle = INVALID_HANDLE_VALUE;
-    other.mapping_handle = NULL;
+    other.file_handle_ = INVALID_HANDLE_VALUE;
+    other.mapping_handle_ = NULL;
 #else
     other.fd_ = -1;
 #endif
@@ -238,8 +238,8 @@ Shard& Shard::operator=(Shard&& other) noexcept {
         metadata_ptr = other.metadata_ptr;
         tensor_data_block_ptr = other.tensor_data_block_ptr;
 #ifdef _WIN32
-        file_handle = other.file_handle;
-        mapping_handle = other.mapping_handle;
+        file_handle_ = other.file_handle_;
+        mapping_handle_ = other.mapping_handle_;
 #else
         fd_ = other.fd_;
 #endif
@@ -249,8 +249,8 @@ Shard& Shard::operator=(Shard&& other) noexcept {
         other.metadata_ptr = nullptr;
         other.tensor_data_block_ptr = nullptr;
 #ifdef _WIN32
-        other.file_handle = INVALID_HANDLE_VALUE;
-        other.mapping_handle = NULL;
+        other.file_handle_ = INVALID_HANDLE_VALUE;
+        other.mapping_handle_ = NULL;
 #else
         other.fd_ = -1;
 #endif
@@ -259,7 +259,11 @@ Shard& Shard::operator=(Shard&& other) noexcept {
 }
 
 const uint8_t* Shard::get_tensor_raw_data(size_t local_offset, size_t n_bytes) const {
-    if (!mapped_data || (mapped_data == MAP_FAILED && fd_ != -1) || !tensor_data_block_ptr) { 
+#ifdef _WIN32
+    if (!mapped_data || mapped_data == NULL || !tensor_data_block_ptr) { 
+#else // POSIX
+    if (!mapped_data || mapped_data == MAP_FAILED || !tensor_data_block_ptr) { 
+#endif
         throw std::logic_error("Shard not properly mapped or initialized to get tensor data: " + file_path);
     }
     const uint8_t* data_start = tensor_data_block_ptr + local_offset;
