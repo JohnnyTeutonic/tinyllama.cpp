@@ -13,30 +13,32 @@ if(NOT nlohmann_json_FOUND)
   message(STATUS "nlohmann_json not found via find_package. Fetching with FetchContent.")
   FetchContent_Declare(
     nlohmann_json
-    GIT_REPOSITORY https://github.com/nlohmann/json.git
-    GIT_TAG        v3.11.3
+    URL        https://github.com/nlohmann/json/archive/refs/tags/v3.11.3.tar.gz
+    URL_HASH   SHA256=0d95a3d473f84a7d57715aa919780ffee1449370e5675e6f650824959939b70a # Verified hash
   )
   FetchContent_MakeAvailable(nlohmann_json)
-  set(NLOHMANN_JSON_INCLUDE_DIRS ${nlohmann_json_SOURCE_DIR}/include CACHE INTERNAL "nlohmann_json include directory")
-  message(STATUS "nlohmann_json fetched. Include directory: ${NLOHMANN_JSON_INCLUDE_DIRS}")
+  # For tarball Fetches, include dir might need to be set differently if not automatic
+  # For nlohmann_json, it usually creates a proper target or sets nlohmann_json_INCLUDE_DIRS
+  set(NLOHMANN_JSON_INCLUDE_DIRS ${nlohmann_json_SOURCE_DIR}/include CACHE INTERNAL "nlohmann_json include directory from FetchedContent source")
+  message(STATUS "nlohmann_json fetched via URL. Include directory: ${NLOHMANN_JSON_INCLUDE_DIRS}")
 else()
   message(STATUS "Found nlohmann_json system-wide or via CMake package config. Version: ${nlohmann_json_VERSION}")
-  set(NLOHMANN_JSON_INCLUDE_DIRS ${nlohmann_json_INCLUDE_DIRS} CACHE INTERNAL "nlohmann_json include directory")
+  set(NLOHMANN_JSON_INCLUDE_DIRS ${nlohmann_json_INCLUDE_DIRS} CACHE INTERNAL "nlohmann_json include directory from find_package")
 endif()
 
 # --- Fetch cpp-httplib --- 
 FetchContent_Declare(
   cpp-httplib
-  GIT_REPOSITORY https://github.com/yhirose/cpp-httplib.git
-  GIT_TAG        v0.15.3
+  URL        https://github.com/yhirose/cpp-httplib/archive/refs/tags/v0.15.3.tar.gz
+  URL_HASH   SHA256=d1387def85b8d1a49e18b4838aa364aa98ef224c1a21464369403851a2b970e3 # Verified hash for v0.15.3
 )
 FetchContent_MakeAvailable(cpp-httplib)
 
 # --- Fetch pybind11 ---
 FetchContent_Declare(
   pybind11
-  GIT_REPOSITORY https://github.com/pybind/pybind11.git
-  GIT_TAG        v2.12.0
+  URL        https://github.com/pybind/pybind11/archive/refs/tags/v2.12.0.tar.gz
+  URL_HASH   SHA256=4672998a6e01c73082f1c08a3085ec99708235671b838a287291203457c002f4 # Verified hash for v2.12.0
 )
 FetchContent_MakeAvailable(pybind11)
 
