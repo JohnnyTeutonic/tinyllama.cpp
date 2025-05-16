@@ -28,9 +28,11 @@ setup(
 
     cmake_install_dir='tinyllama_cpp',
 
-    cmake_args=[
+    cmake_args=([
+        '-DHAS_CUDA:BOOL=ON'
+    ] if os.environ.get('TINYLLAMA_CPP_BUILD_CUDA') == '1' else [
         '-DHAS_CUDA:BOOL=OFF'
-    ],  
+    ]),
 
     install_requires=[
         "numpy", 

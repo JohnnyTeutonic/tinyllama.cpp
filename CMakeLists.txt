@@ -1,13 +1,16 @@
-cmake_minimum_required(VERSION 3.11)
+cmake_minimum_required(VERSION 3.15)
 project(TinyLlamaCpp LANGUAGES CXX)
+
+# Set CMake policies
+if(POLICY CMP0135)
+  cmake_policy(SET CMP0135 NEW) # DOWNLOAD_EXTRACT_TIMESTAMP
+endif()
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Include FetchContent module
 include(FetchContent)
 
-# --- Fetch nlohmann/json --- 
 find_package(nlohmann_json 3.2.0 QUIET)
 if(NOT nlohmann_json_FOUND)
   message(STATUS "nlohmann_json not found via find_package. Fetching with FetchContent.")
@@ -17,8 +20,6 @@ if(NOT nlohmann_json_FOUND)
     URL_HASH   SHA256=0d8ef5af7f9794e3263480193c491549b2ba6cc74bb018906202ada498a79406 # Verified hash
   )
   FetchContent_MakeAvailable(nlohmann_json)
-  # For tarball Fetches, include dir might need to be set differently if not automatic
-  # For nlohmann_json, it usually creates a proper target or sets nlohmann_json_INCLUDE_DIRS
   set(NLOHMANN_JSON_INCLUDE_DIRS ${nlohmann_json_SOURCE_DIR}/include CACHE INTERNAL "nlohmann_json include directory from FetchedContent source")
   message(STATUS "nlohmann_json fetched via URL. Include directory: ${NLOHMANN_JSON_INCLUDE_DIRS}")
 else()
@@ -26,7 +27,6 @@ else()
   set(NLOHMANN_JSON_INCLUDE_DIRS ${nlohmann_json_INCLUDE_DIRS} CACHE INTERNAL "nlohmann_json include directory from find_package")
 endif()
 
-# --- Fetch cpp-httplib --- 
 FetchContent_Declare(
   cpp-httplib
   URL        https://github.com/yhirose/cpp-httplib/archive/refs/tags/v0.15.3.tar.gz
@@ -34,7 +34,27 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(cpp-httplib)
 
-# --- Fetch pybind11 ---
+set(HTTPLIB_HEADER_PATH "${cpp-httplib_SOURCE_DIR}/httplib.h")
+message(STATUS "Attempting to patch httplib.h at: ${HTTPLIB_HEADER_PATH} to disable Brotli.")
+
+if(EXISTS "${HTTPLIB_HEADER_PATH}")
+    file(READ "${HTTPLIB_HEADER_PATH}" HTTPLIB_CONTENT_ORIGINAL)
+    set(HTTPLIB_CONTENT "${HTTPLIB_CONTENT_ORIGINAL}") # Work on a copy
+
+    string(REPLACE "// #include <brotli/decode.h> // Patched by TinyLlamaCpp CMakeLists.txt" "#include <brotli/decode.h>" HTTPLIB_CONTENT "${HTTPLIB_CONTENT}")
+    string(REPLACE "// #include <brotli/encode.h> // Patched by TinyLlamaCpp CMakeLists.txt" "#include <brotli/encode.h>" HTTPLIB_CONTENT "${HTTPLIB_CONTENT}")
+
+    string(REPLACE "#ifdef CPPHTTPLIB_BROTLI_SUPPORT" "#if 0 // Patched by TinyLlamaCpp CMakeLists.txt (was #ifdef CPPHTTPLIB_BROTLI_SUPPORT)" HTTPLIB_CONTENT "${HTTPLIB_CONTENT}")
+    
+    if(NOT "${HTTPLIB_CONTENT}" STREQUAL "${HTTPLIB_CONTENT_ORIGINAL}")
+        file(WRITE "${HTTPLIB_HEADER_PATH}" "${HTTPLIB_CONTENT}")
+        message(STATUS "Patched ${HTTPLIB_HEADER_PATH} to disable Brotli code block via '#if 0'.")
+    else()
+        message(STATUS "No changes made to ${HTTPLIB_HEADER_PATH} during Brotli patching (possibly already patched or string not found).")
+    endif()
+else()
+    message(WARNING "Could not find httplib.h at ${HTTPLIB_HEADER_PATH} for patching. Brotli issues may persist.")
+endif()
 FetchContent_Declare(
   pybind11
   URL        https://github.com/pybind/pybind11/archive/refs/tags/v2.12.0.tar.gz
@@ -42,13 +62,9 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(pybind11)
 
-# Find necessary system libraries
 find_package(Threads REQUIRED)
 find_package(OpenMP REQUIRED)
 
-# Find Boost (for Regex)
-# Look for Boost 1.65 or newer, specifically the regex component.
-# Use REQUIRED to make it an error if Boost or the regex component isn't found.
 find_package(Boost 1.65 REQUIRED COMPONENTS regex)
 if(Boost_FOUND)
     message(STATUS "Found Boost version: ${Boost_VERSION_STRING}")
@@ -58,7 +74,6 @@ else()
     message(FATAL_ERROR "Boost (version 1.65 or newer) with the regex component is required but was not found.")
 endif()
 
-# Handle CUDA
 OPTION(HAS_CUDA "Enable CUDA support (requires CUDA Toolkit and cuBLAS)" ON) # Default to ON, user can override with -DHAS_CUDA=OFF
 
 set(CUDA_ENABLED FALSE) # Default to disabled
@@ -67,7 +82,6 @@ set(CUDA_SOURCES "")   # Default to no CUDA sources
 if(HAS_CUDA)
     enable_language(CUDA)
     find_package(CUDA)
-    # Modern CMake approach to find specific CUDA components
     if(CUDA_FOUND)
         find_package(CUDAToolkit COMPONENTS cublas) 
     endif()
@@ -94,7 +108,6 @@ add_library(tinyllama_core STATIC
     tokenizer.cpp 
     logger.cpp 
     api.cpp
-    vocab_loader.cpp
     gguf_parser.cpp
     quantization.cpp
     model_constants.h
@@ -139,6 +152,10 @@ if(NOT SKBUILD)
     )
     target_link_libraries(tinyllama_server PRIVATE tinyllama_core httplib)
 
+    # Explicitly define CPPHTTPLIB_BROTLI_SUPPORT to 0 for tinyllama_server
+    # This should now be the sole definition if the patch works as expected.
+    target_compile_definitions(tinyllama_server PRIVATE CPPHTTPLIB_BROTLI_SUPPORT=0)
+
     find_package(OpenSSL QUIET) # Try to find OpenSSL for cpp-httplib to potentially use
     if(OPENSSL_FOUND AND TARGET OpenSSL::SSL AND TARGET OpenSSL::Crypto)
         message(STATUS "Found OpenSSL. Enabling SSL support in cpp-httplib for tinyllama_server.")
@@ -180,7 +197,6 @@ else()
 endif()
 
 if (MSVC)
-  # Need to apply to tinyllama_core as well
   foreach(target tinyllama tinyllama_server tinyllama_core)
     set_property(TARGET ${target} PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug$>")
     target_compile_options(${target} PRIVATE "/openmp:llvm" "/DNOMINMAX" "/D_USE_MATH_DEFINES")
