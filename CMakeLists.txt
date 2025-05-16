@@ -131,20 +131,23 @@ add_executable(tinyllama
 # Link tinyllama executable against the core library
 target_link_libraries(tinyllama PRIVATE tinyllama_core)
 
-add_executable(tinyllama_server
-    server.cpp
-)
+if(NOT SKBUILD)
+    add_executable(tinyllama_server
+        server.cpp
+    )
+    target_link_libraries(tinyllama_server PRIVATE tinyllama_core httplib)
 
-target_link_libraries(tinyllama_server PRIVATE tinyllama_core httplib)
-
-find_package(OpenSSL QUIET) # Try to find OpenSSL for cpp-httplib to potentially use
-if(OPENSSL_FOUND AND TARGET OpenSSL::SSL AND TARGET OpenSSL::Crypto)
-    message(STATUS "Found OpenSSL. Enabling SSL support in cpp-httplib.")
-    message(STATUS "OpenSSL Include Directories: ${OpenSSL_INCLUDE_DIRS}")
-    target_compile_definitions(tinyllama_server PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT)
-    target_include_directories(tinyllama_server PRIVATE ${OpenSSL_INCLUDE_DIRS})
-else()
-    message(STATUS "OpenSSL not found or targets not available. HTTPS support in server will be disabled.")
+    find_package(OpenSSL QUIET) # Try to find OpenSSL for cpp-httplib to potentially use
+    if(OPENSSL_FOUND AND TARGET OpenSSL::SSL AND TARGET OpenSSL::Crypto)
+        message(STATUS "Found OpenSSL. Enabling SSL support in cpp-httplib for tinyllama_server.")
+        # httplib usually enables SSL support via this define if headers/libs are found.
+        # It tries to link OpenSSL automatically if CPPHTTPLIB_OPENSSL_SUPPORT is defined.
+        target_compile_definitions(tinyllama_server PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT)
+        # Explicitly add include directories for OpenSSL if found, helps httplib find headers.
+        target_include_directories(tinyllama_server PRIVATE ${OpenSSL_INCLUDE_DIRS})
+    else()
+        message(STATUS "OpenSSL not found for tinyllama_server. HTTPS support will be disabled.")
+    endif()
 endif()
 
 find_package(Python COMPONENTS Interpreter Development REQUIRED)
@@ -159,6 +162,11 @@ target_link_libraries(tinyllama_bindings PRIVATE tinyllama_core)
 if (MSVC)
     set_target_properties(tinyllama_bindings PROPERTIES SUFFIX ".pyd")
 endif()
+
+install(TARGETS tinyllama_bindings
+    LIBRARY DESTINATION .
+    ARCHIVE DESTINATION .
+)
 
 if(OpenMP_FOUND)
     message(STATUS "Found OpenMP, enabling parallel execution.")

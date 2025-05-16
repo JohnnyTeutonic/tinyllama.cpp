@@ -178,6 +178,64 @@ This will create several executables in the `build/` directory (or `build/bin/` 
 
 For detailed insight into the operations performed by the executables (e.g., `tinyllama`, `tinyllama_server`), you can inspect the `debugging.log` file generated in the application's working directory. This log provides a step-by-step account of model loading, tokenization, and generation processes.
 
+### Python Package Installation
+
+In addition to building and running the C++ executables, you can install `tinyllama.cpp` as a Python package. This allows you to use its core inference capabilities directly from Python scripts.
+
+**Prerequisites:**
+
+*   Ensure you have the C++ build dependencies installed (CMake, C++17 compiler, OpenMP, Boost). Refer to the "C++ Runtime Dependencies" section above.
+*   If you are using a Conda environment, it's highly recommended to install the C++ compilers and other dependencies from Conda channels to ensure ABI compatibility:
+    ```bash
+    conda install -c conda-forge cxx-compiler openmp boost
+    ```
+
+**Installation Steps:**
+
+1.  **Clone the repository (if you haven't already):**
+    ```bash
+    git clone https://github.com/JohnnyTeutonic/tinyllama.cpp.git # Or your fork
+    cd tinyllama.cpp
+    ```
+
+2.  **Install the Python package using pip:**
+    Navigate to the root of the cloned repository and run:
+    ```bash
+    pip install .
+    ```
+    This command will build the C++ core library and the Python bindings, then install them as a package named `tinyllama_cpp` in your current Python environment.
+
+    For an editable install (useful for development, where changes to Python files are reflected immediately, though C++ changes still require a rebuild):
+    ```bash
+    pip install -e .
+    ```
+
+**Usage in Python:**
+
+Once installed, you can import and use the package in your Python scripts:
+
+```python
+import tinyllama_cpp
+
+# Example: (Ensure model paths are correct)
+model_path = "path/to/your/model.gguf" # Or directory for safetensors
+
+try:
+    # For GGUF, tokenizer_path can often be the same as model_path
+    # if the tokenizer is embedded.
+    session = tinyllama_cpp.TinyLlamaSession(
+        model_path=model_path, 
+        tokenizer_path=model_path 
+    )
+    print("Session created successfully!")
+    session.generate("Who was Abramham Lincoln?")
+
+except Exception as e:
+    print(f"Error: {e}")
+```
+
+Refer to your Python bindings implementation (`bindings.cpp` and `tinyllama_cpp/__init__.py`) for the exact classes and methods available.
+
 ### Using the Management Scripts
 
 For ease of use, comprehensive scripts are provided in the project root to automate common development and project tasks. These scripts simplify building, cleaning, running the applications, formatting code, generating documentation, and packaging releases.
@@ -339,117 +397,6 @@ You can also generate the documentation locally using the management scripts:
 # Using manage.ps1 (Windows)
 .\manage.ps1 docs
 ```
-
-### Python Bindings (`tinyllama_bindings`)
-
-This project includes Python bindings built using `pybind11`, allowing you to interact with the TinyLlama inference engine directly from Python. The core component exposed is the `TinyLlamaSession` class, which simplifies model loading and text generation.
-
-#### Building and Installing the Python Bindings
-
-The Python bindings are built as part of the main C++ project when CMake is configured. There isn't a separate installation step like `pip install .` in the traditional Python sense; rather, the build process generates a Python module file (`.pyd` on Windows, `.so` on Linux) that can be imported if it's in your Python path or if your script is run from a location where Python can find it (e.g., the project root after building).
-
-1.  **Prerequisites:**
-    *   Ensure you have Python installed (the version used for `pybind11` development, typically Python 3.x).
-    *   Make sure CMake can find your Python installation. If you encounter issues, you might need to set CMake variables like `Python_EXECUTABLE` or ensure Python is correctly added to your system's PATH.
-    *   The `pybind11` library is fetched automatically by CMake.
-
-2.  **Build the Project:**
-    Follow the general build instructions in the "Build the C++ Application" section. For example:
-    ```bash
-    # In project root
-    mkdir build
-    cd build
-    cmake .. 
-    # On Linux/macOS:
-    make -j$(nproc)
-    # On Windows (e.g., from Developer Command Prompt):
-    cmake --build . --config Release
-    ```
-    After a successful build, the Python module (e.g., `build/Release/tinyllama_bindings.pyd` or `build/tinyllama_bindings.so`) should be created. The exact location might vary slightly based on your CMake generator and build type.
-
-#### Using the Python Bindings
-
-Once built, you can import and use the `tinyllama_bindings` module in your Python scripts.
-
-**Example (`test_pybindings.py` located in the project root provides a more complete example):**
-
-```python
-import tinyllama_bindings
-import os
-
-# Path to your model (directory containing safetensors/config.json or a .gguf file)
-# Adjust the path as necessary.
-# model_path = "data/TinyLlama-1.1B-Chat-v1.0" 
-# or for GGUF:
-model_path = "models/tinyllama-1.1b-chat-v1.0.Q8_0.gguf"
-
-if not os.path.exists(model_path):
-    print(f"Model path not found: {model_path}")
-    print("Please download the model and update the 'model_path' variable.")
-    exit()
-
-try:
-    # Redirect C++ stdout/stderr to Python (optional, for viewing C++ logs)
-    with tinyllama_bindings.ostream_redirect(stdout=True, stderr=True):
-        print(f"Initializing TinyLlamaSession with model: {model_path}")
-        # 1. Initialize the session with the model path
-        session = tinyllama_bindings.TinyLlamaSession(model_path)
-        print("TinyLlamaSession initialized.")
-
-        # 2. Get model configuration (optional)
-        config = session.get_config()
-        print(f"Model BOS token ID: {config.bos_token_id}")
-        print(f"Model EOS token ID: {config.eos_token_id}")
-        print(f"Loaded from GGUF: {config.is_gguf_file_loaded}")
-
-        # 3. Generate text
-        prompt = "What is the capital of France?"
-        num_steps = 50
-        temperature = 0.7
-        top_k = 40
-        top_p = 0.9
-        # The 'stop_tokens_str' and 'apply_q_a_format' are positional in current bindings
-        # For safetensors models, apply_q_a_format=True is often desired.
-        # For GGUF, it might depend on the model's pre-prompting.
-        
-        print(f"Generating text for prompt: '{prompt}'")
-        generated_text = session.generate(
-            prompt,
-            num_steps,
-            temperature,
-            top_k,
-            top_p,
-            "",  # stop_tokens_str (e.g., "<|user|>")
-            True # apply_q_a_format 
-        )
-        
-        print("\n--- Generated Text ---")
-        print(f"Prompt: {prompt}")
-        print(f"Output: {generated_text}")
-
-except Exception as e:
-    print(f"An error occurred: {e}")
-    import traceback
-    traceback.print_exc()
-
-### Running the Command-Line Chat Client (`tinyllama`)
-
-```bash
-# Navigate back to the project root or ensure paths are correct
-# Run the server, pointing it to your model data directory
-./build/tinyllama_server ./data 
-
-# Example if executable is directly in build:
-# ./build/tinyllama_server ./data
-
-# Example on Windows Release build:
-# ./build/Release/tinyllama_server.exe ./data
-```
-
-*   Replace `./data` with the actual path to the directory containing your `config.json`, `tokenizer.json`, and `model.safetensors`.
-*   The server will start, load the model, and listen on `http://localhost:8080` by default.
-*   Open your web browser and navigate to `http://localhost:8080`.
-*   You should see a basic chat interface where you can interact with the model.
 
 ## Acknowledgements
 
