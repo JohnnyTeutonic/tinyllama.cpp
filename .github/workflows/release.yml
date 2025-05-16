@@ -240,7 +240,7 @@ jobs:
             # Fallback if the primary path doesn't exist, try the other cached path
             $BOOST_ROOT_DIR = "C:\local\boost_1_87_0"
             if (-not (Test-Path $BOOST_ROOT_DIR)) {
-               $BOOST_ROOT_DIR = "C:\Boost" # Final fallback
+               $BOOST_ROOT_DIR = "C:\Boost"
             }
           }
           Write-Host "Setting BOOST_ROOT to $BOOST_ROOT_DIR"
@@ -254,16 +254,50 @@ jobs:
       - name: Build
         run: |
           cd build
-          cmake --build . --config Release
+          if [ "${{ runner.os }}" == "Linux" ]; then
+            echo "Building Linux targets: tinyllama, tinyllama_server"
+            cmake --build . --config Release --target tinyllama tinyllama_server -j $(nproc)
+          elif [ "${{ runner.os }}" == "Windows" ]; then
+            echo "Building Windows targets: tinyllama, tinyllama_server"
+            cmake --build . --config Release --target tinyllama tinyllama_server
+          fi
 
       - name: Package (Linux)
         if: runner.os == 'Linux'
         run: |
-          mkdir -p ${{ matrix.artifact_name }}
-          cp build/tinyllama ${{ matrix.artifact_name }}/
-          cp build/tinyllama_server ${{ matrix.artifact_name }}/
-          cp README.md ${{ matrix.artifact_name }}/
-          tar czf ${{ matrix.asset_name }} ${{ matrix.artifact_name }}
+          echo "Preparing Linux package for build type: ${{ matrix.build_type }}"
+          echo "Listing contents of build directory:"
+          ls -l build/
+          
+          ARTIFACT_DIR=${{ matrix.artifact_name }}
+          mkdir -p $ARTIFACT_DIR
+          
+          echo "Copying executables..."
+          if [ -f build/tinyllama ]; then
+            cp build/tinyllama $ARTIFACT_DIR/
+          else
+            echo "ERROR: build/tinyllama not found!"
+            exit 1
+          fi
+          
+          if [ -f build/tinyllama_server ]; then
+            cp build/tinyllama_server $ARTIFACT_DIR/
+          else
+            echo "ERROR: build/tinyllama_server not found! (This might be expected for SKBUILD if not a server build, but CI should build it)"
+            # For CI release builds, tinyllama_server should generally be present unless specifically excluded by build_type logic
+            if [ "${{ matrix.build_type }}" != "some_non_server_build_type_if_it_exists" ]; then # Adjust condition if needed
+                 exit 1
+            fi
+          fi
+          
+          cp README.md $ARTIFACT_DIR/
+          
+          echo "Contents of staging directory $ARTIFACT_DIR:"
+          ls -l $ARTIFACT_DIR
+          
+          echo "Creating tarball ${{ matrix.asset_name }}..."
+          tar czf ${{ matrix.asset_name }} $ARTIFACT_DIR
+          echo "Tarball created."
 
       - name: Package (Windows)
         if: runner.os == 'Windows'

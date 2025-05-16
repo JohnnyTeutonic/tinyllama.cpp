@@ -69,7 +69,7 @@ find_package(Boost 1.65 REQUIRED COMPONENTS regex)
 if(Boost_FOUND)
     message(STATUS "Found Boost version: ${Boost_VERSION_STRING}")
     message(STATUS "Boost include directories: ${Boost_INCLUDE_DIRS}")
-    message(STATUS "Boost regex library: ${Boost_REGEX_LIBRARY}") # Variable might differ based on Boost/CMake version
+    message(STATUS "Boost regex library: ${Boost_REGEX_LIBRARY}")
 else()
     message(FATAL_ERROR "Boost (version 1.65 or newer) with the regex component is required but was not found.")
 endif()
@@ -152,17 +152,12 @@ if(NOT SKBUILD)
     )
     target_link_libraries(tinyllama_server PRIVATE tinyllama_core httplib)
 
-    # Explicitly define CPPHTTPLIB_BROTLI_SUPPORT to 0 for tinyllama_server
-    # This should now be the sole definition if the patch works as expected.
     target_compile_definitions(tinyllama_server PRIVATE CPPHTTPLIB_BROTLI_SUPPORT=0)
 
     find_package(OpenSSL QUIET) # Try to find OpenSSL for cpp-httplib to potentially use
     if(OPENSSL_FOUND AND TARGET OpenSSL::SSL AND TARGET OpenSSL::Crypto)
         message(STATUS "Found OpenSSL. Enabling SSL support in cpp-httplib for tinyllama_server.")
-        # httplib usually enables SSL support via this define if headers/libs are found.
-        # It tries to link OpenSSL automatically if CPPHTTPLIB_OPENSSL_SUPPORT is defined.
         target_compile_definitions(tinyllama_server PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT)
-        # Explicitly add include directories for OpenSSL if found, helps httplib find headers.
         target_include_directories(tinyllama_server PRIVATE ${OpenSSL_INCLUDE_DIRS})
     else()
         message(STATUS "OpenSSL not found for tinyllama_server. HTTPS support will be disabled.")
@@ -198,7 +193,12 @@ endif()
 
 if (MSVC)
   foreach(target tinyllama tinyllama_server tinyllama_core)
-    set_property(TARGET ${target} PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug$>")
+    if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+      set_property(TARGET ${target} PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreadedDebug") # /MTd
+    else()
+      set_property(TARGET ${target} PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded") # /MT
+    endif()
+
     target_compile_options(${target} PRIVATE "/openmp:llvm" "/DNOMINMAX" "/D_USE_MATH_DEFINES")
     target_compile_definitions(${target} PRIVATE NOMINMAX _USE_MATH_DEFINES)
   endforeach()
