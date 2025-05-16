@@ -30,7 +30,7 @@ endif()
 FetchContent_Declare(
   cpp-httplib
   URL        https://github.com/yhirose/cpp-httplib/archive/refs/tags/v0.15.3.tar.gz
-  URL_HASH   SHA256=d1387def85b8d1a49e18b4838aa364aa98ef224c1a21464369403851a2b970e3 # Verified hash for v0.15.3
+  URL_HASH   SHA256=2121bbf38871bb2aafb5f7f2b9b94705366170909f434428352187cb0216124e # Verified hash for v0.15.3
 )
 FetchContent_MakeAvailable(cpp-httplib)
 
