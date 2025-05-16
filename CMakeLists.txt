@@ -14,7 +14,7 @@ if(NOT nlohmann_json_FOUND)
   FetchContent_Declare(
     nlohmann_json
     URL        https://github.com/nlohmann/json/archive/refs/tags/v3.11.3.tar.gz
-    URL_HASH   SHA256=0d95a3d473f84a7d57715aa919780ffee1449370e5675e6f650824959939b70a # Verified hash
+    URL_HASH   SHA256=0d8ef5af7f9794e3263480193c491549b2ba6cc74bb018906202ada498a79406 # Verified hash
   )
   FetchContent_MakeAvailable(nlohmann_json)
   # For tarball Fetches, include dir might need to be set differently if not automatic
