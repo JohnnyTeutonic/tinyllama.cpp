@@ -169,17 +169,17 @@ Shard::~Shard() {
 #ifdef _WIN32
     if (mapped_data != nullptr) {
         if (!UnmapViewOfFile(mapped_data)) {
-            Logger::error("Shard: Failed to unmap view of file (Windows) for \\"" + file_path + "\\" Error: " + std::to_string(GetLastError()));
+            Logger::error("Shard: Failed to unmap view of file (Windows) for \"" + file_path + "\" Error: " + std::to_string(GetLastError()));
         }
     }
     if (mapping_handle_ != NULL) {
         if (!CloseHandle(mapping_handle_)) {
-             Logger::error("Shard: Failed to close mapping handle (Windows) for \\"" + file_path + "\\" Error: " + std::to_string(GetLastError()));
+             Logger::error("Shard: Failed to close mapping handle (Windows) for \"" + file_path + "\" Error: " + std::to_string(GetLastError()));
         }
     }
     if (file_handle_ != INVALID_HANDLE_VALUE) {
         if (!CloseHandle(file_handle_)) {
-            Logger::error("Shard: Failed to close file handle (Windows) for \\"" + file_path + "\\" Error: " + std::to_string(GetLastError()));
+            Logger::error("Shard: Failed to close file handle (Windows) for \"" + file_path + "\" Error: " + std::to_string(GetLastError()));
         }
     }
     mapped_data = nullptr; 
