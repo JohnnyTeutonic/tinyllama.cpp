@@ -38,7 +38,7 @@ FetchContent_MakeAvailable(cpp-httplib)
 FetchContent_Declare(
   pybind11
   URL        https://github.com/pybind/pybind11/archive/refs/tags/v2.12.0.tar.gz
-  URL_HASH   SHA256=4672998a6e01c73082f1c08a3085ec99708235671b838a287291203457c002f4 # Verified hash for v2.12.0
+  URL_HASH   SHA256=bf8f242abd1abcd375d516a7067490fb71abd79519a282d22b6e4d19282185a7 # Verified hash for v2.12.0 from build error
 )
 FetchContent_MakeAvailable(pybind11)
 
