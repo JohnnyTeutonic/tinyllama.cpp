@@ -22,7 +22,15 @@ These are needed to **build and run** the C++ application:
 
 1.  **CMake (>= 3.11):** Used for building the project.
 2.  **C++17 Compliant Compiler:** Such as g++, Clang, or MSVC.
-3.  **Boost (components: Regex, Xpressive):** For regular expression support. (Handled by `find_package` in CMake; system installation of appropriate Boost libraries needed).
+3.  **Boost Libraries (Regex, Xpressive, etc.):** For regular expression support. (Handled by `find_package` in CMake; system installation of appropriate Boost libraries needed)
+    *   `libboost-all-dev` is recommended to ensure all necessary components,
+        including header-only libraries like Boost.Xpressive (required for Llama 3
+        tokenizer functionality), are installed.
+        If you prefer a more minimal installation, you would need at least
+        `libboost-regex-dev` and ensure `boost/xpressive/xpressive.hpp`
+        is available from another Boost header package (e.g. `libboost-dev`
+        for a specific version which includes all headers).
+        However, `libboost-all-dev` is the most straightforward way to get everything.
 4.  **nlohmann/json:** For parsing JSON configuration files. (Fetched automatically by CMake if not found system-wide).
 5.  **cpp-httplib:** For the web server backend. (Fetched automatically by CMake).
 6.  **OpenMP (Optional but Recommended):** For multi-threading CPU acceleration. CMake will try to find it; performance will be lower without it.
@@ -39,8 +47,16 @@ sudo apt update
 # 2. Essential build tools (includes g++ compiler) and CMake
 sudo apt install build-essential cmake
 
-# 3. Boost.Regex library
-sudo apt install libboost-regex-dev
+# 3. Boost Libraries (Regex, Xpressive, etc.)
+#    `libboost-all-dev` is recommended to ensure all necessary components,
+#    including header-only libraries like Boost.Xpressive (required for Llama 3
+#    tokenizer functionality), are installed.
+#    If you prefer a more minimal installation, you would need at least
+#    `libboost-regex-dev` and ensure `boost/xpressive/xpressive.hpp`
+#    is available from another Boost header package (e.g. `libboost-dev`
+#    for a specific version which includes all headers).
+#    However, `libboost-all-dev` is the most straightforward way to get everything.
+sudo apt install libboost-all-dev
 
 # 4. OpenMP (for parallel processing)
 #    Usually comes with modern g++, but can be installed explicitly if needed.
@@ -48,11 +64,11 @@ sudo apt install libomp-dev
 
 ```
 *   **Boost.Regex on other systems:**
-    *   **Fedora/RHEL:** `sudo dnf install boost-regex` (or `boost-devel` which includes regex)
-    *   **macOS (Homebrew):** `brew install boost` (this installs multiple Boost libraries)
-    *   **Windows:** If using Chocolatey, `boost-msvc-14.2` (or a similar versioned package) includes regex. If using `vcpkg`, install `boost-regex`. If building Boost from source, ensure the regex library is built.
+    *   **Fedora/RHEL:** `sudo dnf install boost-devel` (this typically includes all Boost headers and libraries, including Xpressive and Regex)
+    *   **macOS (Homebrew):** `brew install boost` (this installs multiple Boost libraries, including Xpressive headers and Regex)
+    *   **Windows:** If using Chocolatey, `boost-msvc-14.3` (or a similar versioned package like `boost-msvc-14.2`) aims to provide a comprehensive Boost installation. If using `vcpkg`, install `boost-regex` and ensure Xpressive headers are available (often through `boost-headers` or by installing `boost-xpressive` if available as a separate component, or by installing a full `boost` package). If building Boost from source, ensure the regex library is built and all headers are installed.
 *   **nlohmann/json & cpp-httplib:** These libraries are fetched directly by CMake if not found system-wide, so no separate installation step is typically needed for them.
-*   **Other Distributions:** For non-Debian/Ubuntu systems, please use your distribution's package manager to find the equivalent packages for `build-essential`, `cmake`, `libboost-regex-dev`, and `libomp-dev`.
+*   **Other Distributions:** For non-Debian/Ubuntu systems, please use your distribution's package manager to find the equivalent packages for `build-essential`, `cmake`, `libboost-all-dev` (or its equivalent like `boost-devel`), and `libomp-dev`.
 
 ##### CUDA Toolkit (Optional - For GPU Acceleration)
 
