@@ -93,11 +93,11 @@ jobs:
         with:
           path: |
             C:\ProgramData\chocolatey\lib
-            C:\local\boost_1_81_0
+            C:\local\boost_1_87_0
             C:\Boost
-          key: ${{ runner.os }}-choco-boost-1.81.0-${{ hashFiles('**/release.yml') }}
+          key: ${{ runner.os }}-choco-boost-1.87.0-${{ hashFiles('**/release.yml') }}
           restore-keys: |
-            ${{ runner.os }}-choco-boost-1.81.0-
+            ${{ runner.os }}-choco-boost-1.87.0-
             ${{ runner.os }}-choco-boost-
 
       - name: Setup CMake
@@ -245,8 +245,12 @@ jobs:
           echo "BOOST_INCLUDEDIR=" >> $env:GITHUB_ENV
           echo "BOOST_LIBRARYDIR=" >> $env:GITHUB_ENV
 
-          $BOOST_VERSION_UNDERSCORE = "1_81_0" # Corresponds to version 1.81.0 being installed
+          $BOOST_VERSION_UNDERSCORE = "1_87_0" # Adjusted to reflect actual installed version from logs
           $TARGET_BOOST_ROOT_DIR = "C:\local\boost_$($BOOST_VERSION_UNDERSCORE)"
+
+          # We keep the Chocolatey install command attempting 1.81.0 as per original intent
+          # but the paths above are changed to 1.87.0 for CMake to find what IS being installed.
+          # This is a diagnostic step.
 
           if (-not (Test-Path $TARGET_BOOST_ROOT_DIR)) {
             Write-Warning "Boost not found at the expected installation path $TARGET_BOOST_ROOT_DIR. Trying C:\Boost as a fallback."
@@ -292,7 +296,8 @@ jobs:
           Set-Location "build"
           # Pass BOOST_ROOT directly, disable system path searching for Boost, and include Generator/Architecture
           # Also, explicitly unset BOOST_ROOT from cache first to ensure our value is taken
-          cmake .. -U BOOST_ROOT -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release -DBOOST_ROOT="$TARGET_BOOST_ROOT_DIR" -DBoost_DEBUG=ON -DBoost_NO_SYSTEM_PATHS=ON ${{ matrix.cmake_flags }}
+          # And now, also try explicitly setting Boost_INCLUDE_DIR based on typical Choco install path for boost-msvc packages
+          cmake .. -U BOOST_ROOT -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release -DBOOST_ROOT="$TARGET_BOOST_ROOT_DIR" -DBoost_INCLUDE_DIR="$TARGET_BOOST_ROOT_DIR" -DBoost_DEBUG=ON -DBoost_NO_SYSTEM_PATHS=ON ${{ matrix.cmake_flags }}
 
       - name: Build (Linux)
         if: runner.os == 'Linux'
