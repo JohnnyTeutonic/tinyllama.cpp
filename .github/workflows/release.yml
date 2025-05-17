@@ -92,7 +92,6 @@ jobs:
 
       - name: Cache Chocolatey packages and Boost (Windows)
         if: matrix.os_runner == 'windows-latest'
-        if: runner.os == 'Windows'
         uses: actions/cache@v4
         with:
           path: |
