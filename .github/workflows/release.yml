@@ -202,16 +202,19 @@ jobs:
              # Also set Boost_ROOT directly for CMake configure step below as an explicit hint
              $env:Boost_ROOT_CMake_Hint = $BOOST_INSTALL_PATH_GUESS 
           } else {
-             Write-Warning "Could not find guessed Boost 1.81.0 path: $BOOST_INSTALL_PATH_GUESS. CMake might fail to find Boost."
-             # Try the generic C:\Boost as a last resort from cache, though version might be wrong
+             Write-Warning "Could not find guessed Boost 1.81.0 path: $BOOST_INSTALL_PATH_GUESS. Attempting fallbacks."
+             # Try the generic C:\Boost as a first fallback
              if (Test-Path "C:\Boost") {
                 Write-Host "Falling back to C:\Boost for BOOST_ROOT"
                 echo "BOOST_ROOT=C:\Boost" >> $env:GITHUB_ENV
                 $env:Boost_ROOT_CMake_Hint = "C:\Boost"
-             } else if (Test-Path "C:\ProgramData\Boost\boost_1.87.0") { # From cache path
+             } else if (Test-Path "C:\ProgramData\Boost\boost_1.87.0") { # Second fallback from cache path
                 Write-Host "Falling back to C:\ProgramData\Boost\boost_1.87.0 for BOOST_ROOT"
                 echo "BOOST_ROOT=C:\ProgramData\Boost\boost_1.87.0" >> $env:GITHUB_ENV
                 $env:Boost_ROOT_CMake_Hint = "C:\ProgramData\Boost\boost_1.87.0"
+             } else {
+                Write-Warning "None of the primary or fallback Boost paths were found. BOOST_ROOT_CMake_Hint will not be set."
+                # $env:Boost_ROOT_CMake_Hint remains unset or empty
              }
           }
 
