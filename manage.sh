@@ -64,6 +64,7 @@ usage() {
     echo "                 --model-dir <path>          (default: ${DEFAULT_MODEL_DIR})"
     echo "                 --tokenizer <path>        (default: '${DEFAULT_TOKENIZER_PATH}' or auto-detect from model_dir)"
     echo "                 --threads <num>             (default: ${DEFAULT_THREADS})"
+    echo "                 --system-prompt <text>    (Optional) System prompt to guide the model."
     echo "                 --temperature <float>        (default: ${DEFAULT_TEMPERATURE}) (Note: Currently uses C++ default)"
     echo "                 --top-k <int>               (default: ${DEFAULT_TOP_K}) (Note: Currently uses C++ default)"
     echo "                 --top-p <float>             (default: ${DEFAULT_TOP_P}) (Note: Currently uses C++ default)"
@@ -75,6 +76,7 @@ usage() {
     echo "               Options:"
     echo "                 --model-dir <path>          (default: ${DEFAULT_MODEL_DIR})"
     echo "                 --tokenizer <path>          (default: ${DEFAULT_TOKENIZER_PATH})"
+    echo "                 --system-prompt <text>    (Optional) System prompt to guide the model."
     echo "                 --prompt <text>             (default: ${CURRENT_INTERACTIVE_PROMPT})"
     echo "                 --steps <num>               (default: ${MAX_TOKENS_SERVER})"
     echo "                 --threads <num>             (default: ${DEFAULT_THREADS})"
@@ -195,8 +197,8 @@ do_run_server() {
     local use_mmap_arg="${use_mmap}"
     local no_log_flag="${no_log}"
 
-    echo "Starting server with: Model=${model_dir}, Host=${server_host}, Port=${server_port}, N_GPU_Layers=${n_gpu_layers_arg}, Use_Mmap=${use_mmap_arg}, No_Log=${no_log_flag}"
-    LD_LIBRARY_PATH=./build/lib ./build/bin/main "${model_dir}" "${server_port}" "${server_host}" "${n_gpu_layers_arg}" "${use_mmap_arg}" "${no_log_flag}" > "${SERVER_LOG_FILE}" 2>&1 &
+    echo "Starting server with: Executable=${executable_path}, Model=${model_dir}, Host=${server_host}, Port=${server_port}, N_GPU_Layers=${n_gpu_layers_arg}, Use_Mmap=${use_mmap_arg}, No_Log=${no_log_flag}"
+    LD_LIBRARY_PATH=./build/lib "${executable_path}" "${model_dir}" "${server_port}" "${server_host}" "${n_gpu_layers_arg}" "${use_mmap_arg}" "${no_log_flag}" > "${SERVER_LOG_FILE}" 2>&1 &
     SERVER_PID=$!
     echo "Server PID: ${SERVER_PID}"
 }
@@ -209,9 +211,11 @@ do_run_chat() {
     local top_k_arg="${DEFAULT_TOP_K}"
     local top_p_arg="${DEFAULT_TOP_P}"
     local prompt_arg=""
+    local system_prompt_arg=""
     local steps_arg="64" # Corresponds to max_tokens in main.cpp
     local n_gpu_layers_arg="${DEFAULT_N_GPU_LAYERS}"
     local use_mmap_arg="${DEFAULT_USE_MMAP}"
+    local pass_through_args=()
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -223,6 +227,9 @@ do_run_chat() {
             shift; shift;;
             --threads)
             threads_arg="$2"
+            shift; shift;;
+            --system-prompt)
+            system_prompt_arg="$2"
             shift; shift;;
             --temperature)
             temperature_arg="$2"
@@ -247,12 +254,11 @@ do_run_chat() {
         esac
     done
 
-    local executable_path="${PROJECT_ROOT_DIR}/build/bin/main" # Adjusted to use the main executable
+    local executable_path="${PROJECT_ROOT_DIR}/build/main"
     if [ ! -f "$executable_path" ]; then
-        # Fallback for older build structures or different executable name if needed
         executable_path="${PROJECT_ROOT_DIR}/build/tinyllama"
         if [ ! -f "$executable_path" ]; then
-            error "Chat client executable not found at ./build/bin/main or ./build/tinyllama. Please build the project first."
+            error "Main executable not found at ${PROJECT_ROOT_DIR}/build/main or ${PROJECT_ROOT_DIR}/build/tinyllama. Please build the project first."
         fi
     fi
 
@@ -268,174 +274,110 @@ do_run_chat() {
 
     local mode_for_main="chat"
     
-    # Construct arguments for main.cpp
-    # main.cpp expects: <model_path> <tokenizer_path> <num_threads> <mode> <initial_prompt> <max_tokens> <n_gpu_layers> <use_mmap>
-    local exec_args_for_cpp=(
-        "$executable_path"
-        "$model_dir_arg"
-        "$tokenizer_path_arg"
-        "$threads_arg"
-        "$mode_for_main"
-        "$prompt_arg" # main.cpp's chat loop handles if this is empty for interactive
-        "$steps_arg"
-        "$n_gpu_layers_arg"
-        "$use_mmap_arg"
-    )
+    pass_through_args+=("${model_dir_arg}")
+    pass_through_args+=("${tokenizer_path_arg}")
+    pass_through_args+=("${threads_arg}")
+    pass_through_args+=("${mode_for_main}")
 
-    echo "Invoking C++ main: ${exec_args_for_cpp[*]}"
-    LD_LIBRARY_PATH=./build/lib "${exec_args_for_cpp[@]}"
+    if [ -n "$system_prompt_arg" ]; then
+        pass_through_args+=("--system-prompt" "${system_prompt_arg}")
+    fi
+    if [ -n "$prompt_arg" ]; then
+        pass_through_args+=("${prompt_arg}")
+    fi
+    
+    pass_through_args+=("--max-tokens" "${steps_arg}")
+    pass_through_args+=("--n-gpu-layers" "${n_gpu_layers_arg}")
+    pass_through_args+=("--use-mmap" "${use_mmap_arg}")
+    pass_through_args+=("--temperature" "${temperature_arg}")
+
+    echo "Invoking C++ main: $executable_path ${pass_through_args[*]}"
+    LD_LIBRARY_PATH=./build/lib "$executable_path" "${pass_through_args[@]}"
 }
 
 do_run_prompt() {
-    local model_path_arg="" # New variable for the model path
-    local tokenizer_path_arg_base="$DEFAULT_TOKENIZER_PATH"
-    local prompt_arg="$DEFAULT_PROMPT"
-    local steps_arg="$DEFAULT_STEPS"
-    local threads_arg="$DEFAULT_THREADS"
-    local temperature_arg="$DEFAULT_TEMPERATURE"
-    local n_gpu_layers_arg="$DEFAULT_N_GPU_LAYERS"
-    local use_mmap_arg="$DEFAULT_USE_MMAP"
-    # local model_dir_provided=false # Flag to track if --model-dir was used (optional if we simplify --model-dir handling)
+    local model_dir_arg="${DEFAULT_MODEL_DIR}"
+    local tokenizer_path_arg="${DEFAULT_TOKENIZER_PATH}"
+    local prompt_arg="${CURRENT_INTERACTIVE_PROMPT}"
+    local system_prompt_arg=""
+    local steps_arg="${MAX_TOKENS_SERVER}"
+    local threads_arg="${DEFAULT_THREADS}"
+    local temperature_arg="${DEFAULT_TEMPERATURE}"
+    local n_gpu_layers_arg="${DEFAULT_N_GPU_LAYERS}"
+    local use_mmap_arg="${DEFAULT_USE_MMAP}"
+    local pass_through_args=()
 
-    shift # Get past "run-prompt"
-
-    # Check if the first argument is a model path (GGUF file or directory)
-    if [[ "$#" -gt 0 && "$1" != -* ]]; then
-        model_path_arg="$1"
-        shift # Consume the model path argument
-    fi
-
-    while [ "$#" -gt 0 ]; do
+    while [[ $# -gt 0 ]]; do
         case "$1" in
-            --model-dir) # This option is primarily for providing a directory
-                if [ -z "$2" ]; then error "Missing value for --model-dir"; fi
-                if [ -n "$model_path_arg" ]; then # If model_path_arg was set positionally
-                    error "Cannot specify both a positional model path ('$model_path_arg') and --model-dir ('$2'). Please provide only one."
-                fi
-                model_path_arg="$2" # Treat --model-dir as setting the model_path_arg
-                # model_dir_provided=true # (optional flag)
-                shift # Consume --model-dir
-                shift # Consume its value
-                ;;
+            --model-dir)
+            model_dir_arg="$2"
+            shift; shift;;
             --tokenizer)
-                if [ -z "$2" ]; then error "Missing value for --tokenizer"; fi
-                tokenizer_path_arg_base="$2"
-                shift # Consume --tokenizer
-                shift # Consume its value
-                ;;
+            tokenizer_path_arg="$2"
+            shift; shift;;
+            --system-prompt)
+            system_prompt_arg="$2"
+            shift; shift;;
             --prompt)
-                if [ -z "$2" ]; then error "Missing value for --prompt"; fi
-                prompt_arg="$2"
-                shift # Consume --prompt
-                shift # Consume its value
-                ;;
+            prompt_arg="$2"
+            shift; shift;;
             --steps)
-                if [ -z "$2" ]; then error "Missing value for --steps"; fi
-                steps_arg="$2"
-                shift # Consume --steps
-                shift # Consume its value
-                ;;
+            steps_arg="$2"
+            shift; shift;;
             --threads)
-                if [ -z "$2" ]; then error "Missing value for --threads"; fi
-                threads_arg="$2"
-                shift # Consume --threads
-                shift # Consume its value
-                ;;
+            threads_arg="$2"
+            shift; shift;;
             --temperature)
-                if [ -z "$2" ]; then error "Missing value for --temperature"; fi
-                temperature_arg="$2"
-                shift # Consume --temperature
-                shift # Consume its value
-                ;;
+            temperature_arg="$2"
+            shift; shift;;
             --n-gpu-layers)
-                if [ -z "$2" ]; then error "Missing value for --n-gpu-layers"; fi
-                n_gpu_layers_arg="$2"
-                shift # Consume --n-gpu-layers
-                shift # Consume its value
-                ;;
+            n_gpu_layers_arg="$2"
+            shift; shift;;
             --mmap)
-                if [ -z "$2" ]; then error "Missing value for --mmap"; fi
-                use_mmap_arg="$2"
-                shift # Consume --mmap
-                shift # Consume its value
-                ;;
-            -*)
-                # Handle unknown options that start with -
-                echo "Unknown option for run-prompt: $1"
-                usage
-                exit 1
-                ;;
+            use_mmap_arg="$2"
+            shift; shift;;
             *)
-                # This case should ideally not be hit if the model path is consumed before the loop
-                # and all other arguments are options.
-                echo "Unexpected argument for run-prompt: $1. Model path should be the first argument or specified with --model-dir."
-                usage
-                exit 1
-                ;;
+            error "Unknown option for run-prompt: $1"; usage ;;
         esac
     done
 
-    # If no model path was provided positionally or via --model-dir, use default from DEFAULT_MODEL_DIR_CHAT
-    if [ -z "$model_path_arg" ]; then
-        log "No model path specified by user, defaulting to model directory: $DEFAULT_MODEL_DIR_CHAT"
-        model_path_arg="$DEFAULT_MODEL_DIR_CHAT" # Default to directory if nothing else provided
-    fi
-
-    local executable_path="${PROJECT_ROOT_DIR}/build/bin/main"
+    local executable_path="${PROJECT_ROOT_DIR}/build/main"
     if [ ! -f "$executable_path" ]; then
-        executable_path="${PROJECT_ROOT_DIR}/build/tinyllama" # Fallback for older structure
+        executable_path="${PROJECT_ROOT_DIR}/build/tinyllama"
         if [ ! -f "$executable_path" ]; then
-            error "Main executable not found at ./build/bin/main or ./build/tinyllama. Please build the project first."
-        fi
-    fi
-    log "Using executable: $executable_path"
-
-    local tokenizer_path_arg
-    # Determine tokenizer_path_arg based on model_path_arg
-    if [ -d "$model_path_arg" ]; then # If model_path_arg is a directory
-        # If user specified a base for tokenizer (e.g. --tokenizer tokenizer.bin) use it relative to model_path_arg
-        # Otherwise, if tokenizer_path_arg_base is the default (empty), form path like "data/tokenizer.model"
-        if [ -n "$tokenizer_path_arg_base" ] && [ "$tokenizer_path_arg_base" != "$DEFAULT_TOKENIZER_PATH" ]; then
-             tokenizer_path_arg="${model_path_arg}/${tokenizer_path_arg_base}"
-        else # Default tokenizer name with model directory
-             tokenizer_path_arg="${model_path_arg}/tokenizer.model"
-        fi
-    elif [ -f "$model_path_arg" ]; then # If model_path_arg is a file (e.g., GGUF)
-        if [ "$tokenizer_path_arg_base" = "$DEFAULT_TOKENIZER_PATH" ] || [ -z "$tokenizer_path_arg_base" ]; then
-            # If no explicit tokenizer path is given, or it's the default (empty string),
-            # pass "tokenizer.model". The C++ app will look for a real file with this name
-            # next to the GGUF, or use the GGUF's internal tokenizer.
-            tokenizer_path_arg="tokenizer.model"
-        else
-            # User explicitly provided a tokenizer path, use that.
-            tokenizer_path_arg="$tokenizer_path_arg_base"
-        fi
-    else
-        # If model_path_arg is not a directory and not a file, but was specified (not default)
-        if [ "$model_path_arg" != "$DEFAULT_MODEL_DIR_CHAT" ]; then
-             error "Model path '$model_path_arg' is not a valid file or directory."
-        else # It's the default directory which might not exist yet, which is fine for --model-dir
-             log "Default model directory '$model_path_arg' may not exist yet. This is acceptable if the C++ application creates it or expects it."
-             # For default directory, construct tokenizer path as before
-             tokenizer_path_arg="${model_path_arg}/tokenizer.model"
+            error "Main executable not found at ${PROJECT_ROOT_DIR}/build/main or ${PROJECT_ROOT_DIR}/build/tinyllama. Please build the project first."
         fi
     fi
     
-    echo "Running prompt mode..."
-    echo "Model: $model_path_arg"
-    echo "Tokenizer: $tokenizer_path_arg"
-    echo "Threads: $threads_arg"
-    echo "Prompt: $prompt_arg"
-    echo "Steps: $steps_arg"
-    echo "Temperature: $temperature_arg"
+    log "Starting prompt mode..."
+    log "  Model Path: $model_dir_arg"
+    log "  Tokenizer Path: $tokenizer_path_arg"
+    log "  Threads: $threads_arg"
+    log "  Prompt: $prompt_arg"
+    log "  Max Tokens (steps): $steps_arg"
+    log "  (Note: Temperature, Top-K, Top-P from manage.sh are not currently passed to C++ main)"
+
+    pass_through_args+=("${model_dir_arg}")
+    pass_through_args+=("${tokenizer_path_arg}")
+    pass_through_args+=("${threads_arg}")
+    pass_through_args+=("prompt")
+
+    if [ -n "$system_prompt_arg" ]; then
+        pass_through_args+=("--system-prompt" "${system_prompt_arg}")
+    fi
+    
+    pass_through_args+=("${prompt_arg}")
+    
+    pass_through_args+=("--max-tokens" "${steps_arg}")
+    pass_through_args+=("--n-gpu-layers" "${n_gpu_layers_arg}")
+    pass_through_args+=("--use-mmap" "${use_mmap_arg}")
+    pass_through_args+=("--temperature" "${temperature_arg}")
+
     echo "N GPU Layers: $n_gpu_layers_arg"
     echo "Use Mmap: $use_mmap_arg"
 
-    # Order: model_path, tokenizer_path, num_threads, mode, initial_prompt_string, max_tokens, n_gpu_layers, use_mmap, temperature
-    local exec_args_for_cpp=("$executable_path" "$model_path_arg" "$tokenizer_path_arg" "$threads_arg" "prompt" "$prompt_arg" "$steps_arg" "$n_gpu_layers_arg" "$use_mmap_arg" "$temperature_arg")
-    
-    echo "Executing: ${exec_args_for_cpp[@]}"
-    LD_LIBRARY_PATH=./build/lib "${exec_args_for_cpp[@]}"
+    echo "Executing: $executable_path ${pass_through_args[*]}"
+    LD_LIBRARY_PATH=./build/lib "$executable_path" "${pass_through_args[@]}"
 }
 
 do_format() {

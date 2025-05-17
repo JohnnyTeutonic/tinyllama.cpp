@@ -22,7 +22,7 @@ These are needed to **build and run** the C++ application:
 
 1.  **CMake (>= 3.11):** Used for building the project.
 2.  **C++17 Compliant Compiler:** Such as g++, Clang, or MSVC.
-3.  **Boost.Regex:** For regular expression support. Only the `regex` component of Boost is required. (Handled by `find_package` in CMake; system installation needed).
+3.  **Boost (components: Regex, Xpressive):** For regular expression support. (Handled by `find_package` in CMake; system installation of appropriate Boost libraries needed).
 4.  **nlohmann/json:** For parsing JSON configuration files. (Fetched automatically by CMake if not found system-wide).
 5.  **cpp-httplib:** For the web server backend. (Fetched automatically by CMake).
 6.  **OpenMP (Optional but Recommended):** For multi-threading CPU acceleration. CMake will try to find it; performance will be lower without it.
@@ -184,6 +184,39 @@ make -j$(nproc)
 
 This will create several executables in the `build/` directory (or `build/bin/` or `build/Release/` depending on your system and generator), including `tinyllama_server` (for SafeTensors models) and `tinyllama` (general purpose CLI).
 
+The `tinyllama` executable is the main command-line interface for direct interaction:
+
+```bash
+./build/tinyllama <model_path> <tokenizer_path> <num_threads> <prompt|chat> \
+                  [--system-prompt <system_prompt_string>] \
+                  [initial_user_prompt] \
+                  [max_tokens] \
+                  [n_gpu_layers] \
+                  [use_mmap] \
+                  [temperature]
+```
+
+**Arguments for `tinyllama` executable:**
+
+*   `<model_path>`: Path to the model file (.gguf) or directory (SafeTensors).
+*   `<tokenizer_path>`: Path to the tokenizer file.
+*   `<num_threads>`: Number of threads to use for generation.
+*   `<prompt|chat>`: Mode of operation.
+    *   `prompt`: Single prompt generation, then exits.
+    *   `chat`: Interactive chat mode.
+*   `--system-prompt <system_prompt_string>` (Optional): Provides a system-level instruction to the model. Enclose in quotes if it contains spaces. Default: Empty.
+*   `initial_user_prompt` (Optional): The first user message in `chat` mode, or the main prompt in `prompt` mode. Default: "Hello, world!".
+*   `max_tokens` (Optional): Maximum number of new tokens to generate. Default: 256.
+*   `n_gpu_layers` (Optional): Number of layers to offload to GPU (-1 for all, 0 for none). Default: -1 (all layers on GPU if available).
+*   `use_mmap` (Optional): Use memory-mapping for GGUF files ('true' or 'false'). Default: true.
+*   `temperature` (Optional): Sampling temperature (e.g., 0.1). Lower is more deterministic. Default: 0.1.
+
+**Example with System Prompt:**
+
+```bash
+./build/tinyllama ./models/TinyLlama-1.1B-Chat-v1.0.Q8_0.gguf ./models/tokenizer.json 4 chat --system-prompt "You are a pirate." "Avast ye, what be the news?"
+```
+
 For detailed insight into the operations performed by the executables (e.g., `tinyllama`, `tinyllama_server`), you can inspect the `debugging.log` file generated in the application's working directory. This log provides a step-by-step account of model loading, tokenization, and generation processes.
 
 ### Python Package Installation
@@ -248,20 +281,54 @@ Once installed, you can import and use the package in your Python scripts:
 import tinyllama_cpp
 
 # Example: (Ensure model paths are correct)
-model_path = "path/to/your/model.gguf" # Or directory for safetensors
+model_path = "path/to/your/model_or_gguf_file"
+tokenizer_path = "path/to/your/tokenizer.json_or.model"
 
-try:
-    # For GGUF, tokenizer_path can often be the same as model_path
-    # if the tokenizer is embedded.
-    session = tinyllama_cpp.TinyLlamaSession(
-        model_path=model_path, 
-        tokenizer_path=model_path 
+# Initialize the session
+# For GGUF, tokenizer_path can often be the same as model_path if tokenizer is embedded,
+# or a separate tokenizer.model/tokenizer.json.
+# For SafeTensors, model_path is the directory containing model.safetensors, config.json, tokenizer.json,
+# and tokenizer_path should point to the tokenizer.json in that directory.
+session = tinyllama_cpp.TinyLlamaSession(model_path, tokenizer_path, num_gpu_layers=-1) # Use -1 for all GPU layers if CUDA enabled
+
+# Define prompts
+user_prompt = "What is the capital of France?"
+system_prompt_optional = "You are a helpful geography expert." # Optional
+
+# Generate text
+# The `apply_q_a_format` parameter defaults to `true`. This means Q:A style formatting 
+# (e.g., "Q: [prompt]\\nA:") is applied by default if the loaded model is not Llama 3 
+# and does not have an explicit GGUF chat template. This is often preferred for Llama 2 models.
+# Set to `False` if you want to use a raw prompt for such models.
+# If a GGUF or Llama 3 chat template is active, that template takes precedence.
+response = session.generate(
+    prompt=user_prompt, 
+    steps=64, 
+    temperature=0.7,
+    system_prompt=system_prompt_optional # Pass the system prompt here
+    # apply_q_a_format=True # This is now the default
+)
+
+print(f"User: {user_prompt}")
+if system_prompt_optional:
+    print(f"System: {system_prompt_optional}")
+print(f"AI: {response}")
+
+# Example for chat interaction (simplified loop)
+print("\nEntering chat mode (type 'quit' to exit)...")
+while True:
+    current_user_input = input("You: ")
+    if current_user_input.lower() == 'quit':
+        break
+    
+    chat_response = session.generate(
+        prompt=current_user_input,
+        steps=128,
+        temperature=0.7,
+        system_prompt=system_prompt_optional, # Maintain system prompt across turns if desired
+        # apply_q_a_format=True # Default, applies Q:A if no GGUF/Llama3 template
     )
-    print("Session created successfully!")
-    session.generate("Who was Abramham Lincoln?")
-
-except Exception as e:
-    print(f"Error: {e}")
+    print(f"AI: {chat_response}")
 ```
 
 Refer to your Python bindings implementation (`bindings.cpp` and `tinyllama_cpp/__init__.py`) for the exact classes and methods available.
@@ -282,7 +349,7 @@ chmod +x manage.sh
 
 *   `./manage.sh build [--build-type <Release|Debug>] [--cuda <ON|OFF>]`
 *   `./manage.sh run-server [--model-dir <path>] [--tokenizer <path>] [--threads <num>] [--host <hostname>] [--port <num>] [--n-gpu-layers <num>] [--mmap <true|false>] [--no-log]`
-*   `./manage.sh run-chat [--model-dir <path>] [--tokenizer <path>] [--threads <num>] [--prompt <text>] [--n-gpu-layers <num>] [--mmap <true|false>]`
+*   `./manage.sh run-chat [--model-dir <path>] [--tokenizer <path>] [--threads <num>] [--system-prompt <text>] [--prompt <text>] [--steps <num>] [--n-gpu-layers <num>] [--mmap <true|false>]`
     *   (Note: `run-chat` specific sampling parameters like temperature, top-k, top-p are set to defaults in the C++ `main`.)
 *   `./manage.sh run-prompt [--model-dir <path>] [--tokenizer <path>] [--prompt <text>] [--steps <num>] [--threads <num>] [--n-gpu-layers <num>] [--mmap <true|false>][--temperature <num>]`
     *   This command runs the model with a single provided prompt and then exits.
@@ -299,14 +366,14 @@ This script provides equivalent functionality to `manage.sh` for Windows users.
 
 ```powershell
 .\\manage.ps1 build -BuildType Debug -Cuda OFF
-.\\manage.ps1 run-chat -ModelDir .\\models\\my_model.gguf -TokenizerPath .\\models\\tokenizer.json -Threads 2 -Prompt "Hello" -NGpuLayers 0 -Mmap $false
+.\\manage.ps1 run-chat -ModelDir .\\models\\my_model.gguf -TokenizerPath .\\models\\tokenizer.json -Threads 2 -SystemPrompt "You are a helpful assistant."
 ```
 
 **Key Command Options (refer to `.\\manage.ps1 help` for all options):**
 
 *   `.\\manage.ps1 build [-BuildType <Release|Debug>] [-Cuda <ON|OFF>]`
 *   `.\\manage.ps1 run-server [-ModelDir <path>] [-TokenizerPath <path>] [-Threads <num>] [-Host <hostname>] [-Port <num>] [-NGpuLayers <num>] [-Mmap <$true|$false>] [-NoLog]`
-*   `.\\manage.ps1 run-chat [-ModelDir <path>] [-TokenizerPath <path>] [-Threads <num>] [-Prompt <text>] [-NGpuLayers <num>] [-Mmap <$true|$false>]`
+*   `.\\manage.ps1 run-chat [-ModelDir <path>] [-TokenizerPath <path>] [-Threads <num>] [-SystemPrompt <text>] [-Prompt <text>] [-Steps <num>] [-NGpuLayers <num>] [-Mmap <$true|$false>]`
     *   (Note: `run-chat` specific sampling parameters like temperature, top-k, top-p are set to defaults in the C++ `main`.)
 *   `.\\manage.ps1 run-prompt [-ModelDir <path>] [-TokenizerPath <path>] [-Prompt <text>] [-Steps <num>] [-Threads <num>] [-NGpuLayers <num>] [-Mmap <$true|$false>][-Temperature <num>]`
     *   This command runs the model with a single provided prompt and then exits.
@@ -355,7 +422,7 @@ Besides the web server, you can interact with the models directly via command-li
     *   **Note on Sampling Parameters**: The `tinyllama` executable currently uses default internal values for temperature, top-k, and top-p. To control these, modify them within `main.cpp` or extend `main.cpp` to parse them from the command line.
     *   **Example (SafeTensors directory, chat mode via `manage.sh` which constructs the correct call):**
         ```bash
-        ./manage.sh run-chat --model-dir ./data/TinyLlama-1.1B-Chat-v1.0 --tokenizer ./data/TinyLlama-1.1B-Chat-v1.0/tokenizer.json --threads 4 --prompt "Who is Bill Gates?" --n-gpu-layers -1
+        ./manage.sh run-chat --model-dir ./data/TinyLlama-1.1B-Chat-v1.0 --tokenizer ./data/TinyLlama-1.1B-Chat-v1.0/tokenizer.json --threads 4 --system-prompt "You are a helpful assistant."
         ```
     *   **Example (GGUF file, direct call, prompt mode):**
         ```bash

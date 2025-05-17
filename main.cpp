@@ -8,23 +8,26 @@
  * required for proper model responses in both formats.
  *
  * Usage:
- *   tinyllama [model_path] [prompt] [steps] [temperature] [top_k] [top_p] [cpu_layers]
+ *   tinyllama <model_path> <tokenizer_path> <num_threads> <prompt|chat> [--system-prompt <system_prompt_string>] [initial_user_prompt] [max_tokens] [n_gpu_layers] [use_mmap] [temperature]
  *
  * Arguments:
- *   model_path: Path to model directory or .gguf file (default: data)
- *   prompt: Input text (default: "Hello, world!")
- *   steps: Number of tokens to generate (default: 64)
- *   temperature: Sampling temperature, lower is more deterministic (default: 0.1)
- *   top_k: Limit sampling to top K tokens (default: 40)
- *   top_p: Limit sampling to top P probability mass (default: 0.9)
- *   cpu_layers: Number of layers to offload to CPU (default: 0)
+ *   model_path: Path to the model file (.gguf) or directory (SafeTensors).
+ *   tokenizer_path: Path to the tokenizer file.
+ *   num_threads: Number of threads to use for generation.
+ *   prompt|chat: 'prompt' for single prompt generation or 'chat' for interactive chat mode.
+ *   --system-prompt: (Optional) System prompt to guide the model. Default: empty.
+ *   initial_user_prompt: (Optional) Initial user prompt string. Default: "Hello, world!"
+ *   max_tokens: (Optional) Maximum number of tokens to generate. Default: 256
+ *   n_gpu_layers: (Optional) Number of layers to offload to GPU (-1 for all, 0 for none). Default: -1 (all layers on GPU if available)
+ *   use_mmap: (Optional) Use mmap for GGUF files ('true' or 'false'). Default: true
+ *   temperature: (Optional) Sampling temperature (e.g., 0.1). Lower is more deterministic. Default: 0.1
  *
  * Example:
- *   ./tinyllama data "What is the capital of France?" 64 0.1 40 0.9 0
+ *   ./tinyllama ./models/model.gguf ./models/tokenizer.model 4 prompt --system-prompt "You are a helpful assistant." "What is the capital of France?" 128 0 true 0.1
  *
  * Note:
- *   The program always applies Q:A formatting to prompts ("Q: [prompt]\nA:")
- *   as this is required for proper responses from both GGUF and SafeTensors models.
+ *   The program may automatically apply Q:A formatting to prompts (e.g., "Q: [prompt]\nA:")
+ *   depending on the model type, as this can be required for proper responses.
  */
 
 #include <algorithm>
@@ -53,14 +56,15 @@ std::string trim_whitespace(const std::string& s) {
 void print_usage(const char* program_name) {
   std::cout << "Usage: " << program_name
             << " <model_path> <tokenizer_path> <num_threads> <prompt|chat> "
-               "[initial_prompt_string] [max_tokens] [n_gpu_layers] [use_mmap] [temperature]"
+               "[--system-prompt <system_prompt_string>] [initial_user_prompt] [max_tokens] [n_gpu_layers] [use_mmap] [temperature]"
             << std::endl;
   std::cout << "\nArguments:\n"
                "  model_path          : Path to the model file (.gguf) or directory (SafeTensors).\n"
                "  tokenizer_path      : Path to the tokenizer file.\n"
                "  num_threads         : Number of threads to use for generation.\n"
                "  prompt|chat         : 'prompt' for single prompt generation or 'chat' for chat mode.\n"
-               "  initial_prompt_string: (Optional) Initial prompt string. Default: \"Hello, world!\".\n"
+               "  --system-prompt     : (Optional) System prompt to guide the model. Default: empty.\n"
+               "  initial_user_prompt : (Optional) Initial user prompt string. Default: \"Hello, world!\".\n"
                "  max_tokens          : (Optional) Maximum number of tokens to generate. Default: 256.\n"
                "  n_gpu_layers        : (Optional) Number of layers to offload to GPU (-1 for all, 0 for none). Default: -1.\n"
                "  use_mmap            : (Optional) Use mmap for GGUF files ('true' or 'false'). Default: true.\n"
@@ -82,16 +86,26 @@ int main(int argc, char** argv) {
 
   std::string model_path_or_dir = argv[1];
   std::string tokenizer_path = argv[2];
-  int num_threads = 4; // Default
+  int num_threads = 4; // Default, will be overwritten if provided by argv[3]
   try {
-    num_threads = std::stoi(argv[3]);
+      if (argc > 3) { // Ensure argv[3] (number of threads) exists
+          num_threads = std::stoi(argv[3]);
+      } else {
+          Logger::warning("Number of threads not provided, using default: " + std::to_string(num_threads));
+      }
   } catch (const std::exception& e) {
-    Logger::error("Invalid num_threads argument: " + std::string(argv[3]) +
-                  ". Using default: " + std::to_string(num_threads));
+      Logger::warning("Could not parse num_threads from argv[3]: '" + (argc > 3 ? std::string(argv[3]) : "<not provided>") + "'. Using default: " + std::to_string(num_threads));
   }
+  
+  if (argc < 5) { // Check after attempting to parse num_threads
+      std::cerr << "ERROR: Missing mode argument (prompt|chat) after num_threads." << std::endl;
+      print_usage(argv[0]);
+      return 1;
+  }
+  std::string mode_str = argv[4]; // Mode (prompt|chat) is argv[4]
 
-  std::string mode_str = argv[4];
-  std::string initial_prompt_string = "Hello, world!"; // Default
+  std::string system_prompt_str = ""; // Default empty system prompt
+  std::string user_prompt_str = "Hello, world!"; // Default user prompt
   int max_tokens = 256; // Default for steps
   int n_gpu_layers = -1; // Default: all layers on GPU
   bool use_mmap = true; // Default: use mmap
@@ -101,52 +115,59 @@ int main(int argc, char** argv) {
   int top_k = 40;           // Default, not exposed via CLI in this version
   float top_p = 0.9f;       // Default, not exposed via CLI in this version
 
-  if (argc > 5) {
-    initial_prompt_string = trim_whitespace(argv[5]);
-  }
-
-  if (argc > 6) {
-    try {
-      max_tokens = std::stoi(argv[6]);
-    } catch (const std::exception& e) {
-      Logger::error("Invalid max_tokens argument: " + std::string(argv[6]) +
-                    ". Using default: " + std::to_string(max_tokens));
-    }
-  }
-
-  if (argc > 7) {
-    try {
-      n_gpu_layers = std::stoi(argv[7]);
-    } catch (const std::invalid_argument& ia) {
-      std::cerr << "ERROR: Invalid n_gpu_layers: " << argv[7] << std::endl;
-      return 1;
-    }
-  }
-
-  if (argc > 8) {
-    std::string mmap_str = argv[8];
-    std::transform(mmap_str.begin(), mmap_str.end(), mmap_str.begin(), ::tolower);
-    if (mmap_str == "false" || mmap_str == "0") {
-      use_mmap = false;
-    } else if (mmap_str == "true" || mmap_str == "1") {
-      use_mmap = true;
-    } else {
-      std::cerr << "ERROR: Invalid use_mmap value: " << argv[8]
-                << ". Expected 'true', 'false', '1', or '0'." << std::endl;
-      return 1;
-    }
-  }
-
-  if (argc > 9) { // Temperature is argv[9]
-    try {
-      temperature = std::stof(argv[9]);
-      if (temperature < 0.0f) {
-        Logger::warning("Temperature cannot be negative. Using default: 0.1");
-        temperature = 0.1f;
+  int current_arg_idx = 5;
+  while(current_arg_idx < argc) {
+    std::string arg = argv[current_arg_idx];
+    if (arg == "--system-prompt" || arg == "-sp") {
+      if (current_arg_idx + 1 < argc) {
+        system_prompt_str = argv[current_arg_idx + 1];
+        current_arg_idx += 2;
+      } else {
+        std::cerr << "ERROR: --system-prompt requires a value." << std::endl;
+        print_usage(argv[0]);
+        return 1;
       }
-    } catch (const std::exception& e) {
-      Logger::error("Invalid temperature argument: " + std::string(argv[9]) +
-                    ". Using default: " + std::to_string(temperature));
+    } else if (arg == "--max-tokens" || arg == "-mt") {
+        if (current_arg_idx + 1 < argc) {
+            try { max_tokens = std::stoi(argv[current_arg_idx+1]); }
+            catch (const std::exception& e) { Logger::error("Invalid max_tokens: " + std::string(argv[current_arg_idx+1])); }
+            current_arg_idx += 2;
+        } else { std::cerr << "ERROR: --max-tokens requires a value." << std::endl; return 1;}
+    } else if (arg == "--n-gpu-layers" || arg == "-ngl") {
+        if (current_arg_idx + 1 < argc) {
+            try { n_gpu_layers = std::stoi(argv[current_arg_idx+1]); }
+            catch (const std::exception& e) { Logger::error("Invalid n_gpu_layers: " + std::string(argv[current_arg_idx+1])); }
+            current_arg_idx += 2;
+        } else { std::cerr << "ERROR: --n-gpu-layers requires a value." << std::endl; return 1;}
+    } else if (arg == "--use-mmap") {
+         if (current_arg_idx + 1 < argc) {
+            std::string mmap_str_val = argv[current_arg_idx+1];
+            std::transform(mmap_str_val.begin(), mmap_str_val.end(), mmap_str_val.begin(), ::tolower);
+            if (mmap_str_val == "false" || mmap_str_val == "0") use_mmap = false;
+            else if (mmap_str_val == "true" || mmap_str_val == "1") use_mmap = true;
+            else { std::cerr << "ERROR: Invalid use_mmap value." << std::endl; return 1; }
+            current_arg_idx += 2;
+        } else { std::cerr << "ERROR: --use-mmap requires a value." << std::endl; return 1;}
+    } else if (arg == "--temperature" || arg == "-t") {
+        if (current_arg_idx + 1 < argc) {
+            try { temperature = std::stof(argv[current_arg_idx+1]); }
+            catch (const std::exception& e) { Logger::error("Invalid temperature: " + std::string(argv[current_arg_idx+1]));}
+            current_arg_idx += 2;
+        } else { std::cerr << "ERROR: --temperature requires a value." << std::endl; return 1;}
+    }
+    else {
+        if (user_prompt_str == "Hello, world!") {
+             user_prompt_str = trim_whitespace(argv[current_arg_idx]);
+        } else if (argv[current_arg_idx][0] != '-') {
+             std::cerr << "ERROR: Unexpected positional argument: " << argv[current_arg_idx] << std::endl;
+             print_usage(argv[0]);
+             return 1;
+        } else {
+            std::cerr << "ERROR: Unknown option: " << argv[current_arg_idx] << std::endl;
+            print_usage(argv[0]);
+            return 1;
+        }
+        current_arg_idx++;
     }
   }
 
@@ -154,7 +175,8 @@ int main(int argc, char** argv) {
   Logger::info("Tokenizer path: " + tokenizer_path);
   Logger::info("Num threads: " + std::to_string(num_threads));
   Logger::info("Mode: " + mode_str);
-  Logger::info("Initial prompt/string: \"" + initial_prompt_string + "\"");
+  Logger::info("System Prompt: \"" + system_prompt_str + "\"");
+  Logger::info("Initial User Prompt: \"" + user_prompt_str + "\"");
   Logger::info("Max tokens: " + std::to_string(max_tokens));
   Logger::info("N GPU Layers: " + std::to_string(n_gpu_layers));
   Logger::info(std::string("Use mmap: ") + (use_mmap ? "true" : "false"));
@@ -165,39 +187,44 @@ int main(int argc, char** argv) {
     Logger::info("TinyLlamaSession initialized successfully.");
 
     const ModelConfig& config = session.get_config();
-    bool apply_qa_formatting; // Explicitly set based on tokenizer family
+    bool apply_qa_formatting_decision; // This will be true if no advanced template is used
 
-    if (config.tokenizer_family == ModelConfig::TokenizerFamily::LLAMA3_TIKTOKEN) {
-        apply_qa_formatting = false;
-        Logger::info("[Main.cpp] Llama 3 model detected (via tokenizer_family). Q&A prompt formatting will be DISABLED for this session.");
+    if (config.tokenizer_family == ModelConfig::TokenizerFamily::LLAMA3_TIKTOKEN || \
+        (session.get_tokenizer() && !session.get_tokenizer()->get_gguf_chat_template().empty())) { // Use getter
+        apply_qa_formatting_decision = false; // Llama 3 or GGUF template handles formatting
+        Logger::info("[Main.cpp] Llama 3 model or GGUF chat template detected. Internal Q&A prompt formatting will be DISABLED.");
     } else {
-        apply_qa_formatting = true; // Default for non-Llama 3 / other models in this CLI context
-        Logger::info("[Main.cpp] Non-Llama 3 model detected (via tokenizer_family). Q&A prompt formatting will be ENABLED for this session.");
+        apply_qa_formatting_decision = true; // Default for other models without GGUF template
+        Logger::info("[Main.cpp] Non-Llama 3 model and no GGUF chat template. Internal Q&A prompt formatting will be ENABLED.");
     }
 
-    Logger::info("[Main.cpp] Mode: '" + mode_str + "'. Final decision for apply_qa_formatting: " + std::string(apply_qa_formatting ? "true" : "false"));
+    Logger::info("[Main.cpp] Mode: '" + mode_str + "'. Final decision for apply_qa_formatting_decision: " + std::string(apply_qa_formatting_decision ? "true" : "false"));
 
     if (mode_str == "prompt") {
       std::string generated_text =
-          session.generate(initial_prompt_string, max_tokens, temperature, top_k, top_p, "", apply_qa_formatting);
+          session.generate(user_prompt_str, max_tokens, temperature, top_k, top_p, system_prompt_str, apply_qa_formatting_decision);
       std::cout << generated_text << std::endl;
     } else if (mode_str == "chat") {
-      std::cout << "Entering chat mode. Type 'exit', 'quit' to end." << std::endl;
-      std::string current_chat_prompt;
-      if (!initial_prompt_string.empty() && initial_prompt_string != "Hello, world!") {
-          current_chat_prompt = initial_prompt_string;
-          std::cout << "AI: " << session.generate(current_chat_prompt, max_tokens, temperature, top_k, top_p, "", apply_qa_formatting) << std::endl;
+      std::cout << "Entering chat mode. System Prompt: \"" << system_prompt_str << "\". Type 'exit', 'quit' to end." << std::endl;
+      std::string current_user_message;
+      
+      if (!user_prompt_str.empty() && (user_prompt_str != "Hello, world!" || !system_prompt_str.empty() )) {
+          current_user_message = user_prompt_str;
+          std::cout << "You: " << current_user_message << std::endl;
+          std::string ai_response = session.generate(current_user_message, max_tokens, temperature, top_k, top_p, system_prompt_str, apply_qa_formatting_decision);
+          std::cout << "AI: " << ai_response << std::endl;
       }
+
       while (true) {
         std::cout << "You: ";
-        std::getline(std::cin, current_chat_prompt);
-        if (current_chat_prompt == "exit" || current_chat_prompt == "quit") {
+        std::getline(std::cin, current_user_message);
+        if (current_user_message == "exit" || current_user_message == "quit") {
           break;
         }
-        if (current_chat_prompt.empty()) {
+        if (current_user_message.empty()) {
           continue;
         }
-        std::string ai_response = session.generate(current_chat_prompt, max_tokens, temperature, top_k, top_p, "", apply_qa_formatting);
+        std::string ai_response = session.generate(current_user_message, max_tokens, temperature, top_k, top_p, system_prompt_str, apply_qa_formatting_decision);
         std::cout << "AI: " << ai_response << std::endl;
       }
     } else {

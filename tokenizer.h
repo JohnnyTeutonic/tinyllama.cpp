@@ -180,6 +180,8 @@ class Tokenizer {
    */
   int unk_token_id() const { return unk_token_id_; }
 
+  const std::string& get_gguf_chat_template() const;
+
  private:
   /**
    * @brief Loads vocabulary from JSON file
@@ -229,6 +231,7 @@ class Tokenizer {
   std::unordered_map<char, int> byte_char_to_id_;       /**< Byte-level character mapping */
 
   Type type_ = Type::UNKNOWN;
+  std::string gguf_chat_template_;                    /**< Chat template string from GGUF metadata */
 
   // SentencePiece specific helper methods (reinstated)
   std::vector<std::string> bpe_tokenize(const std::string& text) const;
@@ -238,18 +241,20 @@ class Tokenizer {
   std::string capitalize_first_letter(std::string s) const;
 
 
-  
+  // New BPE tokenization method for TikToken (Llama 3) path
+  std::vector<int> bpe_tokenize_to_ids(const std::string& text,
+                                       bool add_bos_token_param,
+                                       bool add_eos_token_param,
+                                       bool ignore_merges_param) const;
+
+  // Helper for the new BPE tokenization path
+  void add_bigram_to_queue_refactored(const char* text_data_base,
+                                      const std::vector<llm_symbol>& symbols,
+                                      llm_symbol::index first_symbol_idx,
+                                      std::priority_queue<std::pair<int, int>,
+                                                          std::vector<std::pair<int, int>>,
+                                                          std::greater<std::pair<int, int>>>& work_queue) const;
+
   int find_bpe_rank(const std::string & token_left, const std::string & token_right) const;
   
-
-  
-  std::vector<int> bpe_tokenize_to_ids(const std::string& text) const;
-  
-
-  
-  void add_bigram_to_queue(const std::vector<llm_symbol>& symbols, 
-                             llm_symbol::index left, llm_symbol::index right, 
-                             llm_bigram_bpe::queue& work_queue) const;
-  
-
 };
