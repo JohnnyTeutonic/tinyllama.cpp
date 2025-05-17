@@ -9,7 +9,7 @@
 #include <nlohmann/json.hpp>
 #include <queue>
 #include <boost/regex.hpp> 
-#include <boost/xpressive/xpressive.hpp> // For xpressive regex
+#include <boost/xpressive/xpressive.hpp>
 #include <sstream>
 #include <stdexcept>  
 #include <unordered_set>
@@ -1413,6 +1413,19 @@ std::string Tokenizer::decode_sentencepiece(const std::vector<int>& ids,
             }
         }
 
+        // NEW: Check for <0xNN> format and convert if necessary
+        if (token_str.length() == 6 && token_str.rfind("<0x", 0) == 0 && token_str[5] == '>') {
+            try {
+                std::string hex_val_str = token_str.substr(3, 2);
+                int byte_val = std::stoi(hex_val_str, nullptr, 16);
+                token_str = std::string(1, static_cast<char>(byte_val));
+                Logger::debug("[decode_sentencepiece] Converted '<0x" + hex_val_str + ">' to char: " + std::to_string(byte_val));
+            } catch (const std::exception& e) {
+                Logger::warning("[decode_sentencepiece] Failed to parse hex from token: '" + token_str + "'. Error: " + e.what());
+                // Keep original token_str if parsing fails
+            }
+        }
+
         if (token_str.empty() && !is_special_or_invalid) {
             if (unk_token_id_ != -1) {
                  // Check if UNK should be skipped
@@ -1437,27 +1450,56 @@ std::string Tokenizer::decode_sentencepiece(const std::vector<int>& ids,
             }
         }
 
+        // Handle cases where the token IS the space prefix itself
+        if (token_str == sp_space_prefix || token_str == gpt2_space_prefix) {
+            if (first_token) {
+                // If it's the first token and it's just a space prefix, ignore it and wait for actual content.
+                // first_token remains true.
+                Logger::debug("[decode_sentencepiece] Ignored leading standalone space prefix token.");
+                continue;
+            }
+            // If not the first token, and it's a standalone space prefix, ensure one space is added.
+            std::string current_output_check = ss.str();
+            if (current_output_check.empty() || current_output_check.back() != ' ') {
+                ss << " ";
+                Logger::debug("[decode_sentencepiece] Added space for standalone prefix token mid-sequence.");
+            }
+            first_token = false; // A space was effectively output.
+            continue; // Move to the next token.
+        }
 
         // Process the token string: handle prefixes and append to result
-        if (!token_str.empty()) { // Check again in case it became empty due to skipping UNK
+        if (!token_str.empty()) { 
             bool starts_with_sp_prefix = (token_str.rfind(sp_space_prefix, 0) == 0);
             // Check for GPT2 prefix only if SP prefix wasn't found
             bool starts_with_gpt2_prefix = (!starts_with_sp_prefix && token_str.rfind(gpt2_space_prefix, 0) == 0);
 
             if (starts_with_sp_prefix) {
-                 // Append space only if it's not the very first token outputted
-                if (!first_token) {
+                std::string current_output = ss.str();
+                if (!first_token && (current_output.empty() || current_output.back() != ' ')) {
                     ss << " ";
                 }
-                // Append the rest of the token after the prefix
-                ss << token_str.substr(sp_space_prefix.length());
+                std::string content = token_str.substr(sp_space_prefix.length());
+                // RE-ADD: Trim any leading literal spaces from the content itself
+                size_t first_non_space = content.find_first_not_of(' ');
+                if (std::string::npos != first_non_space) {
+                    content = content.substr(first_non_space);
+                }
+                ss << content;
                 first_token = false; // We have outputted something
             }
             else if (starts_with_gpt2_prefix) { // Handle Ġ prefix if found
-                 if (!first_token) {
+                std::string current_output = ss.str();
+                if (!first_token && (current_output.empty() || current_output.back() != ' ')) {
                     ss << " ";
                 }
-                ss << token_str.substr(gpt2_space_prefix.length());
+                std::string content = token_str.substr(gpt2_space_prefix.length());
+                // RE-ADD: Trim any leading literal spaces from the content itself
+                size_t first_non_space = content.find_first_not_of(' ');
+                if (std::string::npos != first_non_space) {
+                    content = content.substr(first_non_space);
+                }
+                ss << content;
                 first_token = false;
             }
             else { // Token does not start with a known space prefix
