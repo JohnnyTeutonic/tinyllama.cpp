@@ -70,8 +70,10 @@ PYBIND11_MODULE(tinyllama_bindings, m) {
              py::arg("top_k") = 40,
              py::arg("top_p") = 0.9f,
              py::arg("system_prompt") = "",
-             py::arg("apply_q_a_format") = false,
-             "Generates text based on a prompt with various sampling parameters."
+             py::arg("apply_q_a_format") = true,
+             "Generates text based on a prompt with various sampling parameters. "
+             "apply_q_a_format defaults to true, applying Q:A style for models like Llama 2 "
+             "if no GGUF or Llama 3 chat template is active."
         )
         .def("get_config", &tinyllama::TinyLlamaSession::get_config, 
              py::return_value_policy::reference_internal,

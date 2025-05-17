@@ -78,17 +78,21 @@ function Show-Usage {
     Write-Host "  run-chat     Run the command-line chat client."
     Write-Host "               Options:"
     Write-Host "                 -ModelDir <path>          (default: ${DefaultModelDir})"
+    Write-Host "                 -TokenizerPath <path>      (default: auto-detect from ModelDir or '${DefaultTokenizerPath}')"
+    Write-Host "                 -Threads <num>             (default: ${DefaultThreads})"
+    Write-Host "                 -SystemPrompt <text>      (Optional) System prompt to guide the model."
     Write-Host "                 -Temperature <float>        (default: ${DefaultTemperature})"
     Write-Host "                 -TopK <int>               (default: ${DefaultTopK})"
     Write-Host "                 -TopP <float>             (default: ${DefaultTopP})"
-    Write-Host "                 -Prompt <text>             (default: interactive mode, uses default prompt)"
+    Write-Host "                 -Prompt <text>             (default: ${DefaultPrompt})"
     Write-Host "                 -NGpuLayers <int>         (default: ${DefaultNGpuLayers}, -1 for all on GPU)"
     Write-Host "                 -Mmap <true|false>        (default: ${DefaultUseMmap})"
     Write-Host ""
     Write-Host "  run-prompt   Run the C++ model with a single prompt and exit."
     Write-Host "               Options:"
     Write-Host "                 -ModelDir <path>          (default: ${DefaultModelDir})"
-    Write-Host "                 -TokenizerPath <path>      (default: ${DefaultTokenizerPath})"
+    Write-Host "                 -TokenizerPath <path>      (default: auto-detect from ModelDir or '${DefaultTokenizerPath}')"
+    Write-Host "                 -SystemPrompt <text>      (Optional) System prompt to guide the model."
     Write-Host "                 -Prompt <text>             (default: ${DefaultPrompt})"
     Write-Host "                 -Steps <num>               (default: ${DefaultSteps})"
     Write-Host "                 -Temperature <float>       (default: ${DefaultTemperature})"
@@ -243,219 +247,139 @@ function Invoke-RunChat {
         [string]$TokenizerPath = $DefaultTokenizerPath,
         [int]$Threads = $DefaultThreads,
         [bool]$UseMmap = $DefaultUseMmap,
+        [string]$SystemPrompt = "", # New parameter
         [switch]$NoLog
     )
-    $Params = $script:Arguments | ConvertFrom-StringData -Delimiter ' '
-    if ($Params.ModelDir) { $ModelDir = $Params.ModelDir }
-    if ($Params.Temperature) { $Temperature = $Params.Temperature }
-    if ($Params.TopK) { $TopK = $Params.TopK }
-    if ($Params.TopP) { $TopP = $Params.TopP }
-    if ($Params.Prompt) { $Prompt = $Params.Prompt }
-    if ($Params.NGpuLayers) { $NGpuLayers = [int]$Params.NGpuLayers }
-    if ($Params.TokenizerPath) { $TokenizerPath = $Params.TokenizerPath }
-    if ($Params.Threads) { $Threads = [int]$Params.Threads }
-    if ($Params.UseMmap) { $UseMmap = [bool]$Params.UseMmap }
-    if ($Params.NoLog) { $NoLog = $Params.NoLog }
+    $LocalArgs = $PSBoundParameters # Capture explicitly passed parameters
 
-    $ExecutablePath = Join-Path -Path $ProjectRootDir -ChildPath "build/tinyllama.exe"
-     if (-not (Test-Path $ExecutablePath)) {
-      $ExecutablePath = Join-Path -Path $ProjectRootDir -ChildPath "build/${BuildType}/tinyllama.exe"
-    }
-    if (-not (Test-Path $ExecutablePath)) {
-      $ExecutablePath = Join-Path -Path $ProjectRootDir -ChildPath "build/Release/tinyllama.exe" # MSVC default
-    }
-     if (-not (Test-Path $ExecutablePath)) {
-      $ExecutablePath = Join-Path -Path $ProjectRootDir -ChildPath "build/Debug/tinyllama.exe" # MSVC default
+    # Parse remaining -Arguments as a hashtable for options not explicitly defined as params
+    # This is a bit simplistic; a more robust parser would be better for general -key value pairs.
+    $RemainingArgs = @{}
+    for ($i = 0; $i -lt $Arguments.Length; $i += 2) {
+        if ($Arguments[$i] -match '^-([\w-]+)$') {
+            $Key = $Matches[1]
+            if (($i + 1) -lt $Arguments.Length) {
+                $RemainingArgs[$Key] = $Arguments[$i+1]
+            } else {
+                $RemainingArgs[$Key] = $true # For switch-like behavior if value is missing
+            }
+        }
     }
 
-
-    if (-not (Test-Path $ExecutablePath)) {
-        Write-ErrorAndExit "Chat client executable not found at common paths (e.g., $ProjectRootDir\build\tinyllama.exe or $ProjectRootDir\build\$BuildType\tinyllama.exe). Please build the project first."
+    # Override with $RemainingArgs if they exist
+    if ($RemainingArgs.ContainsKey('ModelDir')) { $ModelDir = $RemainingArgs['ModelDir'] }
+    if ($RemainingArgs.ContainsKey('Temperature')) { $Temperature = $RemainingArgs['Temperature'] }
+    if ($RemainingArgs.ContainsKey('TopK')) { $TopK = $RemainingArgs['TopK'] }
+    if ($RemainingArgs.ContainsKey('TopP')) { $TopP = $RemainingArgs['TopP'] }
+    if ($RemainingArgs.ContainsKey('Prompt')) { $Prompt = $RemainingArgs['Prompt'] }
+    if ($RemainingArgs.ContainsKey('BuildType')) { $BuildType = $RemainingArgs['BuildType'] }
+    if ($RemainingArgs.ContainsKey('Steps')) { $Steps = $RemainingArgs['Steps'] }
+    if ($RemainingArgs.ContainsKey('NGpuLayers')) { $NGpuLayers = [int]$RemainingArgs['NGpuLayers'] }
+    if ($RemainingArgs.ContainsKey('TokenizerPath')) { $TokenizerPath = $RemainingArgs['TokenizerPath'] }
+    if ($RemainingArgs.ContainsKey('Threads')) { $Threads = [int]$RemainingArgs['Threads'] }
+    if ($RemainingArgs.ContainsKey('UseMmap')) { $UseMmap = [bool]::Parse($RemainingArgs['UseMmap']) }
+    if ($RemainingArgs.ContainsKey('SystemPrompt')) { $SystemPrompt = $RemainingArgs['SystemPrompt'] }
+    if ($RemainingArgs.ContainsKey('NoLog')) { $NoLog = $true }
+    
+    $ExecutablePath = Find-Executable -Name "main" -BuildType $BuildType
+    if (-not $ExecutablePath) {
+        Write-ErrorAndExit "Main executable (main.exe or main) not found. Please build the project first."
     }
 
     Log-Message "Starting chat client from $ExecutablePath..."
-    Log-Message "Model directory/path: $ModelDir"
-    Log-Message "Temperature: $Temperature"
-    Log-Message "Top-K: $TopK"
-    Log-Message "Top-P: $TopP"
-    Log-Message "N GPU Layers: $NGpuLayers"
-    Log-Message "Tokenizer Path: $TokenizerPath"
-    Log-Message "Threads: $Threads"
-    Log-Message "Use Mmap: $UseMmap"
-    Log-Message "No Log: $NoLog"
-    
-    $ScriptArgs = @($ModelDir, $TokenizerPath, $Threads, $NGpuLayers, [string]$UseMmap)
-    if ([string]::IsNullOrEmpty($Prompt)) {
-        Log-Message "Mode: Interactive"
-        # For interactive, tinyllama.exe might not need a prompt, or a default one. Assuming it handles interactive mode if no prompt.
-        # The C++ tinyllama expects: model_path, prompt, steps, temperature, top_k, top_p
-        # For interactive mode, let's pass a default prompt and let the C++ app handle it.
-        $ScriptArgs += "What is the capital of France?" # Default placeholder prompt for the C++ app if it expects one
-        $ScriptArgs += $Steps
-    } else {
-        Log-Message "Prompt: $Prompt"
-        $ScriptArgs += $Prompt
-        $ScriptArgs += $Steps # Use default steps if prompt is provided
+
+    $ActualModelPath = Resolve-ModelPath -ModelDir $ModelDir
+    $ActualTokenizerPath = Resolve-TokenizerPath -ModelDir $ModelDir -TokenizerPath $TokenizerPath -ModelPathToCheck $ActualModelPath
+
+    $ExecArgs = @(
+        $ActualModelPath,
+        $ActualTokenizerPath,
+        [string]$Threads,
+        "chat" # Mode
+    )
+
+    if (-not [string]::IsNullOrEmpty($SystemPrompt)) {
+        $ExecArgs += "--system-prompt", $SystemPrompt
     }
-    $ScriptArgs += @($Temperature, $TopK, $TopP)
-    
-    if ($NoLog) {
-        $ScriptArgs += "--no-log"
+    if (-not [string]::IsNullOrEmpty($Prompt)) {
+        $ExecArgs += $Prompt # This is initial_user_prompt
     }
     
-    Log-Message "Executing: $ExecutablePath $ScriptArgs"
-    & $ExecutablePath $ScriptArgs
+    $ExecArgs += "--max-tokens", $Steps
+    $ExecArgs += "--n-gpu-layers", ([string]$NGpuLayers)
+    $ExecArgs += "--use-mmap", ([string]$UseMmap).ToLower()
+    $ExecArgs += "--temperature", $Temperature
+    # TopK and TopP are not directly passed to main.cpp in this version
+
+    Log-Message "Running chat with: $ExecutablePath $($ExecArgs -join ' ' )"
+    & $ExecutablePath $ExecArgs
     if ($LASTEXITCODE -ne 0) { Write-ErrorAndExit "Chat client execution failed."}
 }
 
 function Invoke-RunPrompt {
     param (
-        [string]$InitialModelPath = $DefaultModelDir, 
-        [string]$InitialPrompt = "",
-        [string]$InitialSteps = "64", 
-        [string]$InitialTemperature = $DefaultTemperature, # Added InitialTemperature
-        [int]$InitialNGpuLayers = $DefaultNGpuLayers,
-        [string]$InitialTokenizerPath = $DefaultTokenizerPath, 
-        [bool]$InitialUseMmap = $DefaultUseMmap,
-        [int]$InitialThreads = $DefaultThreads
+        [string]$ModelDir = $DefaultModelDir,
+        [string]$TokenizerPath = $DefaultTokenizerPath,
+        [string]$Prompt = "Hello, world!",
+        [string]$Steps = "128",
+        [string]$BuildType = $DefaultBuildType, 
+        [string]$Temperature = $DefaultTemperature,
+        [int]$NGpuLayers = $DefaultNGpuLayers,
+        [int]$Threads = $DefaultThreads,
+        [bool]$UseMmap = $DefaultUseMmap,
+        [string]$SystemPrompt = "" # New parameter
     )
-
-    [string]$ModelPath = $InitialModelPath
-    [string]$Prompt = $InitialPrompt
-    [string]$Steps = $InitialSteps
-    [string]$Temperature = $InitialTemperature # Added Temperature variable
-    [int]$NGpuLayers = $InitialNGpuLayers
-    [string]$TokenizerPath = $InitialTokenizerPath
-    [bool]$UseMmap = $InitialUseMmap
-    [int]$Threads = $InitialThreads
-
-    # Parse $script:Arguments
-    $RemainingArgs = $script:Arguments
-    $ArgsToParse = New-Object System.Collections.Generic.List[string]
-
-    # Check if the first argument is a positional model path
-    if ($RemainingArgs.Count -gt 0 -and -not ($RemainingArgs[0].StartsWith("-"))) {
-        $ModelPath = $RemainingArgs[0]
-        Log-Message "Positional model path detected: $ModelPath"
-        # Add remaining args (skipping the first one) to $ArgsToParse
-        for ($j = 1; $j -lt $RemainingArgs.Count; $j++) {
-            $ArgsToParse.Add($RemainingArgs[$j])
-        }
-    } else {
-        # All args are potentially named or no args
-        $ArgsToParse.AddRange($RemainingArgs)
-    }
-
-    # Parse named arguments from $ArgsToParse
-    $NamedParams = @{}
-    for ($i = 0; $i -lt $ArgsToParse.Count; $i++) {
-        if ($ArgsToParse[$i] -match \'^-{1,2}(.+)\') {
+    $LocalArgs = $PSBoundParameters
+    $RemainingArgs = @{}
+    for ($i = 0; $i -lt $Arguments.Length; $i += 2) {
+        if ($Arguments[$i] -match '^-([\w-]+)$') {
             $Key = $Matches[1]
-            # Check if it's a switch (no value follows or next arg is another param)
-            if (($i + 1) -ge $ArgsToParse.Count -or $ArgsToParse[$i+1].StartsWith("-")) {
-                $NamedParams[$Key] = $true # Switch parameter
-            } else {
-                $NamedParams[$Key] = $ArgsToParse[$i+1]
-                $i++ # Increment to skip the value
-            }
+            if (($i + 1) -lt $Arguments.Length) { $RemainingArgs[$Key] = $Arguments[$i+1] }
+            else { $RemainingArgs[$Key] = $true }
         }
-        # Silently ignore arguments that are not part of a key-value pair after positional model path
     }
 
-    # Override defaults with parsed named arguments
-    if ($NamedParams.ContainsKey('ModelDir')) {
-        # If a positional ModelPath was set AND different from InitialModelPath (meaning it was truly positional)
-        # AND -ModelDir is also present, this is a conflict.
-        if (($ModelPath -ne $InitialModelPath) -and ($ArgsToParse.Count -lt $RemainingArgs.Count)) { # $ArgsToParse.Count < $RemainingArgs.Count implies positional was consumed
-             Write-ErrorAndExit "Cannot specify both a positional model path ('$ModelPath') and -ModelDir ('$($NamedParams['ModelDir'])'). Please provide only one."
-        }
-        $ModelPath = $NamedParams['ModelDir']
-        Log-Message "Using -ModelDir: $ModelPath"
+    if ($RemainingArgs.ContainsKey('ModelDir')) { $ModelDir = $RemainingArgs['ModelDir'] }
+    if ($RemainingArgs.ContainsKey('TokenizerPath')) { $TokenizerPath = $RemainingArgs['TokenizerPath'] }
+    if ($RemainingArgs.ContainsKey('Prompt')) { $Prompt = $RemainingArgs['Prompt'] }
+    if ($RemainingArgs.ContainsKey('Steps')) { $Steps = $RemainingArgs['Steps'] }
+    if ($RemainingArgs.ContainsKey('BuildType')) { $BuildType = $RemainingArgs['BuildType'] }
+    if ($RemainingArgs.ContainsKey('Temperature')) { $Temperature = $RemainingArgs['Temperature'] }
+    if ($RemainingArgs.ContainsKey('NGpuLayers')) { $NGpuLayers = [int]$RemainingArgs['NGpuLayers'] }
+    if ($RemainingArgs.ContainsKey('Threads')) { $Threads = [int]$RemainingArgs['Threads'] }
+    if ($RemainingArgs.ContainsKey('UseMmap')) { $UseMmap = [bool]::Parse($RemainingArgs['UseMmap']) }
+    if ($RemainingArgs.ContainsKey('SystemPrompt')) { $SystemPrompt = $RemainingArgs['SystemPrompt'] }
+
+    if ([string]::IsNullOrEmpty($Prompt)) {
+        Write-ErrorAndExit "Prompt text cannot be empty for run-prompt. Use -Prompt <text>."
     }
-
-    if ($NamedParams.ContainsKey('Prompt')) { $Prompt = $NamedParams['Prompt'] }
-    if ($NamedParams.ContainsKey('Steps')) { $Steps = $NamedParams['Steps'] }
-    if ($NamedParams.ContainsKey('Temperature')) { $Temperature = $NamedParams['Temperature'] } # Parse Temperature
-    if ($NamedParams.ContainsKey('NGpuLayers')) { $NGpuLayers = [int]$NamedParams['NGpuLayers'] }
-    if ($NamedParams.ContainsKey('TokenizerPath')) { $TokenizerPath = $NamedParams['TokenizerPath'] }
-    if ($NamedParams.ContainsKey('UseMmap')) { $UseMmap = [bool]::Parse($NamedParams['UseMmap']) } # Ensure boolean conversion
-    if ($NamedParams.ContainsKey('Threads')) { $Threads = [int]$NamedParams['Threads'] }
-
-
-    # Executable path determination
-    $ExecutableName = "main.exe" # Assuming main.exe is the prompt executable
-    $ExecutablePathCandidates = @(
-        (Join-Path -Path $ProjectRootDir -ChildPath "build\\bin\\$ExecutableName"),
-        (Join-Path -Path $ProjectRootDir -ChildPath "build\\$ExecutableName"), # Fallback
-        (Join-Path -Path $ProjectRootDir -ChildPath "build\\Release\\$ExecutableName"),
-        (Join-Path -Path $ProjectRootDir -ChildPath "build\\Debug\\$ExecutableName")
-    )
-    $ExecutablePath = $ExecutablePathCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-
+    
+    $ExecutablePath = Find-Executable -Name "main" -BuildType $BuildType
     if (-not $ExecutablePath) {
-        Write-ErrorAndExit "Prompt executable '$ExecutableName' not found. Searched: $($ExecutablePathCandidates -join ', ')"
-    }
-    Log-Message "Using executable: $ExecutablePath"
-
-
-    # Adjust TokenizerPath based on ModelPath
-    # If ModelPath is a file (likely GGUF)
-    if ((Test-Path $ModelPath -PathType Leaf)) {
-        if (($TokenizerPath -eq $InitialTokenizerPath) -or ([string]::IsNullOrEmpty($TokenizerPath))) {
-            # If TokenizerPath is default/empty, C++ app will look for "tokenizer.model" or use GGUF's embedded tokenizer.
-            $TokenizerPath = "tokenizer.model" 
-            Log-Message "ModelPath is a file. Using default TokenizerPath ('$TokenizerPath') for C++ app to resolve."
-        }
-        # If TokenizerPath was explicitly set (e.g. -TokenizerPath path/to/tokenizer.model), use that value directly.
-    } elseif (Test-Path $ModelPath -PathType Container) { # If ModelPath is a directory
-        if (([string]::IsNullOrEmpty($TokenizerPath)) -or ($TokenizerPath -eq "tokenizer.model") -or ($TokenizerPath -eq $InitialTokenizerPath)) {
-            # If tokenizer path is default, empty, or "tokenizer.model", assume it's relative to ModelPath (the directory)
-            $TokenizerPath = Join-Path -Path $ModelPath -ChildPath "tokenizer.model"
-            Log-Message "ModelPath is a directory. Resolved TokenizerPath to '$TokenizerPath'"
-        } elseif (-not (Split-Path $TokenizerPath -IsAbsolute)) {
-             # If tokenizer path is relative and explicitly set (and not the default placeholder name), make it relative to ModelPath
-             $TokenizerPath = Join-Path -Path $ModelPath -ChildPath $TokenizerPath
-             Log-Message "ModelPath is a directory. Resolved explicit relative TokenizerPath to '$TokenizerPath'"
-        }
-        # If TokenizerPath is absolute and explicitly set, use that value directly.
-    } else {
-        # ModelPath is not a file and not a directory. Could be an issue unless it's the default $InitialModelPath which might not exist yet.
-        if ($ModelPath -ne $InitialModelPath) {
-            Write-ErrorAndExit "ModelPath '$ModelPath' is not a valid file or directory."
-        } else {
-            # It's the default path (e.g., "data"), which might not exist. Construct tokenizer path assuming it's a directory.
-            $TokenizerPath = Join-Path -Path $ModelPath -ChildPath "tokenizer.model"
-            Log-Message "ModelPath ('$ModelPath') is default and may not exist. Assuming directory structure for TokenizerPath ('$TokenizerPath')."
-        }
+        Write-ErrorAndExit "Main executable (main.exe or main) not found. Please build the project first."
     }
 
+    $ActualModelPath = Resolve-ModelPath -ModelDir $ModelDir
+    $ActualTokenizerPath = Resolve-TokenizerPath -ModelDir $ModelDir -TokenizerPath $TokenizerPath -ModelPathToCheck $ActualModelPath
 
-    Log-Message "Final parameters for C++ application:"
-    Log-Message "  Model Path: $ModelPath"
-    Log-Message "  Tokenizer Path: $TokenizerPath"
-    Log-Message "  Prompt: $Prompt"
-    Log-Message "  Steps: $Steps"
-    Log-Message "  Temperature: $Temperature"
-    Log-Message "  Threads: $Threads"
-    Log-Message "  N GPU Layers: $NGpuLayers"
-    Log-Message "  Use Mmap: $UseMmap"
-
-    # Arguments for main.exe: <model_path> <tokenizer_path> <num_threads> <mode> <initial_prompt_string> <max_tokens> <n_gpu_layers> <use_mmap> <temperature>
-    $ScriptArgs = @(
-        $ModelPath,
-        $TokenizerPath,
-        [string]$Threads,  
-        "prompt",          
-        $Prompt,
-        [string]$Steps,    
-        [string]$NGpuLayers, 
-        [string]$UseMmap.ToString().ToLower(), 
-        $Temperature # Added temperature argument
+    $ExecArgs = @(
+        $ActualModelPath,
+        $ActualTokenizerPath,
+        [string]$Threads,
+        "prompt" # Mode
     )
+    if (-not [string]::IsNullOrEmpty($SystemPrompt)) {
+        $ExecArgs += "--system-prompt", $SystemPrompt
+    }
+    $ExecArgs += $Prompt # This is initial_user_prompt or the main prompt
+    $ExecArgs += "--max-tokens", $Steps
+    $ExecArgs += "--n-gpu-layers", ([string]$NGpuLayers)
+    $ExecArgs += "--use-mmap", ([string]$UseMmap).ToLower()
+    $ExecArgs += "--temperature", $Temperature
 
-    Log-Message "Executing: & `"$ExecutablePath`" $($ScriptArgs -join ' ')"
-    & $ExecutablePath $ScriptArgs
-    if ($LASTEXITCODE -ne 0) { Write-ErrorAndExit "Prompt execution failed with exit code $LASTEXITCODE."}
+    Log-Message "Running prompt with: $ExecutablePath $($ExecArgs -join ' ' )"
+    & $ExecutablePath $ExecArgs
+    if ($LASTEXITCODE -ne 0) { Write-ErrorAndExit "Prompt execution failed."}
 }
 
 function Invoke-FormatCode {

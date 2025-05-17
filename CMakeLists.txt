@@ -65,13 +65,13 @@ FetchContent_MakeAvailable(pybind11)
 find_package(Threads REQUIRED)
 find_package(OpenMP REQUIRED)
 
-find_package(Boost 1.65 REQUIRED COMPONENTS regex)
+find_package(Boost 1.70.0 REQUIRED COMPONENTS regex)
 if(Boost_FOUND)
     message(STATUS "Found Boost version: ${Boost_VERSION_STRING}")
     message(STATUS "Boost include directories: ${Boost_INCLUDE_DIRS}")
     message(STATUS "Boost regex library: ${Boost_REGEX_LIBRARY}")
 else()
-    message(FATAL_ERROR "Boost (version 1.65 or newer) with the regex component is required but was not found.")
+    message(FATAL_ERROR "Boost (version 1.70.0 or newer) with the regex component is required but was not found.")
 endif()
 
 OPTION(HAS_CUDA "Enable CUDA support (requires CUDA Toolkit and cuBLAS)" ON) # Default to ON, user can override with -DHAS_CUDA=OFF

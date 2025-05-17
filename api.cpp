@@ -370,66 +370,71 @@ TinyLlamaSession::~TinyLlamaSession() {
   Logger::info("TinyLlamaSession: Destroyed.");
 }
 
-std::string TinyLlamaSession::generate(const std::string& prompt_input,
-                                      int steps, float temperature,
-                                      int top_k, float top_p,
-                                      const std::string& system_prompt,
-                                      bool apply_q_a_format) {
-  Logger::info("Generate called. Initial Prompt: \"" + prompt_input +
-               "\", Steps: " + std::to_string(steps) +
-               ", Temperature: " + std::to_string(temperature) +
-               ", Top-K: " + std::to_string(top_k) +
-               ", Top-P: " + std::to_string(top_p) +
-               ", System Prompt: \"" + system_prompt +
-               "\", Apply Chat/Q&A Format: " + (apply_q_a_format ? "true" : "false"));
+std::string TinyLlamaSession::generate(const std::string& user_prompt, int steps,
+                                     float temperature,
+                                     int top_k, float top_p,
+                                     const std::string& system_prompt_arg, // Renamed for clarity inside function
+                                     bool apply_q_a_format_cli_hint) { // Renamed for clarity
+  Logger::info("[Generate API] User prompt: \"" + user_prompt + "\", System prompt: \"" + system_prompt_arg + "\", Steps: " + std::to_string(steps));
 
-  std::string final_prompt_for_tokenization;
-  if (apply_q_a_format) {
-    // If GGUF is loaded, always use simple Q:A format as it works best.
-    // For SafeTensors, prefer chat template if available.
-    if (config_.is_gguf_file_loaded) {
-        Logger::info("GGUF model detected. Using simple Q:A format for prompt.");
-        final_prompt_for_tokenization = "Q: " + prompt_input + "\nA:";
-        Logger::info("Applied Q:A format (GGUF). Prompt for tokenization: \"" +
-                     final_prompt_for_tokenization + "\"");
-    } else if (tokenizer_ && !config_.chat_template_string.empty()) {
-        // Non-GGUF (SafeTensors usually) - try chat template
-        try {
-            Logger::info("Applying chat template (SafeTensors). System: '" + system_prompt + "', User: '" + prompt_input + "'");
-            final_prompt_for_tokenization = tokenizer_->apply_chat_template(prompt_input, system_prompt, config_);
-            Logger::info("Formatted prompt using chat template: \"" + final_prompt_for_tokenization + "\"");
-        } catch (const std::exception& e) {
-            Logger::error("Error applying chat template (SafeTensors): " + std::string(e.what()) + ". Falling back to simple Q:A format.");
-            final_prompt_for_tokenization = "Q: " + prompt_input + "\nA:"; 
-            Logger::info("Applied Q:A: fallback format (SafeTensors). Prompt for tokenization: \"" +
-                         final_prompt_for_tokenization + "\"");
-        }
-    } else {
-        // Fallback for SafeTensors if no chat template string or no tokenizer
-        Logger::warning("Chat template string empty or tokenizer not available (SafeTensors). Using simple Q:A format.");
-        final_prompt_for_tokenization = "Q: " + prompt_input + "\nA:";
-        Logger::info("Applied Q:A: format (SafeTensors, no template). Prompt for tokenization: \"" +
-                     final_prompt_for_tokenization + "\"");
-    }
-  } else {
-    final_prompt_for_tokenization = prompt_input;
-    Logger::info("Using provided prompt as-is for tokenization: \"" +
-                 final_prompt_for_tokenization + "\"");
+  if (!model_ || !tokenizer_) {
+    throw std::runtime_error("Model or tokenizer not loaded.");
   }
 
-  // New way: Directly encode the prompt to IDs. 
-  // Assuming encode should not add BOS/EOS here as prompt handling is complex and might already include them.
-  // Or, if encode is meant to be the primary entry, it should handle BOS/EOS internally based on some logic.
-  // For now, matching the previous behavior of just getting IDs for the final_prompt_for_tokenization.
-  std::vector<int> token_ids = tokenizer_->encode(final_prompt_for_tokenization, false, false);
+  std::string final_prompt_for_encoding;
+  bool used_chat_template = false;
 
-  if (token_ids.empty()) {
+  // Priority 1: GGUF Chat Template from Tokenizer
+  if (tokenizer_ && !tokenizer_->get_gguf_chat_template().empty()) {
+    Logger::info("[Generate API] Using GGUF chat template from tokenizer.");
+    final_prompt_for_encoding = tokenizer_->apply_chat_template(user_prompt, system_prompt_arg, config_);
+    used_chat_template = true;
+  } 
+  // Priority 2: Llama 3 family specific template (handled by apply_chat_template's fallback)
+  else if (config_.tokenizer_family == ModelConfig::TokenizerFamily::LLAMA3_TIKTOKEN) {
+    Logger::info("[Generate API] Llama 3 tokenizer family detected, using apply_chat_template.");
+    final_prompt_for_encoding = tokenizer_->apply_chat_template(user_prompt, system_prompt_arg, config_);
+    used_chat_template = true;
+  }
+  // Priority 3: Legacy Q/A formatting if CLI hint is true AND no advanced template was used
+  else if (apply_q_a_format_cli_hint) {
+    Logger::info("[Generate API] No GGUF/Llama3 template, applying legacy Q/A formatting due to CLI hint.");
+    // Simple Q/A formatting - tokenizer_.apply_chat_template might be too complex if it expects specific tokens not present
+    // For non-Llama3 and non-GGUF template scenarios, system_prompt_arg might not be naturally handled by a generic apply_chat_template.
+    // We'll prepend system prompt if present, then Q:A format the user prompt.
+    std::string temp_prompt = user_prompt;
+    if (!system_prompt_arg.empty()) {
+        temp_prompt = system_prompt_arg + "\n\nQ: " + user_prompt + "\nA:"; // Basic combination
+    } else {
+        temp_prompt = "Q: " + user_prompt + "\nA:";
+    }
+    final_prompt_for_encoding = temp_prompt;
+    // No `used_chat_template = true` here, as it's not the full chat templating.
+  }
+  // Priority 4: Raw user prompt (with system prompt prepended if provided)
+  else {
+    Logger::info("[Generate API] No GGUF/Llama3 template and Q/A formatting hint is false. Using user prompt as is (prepending system prompt if available).");
+    if (!system_prompt_arg.empty()) {
+        final_prompt_for_encoding = system_prompt_arg + "\n\n" + user_prompt; // Basic prepend
+    } else {
+        final_prompt_for_encoding = user_prompt;
+    }
+  }
+  
+  Logger::debug("[Generate API] Final prompt for encoding (first 100 chars): \"" + final_prompt_for_encoding.substr(0, 100) + "\"");
+
+  std::vector<int> tokens = tokenizer_->encode(final_prompt_for_encoding, true, false, Tokenizer::PreTokenizeMethod::DEFAULT); // add_bos=true, add_eos=false (EOS handled by loop)
+
+  if (tokens.empty()) {
     Logger::warning("Tokenization resulted in empty ID list for prompt: " +
-                    final_prompt_for_tokenization);
+                    final_prompt_for_encoding);
     return "";
   }
 
-  int num_prompt_tokens = token_ids.size();
+  int num_prompt_tokens = tokens.size();
+  // Log the number of prompt tokens
+  Logger::info("[Generate API] Number of prompt tokens: " + std::to_string(num_prompt_tokens));
+
   int total_steps = num_prompt_tokens + steps - 1;
   int generated_count = 0;
   int next_token_id = -1;
@@ -447,7 +452,7 @@ std::string TinyLlamaSession::generate(const std::string& prompt_input,
     }
 
     int input_token_id =
-        (pos < num_prompt_tokens) ? token_ids[pos] : next_token_id;
+        (pos < num_prompt_tokens) ? tokens[pos] : next_token_id;
     std::vector<float> logits; // Declare logits here
 
     current_data_host = model_->lookup_embedding(input_token_id);
@@ -526,14 +531,19 @@ std::string TinyLlamaSession::generate(const std::string& prompt_input,
 
     if (pos >= num_prompt_tokens - 1) {
       next_token_id = sample_top_k_top_p_temperature(logits, temperature, top_k, top_p, rng_);
-      Logger::debug("[Generate Loop] Pos: " + std::to_string(pos) + ", Prompt Tokens: " + std::to_string(num_prompt_tokens) + ", Generated Token ID: " + std::to_string(next_token_id));
+      // Logger::debug("[Generate Loop] Pos: " + std::to_string(pos) + ", Prompt Tokens: " + std::to_string(num_prompt_tokens) + ", Generated Token ID: " + std::to_string(next_token_id));
+
+      // Decode and log the individual token immediately after sampling
+      std::string decoded_next_token = tokenizer_->decode({next_token_id}, true); 
+      Logger::info("[Generate] Sampled Token ID: " + std::to_string(next_token_id) + 
+                   ", Decoded: '" + decoded_next_token + "'");
 
       if (next_token_id == eos_token_id_) {
         Logger::info("EOS token generated (ID: " + std::to_string(next_token_id) + "). Stopping.");
         break;
       }
 
-      token_ids.push_back(next_token_id);
+      tokens.push_back(next_token_id);
       generated_count++;
 
       if (generated_count >= steps) {
@@ -543,8 +553,8 @@ std::string TinyLlamaSession::generate(const std::string& prompt_input,
     }
   }
 
-  std::vector<int> generated_only_ids(token_ids.begin() + num_prompt_tokens,
-                                      token_ids.end());
+  std::vector<int> generated_only_ids(tokens.begin() + num_prompt_tokens,
+                                      tokens.end());
 
   // Log all generated IDs before decoding
   std::string generated_ids_str = "[Generated IDs Pre-Decode] ";

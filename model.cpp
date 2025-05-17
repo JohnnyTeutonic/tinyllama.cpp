@@ -925,7 +925,7 @@ static void apply_rope_vector(
                             ", i: " + std::to_string(i) + ", calculated freq_idx: " + std::to_string(freq_idx) +
                             ", all_freqs_cis.size(): " + std::to_string(all_freqs_cis.size()));
             continue;
-      }
+          }
 
       float cos_theta = all_freqs_cis[freq_idx].first;
       float sin_theta = all_freqs_cis[freq_idx].second;
@@ -1031,7 +1031,7 @@ void TinyLlamaModel::initialize_weights(const SafeTensorsLoader* loader,
 
     for (int i = 0; i < nhl; ++i) {
       std::string prefix = "model.layers." + std::to_string(i) + ".";
-        auto& lw = layers[i];
+      auto& lw = layers[i];
 
       process_safetensor(prefix + "self_attn.q_proj.weight", lw.q_proj_f32, {(size_t)hs, (size_t)hs});
       process_safetensor(prefix + "self_attn.k_proj.weight", lw.k_proj_f32, {(size_t)config_.num_key_value_heads * (hs / config_.num_attention_heads), (size_t)hs});
@@ -1220,9 +1220,9 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
 
   if (active_num_gpu_layers > 0) { // Only process if GPU layers are active
     // Path 1: Source is already BF16 (model.embed_tokens is std::vector<uint16_t>)
-    if (!embed_tokens.empty()) {
-      gpuErrchk(cudaMalloc(&token_embedding_table_dev_, embed_tokens.size() * sizeof(uint16_t)));
-      gpuErrchk(cudaMemcpy(token_embedding_table_dev_, embed_tokens.data(), embed_tokens.size() * sizeof(uint16_t), cudaMemcpyHostToDevice));
+  if (!embed_tokens.empty()) {
+    gpuErrchk(cudaMalloc(&token_embedding_table_dev_, embed_tokens.size() * sizeof(uint16_t)));
+    gpuErrchk(cudaMemcpy(token_embedding_table_dev_, embed_tokens.data(), embed_tokens.size() * sizeof(uint16_t), cudaMemcpyHostToDevice));
       Logger::info("Copied token_embedding_table (bf16 direct from model.embed_tokens) to GPU.");
       token_embeddings_processed_to_gpu_bf16 = true;
     }
@@ -1305,9 +1305,9 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
 
   if (active_num_gpu_layers > 0) { // Only process if GPU layers are active
     // Path 1: Source is already BF16 (model.lm_head is std::vector<uint16_t>)
-    if (!lm_head.empty()) {
-      gpuErrchk(cudaMalloc(&lm_head_dev_, lm_head.size() * sizeof(uint16_t)));
-      gpuErrchk(cudaMemcpy(lm_head_dev_, lm_head.data(), lm_head.size() * sizeof(uint16_t), cudaMemcpyHostToDevice));
+  if (!lm_head.empty()) {
+    gpuErrchk(cudaMalloc(&lm_head_dev_, lm_head.size() * sizeof(uint16_t)));
+    gpuErrchk(cudaMemcpy(lm_head_dev_, lm_head.data(), lm_head.size() * sizeof(uint16_t), cudaMemcpyHostToDevice));
       Logger::info("Copied lm_head (bf16 direct from model.lm_head) to GPU.");
       lm_head_processed_to_gpu_bf16 = true;
     }
@@ -1589,7 +1589,7 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
             temp_layer_f32 = bf16vec_to_float_vec(bf16_data);
             current_layer_processed = true;
             current_layer_source_type_for_log = "ST_BF16->F32";
-          } 
+          }
         }
       }
       
@@ -1821,7 +1821,7 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& initial_config,
     throw std::runtime_error(
         "Unsupported model file type. Please use .gguf or .safetensors");
   }
-  
+
   Logger::info("TinyLlamaModel constructor: After specific loader block. Current config_.num_cpu_offload_layers = " + std::to_string(this->config_.num_cpu_offload_layers) + 
                ", config_.num_hidden_layers = " + std::to_string(this->config_.num_hidden_layers));
   Logger::info("TinyLlamaModel constructor: Current config_.use_mmap_for_gguf = " + std::string(this->config_.use_mmap_for_gguf ? "true" : "false"));
@@ -2302,18 +2302,29 @@ std::vector<float> TinyLlamaModel::forward(
     if (kv_cache) {
         if (static_cast<size_t>(l) < kv_cache->layers.size()) {
             KVCacheLayer& kv_layer = kv_cache->layers[l];
-            if (kv_layer.k.size() < (size_t)(n_tokens + 1) * n_kv_heads * head_dim) {
-                 kv_layer.k.resize((n_tokens + 1) * n_kv_heads * head_dim);
-                 kv_layer.v.resize((n_tokens + 1) * n_kv_heads * head_dim);
+            size_t layer_max_seq_len = 0;
+            if (n_kv_heads > 0 && head_dim > 0) { // Prevent division by zero if params are bad
+                layer_max_seq_len = kv_layer.k.size() / (n_kv_heads * head_dim);
             }
-            for(int h=0; h < n_kv_heads; ++h) {
-                std::copy(k_vec.begin() + h * head_dim, k_vec.begin() + (h+1) * head_dim, kv_layer.k.begin() + n_tokens * (n_kv_heads * head_dim) + h * head_dim);
-                std::copy(v_vec.begin() + h * head_dim, v_vec.begin() + (h+1) * head_dim, kv_layer.v.begin() + n_tokens * (n_kv_heads * head_dim) + h * head_dim);
+            
+            if (static_cast<size_t>(n_tokens) >= layer_max_seq_len && layer_max_seq_len > 0) {
+                Logger::error("KV Cache access out of bounds in CPU forward. Layer " + std::to_string(l) + 
+                              ", n_tokens: " + std::to_string(n_tokens) + 
+                              ", calculated layer_max_seq_len: " + std::to_string(layer_max_seq_len) + ". Skipping KV update.");
+            } else if (layer_max_seq_len == 0 && n_tokens > 0) {
+                 Logger::error("KV Cache layer_max_seq_len is 0, but n_tokens > 0. Layer " + std::to_string(l) + ". Skipping KV update.");
+            } else {
+                 for(int h=0; h < n_kv_heads; ++h) {
+                     std::copy(k_vec.begin() + h * head_dim, k_vec.begin() + (h+1) * head_dim, kv_layer.k.begin() + n_tokens * (n_kv_heads * head_dim) + h * head_dim);
+                     std::copy(v_vec.begin() + h * head_dim, v_vec.begin() + (h+1) * head_dim, kv_layer.v.begin() + n_tokens * (n_kv_heads * head_dim) + h * head_dim);
+                 }
             }
-        } else { /* Handle error or resize kv_cache->layers */ }
+        } else {
+            Logger::error("KV Cache layer index " + std::to_string(l) + " out of bounds for kv_cache->layers.size() = " + std::to_string(kv_cache->layers.size()));
+        }
     }
     
-    std::vector<float> attn_out_vec(hs);    
+    std::vector<float> attn_out_vec(hs);
     std::vector<float> x_resid1_vec = input; // Store residual
     float att_scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
     std::fill(attn_out_vec.begin(), attn_out_vec.end(), 0.0f);
@@ -2724,7 +2735,7 @@ std::vector<float> TinyLlamaModel::forward_device(
     Logger::error("LM head (lm_head_dev_ for BF16) is null. Cannot calculate logits on GPU.");
     // Returning an empty vector or throwing an exception might be appropriate here
     // For now, to match previous structure if no weights, return empty.
-    return {}; 
+    return {};
   }
 
   gpuErrchk(cudaStreamSynchronize(stream));
