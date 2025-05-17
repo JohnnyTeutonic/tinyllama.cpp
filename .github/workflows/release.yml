@@ -64,17 +64,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os_name: Ubuntu-20.04-CPU-via-Docker
+          - os_name: Ubuntu-latest-CPU
             os_runner: ubuntu-latest
             build_type: cpu
-            artifact_name: tinyllama-linux-cpu-ubuntu2004
-            asset_name: tinyllama-linux-cpu-ubuntu2004.tar.gz
+            artifact_name: tinyllama-linux-cpu-ubuntu-latest
+            asset_name: tinyllama-linux-cpu-ubuntu-latest.tar.gz
             cmake_flags: "-DHAS_CUDA=OFF"
-          - os_name: Ubuntu-20.04-CUDA-via-Docker
+          - os_name: Ubuntu-latest-CUDA
             os_runner: ubuntu-latest
             build_type: cuda
-            artifact_name: tinyllama-linux-cuda-ubuntu2004
-            asset_name: tinyllama-linux-cuda-ubuntu2004.tar.gz
+            artifact_name: tinyllama-linux-cuda-ubuntu-latest
+            asset_name: tinyllama-linux-cuda-ubuntu-latest.tar.gz
             cmake_flags: "-DHAS_CUDA=ON"
           - os_name: Windows
             os_runner: windows-latest
@@ -110,89 +110,47 @@ jobs:
 
       - name: Setup Mamba (Linux CUDA Build)
         if: runner.os == 'Linux' && matrix.build_type == 'cuda'
-        run: echo "Mamba setup for CUDA is now handled within the Docker image."
+        uses: conda-incubator/setup-miniconda@v3.1.0
+        with:
+          activate-environment: "cuda-env"
+          python-version: ${{ matrix.python-version || '3.10' }}
+          miniforge-version: latest
+          add-pip-as-python-dependency: true
+          auto-activate-base: false
 
       - name: Install CUDA Toolkit 12.1.1 via Mamba (Linux CUDA Build)
         if: runner.os == 'Linux' && matrix.build_type == 'cuda'
-        run: echo "CUDA Toolkit is provided by the NVIDIA Docker image."
+        shell: bash -el {0}
+        run: |
+          echo "Installing CUDA 12.1.1 toolkit using Mamba..."
+          mamba install -y -n cuda-env -c nvidia/label/cuda-12.1.1 cuda-toolkit
+          echo "CONDA_PREFIX_1=$CONDA_PREFIX_1" # For debugging
+          echo "CONDA_PREFIX=$CONDA_PREFIX" # For debugging
+          echo "CUDA_HOME=${CONDA_PREFIX}" >> $GITHUB_ENV
+          echo "CUDA_TOOLKIT_ROOT_DIR=${CONDA_PREFIX}" >> $GITHUB_ENV
+          echo "LD_LIBRARY_PATH=${CONDA_PREFIX}/lib:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
+          echo "${CONDA_PREFIX}/bin" >> $GITHUB_PATH
+          which nvcc
+          nvcc --version
 
       - name: Install Dependencies (Linux)
-        if: runner.os == 'Linux' && matrix.build_type == 'cpu'
+        if: runner.os == 'Linux' # Applies to both CPU and CUDA on ubuntu-latest
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential cmake libboost-all-dev doxygen graphviz
-          # OpenMP for CPU builds
           sudo apt-get install -y libomp-dev
-
-      - name: Diagnose Docker GPU capabilities (Linux CUDA)
-        if: runner.os == 'Linux' && matrix.build_type == 'cuda'
-        run: |
-          echo "Checking Docker version..."
-          docker --version
-          echo "Installed Docker runtimes:"
-          docker info --format '{{json .Runtimes}}'
-          echo "Default Docker runtime:"
-          docker info --format '{{.DefaultRuntime}}'
-          echo "NVIDIA Docker version info (if nvidia-docker is a command):"
-          nvidia-docker version || echo "nvidia-docker command not found or failed (this is okay if nvidia-container-toolkit is used)"
-          echo "Listing NVIDIA container CLI info (if available):"
-          sudo nvidia-container-cli info || echo "nvidia-container-cli not found or failed (might indicate nvidia-container-toolkit issue)"
-          echo "Attempting a simple CUDA container test (nvidia-smi)..."
-          docker run --rm --gpus all nvidia/cuda:12.1.1-base-ubuntu20.04 nvidia-smi || echo "nvidia-smi in CUDA base container failed"
-
-      - name: Build in Docker (Linux CUDA)
-        if: runner.os == 'Linux' && matrix.build_type == 'cuda'
-        run: |
-          DOCKER_IMAGE="nvidia/cuda:12.1.1-devel-ubuntu20.04"
-          echo "Pulling Docker image for CUDA build: $DOCKER_IMAGE"
-          docker pull $DOCKER_IMAGE
-
-          echo "Running CUDA build inside Docker container..."
-          # Ensures the script fails if any command fails
-          set -e
-
-          # GitHub's GPU runners should have nvidia-container-toolkit for --gpus all
-          docker run --gpus all --rm \
-            -v "${{ github.workspace }}:/workspace" \
-            -w /workspace \
-            -e CMAKE_CUDA_ARCHITECTURES="all" \
-            -e DEBIAN_FRONTEND=noninteractive \
-            $DOCKER_IMAGE \
-            /bin/bash -c ' \
-              echo "--- Inside Docker ---" && \
-              apt-get update && \
-              echo "Installing build dependencies (cmake, boost, build-essential, git for versioning if needed by app)..." && \
-              apt-get install -y --no-install-recommends cmake libboost-all-dev build-essential git && \
-              \
-              echo "Verifying nvcc and default gcc/g++ in Docker image:" && \
-              nvcc --version && \
-              gcc --version && \
-              g++ --version && \
-              \
-              echo "Configuring CMake (CUDA within Docker)..." && \
-              rm -rf build && \
-              mkdir build && \
-              cd build && \
-              # The Docker image should have nvcc in PATH.
-              # Boost_DEBUG and Boost_NO_SYSTEM_PATHS are more relevant for Windows, but harmless here.
-              # matrix.cmake_flags (-DHAS_CUDA=ON) is passed from the host.
-              # CMAKE_CUDA_ARCHITECTURES is passed via -e to docker run.
-              # The devel image usually has a compatible host compiler for nvcc.
-              cmake .. \
-                -DCMAKE_BUILD_TYPE=Release \
-                ${{ matrix.cmake_flags }} \
-                -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc \
-                -DBoost_DEBUG=ON \
-                -DBoost_NO_SYSTEM_PATHS=ON && \
-              \
-              echo "Building (CUDA within Docker)..." && \
-              cmake --build . --config Release --target tinyllama tinyllama_server -j $(nproc) && \
-              echo "--- Exiting Docker ---" \
-            '
-          echo "CUDA build completed."
+          # ubuntu-latest (e.g., 22.04 or 24.04) should have a modern GCC compatible with CUDA 12.1
+          # If specific CC/CXX needed for CUDA, it would be set here or directly in CMake configure step
+          if [ "${{ matrix.build_type }}" == "cuda" ]; then
+            echo "Ensuring host C++ compiler is suitable for CUDA build on $(lsb_release -ds)"
+            # Example: Install a specific version if default isn't appropriate, though less likely on ubuntu-latest
+            # sudo apt-get install -y gcc-11 g++-11 
+            # echo "CC=/usr/bin/gcc-11" >> $GITHUB_ENV
+            # echo "CXX=/usr/bin/g++-11" >> $GITHUB_ENV
+          fi
 
       - name: Install Dependencies (Windows)
-        if: runner.os == 'Windows'
+        if: matrix.os_runner == 'windows-latest' # Condition changed from runner.os == 'Windows' for consistency
         shell: pwsh
         run: |
           Write-Host "Attempting to upgrade Chocolatey (default sources)..."
@@ -239,24 +197,55 @@ jobs:
           Write-Host "All Chocolatey packages installed successfully."
 
       - name: Configure CMake (Linux)
-        if: runner.os == 'Linux' && matrix.build_type == 'cpu'
+        if: runner.os == 'Linux' # Applies to both CPU and CUDA on ubuntu-latest
         env:
           CC: ${{ env.CC }}
           CXX: ${{ env.CXX }}
-        shell: bash -el {0}
+        shell: bash -el {0} # Ensure conda env is active for CUDA builds
         run: |
-          echo "DEBUG: Current matrix.os: ${{ matrix.os_runner }}, matrix.build_type: ${{ matrix.build_type }}"
+          echo "DEBUG: Current matrix.os_runner: ${{ matrix.os_runner }}, matrix.build_type: ${{ matrix.build_type }}"
           echo "DEBUG: Initial matrix.cmake_flags: ${{ matrix.cmake_flags }}"
           echo "Forcibly removing existing build directory if any..."
           rm -rf build
           mkdir build
           cd build
           CMAKE_EXTRA_ARGS=""
+          if [ "${{ matrix.build_type }}" == "cuda" ]; then
+            echo "Verifying nvcc path and CUDA_HOME / CUDA_TOOLKIT_ROOT_DIR from Mamba:"
+            which nvcc
+            nvcc --version
+            echo "CUDA_HOME is: $CUDA_HOME"
+            echo "CUDA_TOOLKIT_ROOT_DIR is: $CUDA_TOOLKIT_ROOT_DIR"
+            echo "LD_LIBRARY_PATH is: $LD_LIBRARY_PATH"
+            if [ -z "$CUDA_HOME" ] || ! command -v nvcc &> /dev/null ; then
+              echo "Error: CUDA_HOME is not correctly set or nvcc not found in PATH from Mamba."
+              exit 1
+            fi
+            
+            HOST_CXX_FOR_NVCC=""
+            # Prefer CXX from GITHUB_ENV if set by a previous step (e.g. specific gcc install)
+            if [ -n "$CXX" ] && command -v $CXX &> /dev/null; then
+                echo "Using CXX from GITHUB_ENV: $CXX for nvcc -ccbin"
+                HOST_CXX_FOR_NVCC="$CXX"
+            elif command -v g++ &> /dev/null; then # Use system default g++
+                CURRENT_GXX_VERSION=$(g++ -dumpversion)
+                echo "Using system default g++ version $CURRENT_GXX_VERSION for nvcc -ccbin on $(lsb_release -ds)"
+                HOST_CXX_FOR_NVCC="g++"
+            else
+                echo "Error: No suitable g++ found for nvcc -ccbin."
+                exit 1
+            fi
+            echo "Final host CXX command for nvcc -ccbin: $HOST_CXX_FOR_NVCC"
+
+            CMAKE_EXTRA_ARGS="-DCMAKE_CUDA_COMPILER=$(which nvcc)"
+            CMAKE_EXTRA_ARGS="${CMAKE_EXTRA_ARGS} -DCMAKE_CUDA_ARCHITECTURES=all"
+            CMAKE_EXTRA_ARGS="${CMAKE_EXTRA_ARGS} -DCMAKE_CUDA_HOST_COMPILER=${HOST_CXX_FOR_NVCC}"
+          fi
           echo "Configuring CMake with effective matrix.cmake_flags: ${{ matrix.cmake_flags }} and CMAKE_EXTRA_ARGS: ${CMAKE_EXTRA_ARGS}"
           cmake .. -DCMAKE_BUILD_TYPE=Release ${{ matrix.cmake_flags }} ${CMAKE_EXTRA_ARGS}
 
       - name: Configure CMake (Windows)
-        if: runner.os == 'Windows'
+        if: matrix.os_runner == 'windows-latest' # Condition changed for consistency
         shell: pwsh
         run: |
           # Attempt to clear any potentially conflicting environment variables first
@@ -319,15 +308,15 @@ jobs:
           cmake .. -U BOOST_ROOT -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release -DBOOST_ROOT="$TARGET_BOOST_ROOT_DIR" -DBoost_INCLUDE_DIR="$TARGET_BOOST_ROOT_DIR" -DBoost_DEBUG=ON -DBoost_NO_SYSTEM_PATHS=ON ${{ matrix.cmake_flags }}
 
       - name: Build (Linux)
-        if: runner.os == 'Linux' && matrix.build_type == 'cpu'
-        shell: bash
+        if: runner.os == 'Linux' # Applies to both CPU and CUDA
+        shell: bash -el {0} # Ensure conda env is active for CUDA builds for LD_LIBRARY_PATH
         run: |
           cd build
-          echo "Building Linux CPU targets: tinyllama, tinyllama_server"
+          echo "Building Linux targets (CPU or CUDA): tinyllama, tinyllama_server"
           cmake --build . --config Release --target tinyllama tinyllama_server -j $(nproc)
 
       - name: Build (Windows)
-        if: runner.os == 'Windows'
+        if: matrix.os_runner == 'windows-latest' # Condition changed for consistency
         shell: pwsh
         run: |
           Set-Location build
@@ -372,7 +361,7 @@ jobs:
           echo "Tarball created."
 
       - name: Package (Windows)
-        if: runner.os == 'Windows'
+        if: matrix.os_runner == 'windows-latest' # Condition changed for consistency
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path ${{ matrix.artifact_name }}
