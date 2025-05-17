@@ -254,10 +254,39 @@ jobs:
           Write-Host "Using BOOST_ROOT: $BOOST_ROOT_DIR for CMake configuration."
           echo "BOOST_ROOT=$BOOST_ROOT_DIR" >> $env:GITHUB_ENV
 
-          New-Item -ItemType Directory -Force -Path build
-          Set-Location build
+          Write-Host "Listing contents of supposed BOOST_ROOT: $BOOST_ROOT_DIR"
+          Get-ChildItem -Path $BOOST_ROOT_DIR -ErrorAction SilentlyContinue
+
+          Write-Host "Checking for '$BOOST_ROOT_DIR\boost' directory..."
+          if (Test-Path "$BOOST_ROOT_DIR\boost") {
+              Write-Host "Found '$BOOST_ROOT_DIR\boost'"
+              Get-ChildItem -Path "$BOOST_ROOT_DIR\boost" -Recurse -Depth 1 -ErrorAction SilentlyContinue | Select-Object -First 10
+          } else {
+              Write-Warning "'$BOOST_ROOT_DIR\boost' NOT found."
+          }
+
+          Write-Host "Checking for '$BOOST_ROOT_DIR\include\boost' directory..."
+          if (Test-Path "$BOOST_ROOT_DIR\include\boost") {
+              Write-Host "Found '$BOOST_ROOT_DIR\include\boost'"
+              Get-ChildItem -Path "$BOOST_ROOT_DIR\include\boost" -Recurse -Depth 1 -ErrorAction SilentlyContinue | Select-Object -First 10
+          } else {
+              Write-Warning "'$BOOST_ROOT_DIR\include\boost' NOT found."
+          }
+
+          Write-Host "Listing contents of supposed Boost lib dir: $BOOST_ROOT_DIR\lib64-msvc-14.3"
+          Get-ChildItem -Path "$BOOST_ROOT_DIR\lib64-msvc-14.3" -ErrorAction SilentlyContinue
+          Write-Host "Listing contents of supposed Boost lib dir: $BOOST_ROOT_DIR\lib32-msvc-14.3"
+          Get-ChildItem -Path "$BOOST_ROOT_DIR\lib32-msvc-14.3" -ErrorAction SilentlyContinue
+          Write-Host "Listing contents of supposed Boost lib dir: $BOOST_ROOT_DIR\lib"
+          Get-ChildItem -Path "$BOOST_ROOT_DIR\lib" -ErrorAction SilentlyContinue
+
+          if (Test-Path "build") {
+            Remove-Item -Recurse -Force "build" | Out-Null
+          }
+          New-Item -ItemType Directory -Force -Path "build"
+          Set-Location "build"
           # Pass BOOST_ROOT directly and include Generator/Architecture
-          cmake .. -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release -DBOOST_ROOT="$BOOST_ROOT_DIR" ${{ matrix.cmake_flags }}
+          cmake .. -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release -DBOOST_ROOT="$BOOST_ROOT_DIR" -DBoost_DEBUG=ON ${{ matrix.cmake_flags }}
 
       - name: Build (Linux)
         if: runner.os == 'Linux'
