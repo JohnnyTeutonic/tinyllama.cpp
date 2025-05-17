@@ -291,7 +291,8 @@ jobs:
           New-Item -ItemType Directory -Force -Path "build"
           Set-Location "build"
           # Pass BOOST_ROOT directly, disable system path searching for Boost, and include Generator/Architecture
-          cmake .. -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release -DBOOST_ROOT="$TARGET_BOOST_ROOT_DIR" -DBoost_DEBUG=ON -DBoost_NO_SYSTEM_PATHS=ON ${{ matrix.cmake_flags }}
+          # Also, explicitly unset BOOST_ROOT from cache first to ensure our value is taken
+          cmake .. -U BOOST_ROOT -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release -DBOOST_ROOT="$TARGET_BOOST_ROOT_DIR" -DBoost_DEBUG=ON -DBoost_NO_SYSTEM_PATHS=ON ${{ matrix.cmake_flags }}
 
       - name: Build (Linux)
         if: runner.os == 'Linux'
