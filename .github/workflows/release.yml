@@ -157,7 +157,7 @@ jobs:
             @{ Name = "doxygen.install"; LogName = "Doxygen" },
             @{ Name = "graphviz"; LogName = "Graphviz" },
             @{ Name = "openssl"; LogName = "OpenSSL" },
-            @{ Name = "boost.install"; Version = "1.81.0"; LogName = "Boost" } 
+            @{ Name = "boost-msvc-14.3"; Version = "1.81.0"; LogName = "Boost" } 
           )
           $allSucceeded = $true
 
