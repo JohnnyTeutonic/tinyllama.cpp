@@ -5,6 +5,9 @@ project(TinyLlamaCpp LANGUAGES CXX)
 if(POLICY CMP0135)
   cmake_policy(SET CMP0135 NEW) # DOWNLOAD_EXTRACT_TIMESTAMP
 endif()
+if(POLICY CMP0144)
+  cmake_policy(SET CMP0144 NEW) # find_package uses upper-case <PACKAGENAME>_ROOT variables
+endif()
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
