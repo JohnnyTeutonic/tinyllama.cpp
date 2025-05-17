@@ -93,10 +93,11 @@ jobs:
         with:
           path: |
             C:\ProgramData\chocolatey\lib
-            C:\ProgramData\Boost\boost_1.87.0
+            C:\local\boost_1_81_0
             C:\Boost
-          key: ${{ runner.os }}-choco-boost-${{ hashFiles('**/release.yml') }} # Change if you modify the package list
+          key: ${{ runner.os }}-choco-boost-1.81.0-${{ hashFiles('**/release.yml') }}
           restore-keys: |
+            ${{ runner.os }}-choco-boost-1.81.0-
             ${{ runner.os }}-choco-boost-
 
       - name: Setup CMake
@@ -156,7 +157,7 @@ jobs:
             @{ Name = "doxygen.install"; LogName = "Doxygen" },
             @{ Name = "graphviz"; LogName = "Graphviz" },
             @{ Name = "openssl"; LogName = "OpenSSL" },
-            @{ Name = "boost"; Version = "1.81.0"; LogName = "Boost" } 
+            @{ Name = "boost.install"; Version = "1.81.0"; LogName = "Boost" } 
           )
           $allSucceeded = $true
 
@@ -239,16 +240,19 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $BOOST_ROOT_DIR = "C:\ProgramData\Boost\boost_1.87.0"
+          $BOOST_VERSION_UNDERSCORE = "1_81_0" # Corresponds to version 1.81.0 being installed
+          $BOOST_ROOT_DIR = "C:\local\boost_$($BOOST_VERSION_UNDERSCORE)"
+
           if (-not (Test-Path $BOOST_ROOT_DIR)) {
-            # Fallback if the primary path doesn't exist, try the other cached path
-            $BOOST_ROOT_DIR = "C:\local\boost_1_87_0"
+            Write-Warning "Boost not found at the expected installation path $BOOST_ROOT_DIR. Trying C:\Boost as a fallback."
+            $BOOST_ROOT_DIR = "C:\Boost" # Generic fallback path
             if (-not (Test-Path $BOOST_ROOT_DIR)) {
-               $BOOST_ROOT_DIR = "C:\Boost"
+              Write-Warning "Boost also not found at C:\Boost. CMake configuration may fail if Boost is not discoverable by other means."
             }
           }
-          Write-Host "Setting BOOST_ROOT to $BOOST_ROOT_DIR"
-          echo "BOOST_ROOT=$BOOST_ROOT_DIR" >> $env:GITHUB_ENV # For subsequent steps if needed
+          
+          Write-Host "Using BOOST_ROOT: $BOOST_ROOT_DIR for CMake configuration."
+          echo "BOOST_ROOT=$BOOST_ROOT_DIR" >> $env:GITHUB_ENV
 
           New-Item -ItemType Directory -Force -Path build
           Set-Location build
