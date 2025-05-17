@@ -137,16 +137,16 @@ jobs:
         if: runner.os == 'Linux' # Applies to both CPU and CUDA on ubuntu-latest
         run: |
           sudo apt-get update
+          # Install a specific GCC/G++ version (e.g., g++-11) for better GLIBC compatibility and nvcc compatibility
+          sudo apt-get install -y g++-11 gcc-11
+          echo "CC=/usr/bin/gcc-11" >> $GITHUB_ENV
+          echo "CXX=/usr/bin/g++-11" >> $GITHUB_ENV
+          
           sudo apt-get install -y build-essential cmake libboost-all-dev doxygen graphviz
           sudo apt-get install -y libomp-dev
-          # ubuntu-latest (e.g., 22.04 or 24.04) should have a modern GCC compatible with CUDA 12.1
-          # If specific CC/CXX needed for CUDA, it would be set here or directly in CMake configure step
+          
           if [ "${{ matrix.build_type }}" == "cuda" ]; then
-            echo "Ensuring host C++ compiler is suitable for CUDA build on $(lsb_release -ds)"
-            # Example: Install a specific version if default isn't appropriate, though less likely on ubuntu-latest
-            # sudo apt-get install -y gcc-11 g++-11 
-            # echo "CC=/usr/bin/gcc-11" >> $GITHUB_ENV
-            # echo "CXX=/usr/bin/g++-11" >> $GITHUB_ENV
+            echo "Host C++ compiler set to gcc-11/g++-11 for CUDA build on $(lsb_release -ds)"
           fi
 
       - name: Install Dependencies (Windows)
@@ -199,11 +199,12 @@ jobs:
       - name: Configure CMake (Linux)
         if: runner.os == 'Linux' # Applies to both CPU and CUDA on ubuntu-latest
         env:
-          CC: ${{ env.CC }}
-          CXX: ${{ env.CXX }}
+          CC: ${{ env.CC }} # Should now be /usr/bin/gcc-11
+          CXX: ${{ env.CXX }} # Should now be /usr/bin/g++-11
         shell: bash -el {0} # Ensure conda env is active for CUDA builds
         run: |
           echo "DEBUG: Current matrix.os_runner: ${{ matrix.os_runner }}, matrix.build_type: ${{ matrix.build_type }}"
+          echo "DEBUG: Using CC=${CC} and CXX=${CXX}"
           echo "DEBUG: Initial matrix.cmake_flags: ${{ matrix.cmake_flags }}"
           echo "Forcibly removing existing build directory if any..."
           rm -rf build
@@ -223,16 +224,12 @@ jobs:
             fi
             
             HOST_CXX_FOR_NVCC=""
-            # Prefer CXX from GITHUB_ENV if set by a previous step (e.g. specific gcc install)
+            # CXX should be g++-11 from GITHUB_ENV
             if [ -n "$CXX" ] && command -v $CXX &> /dev/null; then
                 echo "Using CXX from GITHUB_ENV: $CXX for nvcc -ccbin"
                 HOST_CXX_FOR_NVCC="$CXX"
-            elif command -v g++ &> /dev/null; then # Use system default g++
-                CURRENT_GXX_VERSION=$(g++ -dumpversion)
-                echo "Using system default g++ version $CURRENT_GXX_VERSION for nvcc -ccbin on $(lsb_release -ds)"
-                HOST_CXX_FOR_NVCC="g++"
             else
-                echo "Error: No suitable g++ found for nvcc -ccbin."
+                echo "Error: CXX environment variable not properly set or g++-11 not found. Expected $CXX to be the host compiler for nvcc."
                 exit 1
             fi
             echo "Final host CXX command for nvcc -ccbin: $HOST_CXX_FOR_NVCC"
@@ -240,9 +237,11 @@ jobs:
             CMAKE_EXTRA_ARGS="-DCMAKE_CUDA_COMPILER=$(which nvcc)"
             CMAKE_EXTRA_ARGS="${CMAKE_EXTRA_ARGS} -DCMAKE_CUDA_ARCHITECTURES=all"
             CMAKE_EXTRA_ARGS="${CMAKE_EXTRA_ARGS} -DCMAKE_CUDA_HOST_COMPILER=${HOST_CXX_FOR_NVCC}"
+            # -allow-unsupported-compiler flag is no longer needed as we are using a compatible g++ (e.g., g++-11)
           fi
           echo "Configuring CMake with effective matrix.cmake_flags: ${{ matrix.cmake_flags }} and CMAKE_EXTRA_ARGS: ${CMAKE_EXTRA_ARGS}"
-          cmake .. -DCMAKE_BUILD_TYPE=Release ${{ matrix.cmake_flags }} ${CMAKE_EXTRA_ARGS}
+          # Explicitly pass CMAKE_C_COMPILER and CMAKE_CXX_COMPILER to ensure they are used
+          cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=${CC} -DCMAKE_CXX_COMPILER=${CXX} ${{ matrix.cmake_flags }} ${CMAKE_EXTRA_ARGS}
 
       - name: Configure CMake (Windows)
         if: matrix.os_runner == 'windows-latest' # Condition changed for consistency
