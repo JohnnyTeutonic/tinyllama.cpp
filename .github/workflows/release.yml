@@ -147,7 +147,7 @@ jobs:
         shell: pwsh
         run: |
           Write-Host "Attempting to upgrade Chocolatey (default sources)..."
-          choco upgrade chocolatey -y
+          choco upgrade chocolatey -y # Try without explicit source first for upgrade
           if ($LASTEXITCODE -ne 0) {
             Write-Warning "Chocolatey upgrade failed or was not necessary. Continuing..."
           }
@@ -156,7 +156,7 @@ jobs:
             @{ Name = "doxygen.install"; LogName = "Doxygen" },
             @{ Name = "graphviz"; LogName = "Graphviz" },
             @{ Name = "openssl"; LogName = "OpenSSL" },
-            @{ Name = "boost"; Version = "1.81.0"; LogName = "Boost" }
+            @{ Name = "boost"; Version = "1.81.0"; LogName = "Boost" } 
           )
           $allSucceeded = $true
 
@@ -188,35 +188,6 @@ jobs:
             exit 1
           }
           Write-Host "All Chocolatey packages installed successfully."
-
-          # Set BOOST_ROOT based on typical choco path for boost --version=1.81.0
-          # Choco usually installs to C:\ProgramData\chocolatey\lib\boost.<version>\tools or similar
-          # A more robust way is to get install location from choco, but this is a common pattern.
-          # For boost 1.81.0, it might be C:\ProgramData\chocolatey\lib\boost.1.81.0 or similar for headers.
-          # The actual root for CMake might be just C:\ProgramData\chocolatey\lib\boost.1.81.0\ or the parent lib dir.
-          # Let's try a common pattern if it exists after install.
-          $BOOST_INSTALL_PATH_GUESS = "C:\ProgramData\chocolatey\lib\boost.1.81.0"
-          if (Test-Path $BOOST_INSTALL_PATH_GUESS) {
-             Write-Host "Found guessed Boost 1.81.0 path: $BOOST_INSTALL_PATH_GUESS. Setting BOOST_ROOT & Boost_ROOT for CMake."
-             echo "BOOST_ROOT=$BOOST_INSTALL_PATH_GUESS" >> $env:GITHUB_ENV
-             # Also set Boost_ROOT directly for CMake configure step below as an explicit hint
-             $env:Boost_ROOT_CMake_Hint = $BOOST_INSTALL_PATH_GUESS 
-          } else {
-             Write-Warning "Could not find guessed Boost 1.81.0 path: $BOOST_INSTALL_PATH_GUESS. Attempting fallbacks."
-             # Try the generic C:\Boost as a first fallback
-             if (Test-Path "C:\Boost") {
-                Write-Host "Falling back to C:\Boost for BOOST_ROOT"
-                echo "BOOST_ROOT=C:\Boost" >> $env:GITHUB_ENV
-                $env:Boost_ROOT_CMake_Hint = "C:\Boost"
-             } else if (Test-Path "C:\ProgramData\Boost\boost_1.87.0") { # Second fallback from cache path
-                Write-Host "Falling back to C:\ProgramData\Boost\boost_1.87.0 for BOOST_ROOT"
-                echo "BOOST_ROOT=C:\ProgramData\Boost\boost_1.87.0" >> $env:GITHUB_ENV
-                $env:Boost_ROOT_CMake_Hint = "C:\ProgramData\Boost\boost_1.87.0"
-             } else {
-                Write-Warning "None of the primary or fallback Boost paths were found. BOOST_ROOT_CMake_Hint will not be set."
-                # $env:Boost_ROOT_CMake_Hint remains unset or empty
-             }
-          }
 
       - name: Configure CMake (Linux)
         if: runner.os == 'Linux'
@@ -267,23 +238,22 @@ jobs:
       - name: Configure CMake (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        env:
-          Boost_ROOT_CMake_Hint: ${{ env.Boost_ROOT_CMake_Hint }}
         run: |
-          # BOOST_ROOT should be in GITHUB_ENV from previous step
-          Write-Host "BOOST_ROOT from GITHUB_ENV is: $($env:BOOST_ROOT)"
-          Write-Host "Boost_ROOT_CMake_Hint from step env is: $($env:Boost_ROOT_CMake_Hint)"
+          $BOOST_ROOT_DIR = "C:\ProgramData\Boost\boost_1.87.0"
+          if (-not (Test-Path $BOOST_ROOT_DIR)) {
+            # Fallback if the primary path doesn't exist, try the other cached path
+            $BOOST_ROOT_DIR = "C:\local\boost_1_87_0"
+            if (-not (Test-Path $BOOST_ROOT_DIR)) {
+               $BOOST_ROOT_DIR = "C:\Boost"
+            }
+          }
+          Write-Host "Setting BOOST_ROOT to $BOOST_ROOT_DIR"
+          echo "BOOST_ROOT=$BOOST_ROOT_DIR" >> $env:GITHUB_ENV # For subsequent steps if needed
 
           New-Item -ItemType Directory -Force -Path build
           Set-Location build
-          
-          $cmakeArgs = @("..", "-DCMAKE_BUILD_TYPE=Release", "${{ matrix.cmake_flags }}")
-          if ($env:Boost_ROOT_CMake_Hint) {
-            $cmakeArgs += "-DBoost_ROOT=$($env:Boost_ROOT_CMake_Hint)" # Pass explicitly to CMake
-          }
-          
-          Write-Host "Running CMake with args: $cmakeArgs"
-          cmake @cmakeArgs
+          # Pass BOOST_ROOT directly and include Generator/Architecture
+          cmake .. -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release -DBOOST_ROOT="$BOOST_ROOT_DIR" ${{ matrix.cmake_flags }}
 
       - name: Build (Linux)
         if: runner.os == 'Linux'
