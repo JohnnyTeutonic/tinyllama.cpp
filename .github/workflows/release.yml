@@ -124,6 +124,22 @@ jobs:
           # OpenMP for CPU builds
           sudo apt-get install -y libomp-dev
 
+      - name: Diagnose Docker GPU capabilities (Linux CUDA)
+        if: runner.os == 'Linux' && matrix.build_type == 'cuda'
+        run: |
+          echo "Checking Docker version..."
+          docker --version
+          echo "Installed Docker runtimes:"
+          docker info --format '{{json .Runtimes}}'
+          echo "Default Docker runtime:"
+          docker info --format '{{.DefaultRuntime}}'
+          echo "NVIDIA Docker version info (if nvidia-docker is a command):"
+          nvidia-docker version || echo "nvidia-docker command not found or failed (this is okay if nvidia-container-toolkit is used)"
+          echo "Listing NVIDIA container CLI info (if available):"
+          sudo nvidia-container-cli info || echo "nvidia-container-cli not found or failed (might indicate nvidia-container-toolkit issue)"
+          echo "Attempting a simple CUDA container test (nvidia-smi)..."
+          docker run --rm --gpus all nvidia/cuda:12.1.1-base-ubuntu20.04 nvidia-smi || echo "nvidia-smi in CUDA base container failed"
+
       - name: Build in Docker (Linux CUDA)
         if: runner.os == 'Linux' && matrix.build_type == 'cuda'
         run: |
