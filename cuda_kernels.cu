@@ -108,6 +108,30 @@ __global__ void rmsnorm_apply_kernel(const float* x, const float* weight,
   }
 }
 
+__global__ void reduce_partial_sums_kernel(const float* partial_sums, float* total_sum_sq_out, int num_partial_sums) {
+    extern __shared__ float sdata[];
+    unsigned int tid = threadIdx.x;
+
+    float my_sum = 0.0f;
+    for (unsigned int i = tid; i < num_partial_sums; i += blockDim.x) {
+        my_sum += partial_sums[i];
+    }
+    sdata[tid] = my_sum;
+    __syncthreads();
+
+    // Standard parallel reduction in shared memory
+    for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            sdata[tid] += sdata[tid + s];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        total_sum_sq_out[0] = sdata[0];
+    }
+}
+
 /**
  * @brief Implementation of RMS normalization with device pointers
  * 
@@ -126,31 +150,42 @@ __global__ void rmsnorm_apply_kernel(const float* x, const float* weight,
 void rmsnorm_vector_cuda(const float* x_dev, const float* weight_dev,
                          float* out_dev, int n, float eps,
                          cudaStream_t stream) {
-  const int threads_per_block = 256;
-  int num_blocks_reduce = (n + threads_per_block - 1) / threads_per_block;
-  size_t shared_mem_size = threads_per_block * sizeof(float);
+  const int threads_per_block = 256; // General purpose threads per block
+  int num_blocks_reduce_pass1 = (n + threads_per_block - 1) / threads_per_block;
+  size_t shared_mem_size_pass1 = threads_per_block * sizeof(float);
 
   float* partial_sums_dev = nullptr;
-  gpuErrchk(cudaMalloc(&partial_sums_dev, num_blocks_reduce * sizeof(float)));
+  gpuErrchk(cudaMalloc(&partial_sums_dev, num_blocks_reduce_pass1 * sizeof(float)));
 
-  rmsnorm_sum_squares_kernel<<<num_blocks_reduce, threads_per_block,
-                               shared_mem_size, stream>>>(x_dev,
+  rmsnorm_sum_squares_kernel<<<num_blocks_reduce_pass1, threads_per_block,
+                               shared_mem_size_pass1, stream>>>(x_dev,
                                                           partial_sums_dev, n);
   gpuErrchk(cudaGetLastError());
 
-  float* partial_sums_host = new float[num_blocks_reduce];
-  gpuErrchk(cudaMemcpy(partial_sums_host, partial_sums_dev,
-                       num_blocks_reduce * sizeof(float),
-                       cudaMemcpyDeviceToHost));
+  float* total_sum_sq_dev = nullptr;
+  gpuErrchk(cudaMalloc(&total_sum_sq_dev, sizeof(float)));
 
-  double total_ssq = 0.0;
-  for (int i = 0; i < num_blocks_reduce; ++i) {
-    total_ssq += partial_sums_host[i];
-  }
-  total_ssq /= n;
-  float inv_norm_factor = 1.0f / SAFE_SQRT(static_cast<float>(total_ssq) + eps);
-  delete[] partial_sums_host;
-  gpuErrchk(cudaFree(partial_sums_dev));
+  const int threads_for_final_reduction = (num_blocks_reduce_pass1 <= 256) ? 256 :
+                                          (num_blocks_reduce_pass1 <= 512) ? 512 : 1024; 
+                                          // Cap at 1024, ensure kernel handles num_partial_sums correctly if it's less than blockDim.x
+  size_t shared_mem_final_reduction = threads_for_final_reduction * sizeof(float);
+  
+  // Launch a single block for the final reduction of partial_sums_dev
+  reduce_partial_sums_kernel<<<1, threads_for_final_reduction, 
+                               shared_mem_final_reduction, stream>>>(
+                                   partial_sums_dev, total_sum_sq_dev, num_blocks_reduce_pass1);
+  gpuErrchk(cudaGetLastError());
+  gpuErrchk(cudaFree(partial_sums_dev)); // Free intermediate partial sums
+
+  float h_total_ssq = 0.0f;
+  gpuErrchk(cudaMemcpyAsync(&h_total_ssq, total_sum_sq_dev, sizeof(float),
+                       cudaMemcpyDeviceToHost, stream));
+  gpuErrchk(cudaStreamSynchronize(stream)); // Ensure h_total_ssq is ready
+  gpuErrchk(cudaFree(total_sum_sq_dev));
+
+  double total_ssq_double = static_cast<double>(h_total_ssq);
+  total_ssq_double /= n;
+  float inv_norm_factor = 1.0f / SAFE_SQRT(static_cast<float>(total_ssq_double) + eps);
 
   int num_blocks_apply = (n + threads_per_block - 1) / threads_per_block;
   rmsnorm_apply_kernel<<<num_blocks_apply, threads_per_block, 0, stream>>>(
@@ -575,9 +610,6 @@ __global__ void attention_kernel(const float* Q_current,
                                  int current_seq_len, int head_dim, float scale,
                                  int cache_num_kv_heads, int num_q_heads) {
 
-  // Kernel launch: grid(num_q_heads), block(head_dim)
-  // blockIdx.x is q_head_idx
-  // threadIdx.x is d_idx (dimension index within head_dim)
 
   int q_head_idx = blockIdx.x;
   int d_idx = threadIdx.x; // dimension index for this thread
@@ -596,17 +628,12 @@ __global__ void attention_kernel(const float* Q_current,
   // Pointer to the current query head's data
   const float* q_head_ptr = Q_current + q_head_idx * head_dim;
 
-  // --- 1. Calculate Scores (Q_head dot K_k) ---
-  // Each block (q_head) calculates all 'current_seq_len' scores.
-  // The 'head_dim' threads in the block cooperate to calculate each dot product.
   for (int k_pos = 0; k_pos < current_seq_len; ++k_pos) {
     // Pointer to the k_pos-th key vector for the relevant kv_head
     size_t k_vec_offset = (size_t)k_pos * cache_num_kv_heads * head_dim +
                           (size_t)kv_head_idx * head_dim;
     const float* k_vec_ptr = K_layer_cache_base + k_vec_offset;
 
-    // Parallel dot product calculation
-    // Each thread d_idx computes one term of the dot product
     dot_product_terms[d_idx] = q_head_ptr[d_idx] * k_vec_ptr[d_idx];
     __syncthreads(); // Ensure all terms are written before reduction
 
@@ -618,22 +645,15 @@ __global__ void attention_kernel(const float* Q_current,
       }
       scores[k_pos] = current_dot * scale;
     }
-    __syncthreads(); // Ensure scores[k_pos] is written before next k_pos iteration (if reduction by d_idx==0)
-                     // or before softmax if reduction was parallel.
-                     // If d_idx == 0 writes, all other threads must wait for it to complete for this k_pos.
+    __syncthreads(); 
   }
 
-  // --- 2. Softmax ---
-  // Parallel reduction to find max_score among scores[0...current_seq_len-1]
-  // Each thread handles a portion of 'scores' array for reduction.
   float thread_max_score = -INFINITY;
   for (int i = d_idx; i < current_seq_len; i += blockDim.x) { // blockDim.x is head_dim
     if (scores[i] > thread_max_score) {
       thread_max_score = scores[i];
     }
   }
-  // Reduce thread_max_score across the block
-  // Simple single-pass reduction (can be optimized with tree reduction if head_dim is large)
   dot_product_terms[d_idx] = thread_max_score; // Repurpose dot_product_terms shared memory
   __syncthreads();
 
@@ -682,10 +702,6 @@ __global__ void attention_kernel(const float* Q_current,
     scores[i] *= inv_sum;
   }
   __syncthreads(); // Ensure all scores are normalized before weighted sum
-
-  // --- 3. Weighted Sum of Values ---
-  // Each thread d_idx calculates one element of the output vector for this q_head.
-  // out_for_this_q_head[d_idx] = sum over k_pos ( scores[k_pos] * V_value_for_d_idx_at_k_pos )
 
   double weighted_val_d = 0.0; // Use double for accumulation
   for (int k_pos = 0; k_pos < current_seq_len; ++k_pos) {
@@ -962,12 +978,6 @@ __global__ void find_max_abs_kernel(const float* __restrict__ data, int n_elemen
     }
 
     if (tid == 0) {
-        // Atomically update the global maximum if this block's maximum is greater
-        // This is a simple way to handle multiple blocks; for very large arrays,
-        // a multi-level reduction would be more efficient.
-        // atomicMax(max_abs_val, sdata[0]); // Original problematic line
-
-        // Correct way to implement atomicMax for floats using atomicCAS
         float old_val = *max_abs_val;
         float new_val = sdata[0];
         while (new_val > old_val) {

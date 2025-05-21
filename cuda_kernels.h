@@ -112,6 +112,8 @@ void rmsnorm_vector_cuda(const std::vector<float>& x_in_host,
                          const std::vector<float>& weight_host,
                          std::vector<float>& out_host, int n, float eps);
 
+__global__ void reduce_partial_sums_kernel(const float* partial_sums, float* total_sum_sq_out, int num_partial_sums);
+
 /**
  * @brief Matrix-Vector Multiplication Operations
  * 

@@ -1060,8 +1060,6 @@ void TinyLlamaModel::initialize_weights(const SafeTensorsLoader* loader,
       size_t expected_num_elements = 1;
       for(size_t dim : tensor_info.shape) expected_num_elements *= dim; // Use shape from metadata
 
-      // The loader now converts both BF16 and F16 to FP32 bytes before this point.
-      // So, tensor_data_bytes for these types will contain FP32 data.
       if (tensor_info.dtype == "BF16" || tensor_info.dtype == "F16" || tensor_info.dtype == "F32") {
         if (tensor_data_bytes.size() != expected_num_elements * sizeof(float)) {
           Logger::error("Size mismatch for tensor '" + name + "' (original dtype " + tensor_info.dtype + ", expected FP32 bytes). Expected " +
@@ -1079,7 +1077,6 @@ void TinyLlamaModel::initialize_weights(const SafeTensorsLoader* loader,
       }
     };
 
-    // Load weights using the new process_safetensor helper
     process_safetensor("model.embed_tokens.weight", embed_tokens_f32, {(size_t)vs, (size_t)hs});
     process_safetensor("lm_head.weight", lm_head_f32, {(size_t)vs, (size_t)hs});
     process_safetensor("model.norm.weight", final_norm_f32, {(size_t)hs});
@@ -1264,8 +1261,6 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
   }
   Logger::info("Finished processing layer norm weights for GPU layers.");
 
-  // Embeddings and LM head (BF16 and FP32 versions to GPU if active_num_gpu_layers > 0)
-  // These are global, so they are needed if any layers are on GPU.
 
   // --- TOKEN EMBEDDING TABLE to GPU (as BF16) ---
   SAFE_CUDA_FREE(token_embedding_table_dev_);    // Target for BF16
@@ -1483,8 +1478,6 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
     size_t kv_cache_dequant_buffer_elems = static_cast<size_t>(config_.max_position_embeddings) * n_kv_heads * head_dim;
     size_t kv_cache_dequant_buffer_bytes = kv_cache_dequant_buffer_elems * sizeof(float);
     if (kv_cache_dequant_buffer_elems > 0) {
-        // Ensure REALLOC_GPU_WORKSPACE is defined or expand it here
-        // #define REALLOC_GPU_WORKSPACE(ptr, sz) SAFE_CUDA_FREE(ptr); gpuErrchk(cudaMalloc(&ptr, sz));
         SAFE_CUDA_FREE(dequant_k_cache_buffer_dev_); 
         gpuErrchk(cudaMalloc(&dequant_k_cache_buffer_dev_, kv_cache_dequant_buffer_bytes));
         SAFE_CUDA_FREE(dequant_v_cache_buffer_dev_);
@@ -2505,11 +2498,8 @@ std::vector<float> TinyLlamaModel::forward(
       Logger::info("[CPU_FWD] ------ END Layer " + std::to_string(l) +
                    " (pos=" + std::to_string(n_tokens) + ") ------");
     }
-  } // End of CPU layer loop
+  }
 
-  // If all layers were processed on CPU, then do final norm and logits.
-  // Otherwise, `input` (which is x_vec from the caller) now holds the output of the last CPU layer,
-  // and will be passed to the GPU stage. The GPU stage will handle final norm and logits if it processes the last layer.
   if (config_.num_cpu_offload_layers == config_.num_hidden_layers) {
     Logger::info("[CPU_FWD] All layers processed on CPU. Performing final RMSNorm and Logits.");
   const std::vector<float>& w_final_norm_vec =
@@ -2687,14 +2677,10 @@ std::vector<float> TinyLlamaModel::forward_device(
                 const float* current_k_head_ptr_fp32 = k_dev_ + kvh * head_dim;
                 const float* current_v_head_ptr_fp32 = v_dev_ + kvh * head_dim;
 
-                // Calculate offset into the flat quantized cache for the current token and head
-                // Cache is [max_seq_len][num_kv_heads][head_dim]
                 size_t token_head_offset_quant = (static_cast<size_t>(pos) * n_kv_heads + kvh) * head_dim;
                 int8_t* k_quant_target_ptr = current_kv_layer.k_dev_quantized + token_head_offset_quant;
                 int8_t* v_quant_target_ptr = current_kv_layer.v_dev_quantized + token_head_offset_quant;
 
-                // Calculate offset into the flat scales cache for the current token and head
-                // Scales are [max_seq_len][num_kv_heads]
                 size_t scale_offset = static_cast<size_t>(pos) * n_kv_heads + kvh;
                 float* k_scale_target_ptr = current_kv_layer.k_dev_scales + scale_offset;
                 float* v_scale_target_ptr = current_kv_layer.v_dev_scales + scale_offset;
@@ -2735,8 +2721,6 @@ std::vector<float> TinyLlamaModel::forward_device(
     KVCacheLayer& attention_kv_layer = kv_cache->layers[l_model_idx]; // Re-fetch for clarity, same as current_kv_layer
 
     if (config_.use_kvcache_quantization) {
-        // Dequantize the entire K and V cache history for this layer up to current 'pos'
-        // into dequant_k_cache_buffer_dev_ and dequant_v_cache_buffer_dev_
         for (int t = 0; t <= pos; ++t) { // Iterate through sequence length up to current token
             for (int kvh = 0; kvh < n_kv_heads; ++kvh) { // Iterate through heads
                 size_t token_head_offset_quant = (static_cast<size_t>(t) * n_kv_heads + kvh) * head_dim;
@@ -2873,14 +2857,12 @@ std::vector<float> TinyLlamaModel::forward_device(
 
     add_residual_cuda(mlp_down_dev_, x_resid2_dev_, current_x_dev, hs, stream); // Output to current_x_dev (model_->x_dev_)
 
-    // Corrected logging conditions to use l_model_idx and num_cpu_layers/total_model_layers
-    // Log if it's the first GPU layer OR the absolute last layer of the model AND log_this_pos is true.
     if (log_this_pos && (l_model_idx == num_cpu_layers || l_model_idx == (total_model_layers - 1))) { 
       std::vector<float> x_host_output(hs);
       gpuErrchk(cudaMemcpy(x_host_output.data(), current_x_dev, hs * sizeof(float), cudaMemcpyDeviceToHost));
       log_vector_summary_detailed("[CUDA] Output of Model Layer " + std::to_string(l_model_idx) + " (GPU_idx " + std::to_string(l_gpu_idx) + ", pos=" + std::to_string(pos) + ")", x_host_output, pos, l_model_idx, 8); // Corrected from l to l_model_idx
     }
-  } // End of GPU layer loop
+  }
 
   if (log_this_pos)
     Logger::info("[TM::fw_dev pos=" + std::to_string(pos) +
@@ -2891,14 +2873,11 @@ std::vector<float> TinyLlamaModel::forward_device(
     Logger::info("[TM::fw_dev pos=" + std::to_string(pos) +
                  "] Processing LM Head.");
 
-  if (lm_head_dev_) { // This is now the primary path, expecting BF16 weights
-    // x_norm_dev_ is FP32, lm_head_dev_ is BF16. Output logits_dev_ should be FP32.
+  if (lm_head_dev_) { 
     matvec_bf16_f32_cuda(cublas_handle_, lm_head_dev_, x_norm_dev_, logits_dev_,
                          vs, hs, stream);
   } else {
     Logger::error("LM head (lm_head_dev_ for BF16) is null. Cannot calculate logits on GPU.");
-    // Returning an empty vector or throwing an exception might be appropriate here
-    // For now, to match previous structure if no weights, return empty.
     return {};
   }
 
@@ -3615,9 +3594,6 @@ void TinyLlamaModel::initialize_rope_freqs() {
                ", using internal rope::MAX_SEQUENCE_LENGTH=" + std::to_string(rope::MAX_SEQUENCE_LENGTH) +
                ", configured rope_theta=" + std::to_string(config_.rope_theta));
 
-  // This function precomputes RoPE frequencies for all positions and head dimensions.
-  // The precomputed_freqs_cis_ vector stores pairs of (cos(angle), sin(angle)).
-  // It's a flat vector: precomputed_freqs_cis_[(pos * head_dim / 2) + (dim_pair_idx)]
 
   if (precomputed_freqs_cis_.empty()) { 
     int max_seq_len = rope::MAX_SEQUENCE_LENGTH; // Or config_.max_position_embeddings if preferred

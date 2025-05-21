@@ -231,16 +231,11 @@ TinyLlamaSession::TinyLlamaSession(const std::string& model_path_arg,
     config_ = model_->get_config(); 
     config_.is_gguf_file_loaded = false; // Ensure this is set for session's copy too
 
-    // After model is loaded, its internal config_ might have been updated (e.g. by GGUF metadata)
-    // We need to ensure our session's KVCache initialization uses the potentially updated config
-    // AND respects the CLI/constructor preference for KV cache quantization.
     config_.use_kvcache_quantization = use_kv_quant; // Re-apply CLI/constructor preference
 
     Logger::info("TinyLlamaSession: Finalizing ModelConfig for KVCache initialization. use_kvcache_quantization set to: " + 
                   std::string(config_.use_kvcache_quantization ? "true" : "false"));
 
-    // Initialize KVCache with potentially updated config_ (from model load) 
-    // and the now-set use_kvcache_quantization flag.
     kv_cache_.initialize(config_, config_.num_hidden_layers, 
                          config_.num_hidden_layers - config_.num_cpu_offload_layers, 
                          config_.max_position_embeddings, 
@@ -253,13 +248,6 @@ TinyLlamaSession::TinyLlamaSession(const std::string& model_path_arg,
 
     if (extension == ".gguf") {
       Logger::info("GGUF model type detected by extension for Session constructor: " + model_path_arg);
-      // For GGUF, num_cpu_offload_layers is determined *after* parsing GGUF meta in TinyLlamaModel constructor.
-      // We pass num_gpu_layers_from_cli as a hint in initial_model_config_for_model_ctor.num_cpu_offload_layers.
-      // The TinyLlamaModel GGUF constructor will interpret it correctly against its loaded num_hidden_layers.
-      // If num_gpu_layers_from_cli is (e.g.) 0 (all CPU), it might be passed as num_cpu_offload_layers = 0 here,
-      // but the model constructor should override this to num_hidden_layers.
-      // This part is tricky; the model constructor has the final say for GGUF based on its own metadata.
-      // The initial_model_config_for_model_ctor.num_cpu_offload_layers set before this branch is used as a hint.
       model_ = std::make_unique<TinyLlamaModel>(initial_model_config_for_model_ctor, model_path_arg);
       config_ = model_->get_config(); 
     } else if (extension == ".safetensors") {
@@ -305,9 +293,6 @@ TinyLlamaSession::TinyLlamaSession(const std::string& model_path_arg,
       config_ = model_->get_config(); 
       config_.is_gguf_file_loaded = false; // Ensure this is set for session's copy too
 
-      // After model is loaded, its internal config_ might have been updated (e.g. by GGUF metadata)
-      // We need to ensure our session's KVCache initialization uses the potentially updated config
-      // AND respects the CLI/constructor preference for KV cache quantization.
       config_.use_kvcache_quantization = use_kv_quant; // Re-apply CLI/constructor preference
 
       Logger::info("TinyLlamaSession: Finalizing ModelConfig for KVCache initialization. use_kvcache_quantization set to: " + 
@@ -329,8 +314,6 @@ TinyLlamaSession::TinyLlamaSession(const std::string& model_path_arg,
   if (!model_) {
       throw std::runtime_error("Model pointer is null after instantiation attempt in Session constructor.");
   }
-  // At this point, model_ is constructed, and model_->get_config() is the definitive one.
-  // config_ member of TinyLlamaSession is now synchronized with model_->get_config().
 
   try {
     if (config_.is_gguf_file_loaded) {
@@ -375,9 +358,6 @@ TinyLlamaSession::TinyLlamaSession(const std::string& model_path_arg,
   const ModelConfig& final_model_config = model_->get_config(); // Explicitly use model's config
   int total_model_layers = final_model_config.num_hidden_layers;
   
-  // Determine actual number of GPU layers based on model's final decision
-  // model_->initialize_gpu_and_rope() would have clamped num_cpu_offload_layers
-  // and thus determined the effective split.
   int effective_cpu_offload_layers = final_model_config.num_cpu_offload_layers;
   int gpu_layers_for_kvcache = total_model_layers - effective_cpu_offload_layers;
   if (gpu_layers_for_kvcache < 0) gpu_layers_for_kvcache = 0; // Sanity check, should not happen if model ctor is correct
@@ -450,9 +430,7 @@ std::string TinyLlamaSession::generate(const std::string& user_prompt, int steps
         temp_prompt = "Q: " + user_prompt + "\nA:";
     }
     final_prompt_for_encoding = temp_prompt;
-    // No `used_chat_template = true` here, as it's not the full chat templating.
   }
-  // Priority 4: Raw user prompt (with system prompt prepended if provided)
   else {
     Logger::info("[Generate API] No GGUF/Llama3 template and Q/A formatting hint is false. Using user prompt as is (prepending system prompt if available).");
     if (!system_prompt_arg.empty()) {
@@ -515,8 +493,6 @@ std::string TinyLlamaSession::generate(const std::string& user_prompt, int steps
 #ifdef HAS_CUDA
     if (num_gpu > 0) { // Process GPU layers if any
         Logger::debug("[Generate] Processing " + std::to_string(num_gpu) + " GPU layers for pos " + std::to_string(pos));
-        // current_data_host contains either embedding (if num_cpu == 0) or output of CPU layers.
-        // Copy this host data to device model_->x_dev_ to start GPU pipeline.
         float* x_dev_ptr = model_->get_x_dev();
         if (!x_dev_ptr) { 
             Logger::fatal("model_->x_dev_ is null before GPU forward pass!"); 
@@ -536,15 +512,11 @@ std::string TinyLlamaSession::generate(const std::string& user_prompt, int steps
         logits.assign(config_.vocab_size > 0 ? config_.vocab_size : 1, 0.0f); // Assign dummy if vocab_size is valid
     } else if (num_cpu == 0 && num_gpu == 0 && num_total_layers > 0) { // Should not happen if logic is correct
          Logger::error("Inconsistent state: HAS_CUDA, num_cpu=0, num_gpu=0, but num_total_layers > 0. Defaulting to CPU path for safety.");
-         // Fallback to full CPU path just in case, using original embedding as input to forward.
-         // This assumes model_->forward() is safe to call even if it was configured for GPU layers that are now skipped.
          current_data_host = model_->lookup_embedding(input_token_id); // Re-fetch original embedding for safety
          logits = model_->forward(current_data_host, pos, &kv_cache_, nullptr);
     }
 #else // No CUDA compiled - All layers (if any) run on CPU
     if (num_total_layers > 0) {
-        // current_data_host already contains embedding if num_cpu_layers was 0, or output of CPU layers if num_cpu_layers > 0.
-        // If num_cpu_layers was > 0, model_->forward has already been called. We call it here if it hasn't (pure CPU path from start)
         if (num_cpu == 0) { // Only call model->forward if it wasn't called for CPU layers above
              Logger::debug("[Generate] NO_CUDA: Processing all " + std::to_string(num_total_layers) + " layers on CPU for pos " + std::to_string(pos));
              logits = model_->forward(current_data_host, pos, &kv_cache_, nullptr);
@@ -572,9 +544,6 @@ std::string TinyLlamaSession::generate(const std::string& user_prompt, int steps
 
     if (pos >= num_prompt_tokens - 1) {
       next_token_id = sample_top_k_top_p_temperature(logits, temperature, top_k, top_p, rng_);
-      // Logger::debug("[Generate Loop] Pos: " + std::to_string(pos) + ", Prompt Tokens: " + std::to_string(num_prompt_tokens) + ", Generated Token ID: " + std::to_string(next_token_id));
-
-      // Decode and log the individual token immediately after sampling
       std::string decoded_next_token = tokenizer_->decode({next_token_id}, true); 
       Logger::info("[Generate] Sampled Token ID: " + std::to_string(next_token_id) + 
                    ", Decoded: '" + decoded_next_token + "'");
