@@ -112,6 +112,11 @@ void rmsnorm_vector_cuda(const std::vector<float>& x_in_host,
                          const std::vector<float>& weight_host,
                          std::vector<float>& out_host, int n, float eps);
 
+// New Batch RMSNorm
+void rmsnorm_batch_cuda(float* d_out, float* d_in, const float* d_weight, 
+                        int num_tokens, int hidden_size, float eps, 
+                        cudaStream_t stream);
+
 __global__ void reduce_partial_sums_kernel(const float* partial_sums, float* total_sum_sq_out, int num_partial_sums);
 
 /**
@@ -158,6 +163,17 @@ void matvec_f32_f32_cuda(cublasHandle_t handle,
 void matvec_f32_f32_cuda(cublasHandle_t handle, const float* mat_f32_dev,
                         const float* vec_f32_dev, float* out_f32_dev,
                         int rows, int cols, cudaStream_t stream = 0);
+
+// New Generic GEMM for FP32 (if needed, can be adapted for BF16 later or use cublasGemmEx)
+void gemm_f32_f32_cuda(cublasHandle_t handle, 
+                       bool transa, bool transb, 
+                       int m, int n, int k, 
+                       const float* alpha, 
+                       const float* A, int lda, 
+                       const float* B, int ldb, 
+                       const float* beta, 
+                       float* C, int ldc, 
+                       cudaStream_t stream);
 
 /**
  * @brief Activation Functions
@@ -417,6 +433,73 @@ void dequantize_int8_to_fp32_symmetric_per_tensor_cuda(
     float* fp32_out_dev,
     int num_elements, 
     cudaStream_t stream = 0);
+
+// New Batched SwiGLU (SiLU + element-wise multiply)
+void swiglu_batch_cuda(float* d_out_batch, // Output: [num_tokens, intermediate_size]
+                       const float* d_gate_act_batch,   // Input: Gate activations [num_tokens, intermediate_size]
+                       const float* d_up_act_batch,     // Input: Up activations [num_tokens, intermediate_size]
+                       int num_tokens,
+                       int intermediate_size,
+                       cudaStream_t stream);
+
+// New Batched RoPE
+void rope_batch_cuda(float* d_q_batch, float* d_k_batch,
+                     const float* d_all_freqs_cis_base, // Changed name
+                     int num_tokens, int num_q_heads, int num_kv_heads, int head_dim,
+                     int start_pos_offset,      // Changed name
+                     bool use_adjacent_pairing, // Changed name and type
+                     cudaStream_t stream);
+
+// New Batched Attention for Prefill
+void attention_batch_prefill_cuda(
+    const float* d_q_batch_strided,   // Input Q: [B, H_q, D_h]
+    const float* d_k_batch_strided,   // Input K for current batch
+    const float* d_v_batch_strided,   // Input V for current batch
+    float* d_kv_cache_k_base,         // K Cache: [S_max, H_kv, D_h]
+    float* d_kv_cache_v_base,         // V Cache: [S_max, H_kv, D_h]
+    float* d_output_batch_strided,    // Output: [B, H_q, D_h]
+    int num_tokens_in_batch,          // B
+    int start_pos_in_kv_cache,        // Start position for this batch in KV cache
+    int cache_max_seq_len,            // Max capacity of KV cache
+    int num_q_heads,                  // H_q
+    int num_kv_heads,                 // H_kv
+    int head_dim,                     // D_h
+    float scale,
+    cudaStream_t stream,
+    const int* attention_mask_cu = nullptr // Optional attention mask, changed name
+);
+
+// New Batched Add Residual
+void add_residual_batch_cuda(float* d_output_batch, // Output: [num_tokens, hidden_size]
+                             const float* d_input_a_batch,   // Input A: [num_tokens, hidden_size]
+                             const float* d_input_b_batch,   // Input B: [num_tokens, hidden_size]
+                             int num_tokens, int hidden_size,
+                             cudaStream_t stream);
+
+// New Batched KV Cache Update (FP32 example)
+// This function seems to be missing a corresponding definition for separate K and V caches.
+// The existing update_kv_cache_batch_cuda takes a single cache layer base.
+// For now, I will comment out the _fp32 version and assume the generic one is intended to be used twice.
+/*
+void update_kv_cache_batch_cuda_fp32(
+    float* d_kvcache_k, float* d_kvcache_v,
+    const float* d_k_batch_current, const float* d_v_batch_current,
+    int num_tokens_in_batch, int start_pos_in_kv_cache,
+    int max_seq_len_in_cache, int num_kv_heads, int head_dim,
+    cudaStream_t stream
+);
+*/
+// Assuming the following is the intended generic function for batch KV update:
+void update_kv_cache_batch_cuda(
+    float* d_kv_cache_layer_base,        // Device pointer to the K or V cache for the current layer
+    const float* d_keys_or_values_batch, // Device pointer to the batch of K or V vectors to be written
+    int start_pos_in_kv_cache,           // The sequence position in the cache where writing for this batch should begin
+    int num_tokens_in_batch,             // Number of tokens in the d_keys_or_values_batch
+    int num_kv_heads,                    // Number of K/V heads
+    int head_dim,                        // Dimension of each K/V head
+    int cache_max_seq_len,               // Maximum sequence length capacity of the cache
+    cudaStream_t stream
+);
 
 #endif // HAS_CUDA
 

@@ -311,6 +311,20 @@ class TinyLlamaModel {
     cudaStream_t stream = 0);
   
   float* get_x_dev() { return x_dev_; }
+
+  void forward_device(int token_id, int pos, KVCache* kv_cache,
+                      cudaStream_t stream = 0);
+  void forward_device_token(int token_id, int pos, KVCache* kv_cache, cudaStream_t stream = 0);
+
+  std::vector<float> forward_device_batch_prefill(
+      float* d_batch_input_hidden_states, // Device pointer to [num_tokens_in_batch, config_.hidden_size]
+      int num_tokens_in_batch,
+      int start_pos_in_kv_cache,         // Typically 0 for prefill
+      KVCache* kv_cache,
+      cudaStream_t stream
+  );
+
+  void initialize_gpu_and_rope();
 #endif
 
   const ModelConfig& get_config() const { return config_; }
@@ -338,9 +352,11 @@ class TinyLlamaModel {
     return gguf_data_ ? gguf_data_.get() : nullptr;
   }
 
-  friend void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model);
+  GGUFData* get_gguf_data_ptr() { return gguf_data_.get(); }
 
   void initialize_rope_freqs();
+
+  friend void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model);
 
  private:
   ModelConfig config_;
@@ -404,7 +420,6 @@ class TinyLlamaModel {
 
   void initialize_weights(const SafeTensorsLoader* loader,
                           const GGUFData* gguf);
-  void initialize_gpu_and_rope();
 
 };
 
