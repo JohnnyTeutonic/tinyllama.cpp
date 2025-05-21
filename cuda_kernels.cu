@@ -22,6 +22,9 @@
 #include <cublas_v2.h>
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
+
+#endif
+
 #include <stdint.h>
 #include <stdio.h>
 
@@ -935,4 +938,152 @@ __global__ void convert_bf16_to_fp32_kernel(const uint16_t* __restrict__ bf16_in
   }
 }
 
-#endif
+// KVCache Quantization Kernels (FP32 <-> INT8)
+#ifdef HAS_CUDA
+
+// Kernel to find the maximum absolute value in a float array (for per-tensor scaling)
+__global__ void find_max_abs_kernel(const float* __restrict__ data, int n_elements, float* __restrict__ max_abs_val) {
+    extern __shared__ float sdata[];
+    unsigned int tid = threadIdx.x;
+    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    float local_max = 0.0f;
+    if (i < n_elements) {
+        local_max = fabsf(data[i]);
+    }
+    sdata[tid] = local_max;
+    __syncthreads();
+
+    for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            sdata[tid] = fmaxf(sdata[tid], sdata[tid + s]);
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        // Atomically update the global maximum if this block's maximum is greater
+        // This is a simple way to handle multiple blocks; for very large arrays,
+        // a multi-level reduction would be more efficient.
+        // atomicMax(max_abs_val, sdata[0]); // Original problematic line
+
+        // Correct way to implement atomicMax for floats using atomicCAS
+        float old_val = *max_abs_val;
+        float new_val = sdata[0];
+        while (new_val > old_val) {
+            float assumed_old = old_val;
+            old_val = atomicCAS((unsigned int*)max_abs_val, 
+                                __float_as_int(assumed_old), 
+                                __float_as_int(new_val));
+            // If atomicCAS did not return what we thought was the old value,
+            // it means another thread updated it. We re-read and retry if our new_val is still greater.
+            if (__int_as_float(old_val) != assumed_old) {
+                 // Re-check condition with the actual current max_abs_val (now in old_val after CAS)
+                if (new_val <= old_val) break; // Another thread set a higher or equal max, or our new_val is no longer the max
+            } else {
+                // Our CAS was successful, or new_val was not greater than the initial read.
+                break; 
+            }
+        }
+    }
+}
+
+// Kernel to quantize FP32 to INT8 using a symmetric per-tensor scale
+__global__ void quantize_fp32_to_int8_symmetric_kernel(
+    const float* __restrict__ fp32_in,
+    int8_t* __restrict__ int8_out,
+    float scale,
+    int n_elements
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n_elements) {
+        float val_fp32 = fp32_in[i];
+        // Symmetric quantization: scaled_value = round(value / scale)
+        // Clamp to [-127, 127] for INT8 (as -128 might not be used or handled differently by some dequant schemes)
+        float scaled_val = roundf(val_fp32 / scale);
+        int8_out[i] = (int8_t)fmaxf(-127.0f, fminf(127.0f, scaled_val));
+    }
+}
+
+// Kernel to dequantize INT8 to FP32 using a symmetric per-tensor scale
+__global__ void dequantize_int8_to_fp32_symmetric_kernel(
+    const int8_t* __restrict__ int8_in,
+    float scale,
+    float* __restrict__ fp32_out,
+    int n_elements
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n_elements) {
+        fp32_out[i] = (float)int8_in[i] * scale;
+    }
+}
+
+void quantize_fp32_to_int8_symmetric_per_tensor_cuda(
+    const float* fp32_in_dev, 
+    int8_t* int8_out_dev, 
+    float* scale_out_dev, // Device pointer to store the single scale value
+    int num_elements, 
+    cudaStream_t stream
+) {
+    if (num_elements == 0) return;
+
+    const int threads_per_block = 256;
+    
+    // --- Step 1: Find the maximum absolute value for scaling ---
+    float* d_max_abs_val_accumulator = nullptr; // Accumulator on device for max_abs from blocks
+    gpuErrchk(cudaMalloc(&d_max_abs_val_accumulator, sizeof(float)));
+    gpuErrchk(cudaMemsetAsync(d_max_abs_val_accumulator, 0, sizeof(float), stream)); // Initialize to 0
+
+    // Max reduction kernel requires shared memory proportional to block size
+    int num_blocks_reduce = (num_elements + threads_per_block - 1) / threads_per_block;
+    size_t shared_mem_size = threads_per_block * sizeof(float);
+    
+    find_max_abs_kernel<<<num_blocks_reduce, threads_per_block, shared_mem_size, stream>>>(
+        fp32_in_dev, num_elements, d_max_abs_val_accumulator);
+    gpuErrchk(cudaGetLastError());
+
+    // Copy the final max absolute value back to `scale_out_dev` which is the designated output for the scale.
+    // The actual scale factor will be calculated from this max_abs_val.
+    float h_max_abs_val = 0.0f;
+    gpuErrchk(cudaMemcpyAsync(&h_max_abs_val, d_max_abs_val_accumulator, sizeof(float), cudaMemcpyDeviceToHost, stream));
+    gpuErrchk(cudaStreamSynchronize(stream)); // Ensure h_max_abs_val is ready
+
+    gpuErrchk(cudaFree(d_max_abs_val_accumulator));
+
+    // Calculate scale: scale = max_abs / 127.0 (so that 127 maps to max_abs)
+    // Add a small epsilon to prevent division by zero if all values are zero.
+    float scale = (h_max_abs_val > 1e-8) ? (h_max_abs_val / 127.0f) : 1.0f; 
+    gpuErrchk(cudaMemcpyAsync(scale_out_dev, &scale, sizeof(float), cudaMemcpyHostToDevice, stream));
+
+    // --- Step 2: Quantize using the calculated scale ---
+    int num_blocks_quantize = (num_elements + threads_per_block - 1) / threads_per_block;
+    quantize_fp32_to_int8_symmetric_kernel<<<num_blocks_quantize, threads_per_block, 0, stream>>>(
+        fp32_in_dev, int8_out_dev, scale, num_elements);
+    gpuErrchk(cudaGetLastError());
+}
+
+void dequantize_int8_to_fp32_symmetric_per_tensor_cuda(
+    const int8_t* int8_in_dev, 
+    const float* scale_in_dev, // Device pointer to the single scale value
+    float* fp32_out_dev,
+    int num_elements, 
+    cudaStream_t stream
+) {
+    if (num_elements == 0) return;
+
+    // Copy scale from device to host to pass as kernel argument
+    // (Kernels typically take scalar arguments by value)
+    float h_scale;
+    gpuErrchk(cudaMemcpyAsync(&h_scale, scale_in_dev, sizeof(float), cudaMemcpyDeviceToHost, stream));
+    // We need to synchronize here to ensure h_scale is available before launching the kernel
+    // A more optimized approach might involve a device-side broadcast of the scale if it were part of a larger struct.
+    gpuErrchk(cudaStreamSynchronize(stream)); 
+
+    const int threads_per_block = 256;
+    int num_blocks = (num_elements + threads_per_block - 1) / threads_per_block;
+    dequantize_int8_to_fp32_symmetric_kernel<<<num_blocks, threads_per_block, 0, stream>>>(
+        int8_in_dev, h_scale, fp32_out_dev, num_elements);
+    gpuErrchk(cudaGetLastError());
+}
+
+#endif // HAS_CUDA

@@ -382,6 +382,40 @@ __global__ void convert_bf16_to_fp32_kernel(const uint16_t* __restrict__ bf16_in
                                             float* __restrict__ fp32_out,
                                             size_t n_elements);
 
+// KVCache Quantization Kernels (FP32 <-> INT8)
+
+/**
+ * @brief Quantizes an FP32 vector to INT8 with a per-tensor symmetric scale.
+ *
+ * @param fp32_in_dev Device pointer to the input FP32 vector.
+ * @param int8_out_dev Device pointer to the output INT8 vector.
+ * @param scale_out_dev Device pointer to store the single FP32 scale factor.
+ * @param num_elements Number of elements in the vector.
+ * @param stream CUDA stream for asynchronous execution.
+ */
+void quantize_fp32_to_int8_symmetric_per_tensor_cuda(
+    const float* fp32_in_dev, 
+    int8_t* int8_out_dev, 
+    float* scale_out_dev,
+    int num_elements, 
+    cudaStream_t stream = 0);
+
+/**
+ * @brief Dequantizes an INT8 vector to FP32 using a per-tensor symmetric scale.
+ *
+ * @param int8_in_dev Device pointer to the input INT8 vector.
+ * @param scale_in_dev Device pointer to the single FP32 scale factor.
+ * @param fp32_out_dev Device pointer to the output FP32 vector.
+ * @param num_elements Number of elements in the vector.
+ * @param stream CUDA stream for asynchronous execution.
+ */
+void dequantize_int8_to_fp32_symmetric_per_tensor_cuda(
+    const int8_t* int8_in_dev, 
+    const float* scale_in_dev, 
+    float* fp32_out_dev,
+    int num_elements, 
+    cudaStream_t stream = 0);
+
 #endif // HAS_CUDA
 
 #endif // CUDA_KERNELS_H

@@ -8,232 +8,136 @@ The GGUF format support includes loading models with various tensor types such a
 
 *   Pure C++ inference core (CPU-based).
 *   Optional CUDA backend for GPU acceleration.
-*   Support for both safetensors and GGUF formats.
+*   Support for both safetensors and GGUF formats (various quantizations like Q4_K_M, Q6_K, Q8_0 for GGUF).
 *   Python bindings
 *   Built-in web server (`cpp-httplib`) for easy interaction via a web UI.
 *   Minimal external dependencies managed via CMake.
 *   Cross-platform (tested on Linux, Windows - requires C++17 compiler).
 
-## Dependencies
+## Dependencies and Setup
 
-### C++ Runtime Dependencies
+This section outlines the necessary components to build and run the project, and how to obtain model files.
 
-These are needed to **build and run** the C++ application:
+### 1. C++ Build Environment Dependencies
 
-1.  **CMake (>= 3.11):** Used for building the project.
+Core requirements to **build and run** the C++ application:
+
+1.  **CMake (>= 3.11):** For building the project.
 2.  **C++17 Compliant Compiler:** Such as g++, Clang, or MSVC.
-3.  **Boost Libraries (Regex, Xpressive, etc.):** For regular expression support. (Handled by `find_package` in CMake; system installation of appropriate Boost libraries needed)
-    *   `libboost-all-dev` is recommended to ensure all necessary components,
-        including header-only libraries like Boost.Xpressive (required for Llama 3
-        tokenizer functionality), are installed.
-        If you prefer a more minimal installation, you would need at least
-        `libboost-regex-dev` and ensure `boost/xpressive/xpressive.hpp`
-        is available from another Boost header package (e.g. `libboost-dev`
-        for a specific version which includes all headers).
-        However, `libboost-all-dev` is the most straightforward way to get everything.
-4.  **nlohmann/json:** For parsing JSON configuration files. (Fetched automatically by CMake if not found system-wide).
-5.  **cpp-httplib:** For the web server backend. (Fetched automatically by CMake).
-6.  **OpenMP (Optional but Recommended):** For multi-threading CPU acceleration. CMake will try to find it; performance will be lower without it.
-7.  **CUDA Toolkit (Optional):** Required **only** if you want GPU-accelerated inference. CMake will detect it if available and build the CUDA kernels. You'll need a compatible NVIDIA GPU and drivers.
+3.  **Boost Libraries (Specifically Regex & Xpressive):** Needed for tokenizer functionalities, especially for Llama 3 tokenizers.
+    *   **Linux (Debian/Ubuntu):** `sudo apt update && sudo apt install build-essential cmake libboost-all-dev libomp-dev`
+        *   `libboost-all-dev` is simplest. For minimal, ensure `libboost-regex-dev` and Boost Xpressive headers are installed.
+    *   **Linux (Fedora/RHEL):** `sudo dnf install gcc-c++ cmake boost-devel libgomp` (or `libomp-devel`).
+    *   **macOS (Homebrew):** `brew install cmake boost llvm` (llvm for OpenMP; may need extra flags if clang isn't finding OpenMP).
+    *   **Windows (vcpkg):** `vcpkg install boost-regex nlohmann-json cpp-httplib` (OpenMP usually included with MSVC).
+        *   Ensure Xpressive headers are pulled, often via `boost-headers` or a full `boost` package if `boost-regex` alone is insufficient.
+    *   **Windows (Chocolatey):** `choco install cmake visualstudio2022buildtools boost-msvc-14.3` (or similar for your VS and Boost versions).
+4.  **nlohmann/json & cpp-httplib:** These are fetched automatically by CMake if not found system-wide (e.g., if not installed via vcpkg or a system package manager). Usually, no separate manual installation is needed.
+5.  **OpenMP (Optional but Recommended):** For multi-threading CPU acceleration. Often included with the compiler. If missing, install (e.g., `libomp-dev` on Debian, `libgomp` on Fedora, from `llvm` on macOS, or part of MSVC). Performance will be lower without it.
+6.  **CUDA Toolkit (Optional - For GPU Acceleration):**
+    *   Required **only** if you want GPU-accelerated inference. You'll need a compatible NVIDIA GPU and drivers.
+    *   **Installation:** Download from the [NVIDIA CUDA Toolkit Archive](https://developer.nvidia.com/cuda-toolkit-archive) and follow NVIDIA's official installation guide. Ensure `nvcc` is in your PATH.
+    *   **Alternative (Linux - Simpler, May Be Older):** On Debian/Ubuntu, `sudo apt install nvidia-cuda-toolkit libcublas-dev` can be used after NVIDIA drivers are set up.
+    *   CMake (`-DHAS_CUDA=ON`) will detect it. `nvcc` (compiler) and `cublas` (library) are key.
 
-#### Installing C++ Dependencies on Linux (Debian/Ubuntu Example)
+### 2. Model Files & Tokenizers
 
-This section provides example commands for installing the necessary C++ dependencies on Debian-based Linux distributions like Ubuntu. Package names and commands may vary for other distributions (e.g., Fedora, Arch Linux, CentOS).
+To run the model, you need both the model weights and tokenizer information. These should be placed in an accessible directory (e.g., `data/` or `models/` within your project structure).
 
-```bash
-# 1. Update package lists
-sudo apt update
+#### Supported Formats:
 
-# 2. Essential build tools (includes g++ compiler) and CMake
-sudo apt install build-essential cmake
+*   **SafeTensors:** This format typically involves three files:
+    *   `config.json`: Contains the model architecture, hyperparameters, and other metadata.
+    *   `tokenizer.json`: Defines the vocabulary, merge rules, and other tokenizer configurations.
+    *   `model.safetensors`: The file containing the model weights.
+    *   *Data Types:* The loader supports `F32`, `BF16`, and `F16` weight types from SafeTensors. `BF16` and `F16` are automatically converted to `F32` upon loading. Internal computation then proceeds in `F32`.
 
-# 3. Boost Libraries (Regex, Xpressive, etc.)
-#    `libboost-all-dev` is recommended to ensure all necessary components,
-#    including header-only libraries like Boost.Xpressive (required for Llama 3
-#    tokenizer functionality), are installed.
-#    If you prefer a more minimal installation, you would need at least
-#    `libboost-regex-dev` and ensure `boost/xpressive/xpressive.hpp`
-#    is available from another Boost header package (e.g. `libboost-dev`
-#    for a specific version which includes all headers).
-#    However, `libboost-all-dev` is the most straightforward way to get everything.
-sudo apt install libboost-all-dev
+*   **GGUF (GPT-Generated Unified Format):** This format aims to package the model into a single file (`.gguf`).
+    *   Ideally, the GGUF file embeds all necessary metadata, including tokenizer information.
+    *   However, for some GGUF files (especially older ones or those converted with minimal metadata), or if the `tinyllama` executable's argument parsing requires it, a separate `tokenizer.json` compatible with the model (e.g., Llama 2/3 style SentencePiece) might still be needed. Place it in the same directory as the GGUF file or provide its path via the `<tokenizer_path>` argument.
+    *   *Quantizations:* Supports various tensor types including `FP32`, `FP16`, `BF16`, and common quantized types like `Q4_K_M`, `Q6_K`, `Q8_0`, etc., as supported by the underlying GGUF parsing library.
 
-# 4. OpenMP (for parallel processing)
-#    Usually comes with modern g++, but can be installed explicitly if needed.
-sudo apt install libomp-dev
+#### Example Model Sources:
 
-```
-*   **Boost.Regex on other systems:**
-    *   **Fedora/RHEL:** `sudo dnf install boost-devel` (this typically includes all Boost headers and libraries, including Xpressive and Regex)
-    *   **macOS (Homebrew):** `brew install boost` (this installs multiple Boost libraries, including Xpressive headers and Regex)
-    *   **Windows:** If using Chocolatey, `boost-msvc-14.3` (or a similar versioned package like `boost-msvc-14.2`) aims to provide a comprehensive Boost installation. If using `vcpkg`, install `boost-regex` and ensure Xpressive headers are available (often through `boost-headers` or by installing `boost-xpressive` if available as a separate component, or by installing a full `boost` package). If building Boost from source, ensure the regex library is built and all headers are installed.
-*   **nlohmann/json & cpp-httplib:** These libraries are fetched directly by CMake if not found system-wide, so no separate installation step is typically needed for them.
-*   **Other Distributions:** For non-Debian/Ubuntu systems, please use your distribution's package manager to find the equivalent packages for `build-essential`, `cmake`, `libboost-all-dev` (or its equivalent like `boost-devel`), and `libomp-dev`.
+It's recommended to download models from reputable sources like Hugging Face. Here are some examples that have been tested:
 
-##### CUDA Toolkit (Optional - For GPU Acceleration)
+*   **TinyLlama 1.1B Chat v1.0:**
+    *   SafeTensors: [TinyLlama/TinyLlama-1.1B-Chat-v1.0](https://huggingface.co/TinyLlama/TinyLlama-1.1B-Chat-v1.0) (download `config.json`, `tokenizer.json`, `model.safetensors`)
+    *   GGUF (e.g., Q8_0): [TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF](https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF) (download the `.gguf` file)
+*   **Llama-2 7B:**
+    *   SafeTensors (HF format): [meta-llama/Llama-2-7b-hf](https://huggingface.co/meta-llama/Llama-2-7b-hf)
+    *   GGUF (e.g., Q8_0): [TheBloke/Llama-2-7B-GGUF](https://huggingface.co/TheBloke/Llama-2-7B-GGUF)
+*   **Meta-Llama-3 8B:**
+    *   GGUF (e.g., Q4_K_M): [QuantFactory/Meta-Llama-3-8B-GGUF](https://huggingface.co/QuantFactory/Meta-Llama-3-8B-GGUF)
+    *   For Llama 3 SafeTensors, you would typically download from the official Meta Llama repository or a trusted conversion, ensuring you get the Llama 3 specific `tokenizer.json` and `config.json`.
 
-There are two main ways to install the CUDA Toolkit:
+*A Note on Python for Model Acquisition:*
+While not required to build or run the C++ application itself, Python scripts using libraries like `torch`, Hugging Face `transformers`, `safetensors`, and `sentencepiece` are commonly used to download models from the Hugging Face Hub and save them into the required `config.json`, `tokenizer.json`, and `model.safetensors` (or `.gguf`) structure.
 
-**1. General Method (Recommended for latest versions or specific version requirements):**
+### 3. Build the C++ Application
 
-*   **NVIDIA Drivers:** First, ensure you have the proprietary NVIDIA drivers installed for your GPU. These are often available through your distribution's package manager (e.g., `nvidia-driver` package on Debian/Ubuntu) or directly from the [NVIDIA website](https://www.nvidia.com/Download/index.aspx).
-*   **CUDA Toolkit Download:** Download and install the CUDA Toolkit from the [NVIDIA CUDA Toolkit Archive](https://developer.nvidia.com/cuda-toolkit-archive). It's generally recommended to install a version that is compatible with your NVIDIA driver.
-    *   Follow the official NVIDIA installation guide for your operating system meticulously.
-    *   Ensure that `nvcc` (the CUDA compiler) is in your `PATH` after installation, and that CMake can find the toolkit (often helped by setting `CUDA_TOOLKIT_ROOT_DIR` or ensuring standard installation paths are used).
-
-**2. Using Debian/Ubuntu Package Manager (`apt` - for convenience, may not be the latest version):**
-
-For Debian/Ubuntu systems, you can install CUDA components using `apt`. This method is often simpler but might provide an older version of the CUDA Toolkit than available directly from NVIDIA.
+Use CMake to build the project. Navigate to the project root directory in your terminal.
 
 ```bash
-# Ensure your NVIDIA drivers are installed first.
-# You might have done this via "Additional Drivers" or by installing a package like 'nvidia-driver-XXX'.
-
-# Install the CUDA Toolkit and development libraries (cuBLAS is crucial for this project)
-sudo apt update
-sudo apt install nvidia-cuda-toolkit libcublas-dev
-
-# Other potentially useful CUDA development libraries (optional, depending on broader needs):
-# sudo apt install libcufft-dev libcurand-dev libcusolver-dev libcusparse-dev
-```
-*   After installation via `apt`, `nvcc` and other tools should generally be in the system `PATH`.
-
-**CMake Detection:**
-
-Regardless of the installation method, CMake will attempt to find the CUDA Toolkit. If `HAS_CUDA` is `ON` (either by default due to detection or set explicitly by you with `-DHAS_CUDA=ON`) and the toolkit is not found or key components like `nvcc` or `cublas` are missing, the CMake configuration step will fail with an error message.
-
-### Python Setup Dependencies
-
-These are needed **only once** to **download and prepare** the model files (`config.json`, `tokenizer.json`, `model.safetensors`) from sources like Hugging Face. They are **NOT** needed to build or run the C++ application itself.
-
-1.  **Python (>= 3.8)**
-2.  **PyTorch (`torch`)**
-3.  **Hugging Face `transformers`**
-4.  **`safetensors`**
-5.  **`sentencepiece`** (often required by the tokenizer)
-
-You would typically use a Python script to load a Hugging Face model and tokenizer and then save the configuration (`config.json`), tokenizer data (`tokenizer.json`), and weights (`model.safetensors`) into a local directory.
-
-## Getting Started
-
-### 1. Obtain Model Files
-
-#### Safetensors
-
-For safetensors models, you need three files from a compatible TinyLlama model (e.g., from Hugging Face):
-
-*   `config.json`
-*   `tokenizer.json`
-*   `model.safetensors`
-
-Place these three files into a directory, for example, named `data/`.
-
-***Supported SafeTensors Data Types:***
-
-*This project's SafeTensors loader currently supports models with weights in the following formats:*
-    *   **`F32` (Single-precision Floating Point):** Loaded as is.
-    *   **`BF16` (BFloat16 Floating Point):** These tensors are automatically converted to `F32` upon loading.
-    *   **`F16` (Half-precision Floating Point):** These tensors are also automatically converted to `F32` upon loading.
-
-*The internal representation and computation for models loaded from SafeTensors will therefore use `F32` precision. Support for other data types (e.g., quantized integer types like `I8`) directly from SafeTensors is not yet implemented.*
-
-#### GGUF
-
-Simply download a llama v2 or tinyllama model from huggingface (TheBloke's repos are the best for this) and place the file into the appropriate directory.
-
-
-### Where to Download Tested Model Weights
-
-This project has been tested with a number of different weights. You can download some of them from the following locations:
-
-*   **For SafeTensors (BF16 format expected):**
-    *   **TinyLlama 1.1B Chat v1.0:** [TinyLlama/TinyLlama-1.1B-Chat-v1.0 on Hugging Face](https://huggingface.co/TinyLlama/TinyLlama-1.1B-Chat-v1.0)
-    *   **Llama-2-7-b-hf:** [meta-llama/Llama-2-7b-hf on Hugging Face](https://huggingface.co/meta-llama/Llama-2-7b-hf/)
-    *   Ensure you download `config.json`, `tokenizer.json`, and `model.safetensors`
-
-*   **For GGUF:**
-    *   **TinyLlama 1.1B Chat v1.0 (Q8_0 GGUF):** [TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF - Q8_0.gguf](https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/blob/main/tinyllama-1.1b-chat-v1.0.Q8_0.gguf)
-    *   **Llama 2 7B (Q8_0 GGUF):** [TheBloke/Llama-2-7B-GGUF - llama-2-7b.Q8_0.gguf](https://huggingface.co/TheBloke/Llama-2-7B-GGUF/blob/main/llama-2-7b.Q8_0.gguf)
-    *   **Llama 3 8B (Q4_K_M GGUF):** [QuantFactory/Llama-3-8B-GGUF - llama-3-8b.Q4_K_M.gguf](https://huggingface.co/QuantFactory/Meta-Llama-3-8B-GGUF/blob/main/Meta-Llama-3-8B.Q4_K_M.gguf)
-    *   When using GGUF files, typically only the `.gguf` file itself is needed, as it should contain the necessary metadata. However, for some GGUF files or if using the `tinyllama` executable with a GGUF that doesn't fully embed tokenizer information, ensure a `tokenizer.json` (compatible with Llama 2) is present in the same directory or the model directory specified.
-
-
-As a reminder, place the downloaded GGUF files in a directory (e.g., `models/`) or directly provide the path to the `tinyllama` executable.
-
-### 2. Build the C++ Application
-
-Use CMake to build the project:
-
-```bash
-# Clone the repository (if you haven't already)
-# git clone <repository-url>
-# cd tinyllama.cpp
-
-# Create a build directory
-mkdir build
+# Create a build directory (if it doesn't exist)
+mkdir -p build
 cd build
 
-# Configure with CMake
-# Default: CMake will try to automatically detect CUDA if available 
-# and if found, it will enable CUDA support (HAS_CUDA=ON).
+# Configure with CMake and Build
+# Option 1: Auto-detect CUDA (Recommended if CUDA is installed and intended for use)
+# CMake will try to find CUDA. If found, HAS_CUDA will be ON.
 cmake ..
 
-# --- Compiling WITH CUDA (Optional) ---
-# If CUDA is installed but you want to be explicit or if auto-detection fails:
-# cmake .. -DHAS_CUDA=ON
-# Ensure your CUDA Toolkit is installed and visible to CMake (e.g., in your PATH).
+# Option 2: Explicitly Enable CUDA (if auto-detection fails or to be certain)
+# cmake .. -DHAS_CUDA=ON 
 
-# --- Compiling WITHOUT CUDA --- 
-# If you have CUDA installed but want to force a CPU-only build:
+# Option 3: Explicitly Disable CUDA (if CUDA is installed but you want a CPU-only build)
 # cmake .. -DHAS_CUDA=OFF
 
-# If you do NOT have CUDA installed, CMake will automatically set HAS_CUDA=OFF.
+# (If CUDA is not installed, HAS_CUDA will automatically be OFF)
 
 # Build the executables
-# On Linux/macOS:
-make -j$(nproc) 
-# On Windows (using MSVC, for example, from a Developer Command Prompt):
-# cmake --build . --config Release 
-# Or open the generated solution file in Visual Studio.
+# For Makefiles (Linux/macOS default):
+make -j$(nproc) # $(nproc) gets the number of processing units
 
+# For MSVC on Windows (from a Developer Command Prompt, typically): 
+# cmake --build . --config Release # Or Debug
+# Alternatively, open the .sln file generated in the build/ directory with Visual Studio.
 ```
 
-This will create several executables in the `build/` directory (or `build/bin/` or `build/Release/` depending on your system and generator), including `tinyllama_server` (for SafeTensors models) and `tinyllama` (general purpose CLI).
+This process will create executables in the `build/` directory (or a subdirectory like `build/Release/` on Windows with MSVC). Key executables include:
 
-The `tinyllama` executable is the main command-line interface for direct interaction:
+*   `tinyllama`: The main command-line interface for direct interaction (chat/prompt modes).
+*   `tinyllama_server`: A web server for interacting with SafeTensors models via a UI (this may be merged or evolve depending on project direction).
+
+**Running the `tinyllama` Executable:**
 
 ```bash
-./build/tinyllama <model_path> <tokenizer_path> <num_threads> <prompt|chat> \
-                  [--system-prompt <system_prompt_string>] \
-                  [initial_user_prompt] \
-                  [max_tokens] \
-                  [n_gpu_layers] \
-                  [use_mmap] \
-                  [temperature]
+# Example path, adjust if your executable is in a subdirectory like build/Release
+./build/tinyllama <model_path> <tokenizer_path> <num_threads> <prompt|chat> [options...]
 ```
 
-**Arguments for `tinyllama` executable:**
+**Key Command-Line Arguments for `tinyllama`:**
 
-*   `<model_path>`: Path to the model file (.gguf) or directory (SafeTensors).
-*   `<tokenizer_path>`: Path to the tokenizer file.
-*   `<num_threads>`: Number of threads to use for generation.
-*   `<prompt|chat>`: Mode of operation.
-    *   `prompt`: Single prompt generation, then exits.
-    *   `chat`: Interactive chat mode.
-*   `--system-prompt <system_prompt_string>` (Optional): Provides a system-level instruction to the model. Enclose in quotes if it contains spaces. Default: Empty.
-*   `initial_user_prompt` (Optional): The first user message in `chat` mode, or the main prompt in `prompt` mode. Default: "Hello, world!".
-*   `max_tokens` (Optional): Maximum number of new tokens to generate. Default: 256.
-*   `n_gpu_layers` (Optional): Number of layers to offload to GPU (-1 for all, 0 for none). Default: -1 (all layers on GPU if available).
-*   `use_mmap` (Optional): Use memory-mapping for GGUF files ('true' or 'false'). Default: true.
-*   `temperature` (Optional): Sampling temperature (e.g., 0.1). Lower is more deterministic. Default: 0.1.
+*   `<model_path>`: Path to model file (.gguf) or directory (SafeTensors).
+*   `<tokenizer_path>`: Path to `tokenizer.json` or `.model` file. (See "Model Files & Tokenizers" for GGUF notes).
+*   `<num_threads>`: Number of CPU threads for generation.
+*   `<prompt|chat>`: `prompt` for single generation, `chat` for interactive mode.
+*   `--system-prompt "<text>"` (Optional): System-level instruction.
+*   `initial_user_prompt` (Optional): First user message or main prompt text.
+*   `--max-tokens <N>` (Optional): Max new tokens to generate (Default: 256).
+*   `--n-gpu-layers <N>` (Optional): Layers to offload to GPU (-1 for all, 0 for none. Default: -1).
+*   `--use-mmap <true|false>` (Optional): Memory-map GGUF files (Default: true).
+*   `--temperature <F>` (Optional): Sampling temperature (e.g., 0.1. Default: 0.1).
+*   `--use-kv-quant <true|false>` (Optional): Use INT8 KVCache on GPU (Default: false).
 
-**Example with System Prompt:**
+**Example Invocation:**
 
 ```bash
-./build/tinyllama ./models/TinyLlama-1.1B-Chat-v1.0.Q8_0.gguf ./models/tokenizer.json 4 chat --system-prompt "You are a pirate." "Avast ye, what be the news?"
+./build/tinyllama ./models/Llama-3-8B.Q4_K_M.gguf ./models/tokenizer.json 4 chat --system-prompt "You are a helpful AI." --n-gpu-layers -1 --use-kv-quant true "Tell me a joke."
 ```
 
-For detailed insight into the operations performed by the executables (e.g., `tinyllama`, `tinyllama_server`), you can inspect the `debugging.log` file generated in the application's working directory. This log provides a step-by-step account of model loading, tokenization, and generation processes.
+For detailed operational logs, inspect `debugging.log` in the application's runtime directory.
 
 ### Python Package Installation
 

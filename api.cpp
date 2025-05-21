@@ -3,6 +3,7 @@
 #include "model_macros.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
@@ -17,6 +18,8 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <iomanip>
+#include <sstream>
 
 #include "logger.h"
 #include "model.h"
@@ -138,19 +141,22 @@ TinyLlamaSession::TinyLlamaSession(const std::string& model_path_arg,
                                    const std::string& tokenizer_path_arg,
                                    int threads,
                                    int num_gpu_layers_from_cli,
-                                   bool cli_use_mmap)
+                                   bool cli_use_mmap,
+                                   bool use_kv_quant)
     : threads_(threads), rng_(std::random_device{}()) {
   Logger::info("TinyLlamaSession constructor entered. Model path: " + model_path_arg +
                ", Tokenizer path: " + tokenizer_path_arg +
                ", Threads: " + std::to_string(threads) +
                ", Num GPU Layers (CLI): " + std::to_string(num_gpu_layers_from_cli) +
-               ", Use MMAP (CLI): " + (cli_use_mmap ? "true" : "false"));
+               ", Use MMAP (CLI): " + (cli_use_mmap ? "true" : "false") +
+               ", Use KV Quant (CLI): " + (use_kv_quant ? "true" : "false"));
 
   std::string effective_model_file_path = model_path_arg; 
   std::string path_for_config_json = model_path_arg;
 
   ModelConfig initial_model_config_for_model_ctor;
   initial_model_config_for_model_ctor.use_mmap_for_gguf = cli_use_mmap;
+  initial_model_config_for_model_ctor.use_kvcache_quantization = use_kv_quant;
   if (num_gpu_layers_from_cli < 0) { 
       initial_model_config_for_model_ctor.num_cpu_offload_layers = 0;
   } else {
@@ -225,6 +231,22 @@ TinyLlamaSession::TinyLlamaSession(const std::string& model_path_arg,
     config_ = model_->get_config(); 
     config_.is_gguf_file_loaded = false; // Ensure this is set for session's copy too
 
+    // After model is loaded, its internal config_ might have been updated (e.g. by GGUF metadata)
+    // We need to ensure our session's KVCache initialization uses the potentially updated config
+    // AND respects the CLI/constructor preference for KV cache quantization.
+    config_.use_kvcache_quantization = use_kv_quant; // Re-apply CLI/constructor preference
+
+    Logger::info("TinyLlamaSession: Finalizing ModelConfig for KVCache initialization. use_kvcache_quantization set to: " + 
+                  std::string(config_.use_kvcache_quantization ? "true" : "false"));
+
+    // Initialize KVCache with potentially updated config_ (from model load) 
+    // and the now-set use_kvcache_quantization flag.
+    kv_cache_.initialize(config_, config_.num_hidden_layers, 
+                         config_.num_hidden_layers - config_.num_cpu_offload_layers, 
+                         config_.max_position_embeddings, 
+                         config_.num_key_value_heads, 
+                         config_.hidden_size / config_.num_attention_heads);
+
   } else { // Not a directory, assume it's a file path and check extension
     std::string extension = fs_model_path.extension().string();
     std::transform(extension.begin(), extension.end(), extension.begin(), ::tolower);
@@ -282,6 +304,22 @@ TinyLlamaSession::TinyLlamaSession(const std::string& model_path_arg,
       model_ = std::make_unique<TinyLlamaModel>(initial_model_config_for_model_ctor, st_loader);
       config_ = model_->get_config(); 
       config_.is_gguf_file_loaded = false; // Ensure this is set for session's copy too
+
+      // After model is loaded, its internal config_ might have been updated (e.g. by GGUF metadata)
+      // We need to ensure our session's KVCache initialization uses the potentially updated config
+      // AND respects the CLI/constructor preference for KV cache quantization.
+      config_.use_kvcache_quantization = use_kv_quant; // Re-apply CLI/constructor preference
+
+      Logger::info("TinyLlamaSession: Finalizing ModelConfig for KVCache initialization. use_kvcache_quantization set to: " + 
+                    std::string(config_.use_kvcache_quantization ? "true" : "false"));
+
+      // Initialize KVCache with potentially updated config_ (from model load) 
+      // and the now-set use_kvcache_quantization flag.
+      kv_cache_.initialize(config_, config_.num_hidden_layers, 
+                           config_.num_hidden_layers - config_.num_cpu_offload_layers, 
+                           config_.max_position_embeddings, 
+                           config_.num_key_value_heads, 
+                           config_.hidden_size / config_.num_attention_heads);
     } else {
       throw std::runtime_error("Unsupported model file type or extension in Session constructor: " + model_path_arg +
                                ". Please provide a directory for SafeTensors, a .gguf file, or a .safetensors file.");
@@ -358,7 +396,8 @@ TinyLlamaSession::TinyLlamaSession(const std::string& model_path_arg,
 
   int head_dim = final_model_config.hidden_size / final_model_config.num_attention_heads;
   
-  kv_cache_.initialize(total_model_layers,          // Total layers for CPU part of KVCache
+  kv_cache_.initialize(final_model_config,          // Total layers for CPU part of KVCache
+                       total_model_layers, 
                        gpu_layers_for_kvcache,    // Actual GPU layers for device memory
                        final_model_config.max_position_embeddings,
                        final_model_config.num_key_value_heads, 
@@ -375,6 +414,8 @@ std::string TinyLlamaSession::generate(const std::string& user_prompt, int steps
                                      int top_k, float top_p,
                                      const std::string& system_prompt_arg, // Renamed for clarity inside function
                                      bool apply_q_a_format_cli_hint) { // Renamed for clarity
+  auto t_start = std::chrono::high_resolution_clock::now(); // Start timing
+
   Logger::info("[Generate API] User prompt: \"" + user_prompt + "\", System prompt: \"" + system_prompt_arg + "\", Steps: " + std::to_string(steps));
 
   if (!model_ || !tokenizer_) {
@@ -565,6 +606,15 @@ std::string TinyLlamaSession::generate(const std::string& user_prompt, int steps
 
   std::string result = tokenizer_->decode(generated_only_ids, true);
   Logger::info("Generated response: " + result);
+
+  auto t_end = std::chrono::high_resolution_clock::now(); // End timing
+  double time_taken_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
+  
+  // Create a string with the desired precision for the time
+  std::ostringstream time_ss;
+  time_ss << std::fixed << std::setprecision(4) << time_taken_ms;
+  Logger::info("[INFO] Total generation processing time: " + time_ss.str() + " ms");
+
   return result;
 }
 

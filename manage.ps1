@@ -38,6 +38,7 @@ $DefaultTokenizerPath = ""
 $DefaultThreads = (Get-WmiObject Win32_Processor).NumberOfLogicalProcessors # Or a sensible default if query fails
 if (-not $DefaultThreads) { $DefaultThreads = 4 }
 $DefaultUseMmap = $true
+$DefaultUseKvQuant = $false # Default for KVCache Quantization
 
 $CurrentInteractivePrompt = ""
 
@@ -87,6 +88,7 @@ function Show-Usage {
     Write-Host "                 -Prompt <text>             (default: ${DefaultPrompt})"
     Write-Host "                 -NGpuLayers <int>         (default: ${DefaultNGpuLayers}, -1 for all on GPU)"
     Write-Host "                 -Mmap <true|false>        (default: ${DefaultUseMmap})"
+    Write-Host "                 -UseKvQuant <true|false>  (default: ${DefaultUseKvQuant})"
     Write-Host ""
     Write-Host "  run-prompt   Run the C++ model with a single prompt and exit."
     Write-Host "               Options:"
@@ -98,6 +100,7 @@ function Show-Usage {
     Write-Host "                 -Temperature <float>       (default: ${DefaultTemperature})"
     Write-Host "                 -NGpuLayers <int>         (default: ${DefaultNGpuLayers}, -1 for all on GPU)"
     Write-Host "                 -Mmap <true|false>        (default: ${DefaultUseMmap})"
+    Write-Host "                 -UseKvQuant <true|false>  (default: ${DefaultUseKvQuant})"
     Write-Host ""
     Write-Host "  format       Format C++/CUDA source code using ${FormatTool}."
     Write-Host "               (Assumes .clang-format file in project root)"
@@ -247,138 +250,164 @@ function Invoke-RunChat {
         [string]$TokenizerPath = $DefaultTokenizerPath,
         [int]$Threads = $DefaultThreads,
         [bool]$UseMmap = $DefaultUseMmap,
-        [string]$SystemPrompt = "", # New parameter
+        [string]$SystemPrompt = "",
+        [bool]$UseKvQuant = $DefaultUseKvQuant,
         [switch]$NoLog
     )
-    $LocalArgs = $PSBoundParameters # Capture explicitly passed parameters
-
-    # Parse remaining -Arguments as a hashtable for options not explicitly defined as params
-    # This is a bit simplistic; a more robust parser would be better for general -key value pairs.
+    $LocalArgs = $PSBoundParameters
     $RemainingArgs = @{}
-    for ($i = 0; $i -lt $Arguments.Length; $i += 2) {
-        if ($Arguments[$i] -match '^-([\w-]+)$') {
-            $Key = $Matches[1]
-            if (($i + 1) -lt $Arguments.Length) {
-                $RemainingArgs[$Key] = $Arguments[$i+1]
-            } else {
-                $RemainingArgs[$Key] = $true # For switch-like behavior if value is missing
-            }
-        }
+    for ($i = 0; $i -lt $script:Arguments.Count; $i += 2) {
+        $Key = $script:Arguments[$i].TrimStart('-')
+        $Value = $script:Arguments[$i+1]
+        $RemainingArgs[$Key] = $Value
     }
 
-    # Override with $RemainingArgs if they exist
     if ($RemainingArgs.ContainsKey('ModelDir')) { $ModelDir = $RemainingArgs['ModelDir'] }
+    if ($RemainingArgs.ContainsKey('TokenizerPath')) { $TokenizerPath = $RemainingArgs['TokenizerPath'] }
+    if ($RemainingArgs.ContainsKey('Threads')) { $Threads = [int]$RemainingArgs['Threads'] }
     if ($RemainingArgs.ContainsKey('Temperature')) { $Temperature = $RemainingArgs['Temperature'] }
     if ($RemainingArgs.ContainsKey('TopK')) { $TopK = $RemainingArgs['TopK'] }
     if ($RemainingArgs.ContainsKey('TopP')) { $TopP = $RemainingArgs['TopP'] }
     if ($RemainingArgs.ContainsKey('Prompt')) { $Prompt = $RemainingArgs['Prompt'] }
-    if ($RemainingArgs.ContainsKey('BuildType')) { $BuildType = $RemainingArgs['BuildType'] }
     if ($RemainingArgs.ContainsKey('Steps')) { $Steps = $RemainingArgs['Steps'] }
     if ($RemainingArgs.ContainsKey('NGpuLayers')) { $NGpuLayers = [int]$RemainingArgs['NGpuLayers'] }
-    if ($RemainingArgs.ContainsKey('TokenizerPath')) { $TokenizerPath = $RemainingArgs['TokenizerPath'] }
-    if ($RemainingArgs.ContainsKey('Threads')) { $Threads = [int]$RemainingArgs['Threads'] }
     if ($RemainingArgs.ContainsKey('UseMmap')) { $UseMmap = [bool]::Parse($RemainingArgs['UseMmap']) }
     if ($RemainingArgs.ContainsKey('SystemPrompt')) { $SystemPrompt = $RemainingArgs['SystemPrompt'] }
+    if ($RemainingArgs.ContainsKey('UseKvQuant')) { $UseKvQuant = [bool]::Parse($RemainingArgs['UseKvQuant']) }
     if ($RemainingArgs.ContainsKey('NoLog')) { $NoLog = $true }
     
-    $ExecutablePath = Find-Executable -Name "main" -BuildType $BuildType
-    if (-not $ExecutablePath) {
-        Write-ErrorAndExit "Main executable (main.exe or main) not found. Please build the project first."
+    $ExecutablePath = Join-Path -Path $ProjectRootDir -ChildPath "build/tinyllama.exe"
+    if (-not (Test-Path $ExecutablePath)) {
+      $ExecutablePath = Join-Path -Path $ProjectRootDir -ChildPath "build/${BuildType}/tinyllama.exe"
+    }
+    if (-not (Test-Path $ExecutablePath)) {
+      $ExecutablePath = Join-Path -Path $ProjectRootDir -ChildPath "build/Release/tinyllama.exe"
+    }
+    if (-not (Test-Path $ExecutablePath)) {
+      $ExecutablePath = Join-Path -Path $ProjectRootDir -ChildPath "build/Debug/tinyllama.exe"
+    }
+
+    if (-not (Test-Path $ExecutablePath)) {
+        Write-ErrorAndExit "Chat executable not found (e.g., $ProjectRootDir\build\tinyllama.exe). Please build the project first."
     }
 
     Log-Message "Starting chat client from $ExecutablePath..."
+    Log-Message "Model Directory: $ModelDir"
+    Log-Message "Tokenizer Path (if specified): $TokenizerPath"
+    Log-Message "Threads: $Threads"
+    Log-Message "N GPU Layers: $NGpuLayers"
+    Log-Message "Use Mmap: $UseMmap"
+    Log-Message "Use KVCache Quantization: $UseKvQuant"
+    Log-Message "System Prompt: $SystemPrompt"
+    Log-Message "Initial Prompt (if any): $Prompt"
+    Log-Message "Max Tokens (Steps): $Steps"
+    Log-Message "Temperature: $Temperature"
 
-    $ActualModelPath = Resolve-ModelPath -ModelDir $ModelDir
-    $ActualTokenizerPath = Resolve-TokenizerPath -ModelDir $ModelDir -TokenizerPath $TokenizerPath -ModelPathToCheck $ActualModelPath
-
-    $ExecArgs = @(
-        $ActualModelPath,
-        $ActualTokenizerPath,
-        [string]$Threads,
+    $CmdArgs = @(
+        $ModelDir,
+        $TokenizerPath,
+        $Threads.ToString(),
         "chat" # Mode
     )
-
     if (-not [string]::IsNullOrEmpty($SystemPrompt)) {
-        $ExecArgs += "--system-prompt", $SystemPrompt
+        $CmdArgs += "--system-prompt", $SystemPrompt
     }
     if (-not [string]::IsNullOrEmpty($Prompt)) {
-        $ExecArgs += $Prompt # This is initial_user_prompt
+        $CmdArgs += $Prompt # Initial prompt is positional after named options for system prompt
     }
-    
-    $ExecArgs += "--max-tokens", $Steps
-    $ExecArgs += "--n-gpu-layers", ([string]$NGpuLayers)
-    $ExecArgs += "--use-mmap", ([string]$UseMmap).ToLower()
-    $ExecArgs += "--temperature", $Temperature
-    # TopK and TopP are not directly passed to main.cpp in this version
+    $CmdArgs += "--max-tokens", $Steps.ToString() # Corresponds to max_tokens
+    $CmdArgs += "--n-gpu-layers", $NGpuLayers.ToString()
+    $CmdArgs += "--use-mmap", ([string]$UseMmap).ToLower() 
+    $CmdArgs += "--temperature", $Temperature.ToString()
+    $CmdArgs += "--use-kv-quant", ([string]$UseKvQuant).ToLower()
 
-    Log-Message "Running chat with: $ExecutablePath $($ExecArgs -join ' ' )"
-    & $ExecutablePath $ExecArgs
+    Log-Message "Executing: & '$ExecutablePath' $CmdArgs"
+    & $ExecutablePath $CmdArgs
     if ($LASTEXITCODE -ne 0) { Write-ErrorAndExit "Chat client execution failed."}
 }
 
 function Invoke-RunPrompt {
     param (
         [string]$ModelDir = $DefaultModelDir,
-        [string]$TokenizerPath = $DefaultTokenizerPath,
-        [string]$Prompt = "Hello, world!",
-        [string]$Steps = "128",
-        [string]$BuildType = $DefaultBuildType, 
         [string]$Temperature = $DefaultTemperature,
+        [string]$TopK = $DefaultTopK,
+        [string]$TopP = $DefaultTopP,
+        [string]$Prompt = "Hello, world!", # Default prompt for run-prompt
+        [string]$BuildType = $DefaultBuildType, # To find the executable
+        [string]$Steps = "64",
         [int]$NGpuLayers = $DefaultNGpuLayers,
+        [string]$TokenizerPath = $DefaultTokenizerPath,
         [int]$Threads = $DefaultThreads,
         [bool]$UseMmap = $DefaultUseMmap,
-        [string]$SystemPrompt = "" # New parameter
+        [string]$SystemPrompt = "",
+        [bool]$UseKvQuant = $DefaultUseKvQuant # Added
     )
     $LocalArgs = $PSBoundParameters
     $RemainingArgs = @{}
-    for ($i = 0; $i -lt $Arguments.Length; $i += 2) {
-        if ($Arguments[$i] -match '^-([\w-]+)$') {
-            $Key = $Matches[1]
-            if (($i + 1) -lt $Arguments.Length) { $RemainingArgs[$Key] = $Arguments[$i+1] }
-            else { $RemainingArgs[$Key] = $true }
-        }
+    for ($i = 0; $i -lt $script:Arguments.Count; $i += 2) {
+        $Key = $script:Arguments[$i].TrimStart('-')
+        $Value = $script:Arguments[$i+1]
+        $RemainingArgs[$Key] = $Value
     }
 
     if ($RemainingArgs.ContainsKey('ModelDir')) { $ModelDir = $RemainingArgs['ModelDir'] }
     if ($RemainingArgs.ContainsKey('TokenizerPath')) { $TokenizerPath = $RemainingArgs['TokenizerPath'] }
+    if ($RemainingArgs.ContainsKey('Threads')) { $Threads = [int]$RemainingArgs['Threads'] }
+    if ($RemainingArgs.ContainsKey('Temperature')) { $Temperature = $RemainingArgs['Temperature'] }
+    if ($RemainingArgs.ContainsKey('TopK')) { $TopK = $RemainingArgs['TopK'] }
+    if ($RemainingArgs.ContainsKey('TopP')) { $TopP = $RemainingArgs['TopP'] }
     if ($RemainingArgs.ContainsKey('Prompt')) { $Prompt = $RemainingArgs['Prompt'] }
     if ($RemainingArgs.ContainsKey('Steps')) { $Steps = $RemainingArgs['Steps'] }
-    if ($RemainingArgs.ContainsKey('BuildType')) { $BuildType = $RemainingArgs['BuildType'] }
-    if ($RemainingArgs.ContainsKey('Temperature')) { $Temperature = $RemainingArgs['Temperature'] }
     if ($RemainingArgs.ContainsKey('NGpuLayers')) { $NGpuLayers = [int]$RemainingArgs['NGpuLayers'] }
-    if ($RemainingArgs.ContainsKey('Threads')) { $Threads = [int]$RemainingArgs['Threads'] }
     if ($RemainingArgs.ContainsKey('UseMmap')) { $UseMmap = [bool]::Parse($RemainingArgs['UseMmap']) }
     if ($RemainingArgs.ContainsKey('SystemPrompt')) { $SystemPrompt = $RemainingArgs['SystemPrompt'] }
-
-    if ([string]::IsNullOrEmpty($Prompt)) {
-        Write-ErrorAndExit "Prompt text cannot be empty for run-prompt. Use -Prompt <text>."
-    }
+    if ($RemainingArgs.ContainsKey('UseKvQuant')) { $UseKvQuant = [bool]::Parse($RemainingArgs['UseKvQuant']) } # Added
     
-    $ExecutablePath = Find-Executable -Name "main" -BuildType $BuildType
-    if (-not $ExecutablePath) {
-        Write-ErrorAndExit "Main executable (main.exe or main) not found. Please build the project first."
+    $ExecutablePath = Join-Path -Path $ProjectRootDir -ChildPath "build/tinyllama.exe"
+    if (-not (Test-Path $ExecutablePath)) {
+      $ExecutablePath = Join-Path -Path $ProjectRootDir -ChildPath "build/${BuildType}/tinyllama.exe"
+    }
+    if (-not (Test-Path $ExecutablePath)) {
+      $ExecutablePath = Join-Path -Path $ProjectRootDir -ChildPath "build/Release/tinyllama.exe"
+    }
+    if (-not (Test-Path $ExecutablePath)) {
+      $ExecutablePath = Join-Path -Path $ProjectRootDir -ChildPath "build/Debug/tinyllama.exe"
     }
 
-    $ActualModelPath = Resolve-ModelPath -ModelDir $ModelDir
-    $ActualTokenizerPath = Resolve-TokenizerPath -ModelDir $ModelDir -TokenizerPath $TokenizerPath -ModelPathToCheck $ActualModelPath
+    if (-not (Test-Path $ExecutablePath)) {
+        Write-ErrorAndExit "Prompt executable not found (e.g., $ProjectRootDir\build\tinyllama.exe). Please build the project first."
+    }
 
-    $ExecArgs = @(
-        $ActualModelPath,
-        $ActualTokenizerPath,
-        [string]$Threads,
+    Log-Message "Running prompt with $ExecutablePath..."
+    Log-Message "Model Directory: $ModelDir"
+    Log-Message "Tokenizer Path (if specified): $TokenizerPath"
+    Log-Message "Threads: $Threads"
+    Log-Message "N GPU Layers: $NGpuLayers"
+    Log-Message "Use Mmap: $UseMmap"
+    Log-Message "Use KVCache Quantization: $UseKvQuant" # Added
+    Log-Message "System Prompt: $SystemPrompt"
+    Log-Message "Prompt: $Prompt"
+    Log-Message "Max Tokens (Steps): $Steps"
+    Log-Message "Temperature: $Temperature"
+
+    $CmdArgs = @(
+        $ModelDir,
+        $TokenizerPath,
+        $Threads.ToString(),
         "prompt" # Mode
     )
     if (-not [string]::IsNullOrEmpty($SystemPrompt)) {
-        $ExecArgs += "--system-prompt", $SystemPrompt
+        $CmdArgs += "--system-prompt", $SystemPrompt
     }
-    $ExecArgs += $Prompt # This is initial_user_prompt or the main prompt
-    $ExecArgs += "--max-tokens", $Steps
-    $ExecArgs += "--n-gpu-layers", ([string]$NGpuLayers)
-    $ExecArgs += "--use-mmap", ([string]$UseMmap).ToLower()
-    $ExecArgs += "--temperature", $Temperature
+    $CmdArgs += $Prompt # Prompt is positional after named options for system prompt
+    $CmdArgs += "--max-tokens", $Steps.ToString()
+    $CmdArgs += "--n-gpu-layers", $NGpuLayers.ToString()
+    $CmdArgs += "--use-mmap", ([string]$UseMmap).ToLower()
+    $CmdArgs += "--temperature", $Temperature.ToString()
+    $CmdArgs += "--use-kv-quant", ([string]$UseKvQuant).ToLower() # Added
 
-    Log-Message "Running prompt with: $ExecutablePath $($ExecArgs -join ' ' )"
-    & $ExecutablePath $ExecArgs
+    Log-Message "Executing: & '$ExecutablePath' $CmdArgs"
+    & $ExecutablePath $CmdArgs
     if ($LASTEXITCODE -ne 0) { Write-ErrorAndExit "Prompt execution failed."}
 }
 

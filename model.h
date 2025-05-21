@@ -92,6 +92,7 @@ struct ModelConfig {
     std::string chat_template_string; /**< Template string for chat formatting */
     bool is_gguf_file_loaded;   /**< Flag indicating if model was loaded from GGUF format */
     bool use_mmap_for_gguf = true; // Whether to use mmap for GGUF files, defaults to true
+    bool use_kvcache_quantization = false; /**< Whether to use INT8 quantization for KVCache on GPU */
     int num_cpu_offload_layers = 0; /**< Number of layers to offload to CPU */
 
     enum class TokenizerFamily {
@@ -113,12 +114,16 @@ ModelConfig parse_model_config_from_gguf(const GGUFData& gguf);
  * CUDA support for GPU acceleration.
  */
 struct KVCacheLayer {
-    std::vector<float> k;     /**< Key cache */
-    std::vector<float> v;     /**< Value cache */
-
+    std::vector<float> k;     // Key cache (CPU)
+    std::vector<float> v;     // Value cache (CPU)
 #ifdef HAS_CUDA
-    float* k_dev = nullptr;  /**< Device pointer for key cache */
-    float* v_dev = nullptr;  /**< Device pointer for value cache */
+    float* k_dev_fp32 = nullptr;      // Original FP32 Key cache (GPU device pointer)
+    float* v_dev_fp32 = nullptr;      // Original FP32 Value cache (GPU device pointer)
+
+    int8_t* k_dev_quantized = nullptr; // Quantized INT8 Key cache (GPU device pointer)
+    int8_t* v_dev_quantized = nullptr; // Quantized INT8 Value cache (GPU device pointer)
+    float* k_dev_scales = nullptr;    // Scales for K cache (GPU device pointer)
+    float* v_dev_scales = nullptr;    // Scales for V cache (GPU device pointer)
 #endif
 };
 
@@ -135,13 +140,15 @@ struct KVCache {
 
     /**
      * @brief Initializes the KV cache with given dimensions
+     * @param config The model configuration, used to determine if KVCache quantization is enabled.
      * @param total_num_model_layers Total number of layers in the model (for sizing CPU cache vectors)
      * @param num_gpu_layers_to_allocate Number of layers for which to allocate GPU device memory. Can be 0.
      * @param max_seq_len Maximum sequence length to cache
      * @param num_kv_heads Number of key/value heads
      * @param head_dim Dimension of each attention head
      */
-    void initialize(int total_num_model_layers, int num_gpu_layers_to_allocate, 
+    void initialize(const ModelConfig& config,
+                    int total_num_model_layers, int num_gpu_layers_to_allocate, 
                     int max_seq_len, int num_kv_heads, int head_dim);
 
 #ifdef HAS_CUDA
@@ -164,13 +171,21 @@ struct KVCache {
             for (int i = 0; i < allocated_num_layers; ++i) {
                 int current_model_idx_for_gpu = gpu_layer_start_model_idx + i;
                 if (static_cast<size_t>(current_model_idx_for_gpu) < layers.size()) {
-                    if (layers[current_model_idx_for_gpu].k_dev) {
-                        gpuErrchk(cudaFree(layers[current_model_idx_for_gpu].k_dev));
-                        layers[current_model_idx_for_gpu].k_dev = nullptr;
+                    if (layers[current_model_idx_for_gpu].k_dev_quantized) {
+                        gpuErrchk(cudaFree(layers[current_model_idx_for_gpu].k_dev_quantized));
+                        layers[current_model_idx_for_gpu].k_dev_quantized = nullptr;
                     }
-                    if (layers[current_model_idx_for_gpu].v_dev) {
-                        gpuErrchk(cudaFree(layers[current_model_idx_for_gpu].v_dev));
-                        layers[current_model_idx_for_gpu].v_dev = nullptr;
+                    if (layers[current_model_idx_for_gpu].v_dev_quantized) {
+                        gpuErrchk(cudaFree(layers[current_model_idx_for_gpu].v_dev_quantized));
+                        layers[current_model_idx_for_gpu].v_dev_quantized = nullptr;
+                    }
+                    if (layers[current_model_idx_for_gpu].k_dev_scales) {
+                        gpuErrchk(cudaFree(layers[current_model_idx_for_gpu].k_dev_scales));
+                        layers[current_model_idx_for_gpu].k_dev_scales = nullptr;
+                    }
+                    if (layers[current_model_idx_for_gpu].v_dev_scales) {
+                        gpuErrchk(cudaFree(layers[current_model_idx_for_gpu].v_dev_scales));
+                        layers[current_model_idx_for_gpu].v_dev_scales = nullptr;
                     }
                 } else {
                      Logger::warning("KVCache::destroy_gpu_resources: current_model_idx_for_gpu (" + 
@@ -376,6 +391,10 @@ class TinyLlamaModel {
   float* swiglu_vec_dev_ = nullptr;
   float* mlp_down_dev_ = nullptr;
   float* logits_dev_ = nullptr;
+
+  // Temporary buffers for KVCache dequantization
+  float* dequant_k_cache_buffer_dev_ = nullptr; // Holds full K cache dequantized from INT8 to FP32
+  float* dequant_v_cache_buffer_dev_ = nullptr; // Holds full V cache dequantized from INT8 to FP32
 #endif
 
   std::vector<std::pair<float, float>> precomputed_freqs_cis_;

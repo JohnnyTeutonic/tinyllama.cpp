@@ -682,7 +682,8 @@ static void log_raw_float_pointer(const std::string& name, const float* ptr,
   Logger::info(ss.str());
 }
 
-void KVCache::initialize(int total_num_model_layers, int num_gpu_layers_to_allocate, 
+void KVCache::initialize(const ModelConfig& config, 
+                         int total_num_model_layers, int num_gpu_layers_to_allocate, 
                          int max_seq_len, int num_kv_heads,
                          int head_dim) {
   this->total_model_layers_ = total_num_model_layers; // Store for use in other KVCache methods if needed
@@ -730,17 +731,34 @@ void KVCache::initialize(int total_num_model_layers, int num_gpu_layers_to_alloc
       size_t cache_elems_per_layer_gpu = static_cast<size_t>(max_seq_len) *
                                  static_cast<size_t>(num_kv_heads) *
                                  static_cast<size_t>(head_dim);
-      size_t cache_bytes_per_layer_gpu = cache_elems_per_layer_gpu * sizeof(float);
+      
+      // Sizes for different KVCache types
+      size_t fp32_cache_bytes_per_layer_gpu = cache_elems_per_layer_gpu * sizeof(float);
+      size_t int8_cache_bytes_per_layer_gpu = cache_elems_per_layer_gpu * sizeof(int8_t);
+      // For scales: one scale per head per token position
+      size_t num_scales_per_layer_gpu = static_cast<size_t>(max_seq_len) * static_cast<size_t>(num_kv_heads);
+      size_t scales_bytes_per_layer_gpu = num_scales_per_layer_gpu * sizeof(float);
 
-      if (cache_elems_per_layer_gpu == 0) {
-    throw std::runtime_error(
-            "KVCache (CUDA): Calculated cache size per layer is zero for GPU layers. Check parameters.");
-  }
+      if (cache_elems_per_layer_gpu == 0 && config.use_kvcache_quantization) {
+        throw std::runtime_error(
+            "KVCache (CUDA INT8): Calculated cache elements per layer is zero. Check parameters.");
+      } else if (cache_elems_per_layer_gpu == 0) {
+        throw std::runtime_error(
+            "KVCache (CUDA FP32): Calculated cache elements per layer is zero. Check parameters.");
+      }
 
-      Logger::info("Allocating KVCache on GPU for " + std::to_string(num_gpu_layers_to_allocate) +
-               " layers, size per layer: " +
-                   std::to_string(cache_bytes_per_layer_gpu / (1024.0 * 1024.0)) +
-               " MB");
+      if (config.use_kvcache_quantization) {
+        Logger::info("Allocating INT8 KVCache + FP32 Scales on GPU for " + std::to_string(num_gpu_layers_to_allocate) +
+                 " layers. Data size per layer: " +
+                     std::to_string(int8_cache_bytes_per_layer_gpu / (1024.0 * 1024.0)) +
+                 " MB. Scales size per layer: " + 
+                     std::to_string(scales_bytes_per_layer_gpu / (1024.0 * 1024.0)) + " MB");
+      } else {
+        Logger::info("Allocating FP32 KVCache on GPU for " + std::to_string(num_gpu_layers_to_allocate) +
+                 " layers, size per layer: " +
+                     std::to_string(fp32_cache_bytes_per_layer_gpu / (1024.0 * 1024.0)) +
+                 " MB");
+      }
 
       int gpu_layer_start_model_idx = this->total_model_layers_ - num_gpu_layers_to_allocate;
       Logger::info("KVCache GPU allocation will target model layers from index " + std::to_string(gpu_layer_start_model_idx) +
@@ -754,22 +772,59 @@ void KVCache::initialize(int total_num_model_layers, int num_gpu_layers_to_alloc
             continue;
         }
 
-        if (layers[current_model_idx_for_gpu].k_dev) {
+        if (layers[current_model_idx_for_gpu].k_dev_fp32) {
           Logger::warning(
-              "KVCache::initialize: Re-initializing KVCache layer " + std::to_string(current_model_idx_for_gpu) + " K dev pointer without proper destruction?");
-          gpuErrchk(cudaFree(layers[current_model_idx_for_gpu].k_dev));
-    }
-        if (layers[current_model_idx_for_gpu].v_dev) {
+              "KVCache::initialize: Re-initializing KVCache layer " + std::to_string(current_model_idx_for_gpu) + " K dev fp32 pointer without proper destruction?");
+          gpuErrchk(cudaFree(layers[current_model_idx_for_gpu].k_dev_fp32));
+          layers[current_model_idx_for_gpu].k_dev_fp32 = nullptr;
+        }
+        if (layers[current_model_idx_for_gpu].v_dev_fp32) {
           Logger::warning(
-              "KVCache::initialize: Re-initializing KVCache layer " + std::to_string(current_model_idx_for_gpu) + " V dev pointer without proper destruction?");
-          gpuErrchk(cudaFree(layers[current_model_idx_for_gpu].v_dev));
-    }
+              "KVCache::initialize: Re-initializing KVCache layer " + std::to_string(current_model_idx_for_gpu) + " V dev fp32 pointer without proper destruction?");
+          gpuErrchk(cudaFree(layers[current_model_idx_for_gpu].v_dev_fp32));
+          layers[current_model_idx_for_gpu].v_dev_fp32 = nullptr;
+        }
+        if (layers[current_model_idx_for_gpu].k_dev_quantized) {
+          Logger::warning(
+              "KVCache::initialize: Re-initializing KVCache layer " + std::to_string(current_model_idx_for_gpu) + " K dev quantized pointer without proper destruction?");
+          gpuErrchk(cudaFree(layers[current_model_idx_for_gpu].k_dev_quantized));
+          layers[current_model_idx_for_gpu].k_dev_quantized = nullptr;
+        }
+        if (layers[current_model_idx_for_gpu].v_dev_quantized) {
+          Logger::warning(
+              "KVCache::initialize: Re-initializing KVCache layer " + std::to_string(current_model_idx_for_gpu) + " V dev quantized pointer without proper destruction?");
+          gpuErrchk(cudaFree(layers[current_model_idx_for_gpu].v_dev_quantized));
+          layers[current_model_idx_for_gpu].v_dev_quantized = nullptr;
+        }
+        if (layers[current_model_idx_for_gpu].k_dev_scales) {
+          Logger::warning(
+              "KVCache::initialize: Re-initializing KVCache layer " + std::to_string(current_model_idx_for_gpu) + " K dev scales pointer without proper destruction?");
+          gpuErrchk(cudaFree(layers[current_model_idx_for_gpu].k_dev_scales));
+          layers[current_model_idx_for_gpu].k_dev_scales = nullptr;
+        }
+        if (layers[current_model_idx_for_gpu].v_dev_scales) {
+          Logger::warning(
+              "KVCache::initialize: Re-initializing KVCache layer " + std::to_string(current_model_idx_for_gpu) + " V dev scales pointer without proper destruction?");
+          gpuErrchk(cudaFree(layers[current_model_idx_for_gpu].v_dev_scales));
+          layers[current_model_idx_for_gpu].v_dev_scales = nullptr;
+        }
+        
+        if (config.use_kvcache_quantization) {
+            gpuErrchk(cudaMalloc(&layers[current_model_idx_for_gpu].k_dev_quantized, int8_cache_bytes_per_layer_gpu));
+            gpuErrchk(cudaMalloc(&layers[current_model_idx_for_gpu].v_dev_quantized, int8_cache_bytes_per_layer_gpu));
+            gpuErrchk(cudaMalloc(&layers[current_model_idx_for_gpu].k_dev_scales, scales_bytes_per_layer_gpu));
+            gpuErrchk(cudaMalloc(&layers[current_model_idx_for_gpu].v_dev_scales, scales_bytes_per_layer_gpu));
 
-        gpuErrchk(cudaMalloc(&layers[current_model_idx_for_gpu].k_dev, cache_bytes_per_layer_gpu));
-        gpuErrchk(cudaMalloc(&layers[current_model_idx_for_gpu].v_dev, cache_bytes_per_layer_gpu));
-
-        gpuErrchk(cudaMemset(layers[current_model_idx_for_gpu].k_dev, 0, cache_bytes_per_layer_gpu));
-        gpuErrchk(cudaMemset(layers[current_model_idx_for_gpu].v_dev, 0, cache_bytes_per_layer_gpu));
+            gpuErrchk(cudaMemset(layers[current_model_idx_for_gpu].k_dev_quantized, 0, int8_cache_bytes_per_layer_gpu));
+            gpuErrchk(cudaMemset(layers[current_model_idx_for_gpu].v_dev_quantized, 0, int8_cache_bytes_per_layer_gpu));
+            gpuErrchk(cudaMemset(layers[current_model_idx_for_gpu].k_dev_scales, 0, scales_bytes_per_layer_gpu));
+            gpuErrchk(cudaMemset(layers[current_model_idx_for_gpu].v_dev_scales, 0, scales_bytes_per_layer_gpu));
+        } else {
+            gpuErrchk(cudaMalloc(&layers[current_model_idx_for_gpu].k_dev_fp32, fp32_cache_bytes_per_layer_gpu));
+            gpuErrchk(cudaMalloc(&layers[current_model_idx_for_gpu].v_dev_fp32, fp32_cache_bytes_per_layer_gpu));
+            gpuErrchk(cudaMemset(layers[current_model_idx_for_gpu].k_dev_fp32, 0, fp32_cache_bytes_per_layer_gpu));
+            gpuErrchk(cudaMemset(layers[current_model_idx_for_gpu].v_dev_fp32, 0, fp32_cache_bytes_per_layer_gpu));
+        }
   }
       Logger::info("KVCache GPU allocation and zeroing complete for " + std::to_string(num_gpu_layers_to_allocate) + " layers.");
   } else {
@@ -1422,7 +1477,32 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
   REALLOC_GPU_WORKSPACE(swiglu_vec_dev_, is_bytes);
   REALLOC_GPU_WORKSPACE(mlp_down_dev_, hs_bytes); 
   REALLOC_GPU_WORKSPACE(logits_dev_, vs_bytes); // For final logits calculation on GPU
-#undef REALLOC_GPU_WORKSPACE
+
+  // Allocate KVCache dequantization buffers if GPU layers are active
+  if (active_num_gpu_layers > 0) {
+    size_t kv_cache_dequant_buffer_elems = static_cast<size_t>(config_.max_position_embeddings) * n_kv_heads * head_dim;
+    size_t kv_cache_dequant_buffer_bytes = kv_cache_dequant_buffer_elems * sizeof(float);
+    if (kv_cache_dequant_buffer_elems > 0) {
+        // Ensure REALLOC_GPU_WORKSPACE is defined or expand it here
+        // #define REALLOC_GPU_WORKSPACE(ptr, sz) SAFE_CUDA_FREE(ptr); gpuErrchk(cudaMalloc(&ptr, sz));
+        SAFE_CUDA_FREE(dequant_k_cache_buffer_dev_); 
+        gpuErrchk(cudaMalloc(&dequant_k_cache_buffer_dev_, kv_cache_dequant_buffer_bytes));
+        SAFE_CUDA_FREE(dequant_v_cache_buffer_dev_);
+        gpuErrchk(cudaMalloc(&dequant_v_cache_buffer_dev_, kv_cache_dequant_buffer_bytes));
+        Logger::info("Allocated KVCache dequantization buffers (K and V) on GPU. Size per buffer: " + 
+                     std::to_string(kv_cache_dequant_buffer_bytes / (1024.0 * 1024.0)) + " MB.");
+    } else {
+        Logger::warning("KVCache dequantization buffer size is 0. Skipping allocation. max_pos_emb=" + std::to_string(config_.max_position_embeddings) +
+                        ", n_kv_heads=" + std::to_string(n_kv_heads) + ", head_dim=" + std::to_string(head_dim));
+        SAFE_CUDA_FREE(dequant_k_cache_buffer_dev_); // Ensure they are null if size is 0
+        SAFE_CUDA_FREE(dequant_v_cache_buffer_dev_);
+    }
+  } else { // No active GPU layers
+    SAFE_CUDA_FREE(dequant_k_cache_buffer_dev_);
+    SAFE_CUDA_FREE(dequant_v_cache_buffer_dev_);
+  }
+
+// #undef REALLOC_GPU_WORKSPACE // Not needed if we expanded it or it was already defined
   Logger::info("Finished allocating/reallocating GPU workspace buffers.");
 
   // Concatenated BF16 layer weights for GPU layers (w_..._dev_ pointers)
@@ -2046,6 +2126,15 @@ TinyLlamaModel::~TinyLlamaModel() {
     gpuErrchk(cudaFree(logits_dev_));
     logits_dev_ = nullptr;
   }
+  // Free KVCache dequantization buffers
+  if (dequant_k_cache_buffer_dev_) {
+    gpuErrchk(cudaFree(dequant_k_cache_buffer_dev_));
+    dequant_k_cache_buffer_dev_ = nullptr;
+  }
+  if (dequant_v_cache_buffer_dev_) {
+    gpuErrchk(cudaFree(dequant_v_cache_buffer_dev_));
+    dequant_v_cache_buffer_dev_ = nullptr;
+  }
   Logger::info("Freed persistent GPU workspace buffers.");
 
   Logger::info("Finished freeing TinyLlamaModel CUDA weight memory.");
@@ -2476,6 +2565,10 @@ std::vector<float> TinyLlamaModel::forward_device(
       Logger::error("forward_device called with null x_input_dev. This should be model_->x_dev_.");
       return {};
   }
+  if (!kv_cache) {
+      Logger::error("forward_device called with null KVCache.");
+      return {};
+  }
 
   int is = config_.intermediate_size;
   float eps = config_.rms_norm_eps;
@@ -2585,26 +2678,97 @@ std::vector<float> TinyLlamaModel::forward_device(
     rope_cuda(q_dev_, n_heads, head_dim, all_freqs_cis_dev, pos, config_.is_gguf_file_loaded, stream);
     rope_cuda(k_dev_, n_kv_heads, head_dim, all_freqs_cis_dev, pos, config_.is_gguf_file_loaded, stream);
 
-    for (int kvh = 0; kvh < n_kv_heads; ++kvh) {
-      const float* current_k_head_ptr = k_dev_ + kvh * head_dim;
-      const float* current_v_head_ptr = v_dev_ + kvh * head_dim;
+    // K/V Cache Update Logic
+    if (static_cast<size_t>(l_model_idx) < kv_cache->layers.size()) {
+        KVCacheLayer& current_kv_layer = kv_cache->layers[l_model_idx];
+        if (config_.use_kvcache_quantization) {
+            // Quantize and store K, V for each head
+            for (int kvh = 0; kvh < n_kv_heads; ++kvh) {
+                const float* current_k_head_ptr_fp32 = k_dev_ + kvh * head_dim;
+                const float* current_v_head_ptr_fp32 = v_dev_ + kvh * head_dim;
 
-      update_kv_cache_cuda(kv_cache->layers[l_model_idx].k_dev, current_k_head_ptr, pos,
-                           kvh, kv_cache->allocated_max_seq_len,
-                           kv_cache->allocated_num_kv_heads,
-                           kv_cache->allocated_head_dim, stream);
+                // Calculate offset into the flat quantized cache for the current token and head
+                // Cache is [max_seq_len][num_kv_heads][head_dim]
+                size_t token_head_offset_quant = (static_cast<size_t>(pos) * n_kv_heads + kvh) * head_dim;
+                int8_t* k_quant_target_ptr = current_kv_layer.k_dev_quantized + token_head_offset_quant;
+                int8_t* v_quant_target_ptr = current_kv_layer.v_dev_quantized + token_head_offset_quant;
 
-      update_kv_cache_cuda(kv_cache->layers[l_model_idx].v_dev, current_v_head_ptr, pos,
-                           kvh, kv_cache->allocated_max_seq_len,
-                           kv_cache->allocated_num_kv_heads,
-                           kv_cache->allocated_head_dim, stream);
+                // Calculate offset into the flat scales cache for the current token and head
+                // Scales are [max_seq_len][num_kv_heads]
+                size_t scale_offset = static_cast<size_t>(pos) * n_kv_heads + kvh;
+                float* k_scale_target_ptr = current_kv_layer.k_dev_scales + scale_offset;
+                float* v_scale_target_ptr = current_kv_layer.v_dev_scales + scale_offset;
+
+                quantize_fp32_to_int8_symmetric_per_tensor_cuda(
+                    current_k_head_ptr_fp32, k_quant_target_ptr, k_scale_target_ptr, head_dim, stream);
+                quantize_fp32_to_int8_symmetric_per_tensor_cuda(
+                    current_v_head_ptr_fp32, v_quant_target_ptr, v_scale_target_ptr, head_dim, stream);
+            }
+        } else {
+            // Store FP32 K, V directly (original path, now using k_dev_fp32, v_dev_fp32)
+            for (int kvh = 0; kvh < n_kv_heads; ++kvh) {
+                const float* current_k_head_ptr = k_dev_ + kvh * head_dim;
+                const float* current_v_head_ptr = v_dev_ + kvh * head_dim;
+
+                // Assuming update_kv_cache_cuda is adapted or overloaded for fp32 target pointers
+                update_kv_cache_cuda(current_kv_layer.k_dev_fp32, current_k_head_ptr, pos,
+                                   kvh, kv_cache->allocated_max_seq_len,
+                                   kv_cache->allocated_num_kv_heads, // This should be n_kv_heads for indexing
+                                   kv_cache->allocated_head_dim, stream); 
+
+                update_kv_cache_cuda(current_kv_layer.v_dev_fp32, current_v_head_ptr, pos,
+                                   kvh, kv_cache->allocated_max_seq_len,
+                                   kv_cache->allocated_num_kv_heads, // This should be n_kv_heads for indexing
+                                   kv_cache->allocated_head_dim, stream);
+            }
+        }
+    } else {
+        Logger::error("KVCache layer index " + std::to_string(l_model_idx) + " out of bounds for kv_cache->layers access in forward_device.");
+        return {}; // Or throw
     }
 
     float scale = 1.0f / SAFE_SQRT(static_cast<float>(head_dim));
-    attention_cuda(q_dev_, kv_cache->layers[l_model_idx].k_dev, kv_cache->layers[l_model_idx].v_dev,
+    
+    // Prepare K/V Pointers for Attention Kernel
+    const float* attention_k_cache_ptr_dev = nullptr;
+    const float* attention_v_cache_ptr_dev = nullptr;
+    KVCacheLayer& attention_kv_layer = kv_cache->layers[l_model_idx]; // Re-fetch for clarity, same as current_kv_layer
+
+    if (config_.use_kvcache_quantization) {
+        // Dequantize the entire K and V cache history for this layer up to current 'pos'
+        // into dequant_k_cache_buffer_dev_ and dequant_v_cache_buffer_dev_
+        for (int t = 0; t <= pos; ++t) { // Iterate through sequence length up to current token
+            for (int kvh = 0; kvh < n_kv_heads; ++kvh) { // Iterate through heads
+                size_t token_head_offset_quant = (static_cast<size_t>(t) * n_kv_heads + kvh) * head_dim;
+                const int8_t* k_quant_source_ptr = attention_kv_layer.k_dev_quantized + token_head_offset_quant;
+                const int8_t* v_quant_source_ptr = attention_kv_layer.v_dev_quantized + token_head_offset_quant;
+
+                size_t scale_offset = static_cast<size_t>(t) * n_kv_heads + kvh;
+                const float* k_scale_source_ptr = attention_kv_layer.k_dev_scales + scale_offset;
+                const float* v_scale_source_ptr = attention_kv_layer.v_dev_scales + scale_offset;
+
+                // Output to the corresponding position in the temporary dequantized buffer
+                float* k_dequant_target_ptr = dequant_k_cache_buffer_dev_ + token_head_offset_quant;
+                float* v_dequant_target_ptr = dequant_v_cache_buffer_dev_ + token_head_offset_quant;
+
+                dequantize_int8_to_fp32_symmetric_per_tensor_cuda(
+                    k_quant_source_ptr, k_scale_source_ptr, k_dequant_target_ptr, head_dim, stream);
+                dequantize_int8_to_fp32_symmetric_per_tensor_cuda(
+                    v_quant_source_ptr, v_scale_source_ptr, v_dequant_target_ptr, head_dim, stream);
+            }
+        }
+        attention_k_cache_ptr_dev = dequant_k_cache_buffer_dev_;
+        attention_v_cache_ptr_dev = dequant_v_cache_buffer_dev_;
+    } else {
+        attention_k_cache_ptr_dev = attention_kv_layer.k_dev_fp32;
+        attention_v_cache_ptr_dev = attention_kv_layer.v_dev_fp32;
+    }
+
+    attention_cuda(q_dev_, attention_k_cache_ptr_dev, attention_v_cache_ptr_dev,
                    attn_out_dev_, n_heads, pos + 1, head_dim, scale,
-                   kv_cache->allocated_max_seq_len,
-                   kv_cache->allocated_num_kv_heads, stream);
+                   kv_cache->allocated_max_seq_len, // This is the total capacity of the cache view for attention
+                   n_kv_heads, // Pass the actual number of KV heads for the model
+                   stream);
     if (log_this_pos) {
       std::vector<float> temp_attn_out_host(hs);
       gpuErrchk(cudaMemcpy(temp_attn_out_host.data(), attn_out_dev_,

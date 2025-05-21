@@ -185,6 +185,15 @@ install(TARGETS tinyllama_bindings
     ARCHIVE DESTINATION .
 )
 
+# --- KVCache Quantization Unit Test ---
+if(CUDA_ENABLED)
+    add_executable(test_kvcache_quant
+        test_kvcache_quant.cpp
+    )
+    target_link_libraries(test_kvcache_quant PRIVATE tinyllama_core)
+    message(STATUS "Added test_kvcache_quant executable (CUDA-dependent).")
+endif()
+
 if(OpenMP_FOUND)
     message(STATUS "Found OpenMP, enabling parallel execution.")
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${OpenMP_C_FLAGS}")

@@ -33,11 +33,13 @@ class TinyLlamaSession {
    * @param threads Number of threads to use for model loading.
    * @param num_gpu_layers_from_cli Number of GPU layers to use from command-line arguments.
    * @param cli_use_mmap Whether to use mmap for loading the model.
+   * @param use_kv_quant Whether to use INT8 quantization for the KVCache on GPU.
    * @throws std::runtime_error if loading fails.
    */
   TinyLlamaSession(const std::string& model_path,
                    const std::string& tokenizer_path, int threads = 1,
-                   int num_gpu_layers_from_cli = 0, bool cli_use_mmap = true);
+                   int num_gpu_layers_from_cli = 0, bool cli_use_mmap = true,
+                   bool use_kv_quant = false);
 
   /**
    * @brief Destructor to ensure proper cleanup (e.g., KVCache CUDA memory).

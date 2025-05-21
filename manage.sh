@@ -14,6 +14,7 @@ DEFAULT_RELEASE_VERSION="1.0.14"
 DEFAULT_TEMPERATURE="0.1"
 DEFAULT_TOP_K="40"
 DEFAULT_TOP_P="0.9"
+DEFAULT_USE_KV_QUANT="false" # Default for KVCache Quantization
 FORMAT_TOOL="clang-format"
 DOXYGEN_CONFIG_FILE="Doxyfile"
 PROJECT_ROOT_DIR=$(pwd) # Assuming script is run from project root
@@ -71,6 +72,7 @@ usage() {
     echo "                 --prompt <text>             (default: interactive mode)"
     echo "                 --n-gpu-layers <int>        (default: ${DEFAULT_N_GPU_LAYERS}, -1 for all on GPU)"
     echo "                 --mmap <true|false>          (default: ${DEFAULT_USE_MMAP})"
+    echo "                 --use-kv-quant <true|false> (default: ${DEFAULT_USE_KV_QUANT})"
     echo ""
     echo "  run-prompt   Run the C++ model with a single prompt and exit."
     echo "               Options:"
@@ -83,6 +85,7 @@ usage() {
     echo "                 --temperature <float>       (default: ${DEFAULT_TEMPERATURE})"
     echo "                 --n-gpu-layers <int>        (default: ${DEFAULT_N_GPU_LAYERS}, -1 for all on GPU)"
     echo "                 --mmap <true|false>          (default: ${DEFAULT_USE_MMAP})"
+    echo "                 --use-kv-quant <true|false> (default: ${DEFAULT_USE_KV_QUANT})"
     echo ""
     echo "  format       Format C++/CUDA source code using ${FORMAT_TOOL}."
     echo "               (Assumes .clang-format file in project root)"
@@ -215,6 +218,7 @@ do_run_chat() {
     local steps_arg="64" # Corresponds to max_tokens in main.cpp
     local n_gpu_layers_arg="${DEFAULT_N_GPU_LAYERS}"
     local use_mmap_arg="${DEFAULT_USE_MMAP}"
+    local use_kv_quant_arg="${DEFAULT_USE_KV_QUANT}"
     local pass_through_args=()
 
     while [[ $# -gt 0 ]]; do
@@ -248,6 +252,9 @@ do_run_chat() {
             shift; shift;;
             --mmap)
             use_mmap_arg="$2"
+            shift; shift;;
+            --use-kv-quant)
+            use_kv_quant_arg="$2"
             shift; shift;;
             *)
             error "Unknown option for run-chat: $1"; usage ;;
@@ -289,6 +296,7 @@ do_run_chat() {
     pass_through_args+=("--max-tokens" "${steps_arg}")
     pass_through_args+=("--n-gpu-layers" "${n_gpu_layers_arg}")
     pass_through_args+=("--use-mmap" "${use_mmap_arg}")
+    pass_through_args+=("--use-kv-quant" "${use_kv_quant_arg}")
     pass_through_args+=("--temperature" "${temperature_arg}")
 
     echo "Invoking C++ main: $executable_path ${pass_through_args[*]}"
@@ -305,6 +313,7 @@ do_run_prompt() {
     local temperature_arg="${DEFAULT_TEMPERATURE}"
     local n_gpu_layers_arg="${DEFAULT_N_GPU_LAYERS}"
     local use_mmap_arg="${DEFAULT_USE_MMAP}"
+    local use_kv_quant_arg="${DEFAULT_USE_KV_QUANT}"
     local pass_through_args=()
 
     while [[ $# -gt 0 ]]; do
@@ -335,6 +344,9 @@ do_run_prompt() {
             shift; shift;;
             --mmap)
             use_mmap_arg="$2"
+            shift; shift;;
+            --use-kv-quant)
+            use_kv_quant_arg="$2"
             shift; shift;;
             *)
             error "Unknown option for run-prompt: $1"; usage ;;
@@ -371,6 +383,7 @@ do_run_prompt() {
     pass_through_args+=("--max-tokens" "${steps_arg}")
     pass_through_args+=("--n-gpu-layers" "${n_gpu_layers_arg}")
     pass_through_args+=("--use-mmap" "${use_mmap_arg}")
+    pass_through_args+=("--use-kv-quant" "${use_kv_quant_arg}")
     pass_through_args+=("--temperature" "${temperature_arg}")
 
     echo "N GPU Layers: $n_gpu_layers_arg"
