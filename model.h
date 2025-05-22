@@ -337,6 +337,11 @@ class TinyLlamaModel {
       KVCache* kv_cache
   );
 
+  std::vector<float> forward_cpu_logits_batch(
+      const std::vector<float>& final_batch_activations, // [num_tokens, hidden_size]
+      int num_tokens_in_batch
+  );
+
 #endif // HAS_CUDA
 
   const ModelConfig& get_config() const { return config_; }
@@ -458,5 +463,9 @@ std::vector<uint16_t> uint8_vector_to_uint16_vector(
 
 void log_vector_summary(const std::string& name, const std::vector<float>& v,
                         int head_count = 5);
+
+void log_vector_summary_batch(const std::string& name, const std::vector<float>& batch_vector,
+                              int num_tokens_in_batch, int single_token_vector_size,
+                              int head_count = 5);
 
 #endif

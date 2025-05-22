@@ -123,6 +123,33 @@ static std::vector<float> bf16vec_to_float_vec(
   return v_f32;
 }
 
+void log_vector_summary_batch(const std::string& name, const std::vector<float>& batch_vector,
+                              int num_tokens_in_batch, int single_token_vector_size,
+                              int head_count) {
+    if (batch_vector.empty() || num_tokens_in_batch == 0) {
+        Logger::info(name + " is empty or num_tokens_in_batch is 0.");
+        return;
+    }
+
+    if (batch_vector.size() != (size_t)num_tokens_in_batch * single_token_vector_size) {
+        Logger::error(name + " size mismatch. Expected: " +
+                      std::to_string((size_t)num_tokens_in_batch * single_token_vector_size) +
+                      " Got: " + std::to_string(batch_vector.size()));
+        return;
+    }
+
+    // Log first token
+    std::vector<float> first_token_vector(batch_vector.begin(), batch_vector.begin() + single_token_vector_size);
+    log_vector_summary(name + " (First Token)", first_token_vector, head_count);
+
+    // Log last token if batch size > 1 and it's different from the first
+    if (num_tokens_in_batch > 1) {
+        std::vector<float> last_token_vector(batch_vector.end() - single_token_vector_size, batch_vector.end());
+        log_vector_summary(name + " (Last Token in Batch)", last_token_vector, head_count);
+    }
+}
+
+
 inline uint16_t float32_to_bfloat16(float val) {
   uint32_t bits;
   std::memcpy(&bits, &val, sizeof(float));
@@ -4501,8 +4528,6 @@ std::vector<float> TinyLlamaModel::forward_cpu_batch(
             current_batch_activations[i] = residual_batch_component_attn[i] + batch_attn_proj_out[i];
         }
 
-// ... (previous parts of the layer loop, like Attention and first residual, remain the same) ...
-
         // --- Batched MLP Part ---
         std::vector<float> residual_batch_component_mlp = current_batch_activations; // Store for MLP residual
         std::vector<float> batch_x_norm2(current_batch_activations.size());
@@ -4571,7 +4596,7 @@ std::vector<float> TinyLlamaModel::forward_cpu_batch(
         } else { 
             Logger::error("[CPU_BATCH_FWD] Layer " + std::to_string(l) + ": No down_proj weights found for CPU"); 
             return {};
-
+        }
         // Second Residual Connection (Batched)
         // current_batch_activations = residual_batch_component_mlp + batch_mlp_down_proj_out;
         // This loop processes all elements for all tokens in a flat manner.
@@ -4592,4 +4617,78 @@ std::vector<float> TinyLlamaModel::forward_cpu_batch(
     Logger::info("[CPU_BATCH_FWD] Exiting. Output activations size: " + std::to_string(current_batch_activations.size()));
     return current_batch_activations;
 }
+
+
+std::vector<float> TinyLlamaModel::forward_cpu_logits_batch(
+    const std::vector<float>& final_batch_activations, // [num_tokens, hidden_size]
+    int num_tokens_in_batch) {
+
+    Logger::info("[CPU_LOGITS_BATCH] Entered. num_tokens_in_batch: " + std::to_string(num_tokens_in_batch));
+
+    if (final_batch_activations.size() != (size_t)num_tokens_in_batch * config_.hidden_size) {
+        Logger::error("[CPU_LOGITS_BATCH] final_batch_activations size mismatch. Expected: " +
+                      std::to_string((size_t)num_tokens_in_batch * config_.hidden_size) + " Got: " +
+                      std::to_string(final_batch_activations.size()));
+        return {};
+    }
+
+    int hs = config_.hidden_size;
+    int vs = config_.vocab_size;
+    float eps = config_.rms_norm_eps;
+
+    // 1. Final RMSNorm
+    std::vector<float> final_batch_norm_out(num_tokens_in_batch * hs);
+    const std::vector<float>& w_final_norm_vec =
+        final_norm_f32.empty() ? bf16vec_to_float_vec(final_norm)
+                               : final_norm_f32;
+    if (w_final_norm_vec.empty()) {
+         Logger::error("[CPU_LOGITS_BATCH] Final RMSNorm weights are empty (neither f32 nor bf16 available).");
+         return {};
+    }
+
+    rmsnorm_batch_cpu(final_batch_activations, w_final_norm_vec, final_batch_norm_out,
+                      num_tokens_in_batch, hs, eps);
+    
+    log_vector_summary_batch("[CPU_LOGITS_BATCH] final_batch_norm_out (first token)", final_batch_norm_out, num_tokens_in_batch, hs, 15);
+
+
+    // 2. Batched LM Head multiplication
+    std::vector<float> batch_logits_out(num_tokens_in_batch * vs);
+
+    if (!lm_head_f32.empty()) {
+        Logger::info("[CPU_LOGITS_BATCH] Using F32 LM Head weights.");
+        matmul_f32_f32_batch_cpu(lm_head_f32, final_batch_norm_out, batch_logits_out,
+                                 num_tokens_in_batch, vs, hs);
+    } else if (!lm_head_q8_0.empty() && config_.is_gguf_file_loaded) {
+        Logger::info("[CPU_LOGITS_BATCH] Using Q8_0 LM Head weights.");
+        matmul_q8_0_f32_batch_cpu(lm_head_q8_0, final_batch_norm_out, batch_logits_out,
+                                   num_tokens_in_batch, vs, hs);
+    } else if (!lm_head_q6k.empty() && config_.is_gguf_file_loaded) {
+        Logger::info("[CPU_LOGITS_BATCH] Using Q6_K LM Head weights.");
+        matmul_q6k_f32_batch_cpu(lm_head_q6k, final_batch_norm_out, batch_logits_out,
+                                  num_tokens_in_batch, vs, hs);
+    } else if (!lm_head_q4k.empty() && config_.is_gguf_file_loaded) {
+        Logger::info("[CPU_LOGITS_BATCH] Using Q4_K LM Head weights.");
+        matmul_q4k_f32_batch_cpu(lm_head_q4k, final_batch_norm_out, batch_logits_out,
+                                  num_tokens_in_batch, vs, hs);
+    } else if (!lm_head.empty()) { // BF16 SafeTensors weights
+        Logger::info("[CPU_LOGITS_BATCH] Using BF16 LM Head weights (converting to F32 for matmul).");
+        // Convert BF16 lm_head to FP32 for batched matmul
+        // Note: This conversion happens on every call if BF16 is used.
+        // Consider pre-converting if performance is critical and memory allows.
+        std::vector<float> lm_head_f32_temp = bf16vec_to_float_vec(lm_head);
+        if (lm_head_f32_temp.empty()) {
+            Logger::error("[CPU_LOGITS_BATCH] Failed to convert BF16 LM Head to F32.");
+            return {};
+        }
+        matmul_f32_f32_batch_cpu(lm_head_f32_temp, final_batch_norm_out, batch_logits_out,
+                                 num_tokens_in_batch, vs, hs);
+    } else {
+        Logger::error("[CPU_LOGITS_BATCH] No valid LM Head weights found (F32, Q8_0, Q6_K, Q4_K, BF16).");
+        return {};
+    }
+    
+    log_vector_summary_batch("[CPU_LOGITS_BATCH] batch_logits_out (first token, last token in batch if different)", batch_logits_out, num_tokens_in_batch, vs, 15);
+
+    return batch_logits_out;
 }

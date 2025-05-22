@@ -566,14 +566,112 @@ std::string TinyLlamaSession::generate(const std::string& user_prompt, int steps
       next_token_id = sample_top_k_top_p_temperature(logits, temperature, top_k, top_p, rng_);
       Logger::info("[Generate API] Prefill successful. Next token ID (for pos=" + std::to_string(num_prompt_tokens) + "): " + std::to_string(next_token_id));
 
-  } else { 
-      Logger::info("[Generate API] Skipping GPU batch prefill (num_gpu_layers_model=" + std::to_string(num_gpu_layers_model) + 
-                   ", num_prompt_tokens=" + std::to_string(num_prompt_tokens) + "). Will use iterative processing for prompt.");
-      start_pos_for_loop = 0; // Standard loop from the beginning
-      // logits remains empty, will be populated by the first iteration of the loop that processes a token to be generated.
+  } else { // This 'else' means (num_gpu_layers_model == 0 || num_prompt_tokens == 0) when HAS_CUDA is defined
+      Logger::info("[Generate API] Using CPU for prefill (either no GPU layers, or no prompt tokens for GPU prefill). Prompt tokens: " + std::to_string(num_prompt_tokens));
+      if (num_prompt_tokens > 0) {
+          std::vector<float> prompt_embeddings_flat;
+          prompt_embeddings_flat.reserve(num_prompt_tokens * config_.hidden_size);
+          for (int i = 0; i < num_prompt_tokens; ++i) {
+              std::vector<float> current_token_embedding = model_->lookup_embedding(tokens[i]);
+              if (current_token_embedding.empty()) {
+                  Logger::error("Failed to get embedding for prompt token ID " + std::to_string(tokens[i]) + " at index " + std::to_string(i));
+                  return ""; 
+              }
+              prompt_embeddings_flat.insert(prompt_embeddings_flat.end(), current_token_embedding.begin(), current_token_embedding.end());
+          }
+
+          // All layers are processed by CPU in this path
+          std::vector<float> cpu_prefill_output_activations = model_->forward_cpu_batch(
+              prompt_embeddings_flat,
+              num_prompt_tokens,
+              config_.num_hidden_layers, // Process ALL layers on CPU
+              0, // start_pos for this batch segment in CPU processing
+              &kv_cache_
+          );
+
+          if (cpu_prefill_output_activations.empty()) {
+              Logger::error("CPU batch prefill (all layers) returned empty activations.");
+              return "";
+          }
+          Logger::info("[Generate API] CPU batch prefill (all layers) processed. Activations size: " + std::to_string(cpu_prefill_output_activations.size()));
+          
+          // Get logits for all tokens in the prefill batch
+          std::vector<float> all_logits_from_prefill = model_->forward_cpu_logits_batch(
+              cpu_prefill_output_activations,
+              num_prompt_tokens
+          );
+
+          if (all_logits_from_prefill.empty() || all_logits_from_prefill.size() != (size_t)num_prompt_tokens * config_.vocab_size) {
+              Logger::error("CPU batch prefill logit calculation failed or returned unexpected size.");
+              return "";
+          }
+
+          // Extract logits for the LAST token of the prompt to predict the next token
+          logits.resize(config_.vocab_size);
+          size_t last_token_logits_offset = (size_t)(num_prompt_tokens - 1) * config_.vocab_size;
+          std::copy(all_logits_from_prefill.begin() + last_token_logits_offset,
+                    all_logits_from_prefill.begin() + last_token_logits_offset + config_.vocab_size,
+                    logits.begin());
+
+          kv_cache_.seq_len = num_prompt_tokens; // KVCache is now filled up to num_prompt_tokens
+          start_pos_for_loop = num_prompt_tokens; // Main loop starts after the prompt
+          next_token_id = sample_top_k_top_p_temperature(logits, temperature, top_k, top_p, rng_);
+          Logger::info("[Generate API] CPU Prefill successful. Next token ID (for pos=" + std::to_string(num_prompt_tokens) + "): " + std::to_string(next_token_id));
+      } else {
+          start_pos_for_loop = 0; // No prompt tokens, standard loop from beginning
+      }
   }
-#else // No HAS_CUDA
-  start_pos_for_loop = 0; // No GPU prefill, standard loop from beginning
+#else // No HAS_CUDA defined - Pure CPU path from the start
+  Logger::info("[Generate API] No CUDA. Using CPU for prefill. Prompt tokens: " + std::to_string(num_prompt_tokens));
+  if (num_prompt_tokens > 0) {
+      std::vector<float> prompt_embeddings_flat;
+      prompt_embeddings_flat.reserve(num_prompt_tokens * config_.hidden_size);
+      for (int i = 0; i < num_prompt_tokens; ++i) {
+          std::vector<float> current_token_embedding = model_->lookup_embedding(tokens[i]);
+          if (current_token_embedding.empty()) {
+              Logger::error("Failed to get embedding for prompt token ID " + std::to_string(tokens[i]) + " at index " + std::to_string(i));
+              return ""; 
+          }
+          prompt_embeddings_flat.insert(prompt_embeddings_flat.end(), current_token_embedding.begin(), current_token_embedding.end());
+      }
+
+      std::vector<float> cpu_prefill_output_activations = model_->forward_cpu_batch(
+          prompt_embeddings_flat,
+          num_prompt_tokens,
+          config_.num_hidden_layers, // Process ALL layers on CPU
+          0, // start_pos
+          &kv_cache_
+      );
+
+      if (cpu_prefill_output_activations.empty()) {
+          Logger::error("CPU batch prefill (all layers, no CUDA path) returned empty activations.");
+          return "";
+      }
+      Logger::info("[Generate API] CPU batch prefill (all layers, no CUDA path) processed. Activations size: " + std::to_string(cpu_prefill_output_activations.size()));
+      
+      std::vector<float> all_logits_from_prefill = model_->forward_cpu_logits_batch(
+          cpu_prefill_output_activations,
+          num_prompt_tokens // Corrected: was num_tokens_in_batch
+      );
+
+      if (all_logits_from_prefill.empty() || all_logits_from_prefill.size() != (size_t)num_prompt_tokens * config_.vocab_size) {
+          Logger::error("CPU batch prefill logit calculation failed or returned unexpected size (no CUDA path).");
+          return "";
+      }
+
+      logits.resize(config_.vocab_size);
+      size_t last_token_logits_offset = (size_t)(num_prompt_tokens - 1) * config_.vocab_size;
+      std::copy(all_logits_from_prefill.begin() + last_token_logits_offset,
+                all_logits_from_prefill.begin() + last_token_logits_offset + config_.vocab_size,
+                logits.begin());
+
+      kv_cache_.seq_len = num_prompt_tokens;
+      start_pos_for_loop = num_prompt_tokens;
+      next_token_id = sample_top_k_top_p_temperature(logits, temperature, top_k, top_p, rng_);
+      Logger::info("[Generate API] CPU Prefill successful (no CUDA path). Next token ID (for pos=" + std::to_string(num_prompt_tokens) + "): " + std::to_string(next_token_id));
+  } else {
+      start_pos_for_loop = 0; // No prompt tokens, standard loop from beginning
+  }
 #endif
 
 
