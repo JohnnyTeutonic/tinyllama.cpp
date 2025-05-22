@@ -3,6 +3,7 @@
 
 #include <string>
 #include <vector>
+#include <sstream>
 
 /**
  * @file logger.h
@@ -22,6 +23,14 @@
  */
 class Logger {
  public:
+  enum class Level {
+    L_DEBUG = 0,
+    L_INFO = 1,
+    L_WARNING = 2,
+    L_ERROR = 3,
+    L_FATAL = 4
+  };
+
   /**
    * @brief Logs an informational message
    * @param message The message to log
@@ -62,6 +71,20 @@ class Logger {
    */
   static void log_vector_stats(const std::string& name,
                                const std::vector<float>& v, int n_show = 10);
+
+  static void set_level(Level level);
+  static Level get_level();
+  static bool is_level_enabled(Level level);
+
+  // Helper to convert pointer to string for logging
+  static std::string ptrToString(const void* ptr) {
+    std::stringstream ss;
+    ss << ptr;
+    return ss.str();
+  }
+
+ private:
+  static Level current_level_;
 };
 
 #endif

@@ -1112,6 +1112,8 @@ void TinyLlamaModel::initialize_weights(const SafeTensorsLoader* loader,
 }
 
 void TinyLlamaModel::initialize_gpu_and_rope() {
+  Logger::info("[INIT_GPU_ROPE_DEBUG_L1113] Absolute Start of initialize_gpu_and_rope: config_.num_cpu_offload_layers = " + std::to_string(config_.num_cpu_offload_layers) + 
+              ", config_.num_hidden_layers = " + std::to_string(config_.num_hidden_layers));
   Logger::info("[GPU_ROPE_INIT_ENTRY] Entered initialize_gpu_and_rope. Requested CPU Offload Layers: " + std::to_string(config_.num_cpu_offload_layers) + ", Total Hidden Layers: " + std::to_string(config_.num_hidden_layers));
   int hs = config_.hidden_size;
   int is = config_.intermediate_size;
@@ -1192,6 +1194,8 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
   }
   Logger::info("cuBLAS handle created successfully.");
   
+  // Temporarily comment out to diagnose LAUNCH_FAILED
+  /*
   if (config_.is_gguf_file_loaded) {
     cublas_status = cublasSetMathMode(cublas_handle_, CUBLAS_PEDANTIC_MATH);
     if (cublas_status != CUBLAS_STATUS_SUCCESS) {
@@ -1202,7 +1206,8 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
   } else {
     Logger::info("Skipping explicit cuBLAS math mode setting for non-GGUF model (using cuBLAS default).");
   }
-  }
+  */
+  Logger::info("Skipping cublasSetMathMode(CUBLAS_PEDANTIC_MATH) for this run as a diagnostic.");
 
   // Final Norm (always on GPU if any GPU layers are active)
   if (final_norm_f32.empty() && !final_norm.empty()) {
@@ -1227,6 +1232,11 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
       }
   }
   Logger::info("Copying layer norm weights (FP32) to GPU for layers " + std::to_string(active_num_cpu_layers) + " to " + std::to_string(nhl - 1));
+  Logger::info("[INIT_DEBUG_PRE_LOOP] Active CPU layers: " + std::to_string(active_num_cpu_layers));
+  if (nhl > 0 && layers.size() > 0) { // Check if layers exist to prevent out of bounds
+    Logger::info("[INIT_DEBUG_PRE_LOOP] layers[0].input_layernorm_f32.empty(): " + std::string(layers[0].input_layernorm_f32.empty() ? "YES" : "NO") + 
+                 ", Size: " + std::to_string(layers[0].input_layernorm_f32.size()));
+  }
   for (int i = active_num_cpu_layers; i < nhl; ++i) { // Iterate ONLY over GPU layers
     if (static_cast<size_t>(i) >= layers.size()) { // Boundary check
         Logger::error("Layer index " + std::to_string(i) + " out of bounds for layers vector (size: " + std::to_string(layers.size()) + ")");
@@ -1246,6 +1256,11 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
     if (!layers[i].input_layernorm_f32.empty()) {
       gpuErrchk(cudaMalloc(&layers[i].input_layernorm_dev, layers[i].input_layernorm_f32.size() * sizeof(float)));
       gpuErrchk(cudaMemcpy(layers[i].input_layernorm_dev, layers[i].input_layernorm_f32.data(), layers[i].input_layernorm_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
+      if (i == active_num_cpu_layers) { // Log only for the first GPU layer processed
+          Logger::info("[INIT_DEBUG] layers[" + std::to_string(i) + "].input_layernorm_dev allocated. Pointer: " + Logger::ptrToString(layers[i].input_layernorm_dev) + 
+                       ", Size used for malloc: " + std::to_string(layers[i].input_layernorm_f32.size() * sizeof(float)) + " bytes (" +
+                       std::to_string(layers[i].input_layernorm_f32.size()) + " elements). Host vector empty: " + (layers[i].input_layernorm_f32.empty() ? "YES" : "NO"));
+      }
     } else {
       // This layer is designated for GPU. It MUST have its norm weights.
       throw std::runtime_error("GPU Layer " + std::to_string(i) + ": input_layernorm_f32 weights are empty. Cannot offload to GPU without them.");
@@ -1340,94 +1355,105 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
       token_embeddings_processed_to_gpu_bf16 = true;
     }
 
-    if (!token_embeddings_processed_to_gpu_bf16) {
+    if (token_embeddings_processed_to_gpu_bf16) {
+        Logger::info("[INIT_DEBUG] token_embedding_table_dev_ (BF16 on GPU) processed. Pointer: " + Logger::ptrToString(token_embedding_table_dev_) + 
+                     ". Flag token_embeddings_processed_to_gpu_bf16: YES");
+    } // This closing brace was for the "if (active_num_gpu_layers > 0)" for token embeddings.
+    // The next line is the warning check.
+    if (!token_embeddings_processed_to_gpu_bf16 && active_num_gpu_layers > 0) { // Added active_num_gpu_layers check here too
         Logger::warning("Token embeddings were not processed to GPU as BF16, despite GPU layers being active. This might indicate missing source embedding data in the model structure or an unhandled GGUF type for embeddings.");
     }
   } else {
     Logger::info("No GPU layers active, skipping token embedding table processing for GPU.");
   }
 
-  // --- LM HEAD to GPU (as BF16) ---
-  SAFE_CUDA_FREE(lm_head_dev_);    // Target for BF16
-  SAFE_CUDA_FREE(lm_head_f32_dev_); // Ensure this is cleared and not used by new LM head logic
+  // --- LM HEAD to GPU ---
+  // We need lm_head_f32_dev_ for the final FP32 GEMM.
+  // lm_head_dev_ will store BF16 for potential future use or other kernels.
 
-  bool lm_head_processed_to_gpu_bf16 = false;
+  SAFE_CUDA_FREE(lm_head_dev_);    // Clear BF16 target
+  SAFE_CUDA_FREE(lm_head_f32_dev_); // Clear FP32 target before repopulating
+
+  bool lm_head_processed_to_gpu_bf16 = false; // For lm_head_dev_
+  bool lm_head_processed_to_gpu_f32 = false;  // For lm_head_f32_dev_
 
   if (active_num_gpu_layers > 0) { // Only process if GPU layers are active
-    // Path 1: Source is already BF16 (model.lm_head is std::vector<uint16_t>)
-  if (!lm_head.empty()) {
-    gpuErrchk(cudaMalloc(&lm_head_dev_, lm_head.size() * sizeof(uint16_t)));
-    gpuErrchk(cudaMemcpy(lm_head_dev_, lm_head.data(), lm_head.size() * sizeof(uint16_t), cudaMemcpyHostToDevice));
-      Logger::info("Copied lm_head (bf16 direct from model.lm_head) to GPU.");
-      lm_head_processed_to_gpu_bf16 = true;
-    }
-    // Path 2: Source is FP32 (model.lm_head_f32) -> convert to BF16
-    else if (!lm_head_f32.empty()) {
-      std::vector<uint16_t> bf16_data(lm_head_f32.size());
-      #pragma omp parallel for
-      for (size_t i = 0; i < lm_head_f32.size(); ++i) {
-        bf16_data[i] = float32_to_bfloat16(lm_head_f32[i]);
-      }
-      gpuErrchk(cudaMalloc(&lm_head_dev_, bf16_data.size() * sizeof(uint16_t)));
-      gpuErrchk(cudaMemcpy(lm_head_dev_, bf16_data.data(), bf16_data.size() * sizeof(uint16_t), cudaMemcpyHostToDevice));
-      Logger::info("Converted lm_head (fp32 source -> bf16) to GPU.");
-      lm_head_processed_to_gpu_bf16 = true;
-    }
-    // Path 3: Source is Q8_0 (model.lm_head_q8_0) -> dequantize to FP32, then convert to BF16
-    else if (!lm_head_q8_0.empty()) {
-      std::vector<float> temp_f32_data(lm_head_q8_0.size() * GGML_QK8_0);
+    std::vector<float> host_f32_lm_head_data; // Temporary host FP32 data
+
+    // Determine the source and prepare host_f32_lm_head_data
+    if (!lm_head_f32.empty()) { // Path A: Source is already FP32
+      host_f32_lm_head_data = lm_head_f32;
+      Logger::info("LM head source is FP32 (lm_head_f32).");
+      lm_head_processed_to_gpu_f32 = true; // It's ready on host
+    } else if (!lm_head_q8_0.empty()) { // Path B: Source is Q8_0
+      host_f32_lm_head_data.resize(lm_head_q8_0.size() * GGML_QK8_0);
       #pragma omp parallel for
       for (size_t i = 0; i < lm_head_q8_0.size(); ++i) {
-        dequantize_q8_0_block(&lm_head_q8_0[i], &temp_f32_data[i * GGML_QK8_0]);
+        dequantize_q8_0_block(&lm_head_q8_0[i], &host_f32_lm_head_data[i * GGML_QK8_0]);
       }
-      std::vector<uint16_t> bf16_data(temp_f32_data.size());
-      #pragma omp parallel for
-      for (size_t i = 0; i < temp_f32_data.size(); ++i) {
-        bf16_data[i] = float32_to_bfloat16(temp_f32_data[i]);
-      }
-      gpuErrchk(cudaMalloc(&lm_head_dev_, bf16_data.size() * sizeof(uint16_t)));
-      gpuErrchk(cudaMemcpy(lm_head_dev_, bf16_data.data(), bf16_data.size() * sizeof(uint16_t), cudaMemcpyHostToDevice));
-      Logger::info("Dequantized lm_head (Q8_0 -> fp32 -> bf16) to GPU.");
-      lm_head_processed_to_gpu_bf16 = true;
-    }
-    // Path 4: Source is Q4_K (model.lm_head_q4k) -> dequantize to FP32, then convert to BF16
-    else if (!lm_head_q4k.empty()) {
-      std::vector<float> temp_f32_data(lm_head_q4k.size() * GGML_QK_K);
+      Logger::info("LM head source is Q8_0, dequantized to FP32 on host.");
+      lm_head_processed_to_gpu_f32 = true;
+    } else if (!lm_head_q4k.empty()) { // Path C: Source is Q4_K
+      host_f32_lm_head_data.resize(lm_head_q4k.size() * GGML_QK_K);
       #pragma omp parallel for
       for (size_t i = 0; i < lm_head_q4k.size(); ++i) {
-        dequantize_q4_k_m(&lm_head_q4k[i], &temp_f32_data[i * GGML_QK_K], GGML_QK_K);
+        dequantize_q4_k_m(&lm_head_q4k[i], &host_f32_lm_head_data[i * GGML_QK_K], GGML_QK_K);
       }
-      std::vector<uint16_t> bf16_data(temp_f32_data.size());
-      #pragma omp parallel for
-      for (size_t i = 0; i < temp_f32_data.size(); ++i) {
-        bf16_data[i] = float32_to_bfloat16(temp_f32_data[i]);
-      }
-      gpuErrchk(cudaMalloc(&lm_head_dev_, bf16_data.size() * sizeof(uint16_t)));
-      gpuErrchk(cudaMemcpy(lm_head_dev_, bf16_data.data(), bf16_data.size() * sizeof(uint16_t), cudaMemcpyHostToDevice));
-      Logger::info("Dequantized lm_head (Q4_K -> fp32 -> bf16) to GPU.");
-      lm_head_processed_to_gpu_bf16 = true;
-    }
-    // Path 5: Source is Q6_K (model.lm_head_q6k) -> dequantize to FP32, then convert to BF16
-    else if (!lm_head_q6k.empty()) {
-      std::vector<float> temp_f32_data(lm_head_q6k.size() * GGML_QK_K);
+      Logger::info("LM head source is Q4_K, dequantized to FP32 on host.");
+      lm_head_processed_to_gpu_f32 = true;
+    } else if (!lm_head_q6k.empty()) { // Path D: Source is Q6_K
+      host_f32_lm_head_data.resize(lm_head_q6k.size() * GGML_QK_K);
       #pragma omp parallel for
       for (size_t i = 0; i < lm_head_q6k.size(); ++i) {
-        dequantize_q6_k(&lm_head_q6k[i], &temp_f32_data[i * GGML_QK_K], GGML_QK_K);
+        dequantize_q6_k(&lm_head_q6k[i], &host_f32_lm_head_data[i * GGML_QK_K], GGML_QK_K);
       }
-      std::vector<uint16_t> bf16_data(temp_f32_data.size());
+      Logger::info("LM head source is Q6_K, dequantized to FP32 on host.");
+      lm_head_processed_to_gpu_f32 = true;
+    } else if (!lm_head.empty()) { // Path E: Source is BF16 (model.lm_head)
+      host_f32_lm_head_data = bf16vec_to_float_vec(lm_head);
+      Logger::info("LM head source is BF16 (lm_head), converted to FP32 on host.");
+      lm_head_processed_to_gpu_f32 = true;
+    }
+
+    // Now, copy host_f32_lm_head_data to lm_head_f32_dev_ if it was successfully prepared
+    if (lm_head_processed_to_gpu_f32 && !host_f32_lm_head_data.empty()) {
+      gpuErrchk(cudaMalloc(&lm_head_f32_dev_, host_f32_lm_head_data.size() * sizeof(float)));
+      gpuErrchk(cudaMemcpy(lm_head_f32_dev_, host_f32_lm_head_data.data(), host_f32_lm_head_data.size() * sizeof(float), cudaMemcpyHostToDevice));
+      Logger::info("Copied final FP32 LM head weights to lm_head_f32_dev_. Pointer: " + Logger::ptrToString(lm_head_f32_dev_));
+    } else if (active_num_gpu_layers > 0) { // Only warn if GPU layers are active and we failed to get FP32
+        Logger::warning("Failed to prepare FP32 LM head data for GPU (lm_head_f32_dev_). This will likely cause errors if an FP32 GEMM uses it.");
+        lm_head_processed_to_gpu_f32 = false; // Mark as not successfully processed to FP32 device
+    }
+
+    // --- Process for BF16 version (lm_head_dev_) ---
+    // This part is similar to before, using host_f32_lm_head_data if available, or original sources
+    if (!host_f32_lm_head_data.empty()) { // If we have FP32 on host (from any source)
+      std::vector<uint16_t> bf16_data(host_f32_lm_head_data.size());
       #pragma omp parallel for
-      for (size_t i = 0; i < temp_f32_data.size(); ++i) {
-        bf16_data[i] = float32_to_bfloat16(temp_f32_data[i]);
+      for (size_t i = 0; i < host_f32_lm_head_data.size(); ++i) {
+        bf16_data[i] = float32_to_bfloat16(host_f32_lm_head_data[i]);
       }
       gpuErrchk(cudaMalloc(&lm_head_dev_, bf16_data.size() * sizeof(uint16_t)));
       gpuErrchk(cudaMemcpy(lm_head_dev_, bf16_data.data(), bf16_data.size() * sizeof(uint16_t), cudaMemcpyHostToDevice));
-      Logger::info("Dequantized lm_head (Q6_K -> fp32 -> bf16) to GPU.");
+      Logger::info("Converted/Copied LM head (source was dequantized/converted to host FP32) to BF16 GPU (lm_head_dev_).");
+      lm_head_processed_to_gpu_bf16 = true;
+    } else if (!lm_head.empty()) { // Original source was BF16, and no FP32 conversion was attempted above for lm_head_f32_dev (e.g. if lm_head_f32 was also empty)
+                                   // This case should ideally be covered by the host_f32_lm_head_data path if lm_head (bf16) was converted to host_f32_lm_head_data first
+      gpuErrchk(cudaMalloc(&lm_head_dev_, lm_head.size() * sizeof(uint16_t)));
+      gpuErrchk(cudaMemcpy(lm_head_dev_, lm_head.data(), lm_head.size() * sizeof(uint16_t), cudaMemcpyHostToDevice));
+      Logger::info("Copied lm_head (bf16 direct from model.lm_head) to BF16 GPU (lm_head_dev_).");
       lm_head_processed_to_gpu_bf16 = true;
     }
+    // Note: The original multiple else-if for Q8, Q4K, Q6K direct to BF16 are now covered by dequantizing to host_f32_lm_head_data first, then converting that to BF16.
+    // This simplifies logic and ensures intermediate FP32 is available.
 
-    if (!lm_head_processed_to_gpu_bf16) {
-        Logger::warning("LM head was not processed to GPU as BF16, despite GPU layers being active. This might indicate missing source LM head data in the model structure or an unhandled GGUF type for LM head.");
+    if (!lm_head_processed_to_gpu_f32 && active_num_gpu_layers > 0) { // Check F32 status again
+        Logger::warning("LM head was NOT successfully processed to FP32 GPU (lm_head_f32_dev_).");
     }
+    if (!lm_head_processed_to_gpu_bf16 && active_num_gpu_layers > 0) {
+        Logger::warning("LM head was NOT successfully processed to BF16 GPU (lm_head_dev_).");
+    }
+
   } else {
     Logger::info("No GPU layers active, skipping LM head processing for GPU.");
   }
@@ -1764,6 +1790,7 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
   }
 #endif // HAS_CUDA
 }
+}
 
 TinyLlamaModel::TinyLlamaModel(const ModelConfig& config,
                                const SafeTensorsLoader& loader)
@@ -1810,7 +1837,12 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& initial_config,
       
       ModelConfig config_from_gguf = parse_model_config_from_gguf(*(this->gguf_data_));
       
-      this->config_ = config_from_gguf; 
+      this->config_ = config_from_gguf;
+      Logger::info("[CTOR_GGUF_DEBUG_L1827] After parse_model_config_from_gguf: config_from_gguf.num_hidden_layers = " + std::to_string(config_from_gguf.num_hidden_layers) + 
+                    ", config_from_gguf.num_cpu_offload_layers (raw from GGUF meta) = " + std::to_string(config_from_gguf.num_cpu_offload_layers));
+      Logger::info("[CTOR_GGUF_DEBUG_L1828] Copied to this->config_ (before CLI hint processing): this->config_.num_hidden_layers = " + std::to_string(this->config_.num_hidden_layers) + 
+                    ", this->config_.num_cpu_offload_layers = " + std::to_string(this->config_.num_cpu_offload_layers));
+
       this->config_.use_mmap_for_gguf = cli_mmap_preference; // Honor CLI mmap preference for session's use of mmap later
       this->config_.is_gguf_file_loaded = true;
 
@@ -1821,7 +1853,8 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& initial_config,
 
       Logger::info("TinyLlamaModel GGUF Ctor: PRE-CALC this->config_.num_cpu_offload_layers (before GGUF specific logic) = " + std::to_string(this->config_.num_cpu_offload_layers) + 
                    " (This value is from GGUF metadata or default, about to be overridden by CLI hint)");
-      
+      Logger::info("[CTOR_GGUF_DEBUG_L1839] Before CLI hint logic: this->config_.num_cpu_offload_layers = " + std::to_string(this->config_.num_cpu_offload_layers) +
+                  ", this->config_.num_hidden_layers = " + std::to_string(this->config_.num_hidden_layers) + ", cli_gpu_layer_request = " + std::to_string(cli_gpu_layer_request));    
       if (cli_gpu_layer_request < 0) {
         this->config_.num_cpu_offload_layers = 0;
         Logger::info("TinyLlamaModel GGUF Ctor CALC: CLI hint < 0 (all GPU). num_cpu_offload_layers set to 0.");
@@ -1843,7 +1876,8 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& initial_config,
         }
       }
       Logger::info("TinyLlamaModel GGUF Ctor: POST-CALC (within GGUF block) final num_cpu_offload_layers = " + std::to_string(this->config_.num_cpu_offload_layers));
-
+      Logger::info("[CTOR_GGUF_DEBUG_L1860] After CLI hint logic: this->config_.num_cpu_offload_layers = " + std::to_string(this->config_.num_cpu_offload_layers) +
+                    ", this->config_.num_hidden_layers = " + std::to_string(this->config_.num_hidden_layers));
     } catch (const std::exception& e) {
       Logger::error("Failed to load or parse GGUF file: " + std::string(e.what()));
       throw; 
@@ -1910,7 +1944,8 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& initial_config,
       this->config_.num_cpu_offload_layers = this->config_.num_hidden_layers;
   }
   Logger::info("TinyLlamaModel constructor: Final clamped num_cpu_offload_layers = " + std::to_string(this->config_.num_cpu_offload_layers));
-
+  Logger::info("[CTOR_DEBUG_L1921] End of Model Ctor (before initialize_weights/rope call): this->config_.num_cpu_offload_layers = " + std::to_string(this->config_.num_cpu_offload_layers) +
+              ", this->config_.num_hidden_layers = " + std::to_string(this->config_.num_hidden_layers));
   Logger::info("Final ModelConfig (before initialize_weights/rope):");
   Logger::info("  hidden_size: " + std::to_string(config_.hidden_size));
   Logger::info("  intermediate_size: " + std::to_string(config_.intermediate_size));
@@ -3642,31 +3677,40 @@ void TinyLlamaModel::initialize_rope_freqs() {
 
 #ifdef HAS_CUDA
 std::vector<float> TinyLlamaModel::forward_device_batch_prefill(
-    float* d_batch_input_embeddings, 
+    float* d_batch_input_embeddings, // This is now assumed to be activations *after* CPU layers if any
     int num_tokens_in_batch,
-    int current_model_pos,
+    int current_model_pos, // This should be the starting position *within the KV cache* for the batch
     KVCache* kv_cache,
     cudaStream_t stream) {
+    Logger::info("[FWD_PREFILL_DEBUG] Entered forward_device_batch_prefill. num_tokens_in_batch: " + std::to_string(num_tokens_in_batch) + ", current_model_pos: " + std::to_string(current_model_pos));
+    if (layers.empty()) {
+        Logger::error("[FWD_PREFILL_DEBUG] Layers vector is empty at START of prefill!");
+        // Consider throwing an error here if layers should never be empty
+        return std::vector<float>(); 
+    }
+    Logger::info("[FWD_PREFILL_DEBUG] layers[0].input_layernorm_dev at START of prefill: " + Logger::ptrToString(layers[0].input_layernorm_dev));
+    Logger::info("[FWD_PREFILL_DEBUG] layers[0].post_attention_layernorm_dev at START of prefill: " + Logger::ptrToString(layers[0].post_attention_layernorm_dev));
+
 
     const int hidden_size = config_.hidden_size;
     const int head_dim = config_.hidden_size / config_.num_attention_heads;
     const int ffn_intermediate_dim = config_.intermediate_size;
     const int n_kv_dim = config_.num_key_value_heads * head_dim;
 
-    float* d_batch_x_ptr = d_batch_input_embeddings;
+    float* d_batch_x_ptr = d_batch_input_embeddings; // Input to the first GPU layer
     float* d_batch_x_norm_out_attn;
     float* d_batch_q_proj_out;
     float* d_batch_k_proj_out;
     float* d_batch_v_proj_out;
     float* d_batch_attn_heads_concat_out;
     float* d_batch_attn_final_proj_out;
-    float* d_batch_residual_attn_out;
+    float* d_batch_residual_attn_out; // Buffer for residual connection before MLP
     float* d_batch_x_norm_out_ffn;
     float* d_batch_ffn_gate_proj_out;
     float* d_batch_ffn_up_proj_out;
     float* d_batch_ffn_swiglu_out;
     float* d_batch_ffn_down_proj_out;
-    float* d_batch_layer_output = nullptr;
+    float* d_batch_layer_output = nullptr; // Output of each GPU layer, becomes input to next
 
     size_t batch_hidden_size_bytes = (size_t)num_tokens_in_batch * hidden_size * sizeof(float);
     size_t batch_kv_proj_size_bytes = (size_t)num_tokens_in_batch * n_kv_dim * sizeof(float);
@@ -3678,289 +3722,161 @@ std::vector<float> TinyLlamaModel::forward_device_batch_prefill(
     gpuErrchk(cudaMalloc(&d_batch_v_proj_out, batch_kv_proj_size_bytes));
     gpuErrchk(cudaMalloc(&d_batch_attn_heads_concat_out, batch_hidden_size_bytes));
     gpuErrchk(cudaMalloc(&d_batch_attn_final_proj_out, batch_hidden_size_bytes));
-    gpuErrchk(cudaMalloc(&d_batch_residual_attn_out, batch_hidden_size_bytes));
+    gpuErrchk(cudaMalloc(&d_batch_residual_attn_out, batch_hidden_size_bytes)); // Allocate residual buffer
     gpuErrchk(cudaMalloc(&d_batch_x_norm_out_ffn, batch_hidden_size_bytes));
     gpuErrchk(cudaMalloc(&d_batch_ffn_gate_proj_out, batch_ffn_intermediate_bytes));
     gpuErrchk(cudaMalloc(&d_batch_ffn_up_proj_out, batch_ffn_intermediate_bytes));
     gpuErrchk(cudaMalloc(&d_batch_ffn_swiglu_out, batch_ffn_intermediate_bytes));
     gpuErrchk(cudaMalloc(&d_batch_ffn_down_proj_out, batch_hidden_size_bytes));
 
-    if (config_.num_hidden_layers > 0) {
+    // Only allocate d_batch_layer_output if there are GPU layers to process
+    // This will also serve as the input to the next layer (d_batch_x_ptr)
+    if (config_.num_cpu_offload_layers < config_.num_hidden_layers) {
          gpuErrchk(cudaMalloc(&d_batch_layer_output, batch_hidden_size_bytes));
     }
-    cudaError_t err_sync_after_mallocs = cudaDeviceSynchronize();
-    if (err_sync_after_mallocs != cudaSuccess) {
-        Logger::error("[Prefill] CUDA error after batch buffer mallocs (sync): " + std::string(cudaGetErrorString(err_sync_after_mallocs)));
-    }
-    cudaError_t err_last_after_mallocs = cudaGetLastError();
-    if (err_last_after_mallocs != cudaSuccess) {
-        Logger::error("[Prefill] CUDA error after batch buffer mallocs (last): " + std::string(cudaGetErrorString(err_last_after_mallocs)));
-    }
+
 
     const float alpha = 1.0f;
     const float beta = 0.0f;
 
-    for (int l = 0; l < config_.num_hidden_layers; ++l) {
-        int l_gpu_idx = l;
+    Logger::info("[PREFILL_DEBUG] Entering prefill. num_cpu_offload_layers: " + std::to_string(config_.num_cpu_offload_layers) + 
+                 ", total_hidden_layers: " + std::to_string(config_.num_hidden_layers));
+
+    // Iterate ONLY through layers designated for GPU
+    for (int l_model_idx = config_.num_cpu_offload_layers; l_model_idx < config_.num_hidden_layers; ++l_model_idx) {
+        int l_gpu_idx = l_model_idx - config_.num_cpu_offload_layers; // Index for concatenated GPU weights
+
+        Logger::info("[PREFILL_DEBUG] Processing Layer: model_idx=" + std::to_string(l_model_idx) + ", gpu_idx=" + std::to_string(l_gpu_idx) + 
+                     ". d_batch_x_ptr: " + Logger::ptrToString(d_batch_x_ptr) +
+                     ", layers[l_model_idx].input_layernorm_dev: " + Logger::ptrToString(layers[l_model_idx].input_layernorm_dev));
+        
+        // Store the input to the attention block for the first residual connection
+        // This is d_batch_x_ptr which is either initial_embeddings or output of previous layer's MLP
+        gpuErrchk(cudaMemcpyAsync(d_batch_residual_attn_out, d_batch_x_ptr, batch_hidden_size_bytes, cudaMemcpyDeviceToDevice, stream));
+
 
         rmsnorm_batch_cuda(d_batch_x_norm_out_attn, d_batch_x_ptr, 
-                           layers[l].input_layernorm_dev,
+                           layers[l_model_idx].input_layernorm_dev,
                            num_tokens_in_batch, hidden_size, config_.rms_norm_eps, stream);
-
-
-        cudaError_t err_sync_before_qproj_l = cudaDeviceSynchronize();
-        if (err_sync_before_qproj_l != cudaSuccess) {
-            Logger::error("[Prefill] CUDA error L" + std::to_string(l) + " before Q-Proj GEMM (sync): " + std::string(cudaGetErrorString(err_sync_before_qproj_l)));
-        }
-        cudaError_t err_last_before_qproj_l = cudaGetLastError();
-        if (err_last_before_qproj_l != cudaSuccess) {
-            Logger::error("[Prefill] CUDA error L" + std::to_string(l) + " before Q-Proj GEMM (last): " + std::string(cudaGetErrorString(err_last_before_qproj_l)));
-        }
 
         const float* w_q_layer_ptr = w_q_f32_dev_ + (size_t)l_gpu_idx * hidden_size * hidden_size;
         gemm_f32_f32_cuda(cublas_handle_, false, false, num_tokens_in_batch, hidden_size, hidden_size, &alpha,
                           d_batch_x_norm_out_attn, hidden_size, w_q_layer_ptr, hidden_size, &beta,
                           d_batch_q_proj_out, hidden_size, stream);
 
-        cudaError_t err_sync_after_qproj_l = cudaDeviceSynchronize();
-        if (err_sync_after_qproj_l != cudaSuccess) {
-            Logger::error("[Prefill] CUDA error L" + std::to_string(l) + " after Q-Proj GEMM (sync): " + std::string(cudaGetErrorString(err_sync_after_qproj_l)));
-        }
-        cudaError_t err_last_after_qproj_l = cudaGetLastError();
-        if (err_last_after_qproj_l != cudaSuccess) {
-            Logger::error("[Prefill] CUDA error L" + std::to_string(l) + " after Q-Proj GEMM (last): " + std::string(cudaGetErrorString(err_last_after_qproj_l)));
-        }
-
-        cudaError_t err_sync_before_kproj_l = cudaDeviceSynchronize();
-        if (err_sync_before_kproj_l != cudaSuccess) {
-            Logger::error("[Prefill] CUDA error L" + std::to_string(l) + " before K-Proj GEMM (sync): " + std::string(cudaGetErrorString(err_sync_before_kproj_l)));
-        }
-        cudaError_t err_last_before_kproj_l = cudaGetLastError();
-        if (err_last_before_kproj_l != cudaSuccess) {
-            Logger::error("[Prefill] CUDA error L" + std::to_string(l) + " before K-Proj GEMM (last): " + std::string(cudaGetErrorString(err_last_before_kproj_l)));
-        }
-        
         const float* w_k_layer_ptr = w_k_f32_dev_ + (size_t)l_gpu_idx * n_kv_dim * hidden_size;
         gemm_f32_f32_cuda(cublas_handle_, false, false, num_tokens_in_batch, n_kv_dim, hidden_size, &alpha,
                           d_batch_x_norm_out_attn, hidden_size, w_k_layer_ptr, n_kv_dim, &beta,
                           d_batch_k_proj_out, n_kv_dim, stream);
 
-        cudaError_t err_sync_after_kproj_l = cudaDeviceSynchronize();
-        if (err_sync_after_kproj_l != cudaSuccess) {
-            Logger::error("[Prefill] CUDA error L" + std::to_string(l) + " after K-Proj GEMM (sync): " + std::string(cudaGetErrorString(err_sync_after_kproj_l)));
-        }
-        cudaError_t err_last_after_kproj_l = cudaGetLastError();
-        if (err_last_after_kproj_l != cudaSuccess) {
-            Logger::error("[Prefill] CUDA error L" + std::to_string(l) + " after K-Proj GEMM (last): " + std::string(cudaGetErrorString(err_last_after_kproj_l)));
-        }
-
         const float* w_v_layer_ptr = w_v_f32_dev_ + (size_t)l_gpu_idx * n_kv_dim * hidden_size;
-        
-        
-        cudaError_t err_sync_before_vproj_l = cudaDeviceSynchronize();
-        if (err_sync_before_vproj_l != cudaSuccess) {
-            Logger::error("[Prefill] CUDA error L" + std::to_string(l) + " before V-Proj GEMM (sync): " + std::string(cudaGetErrorString(err_sync_before_vproj_l)));
-        }
-        cudaError_t err_last_before_vproj_l = cudaGetLastError();
-        if (err_last_before_vproj_l != cudaSuccess) {
-            Logger::error("[Prefill] CUDA error L" + std::to_string(l) + " before V-Proj GEMM (last): " + std::string(cudaGetErrorString(err_last_before_vproj_l)));
-        }
-        
-        
         gemm_f32_f32_cuda(cublas_handle_, false, false, num_tokens_in_batch, n_kv_dim, hidden_size, &alpha,
                           d_batch_x_norm_out_attn, hidden_size, w_v_layer_ptr, n_kv_dim, &beta,
                           d_batch_v_proj_out, n_kv_dim, stream);
 
-        
-        cudaError_t err_sync_after_vproj_l = cudaDeviceSynchronize();
-        if (err_sync_after_vproj_l != cudaSuccess) {
-            Logger::error("[Prefill] CUDA error L" + std::to_string(l) + " after V-Proj GEMM (sync): " + std::string(cudaGetErrorString(err_sync_after_vproj_l)));
-        }
-        cudaError_t err_last_after_vproj_l = cudaGetLastError();
-        if (err_last_after_vproj_l != cudaSuccess) {
-            Logger::error("[Prefill] CUDA error L" + std::to_string(l) + " after V-Proj GEMM (last): " + std::string(cudaGetErrorString(err_last_after_vproj_l)));
-        }
-        
-        
         rope_batch_cuda(
-            d_batch_q_proj_out,                    // d_q_batch
-            d_batch_k_proj_out,                    // d_k_batch
-            all_freqs_cis_dev,                     // d_all_freqs_cis
-            num_tokens_in_batch,                   // num_tokens
-            config_.num_attention_heads,           // num_q_heads
-            config_.num_key_value_heads,           // num_kv_heads
-            head_dim,                              // head_dim
-            current_model_pos,                     // start_pos_in_kv_cache
-            config_.is_gguf_file_loaded,           // is_gguf
-            stream                                 // stream
+            d_batch_q_proj_out,
+            d_batch_k_proj_out,
+            all_freqs_cis_dev,
+            num_tokens_in_batch,
+            config_.num_attention_heads,
+            config_.num_key_value_heads,
+            head_dim,
+            current_model_pos, // This is the starting position in KV cache for the batch
+            config_.is_gguf_file_loaded,
+            stream
         );
 
-        float* d_layer_k_cache_ptr = kv_cache->layers[l].k_dev_fp32; 
-        float* d_layer_v_cache_ptr = kv_cache->layers[l].v_dev_fp32;
+        float* d_layer_k_cache_ptr = kv_cache->layers[l_model_idx].k_dev_fp32; 
+        float* d_layer_v_cache_ptr = kv_cache->layers[l_model_idx].v_dev_fp32;
 
-        // Update K cache
         update_kv_cache_batch_cuda(
-            d_layer_k_cache_ptr,                    // d_kv_cache_layer_base (K)
-            d_batch_k_proj_out,                     // d_keys_or_values_batch (current K)
-            current_model_pos,                      // start_pos_in_kv_cache
-            num_tokens_in_batch,                    // num_tokens_in_batch
-            config_.num_key_value_heads,           // num_kv_heads
-            head_dim,                              // head_dim
-            config_.max_position_embeddings,        // cache_max_seq_len
-            stream                                 // stream
+            d_layer_k_cache_ptr,
+            d_batch_k_proj_out,
+            current_model_pos,
+            num_tokens_in_batch,
+            config_.num_key_value_heads,
+            head_dim,
+            config_.max_position_embeddings,
+            stream
         );
 
-        // Update V cache
         update_kv_cache_batch_cuda(
-            d_layer_v_cache_ptr,                    // d_kv_cache_layer_base (V)
-            d_batch_v_proj_out,                     // d_keys_or_values_batch (current V)
-            current_model_pos,                      // start_pos_in_kv_cache
-            num_tokens_in_batch,                    // num_tokens_in_batch
-            config_.num_key_value_heads,           // num_kv_heads
-            head_dim,                              // head_dim
-            config_.max_position_embeddings,        // cache_max_seq_len
-            stream                                 // stream
+            d_layer_v_cache_ptr,
+            d_batch_v_proj_out,
+            current_model_pos,
+            num_tokens_in_batch,
+            config_.num_key_value_heads,
+            head_dim,
+            config_.max_position_embeddings,
+            stream
         );
-        cudaError_t err_sync_before_attn_l = cudaDeviceSynchronize();
-        if (err_sync_before_attn_l != cudaSuccess) {
-            Logger::error("[Prefill] CUDA error L" + std::to_string(l) + " before Attention (sync): " + std::string(cudaGetErrorString(err_sync_before_attn_l)));
-        }
-        cudaError_t err_last_before_attn_l = cudaGetLastError();
-        if (err_last_before_attn_l != cudaSuccess) {
-            Logger::error("[Prefill] CUDA error L" + std::to_string(l) + " before Attention (last): " + std::string(cudaGetErrorString(err_last_before_attn_l)));
-        }
+
         float current_attention_scale = 1.0f / sqrtf((float)head_dim);
         attention_batch_prefill_cuda(
-            d_batch_q_proj_out,             // Param 1: d_q_batch_strided
-            d_batch_k_proj_out,             // Param 2: d_k_batch_strided
-            d_batch_v_proj_out,             // Param 3: d_v_batch_strided
-            d_layer_k_cache_ptr,            // Param 4: d_kv_cache_k_base
-            d_layer_v_cache_ptr,            // Param 5: d_kv_cache_v_base
-            d_batch_attn_heads_concat_out,  // Param 6: d_output_batch_strided
-            num_tokens_in_batch,            // Param 7: num_tokens_in_batch
-            current_model_pos,              // Param 8: start_pos_in_kv_cache
-            config_.max_position_embeddings,// Param 9: cache_max_seq_len
-            config_.num_attention_heads,    // Param 10: num_q_heads
-            config_.num_key_value_heads,    // Param 11: num_kv_heads
-            head_dim,                       // Param 12: head_dim
-            current_attention_scale,        // Param 13: scale
-            stream,                         // Param 14: stream
-            nullptr                         // Param 15: attention_mask_cu
+            d_batch_q_proj_out,
+            d_batch_k_proj_out, // Note: For prefill, K cache is used by kernel, so this is current K
+            d_batch_v_proj_out, // Note: For prefill, V cache is used by kernel, so this is current V
+            d_layer_k_cache_ptr, // Full K cache for the layer
+            d_layer_v_cache_ptr, // Full V cache for the layer
+            d_batch_attn_heads_concat_out,
+            num_tokens_in_batch,
+            current_model_pos,
+            config_.max_position_embeddings,
+            config_.num_attention_heads,
+            config_.num_key_value_heads,
+            head_dim,
+            current_attention_scale,
+            stream,
+            nullptr
         );
 
-        cudaError_t err_sync_after_attn_l = cudaDeviceSynchronize();
-        if (err_sync_after_attn_l != cudaSuccess) {
-            Logger::error("[Prefill] CUDA error L" + std::to_string(l) + " after Attention (sync): " + std::string(cudaGetErrorString(err_sync_after_attn_l)));
-        }
-        cudaError_t err_last_after_attn_l = cudaGetLastError();
-        if (err_last_after_attn_l != cudaSuccess) {
-            Logger::error("[Prefill] CUDA error L" + std::to_string(l) + " after Attention (last): " + std::string(cudaGetErrorString(err_last_after_attn_l)));
-        }
-
-        cudaError_t err_sync_before_oproj_l = cudaDeviceSynchronize();
-        if (err_sync_before_oproj_l != cudaSuccess) {
-            Logger::error("[Prefill] CUDA error L" + std::to_string(l) + " before O-Proj GEMM (sync): " + std::string(cudaGetErrorString(err_sync_before_oproj_l)));
-        }
-        cudaError_t err_last_before_oproj_l = cudaGetLastError();
-        if (err_last_before_oproj_l != cudaSuccess) {
-            Logger::error("[Prefill] CUDA error L" + std::to_string(l) + " before O-Proj GEMM (last): " + std::string(cudaGetErrorString(err_last_before_oproj_l)));
-        }
         const float* w_o_layer_ptr = w_o_f32_dev_ + (size_t)l_gpu_idx * hidden_size * hidden_size;
         gemm_f32_f32_cuda(cublas_handle_, false, false, num_tokens_in_batch, hidden_size, hidden_size, &alpha,
                           d_batch_attn_heads_concat_out, hidden_size, 
                           w_o_layer_ptr, hidden_size, &beta,
                           d_batch_attn_final_proj_out, hidden_size, stream);
-
-        cudaError_t err_sync_after_oproj_l = cudaDeviceSynchronize();
-        if (err_sync_after_oproj_l != cudaSuccess) {
-            Logger::error("[Prefill] CUDA error L" + std::to_string(l) + " after O-Proj GEMM (sync): " + std::string(cudaGetErrorString(err_sync_after_oproj_l)));
-        }
-        cudaError_t err_last_after_oproj_l = cudaGetLastError();
-        if (err_last_after_oproj_l != cudaSuccess) {
-            Logger::error("[Prefill] CUDA error L" + std::to_string(l) + " after O-Proj GEMM (last): " + std::string(cudaGetErrorString(err_last_after_oproj_l)));
-        }
-
-
-        add_residual_batch_cuda(d_batch_residual_attn_out, d_batch_attn_final_proj_out, d_batch_x_ptr,
+        
+        // First residual: Input to attention + Attention Output
+        // d_batch_residual_attn_out was d_batch_x_ptr (input to layer's first RMSNorm)
+        add_residual_batch_cuda(d_batch_x_ptr, d_batch_attn_final_proj_out, d_batch_residual_attn_out, // Store result in d_batch_residual_attn_out
                                 num_tokens_in_batch, hidden_size, stream);
 
+        // Second RMSNorm, input is the result of the first residual connection
         rmsnorm_batch_cuda(d_batch_x_norm_out_ffn, d_batch_residual_attn_out, 
-                           layers[l].post_attention_layernorm_dev,
+                           layers[l_model_idx].post_attention_layernorm_dev,
                            num_tokens_in_batch, hidden_size, config_.rms_norm_eps, stream);
-
-        cudaError_t err_sync_before_ffn_gate_l = cudaDeviceSynchronize();
-        if (err_sync_before_ffn_gate_l != cudaSuccess) {
-            Logger::error("[Prefill] CUDA error L" + std::to_string(l) + " before FFN Gate-Proj GEMM (sync): " + std::string(cudaGetErrorString(err_sync_before_ffn_gate_l)));
-        }
-        cudaError_t err_last_before_ffn_gate_l = cudaGetLastError();
-        if (err_last_before_ffn_gate_l != cudaSuccess) {
-            Logger::error("[Prefill] CUDA error L" + std::to_string(l) + " before FFN Gate-Proj GEMM (last): " + std::string(cudaGetErrorString(err_last_before_ffn_gate_l)));
-
 
         const float* w1_layer_ptr = w_gate_f32_dev_ + (size_t)l_gpu_idx * hidden_size * ffn_intermediate_dim;
         gemm_f32_f32_cuda(cublas_handle_, false, false, num_tokens_in_batch, ffn_intermediate_dim, hidden_size, &alpha,
                           d_batch_x_norm_out_ffn, hidden_size, w1_layer_ptr, ffn_intermediate_dim, &beta,
                           d_batch_ffn_gate_proj_out, ffn_intermediate_dim, stream);
 
-        cudaError_t err_sync_after_ffn_gate_l = cudaDeviceSynchronize();
-        if (err_sync_after_ffn_gate_l != cudaSuccess) {
-            Logger::error("[Prefill] CUDA error L" + std::to_string(l) + " after FFN Gate-Proj GEMM (sync): " + std::string(cudaGetErrorString(err_sync_after_ffn_gate_l)));
-        }
-        cudaError_t err_last_after_ffn_gate_l = cudaGetLastError();
-        if (err_last_after_ffn_gate_l != cudaSuccess) {
-            Logger::error("[Prefill] CUDA error L" + std::to_string(l) + " after FFN Gate-Proj GEMM (last): " + std::string(cudaGetErrorString(err_last_after_ffn_gate_l)));
-        }
-        cudaError_t err_sync_before_ffn_up_l = cudaDeviceSynchronize();
-        if (err_sync_before_ffn_up_l != cudaSuccess) {
-            Logger::error("[Prefill] CUDA error L" + std::to_string(l) + " before FFN Up-Proj GEMM (sync): " + std::string(cudaGetErrorString(err_sync_before_ffn_up_l)));
-        }
-        cudaError_t err_last_before_ffn_up_l = cudaGetLastError();
-        if (err_last_before_ffn_up_l != cudaSuccess) {
-            Logger::error("[Prefill] CUDA error L" + std::to_string(l) + " before FFN Up-Proj GEMM (last): " + std::string(cudaGetErrorString(err_last_before_ffn_up_l)));
-        }
         const float* w3_layer_ptr = w_up_f32_dev_ + (size_t)l_gpu_idx * hidden_size * ffn_intermediate_dim;
         gemm_f32_f32_cuda(cublas_handle_, false, false, num_tokens_in_batch, ffn_intermediate_dim, hidden_size, &alpha,
                           d_batch_x_norm_out_ffn, hidden_size, w3_layer_ptr, ffn_intermediate_dim, &beta,
                           d_batch_ffn_up_proj_out, ffn_intermediate_dim, stream);
-        cudaError_t err_sync_after_ffn_up_l = cudaDeviceSynchronize();
-        if (err_sync_after_ffn_up_l != cudaSuccess) {
-            Logger::error("[Prefill] CUDA error L" + std::to_string(l) + " after FFN Up-Proj GEMM (sync): " + std::string(cudaGetErrorString(err_sync_after_ffn_up_l)));
-        }
-        cudaError_t err_last_after_ffn_up_l = cudaGetLastError();
-        if (err_last_after_ffn_up_l != cudaSuccess) {
-            Logger::error("[Prefill] CUDA error L" + std::to_string(l) + " after FFN Up-Proj GEMM (last): " + std::string(cudaGetErrorString(err_last_after_ffn_up_l)));
-        }
+
         swiglu_batch_cuda(d_batch_ffn_swiglu_out, d_batch_ffn_gate_proj_out, d_batch_ffn_up_proj_out,
                           num_tokens_in_batch, ffn_intermediate_dim, stream);
-
-        cudaError_t err_sync_before_ffn_down_l = cudaDeviceSynchronize();
-        if (err_sync_before_ffn_down_l != cudaSuccess) {
-            Logger::error("[Prefill] CUDA error L" + std::to_string(l) + " before FFN Down-Proj GEMM (sync): " + std::string(cudaGetErrorString(err_sync_before_ffn_down_l)));
-        }
-        cudaError_t err_last_before_ffn_down_l = cudaGetLastError();
-        if (err_last_before_ffn_down_l != cudaSuccess) {
-            Logger::error("[Prefill] CUDA error L" + std::to_string(l) + " before FFN Down-Proj GEMM (last): " + std::string(cudaGetErrorString(err_last_before_ffn_down_l)));
-        }
 
         const float* w2_layer_ptr = w_down_f32_dev_ + (size_t)l_gpu_idx * ffn_intermediate_dim * hidden_size;
         gemm_f32_f32_cuda(cublas_handle_, false, false, num_tokens_in_batch, hidden_size, ffn_intermediate_dim, &alpha,
                           d_batch_ffn_swiglu_out, ffn_intermediate_dim, w2_layer_ptr, hidden_size, &beta,
                           d_batch_ffn_down_proj_out, hidden_size, stream);
-                            cudaError_t err_sync_after_ffn_down_l = cudaDeviceSynchronize();
-        if (err_sync_after_ffn_down_l != cudaSuccess) {
-            Logger::error("[Prefill] CUDA error L" + std::to_string(l) + " after FFN Down-Proj GEMM (sync): " + std::string(cudaGetErrorString(err_sync_after_ffn_down_l)));
-        }
-        cudaError_t err_last_after_ffn_down_l = cudaGetLastError();
-        if (err_last_after_ffn_down_l != cudaSuccess) {
-            Logger::error("[Prefill] CUDA error L" + std::to_string(l) + " after FFN Down-Proj GEMM (last): " + std::string(cudaGetErrorString(err_last_after_ffn_down_l)));
-        }
+        
+        // Second residual: Input to MLP (which is output of first residual) + MLP Output
+        // Result stored in d_batch_layer_output, which becomes d_batch_x_ptr for the next iteration.
         add_residual_batch_cuda(d_batch_layer_output, d_batch_ffn_down_proj_out, d_batch_residual_attn_out,
                                 num_tokens_in_batch, hidden_size, stream);
         
         d_batch_x_ptr = d_batch_layer_output; 
     }
 
-    rmsnorm_batch_cuda(d_batch_x_norm_out_attn, d_batch_x_ptr, 
+    // After the loop, d_batch_x_ptr points to the output of the last processed GPU layer,
+    // or it's still d_batch_input_embeddings if no GPU layers ran.
+    // This d_batch_x_ptr is the correct input for the final RMSNorm.
+    rmsnorm_batch_cuda(d_batch_x_norm_out_attn, d_batch_x_ptr,
                        final_norm_dev,
                        num_tokens_in_batch, hidden_size, config_.rms_norm_eps, stream);
 
@@ -3969,40 +3885,15 @@ std::vector<float> TinyLlamaModel::forward_device_batch_prefill(
     float* d_logits_last_token;
     gpuErrchk(cudaMalloc(&d_logits_last_token, config_.vocab_size * sizeof(float)));
 
-    cudaError_t err_sync_before_lm_head = cudaDeviceSynchronize();
-    if (err_sync_before_lm_head != cudaSuccess) {
-        Logger::error("[Prefill] CUDA error before LM Head MatVec (sync): " + std::string(cudaGetErrorString(err_sync_before_lm_head)));
-    }
-    cudaError_t err_last_before_lm_head = cudaGetLastError();
-    if (err_last_before_lm_head != cudaSuccess) {
-        Logger::error("[Prefill] CUDA error before LM Head MatVec (last): " + std::string(cudaGetErrorString(err_last_before_lm_head)));
-    }
-
     matvec_f32_f32_cuda(cublas_handle_, lm_head_f32_dev_, d_last_token_activations,
                         d_logits_last_token, config_.vocab_size, hidden_size, stream);
 
-    cudaError_t err_sync_after_lm_head = cudaDeviceSynchronize();
-    if (err_sync_after_lm_head != cudaSuccess) {
-        Logger::error("[Prefill] CUDA error after LM Head MatVec (sync): " + std::string(cudaGetErrorString(err_sync_after_lm_head)));
-    }
-    cudaError_t err_last_after_lm_head = cudaGetLastError();
-    
     std::vector<float> h_logits(config_.vocab_size);
     gpuErrchk(cudaMemcpyAsync(h_logits.data(), d_logits_last_token, config_.vocab_size * sizeof(float),
                            cudaMemcpyDeviceToHost, stream));
-    
-    
-    cudaError_t err_sync_before_final_sync = cudaDeviceSynchronize(); // A full device sync before stream sync
-    if (err_sync_before_final_sync != cudaSuccess) {
-        Logger::error("[Prefill] CUDA error before final stream sync (device sync): " + std::string(cudaGetErrorString(err_sync_before_final_sync)));
-    }
-    cudaError_t err_last_before_final_sync = cudaGetLastError();
-    if (err_last_before_final_sync != cudaSuccess) {
-        Logger::error("[Prefill] CUDA error before final stream sync (last error): " + std::string(cudaGetErrorString(err_last_before_final_sync)));
-    }
     gpuErrchk(cudaStreamSynchronize(stream));
 
-    kv_cache->seq_len += num_tokens_in_batch; 
+    // kv_cache_.seq_len is updated in api.cpp after this function returns successfully.
 
     gpuErrchk(cudaFree(d_batch_x_norm_out_attn));
     gpuErrchk(cudaFree(d_batch_q_proj_out));
@@ -4016,12 +3907,221 @@ std::vector<float> TinyLlamaModel::forward_device_batch_prefill(
     gpuErrchk(cudaFree(d_batch_ffn_up_proj_out));
     gpuErrchk(cudaFree(d_batch_ffn_swiglu_out));
     gpuErrchk(cudaFree(d_batch_ffn_down_proj_out));
-    if (d_batch_layer_output) {
+    if (d_batch_layer_output) { // Only free if it was allocated
         gpuErrchk(cudaFree(d_batch_layer_output));
     }
     gpuErrchk(cudaFree(d_logits_last_token));
     
     return h_logits;
 }
-}
 #endif // HAS_CUDA
+
+std::vector<float> TinyLlamaModel::forward_cpu_batch(
+    const std::vector<float>& batch_input_activations, // Batched: [num_tokens, hidden_size]
+    int num_tokens_in_batch,
+    int num_cpu_layers_to_process,
+    int start_pos_in_sequence, // Starting position of this batch in the overall sequence (for KVCache)
+    KVCache* kv_cache) {
+
+    Logger::info("[CPU_BATCH_FWD] Entered. num_tokens_in_batch: " + std::to_string(num_tokens_in_batch) +
+                 ", num_cpu_layers_to_process: " + std::to_string(num_cpu_layers_to_process) +
+                 ", start_pos_in_sequence: " + std::to_string(start_pos_in_sequence));
+
+    if (num_cpu_layers_to_process <= 0) {
+        Logger::info("[CPU_BATCH_FWD] No CPU layers to process. Returning input activations.");
+        return batch_input_activations; // Return original if no CPU layers specified
+    }
+    if (batch_input_activations.size() != (size_t)num_tokens_in_batch * config_.hidden_size) {
+        Logger::error("[CPU_BATCH_FWD] batch_input_activations size mismatch. Expected: " +
+                      std::to_string((size_t)num_tokens_in_batch * config_.hidden_size) + " Got: " +
+                      std::to_string(batch_input_activations.size()));
+        return {}; // Return empty on error
+    }
+
+    int hs = config_.hidden_size;
+    int vs = config_.vocab_size; // Not used for logits here, but for consistency
+    int is = config_.intermediate_size;
+    int n_heads = config_.num_attention_heads;
+    int n_kv_heads = config_.num_key_value_heads;
+    if (n_heads == 0) { 
+        Logger::error("[CPU_BATCH_FWD] Error: num_attention_heads is zero."); 
+        return {}; 
+    }
+    int head_dim = hs / n_heads;
+    float eps = config_.rms_norm_eps;
+    int max_pos_embeddings = config_.max_position_embeddings;
+
+    std::vector<float> batch_output_activations(batch_input_activations.size());
+
+    // Process each token in the batch individually through the CPU layers
+    for (int token_idx = 0; token_idx < num_tokens_in_batch; ++token_idx) {
+        // Extract single token's activation
+        std::vector<float> current_token_activation(hs);
+        size_t token_offset_in_batch = (size_t)token_idx * hs;
+        std::copy(batch_input_activations.begin() + token_offset_in_batch,
+                  batch_input_activations.begin() + token_offset_in_batch + hs,
+                  current_token_activation.begin());
+
+        int current_token_pos_in_sequence = start_pos_in_sequence + token_idx;
+
+        // Layer processing loop - ONLY for CPU-offloaded layers for this token
+        for (int l = 0; l < num_cpu_layers_to_process; ++l) {
+            // --- Start of single token, single CPU layer processing (similar to TinyLlamaModel::forward) ---
+            const auto& lw = layers[l];
+            std::vector<float> x_norm_vec1(hs);
+            const std::vector<float>& w_input_norm_vec =
+                lw.input_layernorm_f32.empty()
+                    ? bf16vec_to_float_vec(lw.input_layernorm)
+                    : lw.input_layernorm_f32;
+            rmsnorm_vector_cpu(current_token_activation, w_input_norm_vec, x_norm_vec1, eps);
+            
+            std::vector<float> q_vec(hs), k_vec(n_kv_heads * head_dim), v_vec(n_kv_heads * head_dim);
+            
+            if (!lw.q_proj_f32.empty()) matvec_f32_f32_vector_cpu(lw.q_proj_f32, x_norm_vec1, q_vec, hs, hs);
+            else if (!lw.q_proj_q8_0.empty() && config_.is_gguf_file_loaded) matvec_q8_0_f32_vector_cpu(lw.q_proj_q8_0, x_norm_vec1, q_vec, hs, hs);
+            else if (!lw.q_proj_q4k.empty() && config_.is_gguf_file_loaded) matvec_q4k_f32_vector_cpu(lw.q_proj_q4k, x_norm_vec1, q_vec, hs, hs);
+            else if (!lw.q_proj_q6k.empty() && config_.is_gguf_file_loaded) matvec_q6k_f32_vector_cpu(lw.q_proj_q6k, x_norm_vec1, q_vec, hs, hs);
+            else if (!lw.q_proj.empty()) matvec_bf16_f32_vector_cpu(lw.q_proj, x_norm_vec1, q_vec, hs, hs); 
+            else { Logger::error("[CPU_BATCH_FWD] Layer " + std::to_string(l) + ": No Q proj weights for CPU"); return {}; }
+            
+            if (!lw.k_proj_f32.empty()) matvec_f32_f32_vector_cpu(lw.k_proj_f32, x_norm_vec1, k_vec, n_kv_heads * head_dim, hs);
+            else if (!lw.k_proj_q8_0.empty() && config_.is_gguf_file_loaded) matvec_q8_0_f32_vector_cpu(lw.k_proj_q8_0, x_norm_vec1, k_vec, n_kv_heads * head_dim, hs);
+            else if (!lw.k_proj_q4k.empty() && config_.is_gguf_file_loaded) matvec_q4k_f32_vector_cpu(lw.k_proj_q4k, x_norm_vec1, k_vec, n_kv_heads * head_dim, hs);
+            else if (!lw.k_proj_q6k.empty() && config_.is_gguf_file_loaded) matvec_q6k_f32_vector_cpu(lw.k_proj_q6k, x_norm_vec1, k_vec, n_kv_heads * head_dim, hs);
+            else if (!lw.k_proj.empty()) matvec_bf16_f32_vector_cpu(lw.k_proj, x_norm_vec1, k_vec, n_kv_heads * head_dim, hs);
+            else { Logger::error("[CPU_BATCH_FWD] Layer " + std::to_string(l) + ": No K proj weights for CPU"); return {}; }
+
+            if (!lw.v_proj_f32.empty()) matvec_f32_f32_vector_cpu(lw.v_proj_f32, x_norm_vec1, v_vec, n_kv_heads * head_dim, hs);
+            else if (!lw.v_proj_q8_0.empty() && config_.is_gguf_file_loaded) matvec_q8_0_f32_vector_cpu(lw.v_proj_q8_0, x_norm_vec1, v_vec, n_kv_heads * head_dim, hs);
+            else if (!lw.v_proj_q4k.empty() && config_.is_gguf_file_loaded) matvec_q4k_f32_vector_cpu(lw.v_proj_q4k, x_norm_vec1, v_vec, n_kv_heads * head_dim, hs);
+            else if (!lw.v_proj_q6k.empty() && config_.is_gguf_file_loaded) matvec_q6k_f32_vector_cpu(lw.v_proj_q6k, x_norm_vec1, v_vec, n_kv_heads * head_dim, hs);
+            else if (!lw.v_proj.empty()) matvec_bf16_f32_vector_cpu(lw.v_proj, x_norm_vec1, v_vec, n_kv_heads * head_dim, hs);
+            else { Logger::error("[CPU_BATCH_FWD] Layer " + std::to_string(l) + ": No V proj weights for CPU"); return {}; }
+
+            apply_rope_vector(q_vec, n_heads, head_dim, current_token_pos_in_sequence, precomputed_freqs_cis_, max_pos_embeddings, config_.is_gguf_file_loaded);
+            apply_rope_vector(k_vec, n_kv_heads, head_dim, current_token_pos_in_sequence, precomputed_freqs_cis_, max_pos_embeddings, config_.is_gguf_file_loaded);
+
+            if (kv_cache) {
+                if (static_cast<size_t>(l) < kv_cache->layers.size()) {
+                    KVCacheLayer& kv_layer = kv_cache->layers[l];
+                    size_t layer_max_seq_len = 0;
+                    if (n_kv_heads > 0 && head_dim > 0) { 
+                        layer_max_seq_len = kv_layer.k.size() / (n_kv_heads * head_dim);
+                    }
+                    if (static_cast<size_t>(current_token_pos_in_sequence) >= layer_max_seq_len && layer_max_seq_len > 0) {
+                        Logger::error("[CPU_BATCH_FWD] KV Cache access out of bounds. Layer " + std::to_string(l) + 
+                                      ", current_token_pos_in_sequence: " + std::to_string(current_token_pos_in_sequence) + 
+                                      ", calculated layer_max_seq_len: " + std::to_string(layer_max_seq_len) + ". Skipping KV update.");
+                    } else if (layer_max_seq_len == 0 && current_token_pos_in_sequence > 0) {
+                        Logger::error("[CPU_BATCH_FWD] KV Cache layer_max_seq_len is 0, but current_token_pos_in_sequence > 0. Layer " + std::to_string(l) + ". Skipping KV update.");
+                    } else {
+                        for(int h_idx=0; h_idx < n_kv_heads; ++h_idx) {
+                            size_t k_offset_in_vec = (size_t)h_idx * head_dim;
+                            size_t k_offset_in_cache = ((size_t)current_token_pos_in_sequence * n_kv_heads + h_idx) * head_dim;
+                            std::copy(k_vec.begin() + k_offset_in_vec, k_vec.begin() + k_offset_in_vec + head_dim, kv_layer.k.begin() + k_offset_in_cache);
+                            std::copy(v_vec.begin() + k_offset_in_vec, v_vec.begin() + k_offset_in_vec + head_dim, kv_layer.v.begin() + k_offset_in_cache);
+                        }
+                    }
+                } else {
+                    Logger::error("[CPU_BATCH_FWD] KV Cache layer index " + std::to_string(l) + " out of bounds for kv_cache->layers.size() = " + std::to_string(kv_cache->layers.size()));
+                }
+            }
+            
+            std::vector<float> attn_out_vec(hs);
+            std::vector<float> x_resid1_vec = current_token_activation; 
+            float att_scale = 1.0f / SAFE_SQRT(static_cast<float>(head_dim));
+            std::fill(attn_out_vec.begin(), attn_out_vec.end(), 0.0f);
+
+            for (int h = 0; h < n_heads; ++h) {
+                std::vector<float> q_head(head_dim);
+                std::copy(q_vec.begin() + h * head_dim, q_vec.begin() + (h + 1) * head_dim, q_head.begin());
+                std::vector<float> current_multihead_attn_out(head_dim, 0.0f);
+                int kv_group = n_heads / n_kv_heads;
+                int kv_head_idx = h / kv_group;
+
+                if (kv_cache && static_cast<size_t>(l) < kv_cache->layers.size()) {
+                    const KVCacheLayer& kv_layer = kv_cache->layers[l];
+                    int current_loop_seq_len = current_token_pos_in_sequence + 1;
+                    std::vector<float> scores(current_loop_seq_len);
+                    for (int t = 0; t < current_loop_seq_len; ++t) {
+                        float score = 0.0f;
+                        for (int d = 0; d < head_dim; ++d) {
+                            score += q_head[d] * kv_layer.k[t * (n_kv_heads * head_dim) + kv_head_idx * head_dim + d];
+                        }
+                        scores[t] = score * att_scale;
+                    }
+                    softmax_vector_cpu(scores, scores);
+                    for (int t = 0; t < current_loop_seq_len; ++t) {
+                        for (int d = 0; d < head_dim; ++d) {
+                            current_multihead_attn_out[d] += scores[t] * kv_layer.v[t * (n_kv_heads * head_dim) + kv_head_idx * head_dim + d];
+                        }
+                    }
+                }
+                std::copy(current_multihead_attn_out.begin(), current_multihead_attn_out.end(), attn_out_vec.begin() + h * head_dim);
+            }
+            
+            std::vector<float> attn_proj_vec(hs);
+            if(!lw.o_proj_f32.empty()) matvec_f32_f32_vector_cpu(lw.o_proj_f32, attn_out_vec, attn_proj_vec, hs, hs);
+            else if (!lw.o_proj_q8_0.empty() && config_.is_gguf_file_loaded) matvec_q8_0_f32_vector_cpu(lw.o_proj_q8_0, attn_out_vec, attn_proj_vec, hs, hs);
+            else if (!lw.o_proj_q4k.empty() && config_.is_gguf_file_loaded) matvec_q4k_f32_vector_cpu(lw.o_proj_q4k, attn_out_vec, attn_proj_vec, hs, hs);
+            else if (!lw.o_proj_q6k.empty() && config_.is_gguf_file_loaded) matvec_q6k_f32_vector_cpu(lw.o_proj_q6k, attn_out_vec, attn_proj_vec, hs, hs);
+            else if(!lw.o_proj.empty()) matvec_bf16_f32_vector_cpu(lw.o_proj, attn_out_vec, attn_proj_vec, hs, hs);
+            else { Logger::error("[CPU_BATCH_FWD] Layer " + std::to_string(l) + ": No O proj weights for CPU"); return {}; }
+
+            for(size_t i_res=0; i_res < current_token_activation.size(); ++i_res) current_token_activation[i_res] = x_resid1_vec[i_res] + attn_proj_vec[i_res];
+
+            std::vector<float> x_norm_vec2(hs);
+            std::vector<float> x_resid2_vec = current_token_activation;
+            const std::vector<float>& w_post_attn_norm_vec =
+                lw.post_attention_layernorm_f32.empty()
+                    ? bf16vec_to_float_vec(lw.post_attention_layernorm)
+                    : lw.post_attention_layernorm_f32;
+            rmsnorm_vector_cpu(current_token_activation, w_post_attn_norm_vec, x_norm_vec2, eps);
+
+            std::vector<float> gate_vec(is), up_vec(is);
+            if(!lw.gate_proj_f32.empty()) matvec_f32_f32_vector_cpu(lw.gate_proj_f32, x_norm_vec2, gate_vec, is, hs);
+            else if (!lw.gate_proj_q8_0.empty() && config_.is_gguf_file_loaded) matvec_q8_0_f32_vector_cpu(lw.gate_proj_q8_0, x_norm_vec2, gate_vec, is, hs);
+            else if (!lw.gate_proj_q4k.empty() && config_.is_gguf_file_loaded) matvec_q4k_f32_vector_cpu(lw.gate_proj_q4k, x_norm_vec2, gate_vec, is, hs);
+            else if (!lw.gate_proj_q6k.empty() && config_.is_gguf_file_loaded) matvec_q6k_f32_vector_cpu(lw.gate_proj_q6k, x_norm_vec2, gate_vec, is, hs);
+            else if(!lw.gate_proj.empty()) matvec_bf16_f32_vector_cpu(lw.gate_proj, x_norm_vec2, gate_vec, is, hs);
+            else { Logger::error("[CPU_BATCH_FWD] Layer " + std::to_string(l) + ": No Gate proj weights for CPU"); return {}; }
+
+            if(!lw.up_proj_f32.empty()) matvec_f32_f32_vector_cpu(lw.up_proj_f32, x_norm_vec2, up_vec, is, hs);
+            else if (!lw.up_proj_q8_0.empty() && config_.is_gguf_file_loaded) matvec_q8_0_f32_vector_cpu(lw.up_proj_q8_0, x_norm_vec2, up_vec, is, hs);
+            else if (!lw.up_proj_q4k.empty() && config_.is_gguf_file_loaded) matvec_q4k_f32_vector_cpu(lw.up_proj_q4k, x_norm_vec2, up_vec, is, hs);
+            else if (!lw.up_proj_q6k.empty() && config_.is_gguf_file_loaded) matvec_q6k_f32_vector_cpu(lw.up_proj_q6k, x_norm_vec2, up_vec, is, hs);
+            else if(!lw.up_proj.empty()) matvec_bf16_f32_vector_cpu(lw.up_proj, x_norm_vec2, up_vec, is, hs);
+            else { Logger::error("[CPU_BATCH_FWD] Layer " + std::to_string(l) + ": No Up proj weights for CPU"); return {}; }
+
+            std::vector<float> silu_out_vec(is);
+            silu_cpu(gate_vec, silu_out_vec);
+
+            std::vector<float> swiglu_result_vec(is);
+            for(size_t i_swi=0; i_swi < is; ++i_swi) swiglu_result_vec[i_swi] = silu_out_vec[i_swi] * up_vec[i_swi];
+
+            std::vector<float> mlp_out_vec(hs);
+            if(!lw.down_proj_f32.empty()) matvec_f32_f32_vector_cpu(lw.down_proj_f32, swiglu_result_vec, mlp_out_vec, hs, is);
+            else if (!lw.down_proj_q8_0.empty() && config_.is_gguf_file_loaded) matvec_q8_0_f32_vector_cpu(lw.down_proj_q8_0, swiglu_result_vec, mlp_out_vec, hs, is);
+            else if (!lw.down_proj_q4k.empty() && config_.is_gguf_file_loaded) matvec_q4k_f32_vector_cpu(lw.down_proj_q4k, swiglu_result_vec, mlp_out_vec, hs, is);
+            else if (!lw.down_proj_q6k.empty() && config_.is_gguf_file_loaded) matvec_q6k_f32_vector_cpu(lw.down_proj_q6k, swiglu_result_vec, mlp_out_vec, hs, is);
+            else if(!lw.down_proj.empty()) matvec_bf16_f32_vector_cpu(lw.down_proj, swiglu_result_vec, mlp_out_vec, hs, is);
+            else { Logger::error("[CPU_BATCH_FWD] Layer " + std::to_string(l) + ": No Down proj weights for CPU"); return {}; }
+
+            for(size_t i_res2=0; i_res2 < current_token_activation.size(); ++i_res2) current_token_activation[i_res2] = x_resid2_vec[i_res2] + mlp_out_vec[i_res2];
+            // --- End of single token, single CPU layer processing ---
+        }
+        // Store the processed token's activation back into the batch_output_activations
+        std::copy(current_token_activation.begin(), current_token_activation.end(),
+                  batch_output_activations.begin() + token_offset_in_batch);
+    }
+
+    // After all tokens in the batch have been processed through all CPU layers,
+    // update the KVCache's sequence length.
+    if (kv_cache && num_tokens_in_batch > 0) {
+        kv_cache->seq_len = start_pos_in_sequence + num_tokens_in_batch;
+        Logger::info("[CPU_BATCH_FWD] KVCache seq_len updated to: " + std::to_string(kv_cache->seq_len));
+    }
+
+    Logger::info("[CPU_BATCH_FWD] Exiting. Output activations size: " + std::to_string(batch_output_activations.size()));
+    return batch_output_activations;
+}

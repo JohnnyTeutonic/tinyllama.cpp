@@ -325,7 +325,19 @@ class TinyLlamaModel {
   );
 
   void initialize_gpu_and_rope();
-#endif
+
+  // Processes a batch of activations through a specified number of CPU layers.
+  // Updates the KVCache for these layers.
+  // Returns the batch of activations after processing by the last CPU layer.
+  std::vector<float> forward_cpu_batch(
+      const std::vector<float>& batch_input_activations, // Batched: [num_tokens, hidden_size]
+      int num_tokens_in_batch,
+      int num_cpu_layers_to_process,
+      int start_pos_in_sequence, // Starting position of this batch in the overall sequence (for KVCache)
+      KVCache* kv_cache
+  );
+
+#endif // HAS_CUDA
 
   const ModelConfig& get_config() const { return config_; }
 

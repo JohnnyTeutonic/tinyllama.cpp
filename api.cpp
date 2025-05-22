@@ -469,39 +469,87 @@ std::string TinyLlamaSession::generate(const std::string& user_prompt, int steps
   if (num_gpu_layers_model > 0 && num_prompt_tokens > 0) {
       Logger::info("[Generate API] Attempting GPU batch prefill for " + std::to_string(num_prompt_tokens) + " prompt tokens.");
       
-      std::vector<float> batch_input_embeddings_host;
-      batch_input_embeddings_host.reserve(num_prompt_tokens * config_.hidden_size);
+      std::vector<float> batch_intermediate_activations_host; // Will hold initial embeddings or output of CPU layers
+      batch_intermediate_activations_host.reserve(num_prompt_tokens * config_.hidden_size);
+
+      // 1. Initial Embedding Lookup
       for (int i = 0; i < num_prompt_tokens; ++i) {
           std::vector<float> current_token_embedding = model_->lookup_embedding(tokens[i]);
           if (current_token_embedding.empty()) {
               Logger::error("Failed to get embedding for prompt token ID " + std::to_string(tokens[i]) + " at index " + std::to_string(i));
               return ""; 
           }
-          batch_input_embeddings_host.insert(batch_input_embeddings_host.end(), current_token_embedding.begin(), current_token_embedding.end());
+          batch_intermediate_activations_host.insert(batch_intermediate_activations_host.end(), current_token_embedding.begin(), current_token_embedding.end());
       }
 
-      float* d_batch_input_embeddings = nullptr;
-      if (!batch_input_embeddings_host.empty()) {
-          gpuErrchk(cudaMalloc(&d_batch_input_embeddings, batch_input_embeddings_host.size() * sizeof(float)));
-          gpuErrchk(cudaMemcpy(d_batch_input_embeddings, batch_input_embeddings_host.data(), batch_input_embeddings_host.size() * sizeof(float), cudaMemcpyHostToDevice));
+      // 2. CPU Layer Batch Processing (New Step)
+      if (num_cpu_layers_model > 0) {
+          Logger::info("[Generate API] Processing " + std::to_string(num_cpu_layers_model) + " CPU layers in batch for prefill.");
+          // This function needs to be implemented in TinyLlamaModel.
+          // It should update kv_cache_ for the CPU layers it processes.
+          // The '0' for start_pos assumes this batch processing for CPU layers starts from sequence position 0 for this batch.
+          batch_intermediate_activations_host = model_->forward_cpu_batch(
+              batch_intermediate_activations_host, 
+              num_prompt_tokens, 
+              num_cpu_layers_model, 
+              0, // start_pos for this batch segment in CPU processing
+              &kv_cache_
+          ); 
+          if (batch_intermediate_activations_host.empty()) {
+              Logger::error("CPU batch processing for prefill returned empty activations.");
+              return "";
+          }
+          Logger::info("[Generate API] CPU layers processed for prefill. Activations size: " + std::to_string(batch_intermediate_activations_host.size()));
+          // After CPU layers, kv_cache_.seq_len would have been updated by forward_cpu_batch up to num_prompt_tokens
+          // if it processed the entire prompt.
+      }
+
+      // 3. Data Transfer to GPU (activations from CPU layers, or initial embeddings if no CPU layers)
+      float* d_batch_gpu_input_activations = nullptr;
+      if (!batch_intermediate_activations_host.empty()) {
+          gpuErrchk(cudaMalloc(&d_batch_gpu_input_activations, batch_intermediate_activations_host.size() * sizeof(float)));
+          gpuErrchk(cudaMemcpy(d_batch_gpu_input_activations, batch_intermediate_activations_host.data(), batch_intermediate_activations_host.size() * sizeof(float), cudaMemcpyHostToDevice));
+          
+          cudaError_t err_sync_after_memcpy = cudaDeviceSynchronize(); // Existing debug log location
+          if (err_sync_after_memcpy != cudaSuccess) {
+              Logger::error("[Generate API DEBUG] CUDA error after d_batch_gpu_input_activations setup (sync): " + std::string(cudaGetErrorString(err_sync_after_memcpy)));
+          }
+          cudaError_t err_last_after_memcpy = cudaGetLastError();
+          if (err_last_after_memcpy != cudaSuccess) {
+              Logger::error("[Generate API DEBUG] CUDA error after d_batch_gpu_input_activations setup (last): " + std::string(cudaGetErrorString(err_last_after_memcpy)));
+          } else {
+              Logger::info("[Generate API DEBUG] d_batch_gpu_input_activations setup for prefill SYNC OK. Pointer: " + Logger::ptrToString(d_batch_gpu_input_activations));
+          }
       } else {
-          Logger::error("Batch input embeddings host vector is empty before GPU prefill.");
+          Logger::error("Batch intermediate activations host vector is empty before GPU prefill stage.");
           return "";
       }
 
-      // Ensure KVCache seq_len is 0 before prefill call for a new sequence.
-      // It was already set to 0 above, but good to be explicit if it were moved.
-      kv_cache_.seq_len = 0; 
+      // kv_cache_.seq_len for the GPU part should start from 0 if CPU layers didn't touch it,
+      // or num_prompt_tokens if CPU layers fully processed the prompt.
+      // The current_model_pos for forward_device_batch_prefill is the starting *offset* for RoPE and KV cache updates
+      // for the tokens being processed *by the GPU layers*.
+      // If CPU layers handled tokens 0..N-1, GPU layers handle the same tokens 0..N-1 but for *their* respective layers.
+      // So, current_model_pos for RoPE in GPU layers should still be based on the token's actual position in sequence.
+      // The KVCache update inside forward_device_batch_prefill uses current_model_pos as the offset.
+      // This seems correct: current_model_pos = 0, as this function processes the whole prompt batch from its perspective.
+      // The KVCache itself tracks total length.
+      
+      // Important: If CPU layers modified kv_cache_.seq_len, it should be consistent here.
+      // Let's assume forward_cpu_batch sets kv_cache_.seq_len correctly if it runs.
+      // If no CPU layers ran, kv_cache_.seq_len is still 0 here.
+      // The `forward_device_batch_prefill` will update KV cache from `current_model_pos`.
+      
       logits = model_->forward_device_batch_prefill(
-          d_batch_input_embeddings,
+          d_batch_gpu_input_activations,
           num_prompt_tokens,
-          0, // current_model_pos for prefill is 0
+          0, // current_model_pos for this batch segment for GPU layers
           &kv_cache_,
           0 // default stream
       );
       
-      if (d_batch_input_embeddings) {
-          gpuErrchk(cudaFree(d_batch_input_embeddings));
+      if (d_batch_gpu_input_activations) {
+          gpuErrchk(cudaFree(d_batch_gpu_input_activations));
       }
 
       if (logits.empty()) {

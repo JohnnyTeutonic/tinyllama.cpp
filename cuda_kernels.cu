@@ -235,24 +235,53 @@ void matvec_f32_f32_cuda(cublasHandle_t handle, const float* mat_f32_dev,
                          int cols, cudaStream_t stream) {
   const float alpha = 1.0f;
   const float beta = 0.0f;
-  int M = rows;
-  int N = 1;
-  int K = cols;
+  int M_blas = rows; // For C(M,N) = op(A)(M,K) * op(B)(K,N), M is rows of op(A) and C
+  int N_blas = 1;    // N is cols of op(B) and C
+  int K_blas = cols; // K is cols of op(A) and rows of op(B)
+
+  // Assuming mat_f32_dev is row-major (actual_rows=rows, actual_cols=cols)
+  // To use with CUBLAS_OP_T, A becomes actual_cols x actual_rows (K_blas x M_blas)
+  // op(A) will have M_blas rows and K_blas cols for cuBLAS
+  // vec_f32_dev is col-vector (actual_rows=cols, actual_cols=1)
+  // op(B) will have K_blas rows and N_blas cols for cuBLAS
 
   cublasStatus_t status = cublasSetStream(handle, stream);
   if (status != CUBLAS_STATUS_SUCCESS) {
-    Logger::error("cublasSetStream failed");
+    Logger::error("cublasSetStream failed in matvec_f32_f32_cuda with error: " + std::to_string(status) + " (" + cublasGetStatusString(status) + ")");
     throw std::runtime_error("cublasSetStream failed");
   }
 
-  status = cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, M, N, K, &alpha,
-                       mat_f32_dev, K, vec_f32_dev, K, &beta, out_f32_dev, M);
+  Logger::info("[MATVEC_DEBUG] cublasSgemm call with: transA=T, transB=N" 
+               ", M=" + std::to_string(M_blas) + ", N=" + std::to_string(N_blas) + ", K=" + std::to_string(K_blas) +
+               ", LDA=" + std::to_string(K_blas) + " (cols_orig_A for T)" +
+               ", LDB=" + std::to_string(K_blas) + " (rows_orig_B for N)" +
+               ", LDC=" + std::to_string(M_blas) + " (rows_orig_C for N)" +
+               ", alpha=" + std::to_string(alpha) + ", beta=" + std::to_string(beta) +
+               ", A_ptr=" + Logger::ptrToString(mat_f32_dev) + ", B_ptr=" + Logger::ptrToString(vec_f32_dev) + ", C_ptr=" + Logger::ptrToString(out_f32_dev) );
+
+  // C(M,N) = A(M,K)^T * B(K,N) ( ভুল ) -> C(M,N) = op(A)(M,K) * op(B)(K,N)
+  // A is mat_f32_dev (user rows x user cols). op(A)=A^T (user cols x user rows)
+  // B is vec_f32_dev (user cols x 1). op(B)=B (user cols x 1)
+  // Result C is out_f32_dev (user rows x 1)
+  // M_cublas = user rows (vocab_size)
+  // N_cublas = 1
+  // K_cublas = user cols (hidden_size)
+  // For A^T: A is (rows x cols)_user_row_major. A^T (col-major view for cublas) is (cols x rows)_user.
+  //            lda for A (when opA=T) is cols_user.
+  // For B: B is (cols x 1)_user_col_vector. ldb for B (when opB=N) is cols_user.
+  status = cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, 
+                       M_blas, N_blas, K_blas, 
+                       &alpha, 
+                       mat_f32_dev, K_blas,  // LDA for A when transA=T is original number of columns of A
+                       vec_f32_dev, K_blas,  // LDB for B when transB=N is original number of rows of B
+                       &beta, 
+                       out_f32_dev, M_blas); // LDC for C is original number of rows of C
 
   if (status != CUBLAS_STATUS_SUCCESS) {
-    Logger::error("cublasSgemm (FP32) failed with status: " +
-                  std::to_string(status));
-
-    throw std::runtime_error("cublasSgemm (FP32) failed");
+    Logger::error("cublasSgemm (FP32 matvec) failed with status: " + std::to_string(status) + " (" + cublasGetStatusString(status) + ")");
+    Logger::error("MatVec GEMM params: M=" + std::to_string(M_blas) + " N=" + std::to_string(N_blas) + " K=" + std::to_string(K_blas) +
+                  " LDA=" + std::to_string(K_blas) + " LDB=" + std::to_string(K_blas) + " LDC=" + std::to_string(M_blas) );
+    throw std::runtime_error("cublasSgemm (FP32 matvec) failed");
   }
 }
 
@@ -1291,38 +1320,89 @@ void dequantize_int8_to_fp32_symmetric_per_tensor_cuda(
 // New Generic GEMM for FP32
 void gemm_f32_f32_cuda(cublasHandle_t handle, 
                        bool transa_user, bool transb_user, 
-                       int m, int n, int k, 
-                       const float* alpha, 
-                       const float* A, int lda, 
-                       const float* B, int ldb, 
-                       const float* beta, 
-                       float* C, int ldc, 
+                       int m_user, int n_user, int k_user, 
+                       const float* alpha_user, 
+                       const float* A_user, int lda_user, 
+                       const float* B_user, int ldb_user, 
+                       const float* beta_user, 
+                       float* C_user, int ldc_user, 
                        cudaStream_t stream) {
+    
     cublasStatus_t status = cublasSetStream(handle, stream);
     if (status != CUBLAS_STATUS_SUCCESS) {
-        Logger::error("cublasSetStream failed in gemm_f32_f32_cuda");
+        Logger::error("cublasSetStream failed in gemm_f32_f32_cuda with error: " + std::to_string(status) + " (" + cublasGetStatusString(status) + ")");
         throw std::runtime_error("cublasSetStream failed");
     }
 
-    cublasOperation_t cublas_transa = transa_user ? CUBLAS_OP_T : CUBLAS_OP_N;
-    cublasOperation_t cublas_transb = transb_user ? CUBLAS_OP_T : CUBLAS_OP_N;
+    cublasOperation_t opA_cublas, opB_cublas;
+    int M_cublas, N_cublas, K_cublas;
+    const float *A_cublas_ptr, *B_cublas_ptr;
+    int LDA_cublas, LDB_cublas;
 
-    // M, N, K are the dimensions of the GEMM operation: C(M,N) = op(A)(M,K) * op(B)(K,N)
-    // lda, ldb, ldc are the leading dimensions of the matrices A, B, C as stored in memory.
-    // For row-major storage, this is typically the number of columns of the matrix.
-    status = cublasSgemm(handle, cublas_transa, cublas_transb, 
-                           m, n, k, 
-                           alpha, 
-                           A, lda, 
-                           B, ldb, 
-                           beta, 
-                           C, ldc);
+    if (!transa_user && !transb_user) {
+        // Standard C_rowmajor(m,n) = A_rowmajor(m,k) * B_rowmajor(k,n)
+        // This is equivalent to C_colmajor(n,m) = B_colmajor(n,k) * A_colmajor(k,m)
+        // So, we call cublasSgemm with m_blas=n_user, n_blas=m_user, k_blas=k_user
+        // A_blas_ptr = B_user, LDA_blas = ldb_user (which is n_user, the number of columns in B_user)
+        // B_blas_ptr = A_user, LDB_blas = lda_user (which is k_user, the number of columns in A_user)
+        // C_blas_ptr = C_user, LDC_blas = ldc_user (which is n_user, the number of columns in C_user)
+        // All ops are CUBLAS_OP_N because we are passing pointers to row-major matrices
+        // and cuBLAS will interpret them as column-major matrices with dimensions swapped for A and B vs C.
+        // More precisely, cuBLAS expects A to be M_cublas x K_cublas (col-major) and B to be K_cublas x N_cublas (col-major)
+        // If B_user (k_user x n_user row-major) is A_cublas, then A_cublas is n_user x k_user col-major. So M_cublas=n_user, K_cublas=k_user, LDA_cublas=n_user (=ldb_user).
+        // If A_user (m_user x k_user row-major) is B_cublas, then B_cublas is k_user x m_user col-major. So K_cublas=k_user, N_cublas=m_user, LDB_cublas=k_user (=lda_user).
+        // This leads to C_cublas being n_user x m_user.
+
+        opA_cublas = CUBLAS_OP_N; 
+        opB_cublas = CUBLAS_OP_N;
+        M_cublas = n_user;         
+        N_cublas = m_user;          
+        K_cublas = k_user;         
+        A_cublas_ptr = B_user;      
+        LDA_cublas = ldb_user; // For B_user (k_user x n_user RM) treated as A_cublas (n_user x k_user CM), LDA is n_user.
+        B_cublas_ptr = A_user;     
+        LDB_cublas = lda_user; // For A_user (m_user x k_user RM) treated as B_cublas (k_user x m_user CM), LDB is k_user.
+    } else {
+        // User has specified transpositions. This case needs careful review if used,
+        // as lda/ldb are for row-major from user, but cuBLAS needs them for col-major view with trans.
+        // For now, direct pass-through (likely incorrect if transposing row-major matrices).
+        Logger::warning("[GEMM_WRAPPER] transa_user or transb_user is true. Direct pass-through of ops and dims.");
+        opA_cublas = transa_user ? CUBLAS_OP_T : CUBLAS_OP_N;
+        opB_cublas = transb_user ? CUBLAS_OP_T : CUBLAS_OP_N;
+        M_cublas = m_user;
+        N_cublas = n_user;
+        K_cublas = k_user;
+        A_cublas_ptr = A_user;
+        LDA_cublas = lda_user;
+        B_cublas_ptr = B_user;
+        LDB_cublas = ldb_user;
+    }
+
+    // Logging before the call
+    Logger::info("[GEMM_WRAPPER_DEBUG] cublasSgemm effective call: transA=" + std::to_string(opA_cublas == CUBLAS_OP_T) + 
+                 ", transB=" + std::to_string(opB_cublas == CUBLAS_OP_T) + 
+                 ", M=" + std::to_string(M_cublas) + ", N=" + std::to_string(N_cublas) + ", K=" + std::to_string(K_cublas) + 
+                 ", LDA=" + std::to_string(LDA_cublas) + ", LDB=" + std::to_string(LDB_cublas) + ", LDC=" + std::to_string(ldc_user) +
+                 ", alpha=" + std::to_string(*alpha_user) + ", beta=" + std::to_string(*beta_user) +
+                 ", A_ptr=" + Logger::ptrToString(A_cublas_ptr) + ", B_ptr=" + Logger::ptrToString(B_cublas_ptr) + ", C_ptr=" + Logger::ptrToString(C_user) );
+
+    status = cublasSgemm(handle, opA_cublas, opB_cublas, 
+                           M_cublas, N_cublas, K_cublas, 
+                           alpha_user, 
+                           A_cublas_ptr, LDA_cublas, 
+                           B_cublas_ptr, LDB_cublas, 
+                           beta_user, 
+                           C_user, ldc_user); // C_user and ldc_user are for the final C_orig(m_user, n_user) row-major matrix.
+                                          // For C_colmajor(n_user, m_user), ldc should be n_user.
 
     if (status != CUBLAS_STATUS_SUCCESS) {
         Logger::error("cublasSgemm failed in gemm_f32_f32_cuda with error: " + std::to_string(status) + " (" + cublasGetStatusString(status) + ")");
-        Logger::error("GEMM params: transa=" + std::to_string(transa_user) + " transb=" + std::to_string(transb_user) + 
-                       " m=" + std::to_string(m) + " n=" + std::to_string(n) + " k=" + std::to_string(k) + 
-                       " lda=" + std::to_string(lda) + " ldb=" + std::to_string(ldb) + " ldc=" + std::to_string(ldc));
+        Logger::error("GEMM params (original user view): transa_user=" + std::to_string(transa_user) + " transb_user=" + std::to_string(transb_user) + 
+                       " m=" + std::to_string(m_user) + " n=" + std::to_string(n_user) + " k=" + std::to_string(k_user) + 
+                       " lda=" + std::to_string(lda_user) + " ldb=" + std::to_string(ldb_user) + " ldc=" + std::to_string(ldc_user));
+        Logger::error("GEMM params (internal cublas view at failure): transA=" + std::to_string(opA_cublas==CUBLAS_OP_T) + " transB=" + std::to_string(opB_cublas==CUBLAS_OP_T) + 
+                       " M_c=" + std::to_string(M_cublas) + " N_c=" + std::to_string(N_cublas) + " K_c=" + std::to_string(K_cublas) + 
+                       " LDA_c=" + std::to_string(LDA_cublas) + " LDB_c=" + std::to_string(LDB_cublas) + " LDC_c(user)=" + std::to_string(ldc_user));
         throw std::runtime_error("cublasSgemm failed");
     }
 }
