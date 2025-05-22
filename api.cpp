@@ -405,39 +405,74 @@ std::string TinyLlamaSession::generate(const std::string& user_prompt, int steps
   std::string final_prompt_for_encoding;
   bool used_chat_template = false;
 
-  // Priority 1: GGUF Chat Template from Tokenizer
-  if (tokenizer_ && !tokenizer_->get_gguf_chat_template().empty()) {
-    Logger::info("[Generate API] Using GGUF chat template from tokenizer.");
-    final_prompt_for_encoding = tokenizer_->apply_chat_template(user_prompt, system_prompt_arg, config_);
-    used_chat_template = true;
-  } 
-  // Priority 2: Llama 3 family specific template (handled by apply_chat_template's fallback)
-  else if (config_.tokenizer_family == ModelConfig::TokenizerFamily::LLAMA3_TIKTOKEN) {
-    Logger::info("[Generate API] Llama 3 tokenizer family detected, using apply_chat_template.");
-    final_prompt_for_encoding = tokenizer_->apply_chat_template(user_prompt, system_prompt_arg, config_);
-    used_chat_template = true;
+  // Log conditions for chat template application
+  if (tokenizer_) {
+    bool gguf_template_empty = tokenizer_->get_gguf_chat_template().empty();
+    Logger::info("[Generate API] GGUF chat template from tokenizer is empty: " + std::string(gguf_template_empty ? "true" : "false"));
+    if (!gguf_template_empty) {
+        Logger::info("[Generate API] GGUF Template Content (first 100 chars): " + tokenizer_->get_gguf_chat_template().substr(0, 100));
+    }
+  } else {
+    Logger::warning("[Generate API] Tokenizer is null before checking chat template!");
   }
-  // Priority 3: Legacy Q/A formatting if CLI hint is true AND no advanced template was used
-  else if (apply_q_a_format_cli_hint) {
-    Logger::info("[Generate API] No GGUF/Llama3 template, applying legacy Q/A formatting due to CLI hint.");
+  std::string family_log_str = "UNKNOWN";
+  if (config_.tokenizer_family == ModelConfig::TokenizerFamily::LLAMA_SENTENCEPIECE) family_log_str = "LLAMA_SENTENCEPIECE";
+  else if (config_.tokenizer_family == ModelConfig::TokenizerFamily::LLAMA3_TIKTOKEN) family_log_str = "LLAMA3_TIKTOKEN";
+  Logger::info("[Generate API] Configured tokenizer_family: " + family_log_str);
+
+  // New Priority Logic:
+  // Priority 1 (NEW): Legacy Q/A formatting if CLI hint is true
+  if (apply_q_a_format_cli_hint) {
+    Logger::info("[Generate API] Using legacy Q/A formatting (CLI Hint is true - Priority 1).");
     std::string temp_prompt = user_prompt;
     if (!system_prompt_arg.empty()) {
-        temp_prompt = system_prompt_arg + "\n\nQ: " + user_prompt + "\nA:"; // Basic combination
+        temp_prompt = system_prompt_arg + "\\n\\nQ: " + user_prompt + "\\nA:";
     } else {
-        temp_prompt = "Q: " + user_prompt + "\nA:";
+        temp_prompt = "Q: " + user_prompt + "\\nA:";
     }
     final_prompt_for_encoding = temp_prompt;
+    used_chat_template = false; // Q/A is not a 'chat template' in the GGUF sense
   }
+  // Priority 2 (WAS 1): GGUF Chat Template from Tokenizer (only if Q/A hint is false)
+  else if (tokenizer_ && !tokenizer_->get_gguf_chat_template().empty()) {
+    std::string gguf_template_content = tokenizer_->get_gguf_chat_template();
+    bool is_llama_sentencepiece_family = (config_.tokenizer_family == ModelConfig::TokenizerFamily::LLAMA_SENTENCEPIECE);
+    bool looks_like_jinja = (gguf_template_content.find("{%") != std::string::npos);
+
+    if (is_llama_sentencepiece_family && looks_like_jinja) {
+        Logger::info("[Generate API] Detected LLAMA_SENTENCEPIECE model with a Jinja-like GGUF template. Forcing Q/A format to avoid C++ Jinja processing issues (Priority 2 Override).");
+        std::string temp_prompt = user_prompt;
+        if (!system_prompt_arg.empty()) {
+            temp_prompt = system_prompt_arg + "\\\\n\\\\nQ: " + user_prompt + "\\\\nA:";
+        } else {
+            temp_prompt = "Q: " + user_prompt + "\\\\nA:";
+        }
+        final_prompt_for_encoding = temp_prompt;
+        used_chat_template = false;
+    } else {
+        Logger::info("[Generate API] Using GGUF chat template from tokenizer (Q/A Hint false - Priority 2).");
+        final_prompt_for_encoding = tokenizer_->apply_chat_template(user_prompt, system_prompt_arg, config_);
+        used_chat_template = true;
+    }
+  } 
+  // Priority 3 (WAS 2): Llama 3 family specific template (only if Q/A hint false and no GGUF template)
+  else if (config_.tokenizer_family == ModelConfig::TokenizerFamily::LLAMA3_TIKTOKEN) {
+    Logger::info("[Generate API] Llama 3 tokenizer family detected, using apply_chat_template (Q/A Hint false, No GGUF template - Priority 3).");
+    final_prompt_for_encoding = tokenizer_->apply_chat_template(user_prompt, system_prompt_arg, config_);
+    used_chat_template = true;
+  }
+  // Priority 4 (WAS 3/4 depending on apply_q_a_format_cli_hint): Raw prompt (if all above are false)
   else {
-    Logger::info("[Generate API] No GGUF/Llama3 template and Q/A formatting hint is false. Using user prompt as is (prepending system prompt if available).");
+    Logger::info("[Generate API] No applicable template/hint. Using user prompt as is (prepending system prompt if available - Priority 4).");
     if (!system_prompt_arg.empty()) {
-        final_prompt_for_encoding = system_prompt_arg + "\n\n" + user_prompt; // Basic prepend
+        final_prompt_for_encoding = system_prompt_arg + "\\n\\n" + user_prompt;
     } else {
         final_prompt_for_encoding = user_prompt;
     }
+    used_chat_template = false;
   }
   
-  Logger::debug("[Generate API] Final prompt for encoding (first 100 chars): \"" + final_prompt_for_encoding.substr(0, 100) + "\"");
+  Logger::debug("[Generate API] Final prompt for encoding (first 100 chars): \\\"" + final_prompt_for_encoding.substr(0, 100) + "\\\"");
 
   std::vector<int> tokens = tokenizer_->encode(final_prompt_for_encoding, true, false, Tokenizer::PreTokenizeMethod::DEFAULT); // add_bos=true, add_eos=false (EOS handled by loop)
 
@@ -455,7 +490,9 @@ std::string TinyLlamaSession::generate(const std::string& user_prompt, int steps
   int next_token_id = -1;
 
   std::vector<float> logits; // Declare logits here, to be populated by prefill or loop
-  kv_cache_.seq_len = 0; // Reset KVCache for new sequence
+  
+  kv_cache_.clear_data(); // Clear K/V vector data for all layers
+  kv_cache_.seq_len = 0;  // Reset KVCache logical sequence length for new sequence
 
   std::vector<float> current_data_host; // To hold embedding or output of CPU layers
   int start_pos_for_loop = 0;
@@ -707,64 +744,64 @@ std::string TinyLlamaSession::generate(const std::string& user_prompt, int steps
     // we use the `logits` from prefill (already sampled into next_token_id for this iteration's input).
     // For all other cases (iterative prompt processing or subsequent generation steps), calculate new logits.
     if (!(pos == num_prompt_tokens && start_pos_for_loop == num_prompt_tokens)) {
-        current_data_host = model_->lookup_embedding(input_token_id);
-        if (current_data_host.empty()) {
-            Logger::error("Failed to get embedding for token " + std::to_string(input_token_id) + " at pos " + std::to_string(pos));
-            break;
-        }
+    current_data_host = model_->lookup_embedding(input_token_id);
+    if (current_data_host.empty()) {
+        Logger::error("Failed to get embedding for token " + std::to_string(input_token_id) + " at pos " + std::to_string(pos));
+        break;
+    }
 
-        int num_total_layers = config_.num_hidden_layers;
-        int num_cpu = config_.num_cpu_offload_layers;
-        int num_gpu = num_total_layers - num_cpu;
+    int num_total_layers = config_.num_hidden_layers;
+    int num_cpu = config_.num_cpu_offload_layers;
+    int num_gpu = num_total_layers - num_cpu;
 
         if (num_cpu > 0) {
-            Logger::debug("[Generate] Processing " + std::to_string(num_cpu) + " CPU layers for pos " + std::to_string(pos));
-            current_data_host = model_->forward(current_data_host, pos, &kv_cache_, nullptr);
-        }
+        Logger::debug("[Generate] Processing " + std::to_string(num_cpu) + " CPU layers for pos " + std::to_string(pos));
+        current_data_host = model_->forward(current_data_host, pos, &kv_cache_, nullptr);
+    }
 
 #ifdef HAS_CUDA
         if (num_gpu > 0) {
-            Logger::debug("[Generate] Processing " + std::to_string(num_gpu) + " GPU layers for pos " + std::to_string(pos));
-            float* x_dev_ptr = model_->get_x_dev();
-            if (!x_dev_ptr) { 
-                Logger::fatal("model_->x_dev_ is null before GPU forward pass!"); 
-                throw std::runtime_error("Critical error: x_dev_ is null in GPU pipeline.");
-            }
+        Logger::debug("[Generate] Processing " + std::to_string(num_gpu) + " GPU layers for pos " + std::to_string(pos));
+        float* x_dev_ptr = model_->get_x_dev();
+        if (!x_dev_ptr) { 
+            Logger::fatal("model_->x_dev_ is null before GPU forward pass!"); 
+            throw std::runtime_error("Critical error: x_dev_ is null in GPU pipeline.");
+        }
             if (current_data_host.empty()) { // Check if current_data_host has valid data
                 Logger::fatal("current_data_host is empty before cudaMemcpy to x_dev_ at pos " + std::to_string(pos)); 
                 throw std::runtime_error("Critical error: current_data_host is empty for GPU pipeline at pos " + std::to_string(pos));
-            }
-            gpuErrchk(cudaMemcpy(x_dev_ptr, current_data_host.data(), current_data_host.size() * sizeof(float), cudaMemcpyHostToDevice));
-            
-            logits = model_->forward_device(x_dev_ptr, pos, &kv_cache_, nullptr);
+        }
+        gpuErrchk(cudaMemcpy(x_dev_ptr, current_data_host.data(), current_data_host.size() * sizeof(float), cudaMemcpyHostToDevice));
+        
+        logits = model_->forward_device(x_dev_ptr, pos, &kv_cache_, nullptr);
         } else if (num_cpu > 0 && num_gpu == 0) {
-            logits = current_data_host;
+        logits = current_data_host;
         } else if (num_total_layers == 0) {
-            Logger::warning("No layers in the model (HAS_CUDA path).");
+        Logger::warning("No layers in the model (HAS_CUDA path).");
             logits.assign(config_.vocab_size > 0 ? config_.vocab_size : 1, 0.0f);
         } else if (num_cpu == 0 && num_gpu == 0 && num_total_layers > 0) {
-             Logger::error("Inconsistent state: HAS_CUDA, num_cpu=0, num_gpu=0, but num_total_layers > 0. Defaulting to CPU path for safety.");
+         Logger::error("Inconsistent state: HAS_CUDA, num_cpu=0, num_gpu=0, but num_total_layers > 0. Defaulting to CPU path for safety.");
              current_data_host = model_->lookup_embedding(input_token_id);
-             logits = model_->forward(current_data_host, pos, &kv_cache_, nullptr);
-        }
+         logits = model_->forward(current_data_host, pos, &kv_cache_, nullptr);
+    }
 #else // No CUDA
-        if (num_total_layers > 0) {
+    if (num_total_layers > 0) {
             // If prefill didn't run, num_cpu could be 0 if all layers were meant for GPU (but CUDA not avail).
             // Or num_cpu > 0 if some were designated for CPU.
             // model->forward needs to be called if current_data_host is just an embedding.
-             if (num_cpu == 0) { // Only call model->forward if it wasn't called for CPU layers above
-                Logger::debug("[Generate] NO_CUDA: Processing all " + std::to_string(num_total_layers) + " layers on CPU for pos " + std::to_string(pos));
-                logits = model_->forward(current_data_host, pos, &kv_cache_, nullptr);
-            } else { // num_cpu > 0, means model->forward was already called and current_data_host has final logits
-                logits = current_data_host;
-            }
-        } else {
-            Logger::warning("No layers in the model (NO_CUDA path).");
-            logits.assign(config_.vocab_size > 0 ? config_.vocab_size : 1, 0.0f);
+        if (num_cpu == 0) { // Only call model->forward if it wasn't called for CPU layers above
+             Logger::debug("[Generate] NO_CUDA: Processing all " + std::to_string(num_total_layers) + " layers on CPU for pos " + std::to_string(pos));
+             logits = model_->forward(current_data_host, pos, &kv_cache_, nullptr);
+        } else { // num_cpu > 0, means model->forward was already called and current_data_host has final logits
+            logits = current_data_host;
         }
+    } else {
+        Logger::warning("No layers in the model (NO_CUDA path).");
+            logits.assign(config_.vocab_size > 0 ? config_.vocab_size : 1, 0.0f);
+    }
 #endif
         // Update KVCache seq_len *after* the forward pass for this position
-        kv_cache_.seq_len = pos + 1;
+    kv_cache_.seq_len = pos + 1;
     }
     // If (pos == num_prompt_tokens && start_pos_for_loop == num_prompt_tokens),
     // logits are from prefill. kv_cache_.seq_len was already set to num_prompt_tokens.

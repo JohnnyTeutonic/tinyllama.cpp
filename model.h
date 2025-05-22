@@ -138,6 +138,9 @@ struct KVCache {
     int seq_len = 0;                  /**< Current sequence length */
     int total_model_layers_ = 0;       /**< Total number of layers in the model */
 
+    // Add a member to store max_seq_len for resize logic
+    int max_seq_len_config_ = 0; // Store the original max_seq_len
+
     /**
      * @brief Initializes the KV cache with given dimensions
      * @param config The model configuration, used to determine if KVCache quantization is enabled.
@@ -148,8 +151,19 @@ struct KVCache {
      * @param head_dim Dimension of each attention head
      */
     void initialize(const ModelConfig& config,
-                    int total_num_model_layers, int num_gpu_layers_to_allocate, 
-                    int max_seq_len, int num_kv_heads, int head_dim);
+                    int total_num_model_layers, int num_gpu_layers_to_allocate,
+                    int max_seq_len_arg, int num_kv_heads, int head_dim);
+
+    void clear_data() {
+        seq_len = 0;
+        // Logger::debug("[KVCache] clear_data() called. seq_len reset to 0. K/V vector sizes remain unchanged.");
+        // DO NOT clear layers[i].k and layers[i].v here,
+        // as they are pre-sized in initialize() and should retain their full size.
+        // for (size_t i = 0; i < layers.size(); ++i) {
+        //     layers[i].k.clear(); 
+        //     layers[i].v.clear(); 
+        // }
+    }
 
 #ifdef HAS_CUDA
     int allocated_num_layers = 0;     /**< Number of GPU layers for which device memory was actually allocated */
