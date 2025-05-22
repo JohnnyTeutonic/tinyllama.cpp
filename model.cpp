@@ -436,10 +436,6 @@ static void matmul_q4k_f32_batch_cpu(
     int output_dim, // rows of the matrix
     int input_dim   // cols of the matrix (must match vec_f32 size for single token)
 ) {
-    Logger::debug("[MATMUL_Q4K_BATCH_CPU] Entered. num_tokens: " + std::to_string(num_tokens) +
-                  ", output_dim: " + std::to_string(output_dim) + ", input_dim: " + std::to_string(input_dim) +
-                  ". mat_q4k.size (num_blocks): " + std::to_string(mat_q4k.size()) +
-                  ", batch_input_activations.size(): " + std::to_string(batch_input_activations.size()));
 
     if (mat_q4k.empty() || batch_input_activations.empty()) {
         Logger::error("[MATMUL_Q4K_BATCH_CPU] Input matrix or batch_input_activations is empty.");
@@ -468,50 +464,18 @@ static void matmul_q4k_f32_batch_cpu(
         const float* input_slice_start = batch_input_activations.data() + (size_t)token_idx * input_dim;
         std::copy(input_slice_start, input_slice_start + input_dim, current_token_input.begin());
 
-        if (log_this_token) {
-            std::string input_vals_log = "InputActivations (first 3): ";
-            for (int i = 0; i < std::min(3, input_dim); ++i) {
-                input_vals_log += std::to_string(current_token_input[i]) + " ";
-            }
-            Logger::debug("[MATMUL_Q4K_BATCH_CPU] Token " + std::to_string(token_idx) +
-                          ". Processing. input_slice_start: " + Logger::ptrToString(input_slice_start) +
-                          ". " + input_vals_log);
-        }
-
         // Prepare output vector for the current token
         std::vector<float> current_token_output(output_dim);
-
-        if (log_this_token) {
-             Logger::debug("[MATMUL_Q4K_BATCH_CPU] Token " + std::to_string(token_idx) +
-                           ": Calling matvec_q4k_f32_vector_cpu with output_dim=" + std::to_string(output_dim) +
-                           ", input_dim=" + std::to_string(input_dim));
-        }
 
         // Perform matrix-vector multiplication for the current token
         // Assuming 'false' is a transpose flag or similar, consistent with other matvec calls
         matvec_q4k_f32_vector_cpu(mat_q4k, current_token_input, current_token_output, output_dim, input_dim, false); 
         
-        if (log_this_token) {
-            std::string output_vals_log = "OutputFromMatVec (first 3): ";
-            for (int i = 0; i < std::min(3, output_dim); ++i) {
-                output_vals_log += std::to_string(current_token_output[i]) + " ";
-            }
-            Logger::debug("[MATMUL_Q4K_BATCH_CPU] Token " + std::to_string(token_idx) +
-                          ": matvec_q4k_f32_vector_cpu returned. " + output_vals_log);
-        }
-        
         // Copy the result into the batched output vector
         float* output_slice_start = batch_output_activations.data() + (size_t)token_idx * output_dim;
         std::copy(current_token_output.begin(), current_token_output.end(), output_slice_start);
 
-        if (log_this_token) {
-             Logger::debug("[MATMUL_Q4K_BATCH_CPU] Token " + std::to_string(token_idx) +
-                           ": Copied current_token_output to batch_output_activations at offset " +
-                           std::to_string((size_t)token_idx * output_dim) +
-                           ". output_slice_start: " + Logger::ptrToString(output_slice_start));
-        }
     }
-    Logger::debug("[MATMUL_Q4K_BATCH_CPU] Exited. batch_output_activations.size(): " + std::to_string(batch_output_activations.size()));
 }
 static void matmul_q6k_f32_batch_cpu(
     const std::vector<block_q6_K>& mat_q6k,             // Quantized matrix weights
@@ -521,10 +485,6 @@ static void matmul_q6k_f32_batch_cpu(
     int output_dim, // rows of the matrix
     int input_dim   // cols of the matrix
 ) {
-    Logger::debug("[MATMUL_Q6K_BATCH_CPU] Entered. num_tokens: " + std::to_string(num_tokens) +
-                  ", output_dim: " + std::to_string(output_dim) + ", input_dim: " + std::to_string(input_dim) +
-                  ". mat_q6k.size (num_blocks): " + std::to_string(mat_q6k.size()) +
-                  ", batch_input_activations.size(): " + std::to_string(batch_input_activations.size()));
 
     if (mat_q6k.empty() || batch_input_activations.empty()) {
         Logger::error("[MATMUL_Q6K_BATCH_CPU] Input matrix or batch_input_activations is empty.");
@@ -553,47 +513,16 @@ static void matmul_q6k_f32_batch_cpu(
         const float* input_slice_start = batch_input_activations.data() + (size_t)token_idx * input_dim;
         std::copy(input_slice_start, input_slice_start + input_dim, current_token_input.begin());
 
-        if (log_this_token) {
-            std::string input_vals_log = "InputActivations (first 3): ";
-            for (int i = 0; i < std::min(3, input_dim); ++i) {
-                input_vals_log += std::to_string(current_token_input[i]) + " ";
-            }
-            Logger::debug("[MATMUL_Q6K_BATCH_CPU] Token " + std::to_string(token_idx) +
-                          ". Processing. input_slice_start: " + Logger::ptrToString(input_slice_start) +
-                          ". " + input_vals_log);
-        }
 
         std::vector<float> current_token_output(output_dim);
-        
-        if (log_this_token) {
-             Logger::debug("[MATMUL_Q6K_BATCH_CPU] Token " + std::to_string(token_idx) +
-                           ": Calling matvec_q6k_f32_vector_cpu with output_dim=" + std::to_string(output_dim) +
-                           ", input_dim=" + std::to_string(input_dim));
-        }
-
         // Assuming the 'false' is a transpose flag or similar, consistent with other matvec calls
         matvec_q6k_f32_vector_cpu(mat_q6k, current_token_input, current_token_output, output_dim, input_dim, false); 
         
-        if (log_this_token) {
-            std::string output_vals_log = "OutputFromMatVec (first 3): ";
-            for (int i = 0; i < std::min(3, output_dim); ++i) {
-                output_vals_log += std::to_string(current_token_output[i]) + " ";
-            }
-            Logger::debug("[MATMUL_Q6K_BATCH_CPU] Token " + std::to_string(token_idx) +
-                          ": matvec_q6k_f32_vector_cpu returned. " + output_vals_log);
-        }
         
         float* output_slice_start = batch_output_activations.data() + (size_t)token_idx * output_dim;
         std::copy(current_token_output.begin(), current_token_output.end(), output_slice_start);
 
-        if (log_this_token) {
-             Logger::debug("[MATMUL_Q6K_BATCH_CPU] Token " + std::to_string(token_idx) +
-                           ": Copied current_token_output to batch_output_activations at offset " +
-                           std::to_string((size_t)token_idx * output_dim) +
-                           ". output_slice_start: " + Logger::ptrToString(output_slice_start));
-        }
     }
-    Logger::debug("[MATMUL_Q6K_BATCH_CPU] Exited. batch_output_activations.size(): " + std::to_string(batch_output_activations.size()));
 }
 static void matmul_q8_0_f32_batch_cpu(
     const std::vector<block_q8_0>& mat_q8_0,            // Quantized matrix weights
@@ -603,11 +532,6 @@ static void matmul_q8_0_f32_batch_cpu(
     int output_dim, // rows of the matrix
     int input_dim   // cols of the matrix
 ) {
-    Logger::debug("[MATMUL_Q8_0_BATCH_CPU] Entered. num_tokens: " + std::to_string(num_tokens) +
-                  ", output_dim: " + std::to_string(output_dim) + ", input_dim: " + std::to_string(input_dim) +
-                  ". mat_q8_0.size (num_blocks): " + std::to_string(mat_q8_0.size()) + // Assuming block_q8_0 might not directly give total element count easily
-                  ", batch_input_activations.size(): " + std::to_string(batch_input_activations.size()));
-
     if (mat_q8_0.empty() || batch_input_activations.empty()) {
         Logger::error("[MATMUL_Q8_0_BATCH_CPU] Input matrix or batch_input_activations is empty.");
         batch_output_activations.assign((size_t)num_tokens * output_dim, 0.0f);
@@ -637,46 +561,15 @@ static void matmul_q8_0_f32_batch_cpu(
         const float* input_slice_start = batch_input_activations.data() + (size_t)token_idx * input_dim;
         std::copy(input_slice_start, input_slice_start + input_dim, current_token_input.begin());
 
-        if (log_this_token) {
-            std::string input_vals_log = "InputActivations (first 3): ";
-            for (int i = 0; i < std::min(3, input_dim); ++i) {
-                input_vals_log += std::to_string(current_token_input[i]) + " ";
-            }
-            Logger::debug("[MATMUL_Q8_0_BATCH_CPU] Token " + std::to_string(token_idx) +
-                          ". Processing. input_slice_start: " + Logger::ptrToString(input_slice_start) +
-                          ". " + input_vals_log);
-        }
 
         std::vector<float> current_token_output(output_dim);
         
-        if (log_this_token) {
-             Logger::debug("[MATMUL_Q8_0_BATCH_CPU] Token " + std::to_string(token_idx) +
-                           ": Calling matvec_q8_0_f32_vector_cpu with output_dim=" + std::to_string(output_dim) +
-                           ", input_dim=" + std::to_string(input_dim));
-        }
-
         matvec_q8_0_f32_vector_cpu(mat_q8_0, current_token_input, current_token_output, output_dim, input_dim, false); // Assuming 'false' is for a specific flag like 'transposed'
-        
-        if (log_this_token) {
-            std::string output_vals_log = "OutputFromMatVec (first 3): ";
-            for (int i = 0; i < std::min(3, output_dim); ++i) {
-                output_vals_log += std::to_string(current_token_output[i]) + " ";
-            }
-            Logger::debug("[MATMUL_Q8_0_BATCH_CPU] Token " + std::to_string(token_idx) +
-                          ": matvec_q8_0_f32_vector_cpu returned. " + output_vals_log);
-        }
         
         float* output_slice_start = batch_output_activations.data() + (size_t)token_idx * output_dim;
         std::copy(current_token_output.begin(), current_token_output.end(), output_slice_start);
 
-        if (log_this_token) {
-             Logger::debug("[MATMUL_Q8_0_BATCH_CPU] Token " + std::to_string(token_idx) +
-                           ": Copied current_token_output to batch_output_activations at offset " +
-                           std::to_string((size_t)token_idx * output_dim) +
-                           ". output_slice_start: " + Logger::ptrToString(output_slice_start));
-        }
     }
-    Logger::debug("[MATMUL_Q8_0_BATCH_CPU] Exited. batch_output_activations.size(): " + std::to_string(batch_output_activations.size()));
 }
 
 void log_vector_summary(const std::string& name, const std::vector<float>& v,
@@ -871,15 +764,9 @@ static void apply_rope_batch_cpu(
         return; 
     }
 
-    Logger::debug("[ROPE_BATCH_CPU] Entered. num_tokens: " + std::to_string(num_tokens) +
-                  ", num_q_heads: " + std::to_string(num_q_heads) + ", num_kv_heads: " + std::to_string(num_kv_heads) +
-                  ", head_dim: " + std::to_string(head_dim) + ", start_pos_in_sequence: " + std::to_string(start_pos_in_sequence) +
-                  ", all_freqs_cis.size(): " + std::to_string(all_freqs_cis.size()) +
-                  ", use_adjacent_pairing: " + (use_adjacent_pairing ? "true" : "false"));
 
     for (int t = 0; t < num_tokens; ++t) {
         int current_token_pos = start_pos_in_sequence + t;
-        Logger::debug("[ROPE_BATCH_CPU] Token " + std::to_string(t) + " (actual_pos: " + std::to_string(current_token_pos) + ")");
 
         if (current_token_pos < 0 || current_token_pos >= max_pos_embeddings) {
             Logger::warning("[ROPE_BATCH_CPU] Token " + std::to_string(t) + " (actual_pos: " + std::to_string(current_token_pos) +
@@ -892,10 +779,6 @@ static void apply_rope_batch_cpu(
             size_t head_start_offset_in_batch = ((size_t)t * num_q_heads + h) * head_dim;
             // Log only for the first head of the first token for brevity, can be expanded if needed
             bool log_this_q_head = (t == 0 && h == 0);
-            if (log_this_q_head) {
-                 Logger::debug("[ROPE_BATCH_CPU] Q - Token " + std::to_string(t) + ", Head " + std::to_string(h) +
-                               ", head_start_offset_in_batch: " + std::to_string(head_start_offset_in_batch));
-            }
 
             for (int i = 0; i < head_dim / 2; ++i) { 
                 size_t freq_idx = (size_t)current_token_pos * (head_dim / 2) + i;
@@ -931,15 +814,6 @@ static void apply_rope_batch_cpu(
                 val0 = q_batch[idx0];
                 val1 = q_batch[idx1];
 
-                if (log_this_q_head && i < 2) { // Log first 2 pairs for the first Q head of the first token
-                    Logger::debug("[ROPE_BATCH_CPU] Q T" + std::to_string(t) + " H" + std::to_string(h) + " P" + std::to_string(i) +
-                                  " pos(" + std::to_string(current_token_pos) + ")" +
-                                  " f_idx(" + std::to_string(freq_idx) + ")" +
-                                  " cos(" + std::to_string(freq_cis_real) + ") sin(" + std::to_string(freq_cis_imag) + ")" +
-                                  " q_in0(" + std::to_string(val0) + ") q_in1(" + std::to_string(val1) + ")" +
-                                  " q_out0(" + std::to_string(val0 * freq_cis_real - val1 * freq_cis_imag) + ")" +
-                                  " q_out1(" + std::to_string(val0 * freq_cis_imag + val1 * freq_cis_real) + ")");
-                }
                 
                 q_batch[idx0] = val0 * freq_cis_real - val1 * freq_cis_imag;
                 q_batch[idx1] = val0 * freq_cis_imag + val1 * freq_cis_real;
@@ -950,10 +824,6 @@ static void apply_rope_batch_cpu(
         for (int h = 0; h < num_kv_heads; ++h) {
             size_t head_start_offset_in_batch = ((size_t)t * num_kv_heads + h) * head_dim;
             bool log_this_k_head = (t == 0 && h == 0); 
-            if (log_this_k_head) {
-                 Logger::debug("[ROPE_BATCH_CPU] K - Token " + std::to_string(t) + ", Head " + std::to_string(h) +
-                               ", head_start_offset_in_batch: " + std::to_string(head_start_offset_in_batch));
-            }
 
             for (int i = 0; i < head_dim / 2; ++i) { 
                 size_t freq_idx = (size_t)current_token_pos * (head_dim / 2) + i;
@@ -989,22 +859,11 @@ static void apply_rope_batch_cpu(
                 val0 = k_batch[idx0];
                 val1 = k_batch[idx1];
 
-                if (log_this_k_head && i < 2) { // Log first 2 pairs for the first K head of the first token
-                     Logger::debug("[ROPE_BATCH_CPU] K T" + std::to_string(t) + " H" + std::to_string(h) + " P" + std::to_string(i) +
-                                  " pos(" + std::to_string(current_token_pos) + ")" +
-                                  " f_idx(" + std::to_string(freq_idx) + ")" +
-                                  " cos(" + std::to_string(freq_cis_real) + ") sin(" + std::to_string(freq_cis_imag) + ")" +
-                                  " k_in0(" + std::to_string(val0) + ") k_in1(" + std::to_string(val1) + ")" +
-                                  " k_out0(" + std::to_string(val0 * freq_cis_real - val1 * freq_cis_imag) + ")" +
-                                  " k_out1(" + std::to_string(val0 * freq_cis_imag + val1 * freq_cis_real) + ")");
-                }
-
                 k_batch[idx0] = val0 * freq_cis_real - val1 * freq_cis_imag;
                 k_batch[idx1] = val0 * freq_cis_imag + val1 * freq_cis_real;
             }
         }
     }
-    Logger::debug("[ROPE_BATCH_CPU] Exited.");
 }
 
 static void matmul_f32_f32_batch_cpu(
@@ -1117,10 +976,6 @@ static void rmsnorm_batch_cpu(const std::vector<float>& x_batch, // [num_tokens,
                               int hidden_size,
                               float eps = numeric::DEFAULT_EPS) {
 
-  Logger::debug("[RMSNORM_BATCH_CPU] Entered. num_tokens: " + std::to_string(num_tokens) +
-                ", hidden_size: " + std::to_string(hidden_size) + ", eps: " + std::to_string(eps) +
-                ". x_batch.size(): " + std::to_string(x_batch.size()) +
-                ", weight.size(): " + std::to_string(weight.size()));
 
   if (x_batch.empty() || x_batch.size() != (size_t)num_tokens * hidden_size || weight.size() != (size_t)hidden_size) {
     Logger::error("[RMSNORM_BATCH_CPU] RMSNorm batch size mismatch or empty input. x_batch.size(): " + std::to_string(x_batch.size()) +
@@ -1136,16 +991,6 @@ static void rmsnorm_batch_cpu(const std::vector<float>& x_batch, // [num_tokens,
   for (int t = 0; t < num_tokens; ++t) {
     double ssq = 0.0; // Use double for sum of squares to maintain precision
     size_t token_offset = (size_t)t * hidden_size;
-    bool log_this_token = (t == 0); // Log details for the first token
-
-    if (log_this_token) {
-        std::string x_vals_log = "x_batch[t_offset + 0..2]: ";
-        for (int i = 0; i < std::min(3, hidden_size); ++i) {
-            x_vals_log += std::to_string(x_batch[token_offset + i]) + " ";
-        }
-        Logger::debug("[RMSNORM_BATCH_CPU] Token " + std::to_string(t) +
-                      ", token_offset: " + std::to_string(token_offset) + ". " + x_vals_log);
-    }
 
     for (int i = 0; i < hidden_size; ++i) {
       ssq += static_cast<double>(x_batch[token_offset + i]) * static_cast<double>(x_batch[token_offset + i]);
@@ -1160,32 +1005,12 @@ static void rmsnorm_batch_cpu(const std::vector<float>& x_batch, // [num_tokens,
     float norm_factor = 1.0f / SAFE_SQRT(norm_factor_input_sqrt + eps); 
                                          // SAFE_MAX inside SAFE_SQRT will use numeric::MIN_NORM_EPS if (norm_factor_input_sqrt + eps) is less than it.
 
-    if (log_this_token) {
-        Logger::debug("[RMSNORM_BATCH_CPU] Token " + std::to_string(t) +
-                      ": ssq_sum=" + std::to_string(ssq) +
-                      ", ssq_mean=" + std::to_string(ssq_mean) +
-                      ", norm_factor_input_to_sqrt (ssq_mean+eps)=" + std::to_string(norm_factor_input_sqrt + eps) +
-                      ", final_norm_factor=" + std::to_string(norm_factor));
-        std::string w_vals_log = "weight[0..2]: ";
-         for (int i = 0; i < std::min(3, hidden_size); ++i) {
-            w_vals_log += std::to_string(weight[i]) + " ";
-        }
-        Logger::debug("[RMSNORM_BATCH_CPU] Token " + std::to_string(t) + ". " + w_vals_log);
-    }
 
     for (int i = 0; i < hidden_size; ++i) {
       out_batch[token_offset + i] = x_batch[token_offset + i] * norm_factor * weight[i];
     }
 
-    if (log_this_token) {
-        std::string out_vals_log = "out_batch[t_offset + 0..2]: ";
-        for (int i = 0; i < std::min(3, hidden_size); ++i) {
-            out_vals_log += std::to_string(out_batch[token_offset + i]) + " ";
-        }
-        Logger::debug("[RMSNORM_BATCH_CPU] Token " + std::to_string(t) + ". " + out_vals_log);
-    }
   }
-  Logger::debug("[RMSNORM_BATCH_CPU] Exited. out_batch.size(): " + std::to_string(out_batch.size()));
 }
 static void rmsnorm_vector_cpu(const std::vector<float>& x,
                                const std::vector<float>& weight,
@@ -2790,12 +2615,6 @@ std::vector<float> TinyLlamaModel::lookup_embedding(int token_id) {
   int hs = config_.hidden_size;
   int vs = config_.vocab_size;
 
-  bool log_this_token_lookup = (token_id == 660 || token_id == 29901 || token_id == 1724 || token_id == 310 || token_id == 278);
-
-  if (log_this_token_lookup) {
-    Logger::info("[CPU_EMBED_DETAIL] Lookup for token_id: " + std::to_string(token_id));
-  }
-
   if (token_id < 0 || token_id >= vs) {
     Logger::error("Token ID out of bounds in lookup_embedding: " +
                   std::to_string(token_id));
@@ -2838,11 +2657,6 @@ std::vector<float> TinyLlamaModel::lookup_embedding(int token_id) {
       std::memcpy(&embedding_vec[dest_offset], dequantized_block,
                   elements_to_copy * sizeof(float));
     }
-    if (log_this_token_lookup) {
-      log_vector_summary("[CPU_EMBED_DETAIL Q4_K] Output Embedding (Token " +
-                             std::to_string(token_id) + ")",
-                         embedding_vec);
-    }
     return embedding_vec;
   }
 
@@ -2878,11 +2692,6 @@ std::vector<float> TinyLlamaModel::lookup_embedding(int token_id) {
       std::memcpy(&embedding_vec[dest_offset], dequantized_block,
                   elements_to_copy * sizeof(float));
     }
-    if (log_this_token_lookup) {
-      log_vector_summary("[CPU_EMBED_DETAIL Q8_0] Output Embedding (Token " +
-                             std::to_string(token_id) + ")",
-                         embedding_vec);
-    }
     return embedding_vec;
   }
 
@@ -2917,11 +2726,6 @@ std::vector<float> TinyLlamaModel::lookup_embedding(int token_id) {
       std::memcpy(&embedding_vec[dest_offset], dequantized_block,
                   elements_to_copy * sizeof(float));
     }
-    if (log_this_token_lookup) {
-      log_vector_summary("[CPU_EMBED_DETAIL Q6_K] Output Embedding (Token " +
-                             std::to_string(token_id) + ")",
-                         embedding_vec);
-    }
     return embedding_vec;
   }
 
@@ -2935,11 +2739,6 @@ std::vector<float> TinyLlamaModel::lookup_embedding(int token_id) {
 
     std::copy(embed_tokens_f32.begin() + offset,
               embed_tokens_f32.begin() + offset + hs, embedding_vec.begin());
-    if (log_this_token_lookup) {
-      log_vector_summary("[CPU_EMBED_DETAIL F32] Output Embedding (Token " +
-                             std::to_string(token_id) + ")",
-                         embedding_vec);
-    }
     return embedding_vec;
 
   } else if (!embed_tokens.empty()) {
@@ -2954,11 +2753,6 @@ std::vector<float> TinyLlamaModel::lookup_embedding(int token_id) {
         embed_tokens.begin() + offset, embed_tokens.begin() + offset + hs);
 
     embedding_vec = bf16vec_to_float_vec(token_embedding_bf16);
-    if (log_this_token_lookup) {
-      log_vector_summary("[CPU_EMBED_DETAIL BF16] Output Embedding (Token " +
-                             std::to_string(token_id) + ")",
-                         embedding_vec);
-    }
     return embedding_vec;
 
   } else {
@@ -4542,14 +4336,6 @@ static void update_kv_cache_batch_cpu(
     KVCacheLayer& layer_cache = kv_cache->layers[layer_idx];
     int kv_dim = num_kv_heads * head_dim;
 
-    Logger::debug("[KV_BATCH_UPDATE L" + std::to_string(layer_idx) + "] Entered. num_tokens_in_batch: " + std::to_string(num_tokens_in_batch) +
-                  ", start_pos_in_sequence: " + std::to_string(start_pos_in_sequence) +
-                  ", kv_dim: " + std::to_string(kv_dim) +
-                  ", Global kv_cache.seq_len (on entry): " + std::to_string(kv_cache->seq_len) +
-                  ", Configured max_seq_len: " + std::to_string(kv_cache->max_seq_len_config_) + 
-                  ", Initial layer_cache.k.size(): " + std::to_string(layer_cache.k.size()) +
-                  ", Initial layer_cache.v.size(): " + std::to_string(layer_cache.v.size()));
-
     if (k_batch_for_layer.size() != static_cast<size_t>(num_tokens_in_batch * kv_dim)) {
         Logger::error("[KV_BATCH_UPDATE L" + std::to_string(layer_idx) + "] k_batch_for_layer size mismatch. Expected " +
                       std::to_string(num_tokens_in_batch * kv_dim) + ", got " + std::to_string(k_batch_for_layer.size()));
@@ -4576,8 +4362,6 @@ static void update_kv_cache_batch_cpu(
         size_t current_token_batch_offset = static_cast<size_t>(token_idx_in_batch) * kv_dim;
         int actual_seq_pos_for_this_token = start_pos_in_sequence + token_idx_in_batch;
 
-        Logger::debug("[KV_BATCH_UPDATE L" + std::to_string(layer_idx) + "] Token_idx_in_batch " + std::to_string(token_idx_in_batch) +
-                      " (actual_seq_pos: " + std::to_string(actual_seq_pos_for_this_token) + ")");
 
         if (static_cast<size_t>(actual_seq_pos_for_this_token) >= static_cast<size_t>(kv_cache->max_seq_len_config_)) {
             Logger::error("[KV_BATCH_UPDATE L" + std::to_string(layer_idx) + 
@@ -4595,14 +4379,11 @@ static void update_kv_cache_batch_cpu(
         for(int i = 0; i < std::min(3, kv_dim); ++i) { k_vals_to_log += std::to_string(k_batch_for_layer[current_token_batch_offset + i]) + " "; }
         if (kv_dim > 3) k_vals_to_log += "...";
 
-        Logger::debug("[KV_BATCH_UPDATE L" + std::to_string(layer_idx) + "] K: layer_cache.k.size (should be full): " + std::to_string(k_size_before) + 
-                      ", dest_offset: " + std::to_string(destination_offset_in_layer_cache) + k_vals_to_log);
         
         std::copy(k_batch_for_layer.begin() + current_token_batch_offset,
                   k_batch_for_layer.begin() + current_token_batch_offset + kv_dim,
                   layer_cache.k.begin() + destination_offset_in_layer_cache);
         
-        Logger::debug("[KV_BATCH_UPDATE L" + std::to_string(layer_idx) + "] K: layer_cache.k.size (after copy, should be unchanged): " + std::to_string(layer_cache.k.size()));
 
         // Log V cache update
         size_t v_size_before = layer_cache.v.size(); // This should be the full max_seq_len size
@@ -4610,18 +4391,12 @@ static void update_kv_cache_batch_cpu(
         for(int i = 0; i < std::min(3, kv_dim); ++i) { v_vals_to_log += std::to_string(v_batch_for_layer[current_token_batch_offset + i]) + " "; }
         if (kv_dim > 3) v_vals_to_log += "...";
 
-        Logger::debug("[KV_BATCH_UPDATE L" + std::to_string(layer_idx) + "] V: layer_cache.v.size (should be full): " + std::to_string(v_size_before) +
-                      ", dest_offset: " + std::to_string(destination_offset_in_layer_cache) + v_vals_to_log);
-
         std::copy(v_batch_for_layer.begin() + current_token_batch_offset,
                   v_batch_for_layer.begin() + current_token_batch_offset + kv_dim,
                   layer_cache.v.begin() + destination_offset_in_layer_cache);
 
-        Logger::debug("[KV_BATCH_UPDATE L" + std::to_string(layer_idx) + "] V: layer_cache.v.size (after copy, should be unchanged): " + std::to_string(layer_cache.v.size()));
     }
     
-    Logger::debug("[KV_BATCH_UPDATE L" + std::to_string(layer_idx) + "] Exited. Final layer_cache.k.size() (should be unchanged): " + std::to_string(layer_cache.k.size()) +
-                  ", Final layer_cache.v.size() (should be unchanged): " + std::to_string(layer_cache.v.size()));
 }
 static void attention_batch_cpu(
     const std::vector<float>& q_batch_roped, // [num_tokens, num_q_heads * head_dim] (hs dimension)
@@ -4645,14 +4420,6 @@ static void attention_batch_cpu(
     size_t expected_output_size = (size_t)num_tokens_in_batch * num_q_heads * head_dim;
     batch_attn_output.assign(expected_output_size, 0.0f);
 
-    Logger::debug("[ATTN_BATCH_CPU] Entered. num_tokens_in_batch: " + std::to_string(num_tokens_in_batch) +
-                  ", start_pos_in_sequence: " + std::to_string(start_pos_in_sequence) +
-                  ", num_q_heads: " + std::to_string(num_q_heads) + ", num_kv_heads: " + std::to_string(num_kv_heads) +
-                  ", head_dim: " + std::to_string(head_dim) + ", attention_scale: " + std::to_string(attention_scale) +
-                  ". Q_batch_size: " + std::to_string(q_batch_roped.size()) +
-                  ", KV_cache.k.size: " + std::to_string(current_layer_kv_cache.k.size()) +
-                  ", KV_cache.v.size: " + std::to_string(current_layer_kv_cache.v.size()) +
-                  ", Output_batch_size: " + std::to_string(batch_attn_output.size()));
 
 
     for (int token_idx = 0; token_idx < num_tokens_in_batch; ++token_idx) {
@@ -4660,24 +4427,12 @@ static void attention_batch_cpu(
         size_t attn_out_token_offset = (size_t)token_idx * num_q_heads * head_dim;
         int current_token_absolute_pos = start_pos_in_sequence + token_idx;
 
-        Logger::debug("[ATTN_BATCH_CPU] Token_idx: " + std::to_string(token_idx) +
-                      ", current_token_absolute_pos: " + std::to_string(current_token_absolute_pos) +
-                      ", q_token_offset: " + std::to_string(q_token_offset) +
-                      ", attn_out_token_offset: " + std::to_string(attn_out_token_offset));
-
         for (int h_q = 0; h_q < num_q_heads; ++h_q) {
             const float* q_head_for_token_ptr = q_batch_roped.data() + q_token_offset + (h_q * head_dim);
             int kv_group_head_idx = h_q / (num_q_heads / num_kv_heads); 
             
             bool log_details_for_this_head = (token_idx == 0 && h_q == 0); // Log details only for 1st token, 1st Q-head
 
-            if (log_details_for_this_head) {
-                Logger::debug("[ATTN_BATCH_CPU] Q_Head: " + std::to_string(h_q) +
-                              ", kv_group_head_idx: " + std::to_string(kv_group_head_idx) +
-                              ". q_head_ptr[0..2]: " + std::to_string(q_head_for_token_ptr[0]) + " " +
-                              (head_dim > 1 ? std::to_string(q_head_for_token_ptr[1]) : "") + " " +
-                              (head_dim > 2 ? std::to_string(q_head_for_token_ptr[2]) : ""));
-            }
 
             int history_len = current_token_absolute_pos + 1;
             if (history_len <= 0) { // Should not happen if current_token_absolute_pos >= 0
@@ -4706,25 +4461,10 @@ static void attention_batch_cpu(
                 }
                 scores[t_hist] = current_dot_product * attention_scale;
 
-                if (log_details_for_this_head && t_hist < 2) { // Log for first 2 history steps for the detailed head
-                    Logger::debug("[ATTN_BATCH_CPU] Q_Head " + std::to_string(h_q) + ", Hist_Token " + std::to_string(t_hist) +
-                                  ", k_cache_offset: " + std::to_string(k_cache_offset) +
-                                  ". k_ptr[0..2]: " + std::to_string(current_layer_kv_cache.k[k_cache_offset + 0]) + " " +
-                                  (head_dim > 1 ? std::to_string(current_layer_kv_cache.k[k_cache_offset + 1]) : "") + " " +
-                                  (head_dim > 2 ? std::to_string(current_layer_kv_cache.k[k_cache_offset + 2]) : "") +
-                                  ". DotProduct: " + std::to_string(current_dot_product) +
-                                  ", ScaledScore: " + std::to_string(scores[t_hist]));
-                }
             }
 
             softmax_vector_cpu(scores, scores); 
 
-            if (log_details_for_this_head) {
-                std::string scores_str = "Softmax scores (first few): ";
-                for(int i=0; i<std::min((int)scores.size(), 5); ++i) scores_str += std::to_string(scores[i]) + " ";
-                Logger::debug("[ATTN_BATCH_CPU] Q_Head " + std::to_string(h_q) + ". " + scores_str);
-            }
-            
             float* current_attn_out_head_ptr = batch_attn_output.data() + attn_out_token_offset + (h_q * head_dim);
 
             for (int t_hist = 0; t_hist < history_len; ++t_hist) {
@@ -4739,29 +4479,14 @@ static void attention_batch_cpu(
                                    " > cache_v_size " + std::to_string(current_layer_kv_cache.v.size()));
                     continue; 
                 }
-                if (log_details_for_this_head && t_hist < 2) { // Log for first 2 history steps for the detailed head
-                     Logger::debug("[ATTN_BATCH_CPU] Q_Head " + std::to_string(h_q) + ", Hist_Token " + std::to_string(t_hist) +
-                                  ", v_cache_offset: " + std::to_string(v_cache_offset) +
-                                  ". v_ptr[0..2]: " + std::to_string(current_layer_kv_cache.v[v_cache_offset + 0]) + " " +
-                                  (head_dim > 1 ? std::to_string(current_layer_kv_cache.v[v_cache_offset + 1]) : "") + " " +
-                                  (head_dim > 2 ? std::to_string(current_layer_kv_cache.v[v_cache_offset + 2]) : "") +
-                                  ". score: " + std::to_string(scores[t_hist]));
-                }
 
                 for (int d = 0; d < head_dim; ++d) {
                     float val_before = (log_details_for_this_head && t_hist < 2 && d < 2) ? current_attn_out_head_ptr[d] : 0.0f;
                     current_attn_out_head_ptr[d] += scores[t_hist] * current_layer_kv_cache.v[v_cache_offset + d];
-                    if (log_details_for_this_head && t_hist < 2 && d < 2) {
-                        Logger::debug("[ATTN_BATCH_CPU] Q_Head " + std::to_string(h_q) + ", Hist_Token " + std::to_string(t_hist) + ", Dim " + std::to_string(d) +
-                                      ". Output_val_before: " + std::to_string(val_before) +
-                                      ", Added: " + std::to_string(scores[t_hist] * current_layer_kv_cache.v[v_cache_offset + d]) +
-                                      ", Output_val_after: " + std::to_string(current_attn_out_head_ptr[d]));
-                    }
                 }
             }
         } 
     } 
-    Logger::debug("[ATTN_BATCH_CPU] Exited.");
 }
 std::vector<float> TinyLlamaModel::forward_cpu_batch(
     const std::vector<float>& batch_input_activations, // Batched: [num_tokens, hidden_size]
@@ -4770,14 +4495,7 @@ std::vector<float> TinyLlamaModel::forward_cpu_batch(
     int start_pos_in_sequence, // Starting position of this batch in the overall sequence (for KVCache)
     KVCache* kv_cache) {
 
-    Logger::info("[CPU_BATCH_FWD] Entered. num_tokens_in_batch: " + std::to_string(num_tokens_in_batch) +
-                  ", num_cpu_layers_to_process: " + std::to_string(num_cpu_layers_to_process) +
-                  ", start_pos_in_sequence: " + std::to_string(start_pos_in_sequence));
 
-    if (num_cpu_layers_to_process <= 0) {
-        Logger::info("[CPU_BATCH_FWD] No CPU layers to process. Returning input activations.");
-        return batch_input_activations;
-    }
     if (batch_input_activations.size() != (size_t)num_tokens_in_batch * config_.hidden_size) {
         Logger::error("[CPU_BATCH_FWD] batch_input_activations size mismatch. Expected: " +
                       std::to_string((size_t)num_tokens_in_batch * config_.hidden_size) + " Got: " +
@@ -5003,10 +4721,8 @@ std::vector<float> TinyLlamaModel::forward_cpu_batch(
         // but we need a final update to the main KVCache object if it tracks a global sequence length
         // beyond individual layer states. Assuming KVCache.seq_len should reflect the end of the processed batch.
         kv_cache->seq_len = start_pos_in_sequence + num_tokens_in_batch;
-        Logger::info("[CPU_BATCH_FWD] KVCache main seq_len updated to: " + std::to_string(kv_cache->seq_len));
     }
 
-    Logger::info("[CPU_BATCH_FWD] Exiting. Output activations size: " + std::to_string(current_batch_activations.size()));
     return current_batch_activations;
 }
 
@@ -5015,7 +4731,6 @@ std::vector<float> TinyLlamaModel::forward_cpu_logits_batch(
     const std::vector<float>& final_batch_activations, // [num_tokens, hidden_size]
     int num_tokens_in_batch) {
 
-    Logger::info("[CPU_LOGITS_BATCH] Entered. num_tokens_in_batch: " + std::to_string(num_tokens_in_batch));
 
     if (final_batch_activations.size() != (size_t)num_tokens_in_batch * config_.hidden_size) {
         Logger::error("[CPU_LOGITS_BATCH] final_batch_activations size mismatch. Expected: " +
@@ -5041,9 +4756,6 @@ std::vector<float> TinyLlamaModel::forward_cpu_logits_batch(
     rmsnorm_batch_cpu(final_batch_activations, w_final_norm_vec, final_batch_norm_out,
                       num_tokens_in_batch, hs, eps);
     
-    log_vector_summary_batch("[CPU_LOGITS_BATCH] final_batch_norm_out (first token)", final_batch_norm_out, num_tokens_in_batch, hs, 15);
-
-
     // 2. Batched LM Head multiplication
     std::vector<float> batch_logits_out(num_tokens_in_batch * vs);
 
@@ -5065,9 +4777,6 @@ std::vector<float> TinyLlamaModel::forward_cpu_logits_batch(
                                   num_tokens_in_batch, vs, hs);
     } else if (!lm_head.empty()) { // BF16 SafeTensors weights
         Logger::info("[CPU_LOGITS_BATCH] Using BF16 LM Head weights (converting to F32 for matmul).");
-        // Convert BF16 lm_head to FP32 for batched matmul
-        // Note: This conversion happens on every call if BF16 is used.
-        // Consider pre-converting if performance is critical and memory allows.
         std::vector<float> lm_head_f32_temp = bf16vec_to_float_vec(lm_head);
         if (lm_head_f32_temp.empty()) {
             Logger::error("[CPU_LOGITS_BATCH] Failed to convert BF16 LM Head to F32.");
@@ -5080,7 +4789,5 @@ std::vector<float> TinyLlamaModel::forward_cpu_logits_batch(
         return {};
     }
     
-    log_vector_summary_batch("[CPU_LOGITS_BATCH] batch_logits_out (first token, last token in batch if different)", batch_logits_out, num_tokens_in_batch, vs, 15);
-
     return batch_logits_out;
 }
