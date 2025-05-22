@@ -113,6 +113,16 @@ static void log_vector_summary_detailed(const std::string& name,
                                         int current_pos, int current_layer,
                                         int N = 5);
 
+static std::vector<float> bf16vec_to_float_vec(
+    const std::vector<uint16_t>& v_bf16) {
+  std::vector<float> v_f32(v_bf16.size());
+#pragma omp parallel for
+  for (int64_t i = 0; i < static_cast<int64_t>(v_bf16.size()); ++i) {
+    v_f32[i] = bfloat16_to_float32(v_bf16[i]);
+  }
+  return v_f32;
+}
+
 inline uint16_t float32_to_bfloat16(float val) {
   uint32_t bits;
   std::memcpy(&bits, &val, sizeof(float));
@@ -326,6 +336,189 @@ static void matvec_f32_f32_vector_cpu(const std::vector<float>& mat_f32,
     out_f32[r] = static_cast<float>(k_sum);
   }
 }
+
+static void apply_rope_vector(
+    std::vector<float>& x, // The Q or K vector for all heads, concatenated
+    int num_heads,
+    int head_dim,
+    int current_token_pos,
+    const std::vector<std::pair<float, float>>& all_freqs_cis,
+    int max_pos_embeddings,
+    bool use_adjacent_pairing
+) {
+  if (current_token_pos < 0 || current_token_pos >= max_pos_embeddings) {
+    return;
+  }
+  if (head_dim % 2 != 0) { 
+    Logger::error("RoPE apply_rope_vector: head_dim must be even. head_dim: " + std::to_string(head_dim));
+    return;
+  }
+
+  const int dim_half = head_dim / 2;
+  size_t pos_offset = static_cast<size_t>(current_token_pos) * static_cast<size_t>(dim_half);
+
+  for (int h = 0; h < num_heads; ++h) {
+    size_t head_offset = static_cast<size_t>(h) * head_dim;
+
+    for (int i = 0; i < dim_half; ++i) { // i iterates 0 to (head_dim/2 - 1)
+      size_t freq_idx = pos_offset + static_cast<size_t>(i);
+      
+      if (freq_idx >= all_freqs_cis.size()) {
+            Logger::warning("RoPE apply_rope_vector: freq_idx out of bounds. pos: " + 
+                            std::to_string(current_token_pos) + ", head_dim/2: " + std::to_string(dim_half) +
+                            ", i: " + std::to_string(i) + ", calculated freq_idx: " + std::to_string(freq_idx) +
+                            ", all_freqs_cis.size(): " + std::to_string(all_freqs_cis.size()));
+            continue;
+          }
+
+      float cos_theta = all_freqs_cis[freq_idx].first;
+      float sin_theta = all_freqs_cis[freq_idx].second;
+      
+      float x0_val, x1_val;
+      size_t x0_idx, x1_idx;
+
+      if (use_adjacent_pairing) {
+        // Adjacent pairing: (x_{2i}, x_{2i+1})
+        x0_idx = head_offset + (2 * i);
+        x1_idx = head_offset + (2 * i + 1);
+      } else {
+        // Split-half pairing: (x_i, x_{i + dim_half})
+        x0_idx = head_offset + i;
+        x1_idx = head_offset + i + dim_half;
+      }
+
+      if (x0_idx >= x.size() || x1_idx >= x.size()) {
+          Logger::warning("RoPE apply_rope_vector: x index out of bounds. x.size(): " + std::to_string(x.size()) +
+                          ", x0_idx: " + std::to_string(x0_idx) + ", x1_idx: " + std::to_string(x1_idx));
+          continue;
+      }
+
+      x0_val = x[x0_idx];
+      x1_val = x[x1_idx];
+      
+      x[x0_idx] = x0_val * cos_theta - x1_val * sin_theta;
+      x[x1_idx] = x0_val * sin_theta + x1_val * cos_theta;
+    }
+  }
+}
+
+static void matmul_q4k_f32_batch_cpu(
+    const std::vector<block_q4_K>& mat_q4k,             // Quantized matrix weights
+    const std::vector<float>& batch_input_activations,  // Batched input: [num_tokens, input_dim]
+    std::vector<float>& batch_output_activations,       // Batched output: [num_tokens, output_dim]
+    int num_tokens,
+    int output_dim, // rows of the matrix
+    int input_dim   // cols of the matrix (must match vec_f32 size for single token)
+) {
+    if (mat_q4k.empty() || batch_input_activations.empty()) {
+        Logger::error("matmul_q4k_f32_batch_cpu: Input matrix or batch_input_activations is empty.");
+        batch_output_activations.assign((size_t)num_tokens * output_dim, 0.0f);
+        return;
+    }
+    if (batch_input_activations.size() != (size_t)num_tokens * input_dim) {
+        Logger::error("matmul_q4k_f32_batch_cpu: batch_input_activations size mismatch. Expected " + 
+                      std::to_string((size_t)num_tokens * input_dim) + ", got " + 
+                      std::to_string(batch_input_activations.size()));
+        batch_output_activations.assign((size_t)num_tokens * output_dim, 0.0f);
+        return;
+    }
+    // Further validation of mat_q4k size against output_dim and input_dim 
+    // is handled by matvec_q4k_f32_vector_cpu.
+
+    batch_output_activations.resize((size_t)num_tokens * output_dim);
+
+#pragma omp parallel for
+    for (int token_idx = 0; token_idx < num_tokens; ++token_idx) {
+        // Extract the input vector for the current token
+        std::vector<float> current_token_input(input_dim);
+        const float* input_slice_start = batch_input_activations.data() + (size_t)token_idx * input_dim;
+        std::copy(input_slice_start, input_slice_start + input_dim, current_token_input.begin());
+
+        // Prepare output vector for the current token
+        std::vector<float> current_token_output(output_dim);
+
+        // Perform matrix-vector multiplication for the current token
+        matvec_q4k_f32_vector_cpu(mat_q4k, current_token_input, current_token_output, output_dim, input_dim, false);
+        
+        // Copy the result into the batched output vector
+        float* output_slice_start = batch_output_activations.data() + (size_t)token_idx * output_dim;
+        std::copy(current_token_output.begin(), current_token_output.end(), output_slice_start);
+    }
+}
+
+static void matmul_q6k_f32_batch_cpu(
+    const std::vector<block_q6_K>& mat_q6k,             // Quantized matrix weights
+    const std::vector<float>& batch_input_activations,  // Batched input: [num_tokens, input_dim]
+    std::vector<float>& batch_output_activations,       // Batched output: [num_tokens, output_dim]
+    int num_tokens,
+    int output_dim, // rows of the matrix
+    int input_dim   // cols of the matrix
+) {
+    if (mat_q6k.empty() || batch_input_activations.empty()) {
+        Logger::error("matmul_q6k_f32_batch_cpu: Input matrix or batch_input_activations is empty.");
+        batch_output_activations.assign((size_t)num_tokens * output_dim, 0.0f);
+        return;
+    }
+    if (batch_input_activations.size() != (size_t)num_tokens * input_dim) {
+        Logger::error("matmul_q6k_f32_batch_cpu: batch_input_activations size mismatch. Expected " +
+                      std::to_string((size_t)num_tokens * input_dim) + ", got " +
+                      std::to_string(batch_input_activations.size()));
+        batch_output_activations.assign((size_t)num_tokens * output_dim, 0.0f);
+        return;
+    }
+
+    batch_output_activations.resize((size_t)num_tokens * output_dim);
+
+#pragma omp parallel for
+    for (int token_idx = 0; token_idx < num_tokens; ++token_idx) {
+        std::vector<float> current_token_input(input_dim);
+        const float* input_slice_start = batch_input_activations.data() + (size_t)token_idx * input_dim;
+        std::copy(input_slice_start, input_slice_start + input_dim, current_token_input.begin());
+
+        std::vector<float> current_token_output(output_dim);
+        matvec_q6k_f32_vector_cpu(mat_q6k, current_token_input, current_token_output, output_dim, input_dim, false);
+        
+        float* output_slice_start = batch_output_activations.data() + (size_t)token_idx * output_dim;
+        std::copy(current_token_output.begin(), current_token_output.end(), output_slice_start);
+    }
+}
+
+static void matmul_q8_0_f32_batch_cpu(
+    const std::vector<block_q8_0>& mat_q8_0,            // Quantized matrix weights
+    const std::vector<float>& batch_input_activations,  // Batched input: [num_tokens, input_dim]
+    std::vector<float>& batch_output_activations,       // Batched output: [num_tokens, output_dim]
+    int num_tokens,
+    int output_dim, // rows of the matrix
+    int input_dim   // cols of the matrix
+) {
+    if (mat_q8_0.empty() || batch_input_activations.empty()) {
+        Logger::error("matmul_q8_0_f32_batch_cpu: Input matrix or batch_input_activations is empty.");
+        batch_output_activations.assign((size_t)num_tokens * output_dim, 0.0f);
+        return;
+    }
+    if (batch_input_activations.size() != (size_t)num_tokens * input_dim) {
+        Logger::error("matmul_q8_0_f32_batch_cpu: batch_input_activations size mismatch. Expected " +
+                      std::to_string((size_t)num_tokens * input_dim) + ", got " +
+                      std::to_string(batch_input_activations.size()));
+        batch_output_activations.assign((size_t)num_tokens * output_dim, 0.0f);
+        return;
+    }
+
+    batch_output_activations.resize((size_t)num_tokens * output_dim);
+
+#pragma omp parallel for
+    for (int token_idx = 0; token_idx < num_tokens; ++token_idx) {
+        std::vector<float> current_token_input(input_dim);
+        const float* input_slice_start = batch_input_activations.data() + (size_t)token_idx * input_dim;
+        std::copy(input_slice_start, input_slice_start + input_dim, current_token_input.begin());
+
+        std::vector<float> current_token_output(output_dim);
+        matvec_q8_0_f32_vector_cpu(mat_q8_0, current_token_input, current_token_output, output_dim, input_dim, false);
+        
+        float* output_slice_start = batch_output_activations.data() + (size_t)token_idx * output_dim;
+        std::copy(current_token_output.begin(), current_token_output.end(), output_slice_start);
+    }
+}
 void log_vector_summary(const std::string& name, const std::vector<float>& v,
                         int head_count) {
   if (v.empty()) {
@@ -489,6 +682,179 @@ int argmax(const std::vector<float>& v) {
   Logger::debug("[ARGMAX HELPER] Max value found: " + std::to_string(max_val) +
                 " at index: " + std::to_string(max_idx));
   return max_idx;
+}
+
+// --- Corrected static helper function for RoPE to be appended to the end of model.cpp ---
+// (Replace the previous apply_rope_batch_cpu with this one)
+
+static void apply_rope_batch_cpu(
+    std::vector<float>& q_batch, // [num_tokens, num_q_heads * head_dim]
+    std::vector<float>& k_batch, // [num_tokens, num_kv_heads * head_dim]
+    int num_tokens,
+    int num_q_heads,
+    int num_kv_heads,
+    int head_dim,
+    int start_pos_in_sequence,
+    const std::vector<std::pair<float, float>>& all_freqs_cis, // Contains pairs of (cos(m*theta_i), sin(m*theta_i))
+    int max_pos_embeddings,
+    bool use_adjacent_pairing // True for GGUF/Llama-style, False for some older Safetensors RoPE
+) {
+    if (q_batch.size() != (size_t)num_tokens * num_q_heads * head_dim) {
+        Logger::error("apply_rope_batch_cpu: q_batch size mismatch.");
+        return;
+    }
+    if (k_batch.size() != (size_t)num_tokens * num_kv_heads * head_dim) {
+        Logger::error("apply_rope_batch_cpu: k_batch size mismatch.");
+        return;
+    }
+    if (head_dim % 2 != 0) {
+        Logger::error("apply_rope_batch_cpu: head_dim must be even for RoPE.");
+        return; // RoPE operates on pairs of dimensions
+    }
+
+#pragma omp parallel for
+    for (int t = 0; t < num_tokens; ++t) {
+        int current_token_pos = start_pos_in_sequence + t;
+        if (current_token_pos >= max_pos_embeddings) {
+            Logger::warning("apply_rope_batch_cpu: current_token_pos " + std::to_string(current_token_pos) +
+                            " exceeds max_pos_embeddings " + std::to_string(max_pos_embeddings) + ". Skipping RoPE for this token.");
+            continue;
+        }
+
+        // Apply RoPE to Q for this token
+        for (int h = 0; h < num_q_heads; ++h) {
+            size_t head_start_offset_in_batch = ((size_t)t * num_q_heads + h) * head_dim;
+            for (int i = 0; i < head_dim / 2; ++i) { // Iterate through pairs of dimensions
+                float freq_cis_real = all_freqs_cis[current_token_pos * (head_dim / 2) + i].first;
+                float freq_cis_imag = all_freqs_cis[current_token_pos * (head_dim / 2) + i].second;
+                
+                float val0, val1;
+                size_t idx0, idx1;
+
+                if (use_adjacent_pairing) { // e.g., (x0, x1), (x2, x3), ...
+                    idx0 = head_start_offset_in_batch + 2 * i;
+                    idx1 = head_start_offset_in_batch + 2 * i + 1;
+                } else { // Half-dimension pairing e.g., (x0, x_{D/2}), (x1, x_{D/2+1}), ...
+                    idx0 = head_start_offset_in_batch + i;
+                    idx1 = head_start_offset_in_batch + i + head_dim / 2;
+                }
+                
+                val0 = q_batch[idx0];
+                val1 = q_batch[idx1];
+                
+                q_batch[idx0] = val0 * freq_cis_real - val1 * freq_cis_imag;
+                q_batch[idx1] = val0 * freq_cis_imag + val1 * freq_cis_real;
+            }
+        }
+
+        // Apply RoPE to K for this token
+        for (int h = 0; h < num_kv_heads; ++h) {
+            size_t head_start_offset_in_batch = ((size_t)t * num_kv_heads + h) * head_dim;
+            for (int i = 0; i < head_dim / 2; ++i) { // Iterate through pairs of dimensions
+                float freq_cis_real = all_freqs_cis[current_token_pos * (head_dim / 2) + i].first;
+                float freq_cis_imag = all_freqs_cis[current_token_pos * (head_dim / 2) + i].second;
+
+                float val0, val1;
+                size_t idx0, idx1;
+
+                if (use_adjacent_pairing) {
+                    idx0 = head_start_offset_in_batch + 2 * i;
+                    idx1 = head_start_offset_in_batch + 2 * i + 1;
+                } else {
+                    idx0 = head_start_offset_in_batch + i;
+                    idx1 = head_start_offset_in_batch + i + head_dim / 2;
+                }
+
+                val0 = k_batch[idx0];
+                val1 = k_batch[idx1];
+
+                k_batch[idx0] = val0 * freq_cis_real - val1 * freq_cis_imag;
+                k_batch[idx1] = val0 * freq_cis_imag + val1 * freq_cis_real;
+            }
+        }
+    }
+}
+// --- End of corrected RoPE function ---
+static void matmul_f32_f32_batch_cpu(
+    const std::vector<float>& mat_weights,      // [output_dim, input_dim]
+    const std::vector<float>& batch_input_activations, // [num_tokens, input_dim]
+    std::vector<float>& batch_output_activations, // [num_tokens, output_dim]
+    int num_tokens,
+    int output_dim, // e.g., hs for Q, n_kv_heads * head_dim for K/V
+    int input_dim   // e.g., hs
+) {
+  if (mat_weights.empty() || batch_input_activations.empty()) {
+    Logger::error("matmul_f32_f32_batch_cpu: Input matrix or batch_input_activations is empty.");
+    batch_output_activations.assign((size_t)num_tokens * output_dim, 0.0f);
+    return;
+  }
+  if (mat_weights.size() != (size_t)output_dim * input_dim) {
+    Logger::error("matmul_f32_f32_batch_cpu: Matrix dimensions mismatch. Expected " +
+                  std::to_string((size_t)output_dim * input_dim) + ", got " +
+                  std::to_string(mat_weights.size()));
+    batch_output_activations.assign((size_t)num_tokens * output_dim, 0.0f);
+    return;
+  }
+  if (batch_input_activations.size() != (size_t)num_tokens * input_dim) {
+    Logger::error(
+        "matmul_f32_f32_batch_cpu: Batch input activations dimension mismatch. Expected " +
+        std::to_string((size_t)num_tokens * input_dim) + ", got " +
+        std::to_string(batch_input_activations.size()));
+    batch_output_activations.assign((size_t)num_tokens * output_dim, 0.0f);
+    return;
+  }
+
+  batch_output_activations.resize((size_t)num_tokens * output_dim);
+
+#pragma omp parallel for schedule(static)
+  for (int t = 0; t < num_tokens; ++t) {
+    size_t input_token_offset = (size_t)t * input_dim;
+    size_t output_token_offset = (size_t)t * output_dim;
+
+    for (int o = 0; o < output_dim; ++o) {
+      double k_sum = 0.0;
+      double k_c = 0.0;
+      size_t weight_row_offset = (size_t)o * input_dim;
+      for (int i = 0; i < input_dim; ++i) {
+        double term = static_cast<double>(mat_weights[weight_row_offset + i]) *
+                      static_cast<double>(batch_input_activations[input_token_offset + i]);
+        double y = term - k_c;
+        double t_sum = k_sum + y; // Renamed t to t_sum to avoid conflict if <cmath> t is in scope
+        k_c = (t_sum - k_sum) - y;
+        k_sum = t_sum;
+      }
+      batch_output_activations[output_token_offset + o] = static_cast<float>(k_sum);
+    }
+  }
+}
+
+static void rmsnorm_batch_cpu(const std::vector<float>& x_batch, // [num_tokens, hidden_size]
+                              const std::vector<float>& weight,    // [hidden_size]
+                              std::vector<float>& out_batch, // [num_tokens, hidden_size]
+                              int num_tokens,
+                              int hidden_size,
+                              float eps = numeric::DEFAULT_EPS) {
+  if (x_batch.empty() || x_batch.size() != (size_t)num_tokens * hidden_size || weight.size() != (size_t)hidden_size) {
+    Logger::error("RMSNorm batch size mismatch or empty input.");
+    out_batch.assign((size_t)num_tokens * hidden_size, 0.0f);
+    return;
+  }
+  out_batch.resize((size_t)num_tokens * hidden_size);
+
+#pragma omp parallel for
+  for (int t = 0; t < num_tokens; ++t) {
+    double ssq = 0.0;
+    size_t token_offset = (size_t)t * hidden_size;
+    for (int i = 0; i < hidden_size; ++i) {
+      ssq += static_cast<double>(x_batch[token_offset + i]) * static_cast<double>(x_batch[token_offset + i]);
+    }
+    ssq /= hidden_size;
+    float norm_factor = 1.0f / SAFE_SQRT(static_cast<float>(ssq) + 
+                                         SAFE_MAX(eps, numeric::MIN_NORM_EPS));
+    for (int i = 0; i < hidden_size; ++i) {
+      out_batch[token_offset + i] = x_batch[token_offset + i] * norm_factor * weight[i];
+    }
+  }
 }
 
 static void rmsnorm_vector_cpu(const std::vector<float>& x,
@@ -841,15 +1207,6 @@ void KVCache::initialize(const ModelConfig& config,
 #endif
 }
 
-static std::vector<float> bf16vec_to_float_vec(
-    const std::vector<uint16_t>& v_bf16) {
-  std::vector<float> v_f32(v_bf16.size());
-#pragma omp parallel for
-  for (int64_t i = 0; i < static_cast<int64_t>(v_bf16.size()); ++i) {
-    v_f32[i] = bfloat16_to_float32(v_bf16[i]);
-  }
-  return v_f32;
-}
 
 static void matvec_bf16_f32_vector_cpu(const std::vector<uint16_t>& mat_bf16,
                                        const std::vector<float>& vec_f32,
@@ -948,70 +1305,6 @@ static void calculate_attention_scores(const std::vector<float>& Q,
   }
 }
 
-static void apply_rope_vector(
-    std::vector<float>& x, // The Q or K vector for all heads, concatenated
-    int num_heads,
-    int head_dim,
-    int current_token_pos,
-    const std::vector<std::pair<float, float>>& all_freqs_cis,
-    int max_pos_embeddings,
-    bool use_adjacent_pairing
-) {
-  if (current_token_pos < 0 || current_token_pos >= max_pos_embeddings) {
-    return;
-  }
-  if (head_dim % 2 != 0) { 
-    Logger::error("RoPE apply_rope_vector: head_dim must be even. head_dim: " + std::to_string(head_dim));
-    return;
-  }
-
-  const int dim_half = head_dim / 2;
-  size_t pos_offset = static_cast<size_t>(current_token_pos) * static_cast<size_t>(dim_half);
-
-  for (int h = 0; h < num_heads; ++h) {
-    size_t head_offset = static_cast<size_t>(h) * head_dim;
-
-    for (int i = 0; i < dim_half; ++i) { // i iterates 0 to (head_dim/2 - 1)
-      size_t freq_idx = pos_offset + static_cast<size_t>(i);
-      
-      if (freq_idx >= all_freqs_cis.size()) {
-            Logger::warning("RoPE apply_rope_vector: freq_idx out of bounds. pos: " + 
-                            std::to_string(current_token_pos) + ", head_dim/2: " + std::to_string(dim_half) +
-                            ", i: " + std::to_string(i) + ", calculated freq_idx: " + std::to_string(freq_idx) +
-                            ", all_freqs_cis.size(): " + std::to_string(all_freqs_cis.size()));
-            continue;
-          }
-
-      float cos_theta = all_freqs_cis[freq_idx].first;
-      float sin_theta = all_freqs_cis[freq_idx].second;
-      
-      float x0_val, x1_val;
-      size_t x0_idx, x1_idx;
-
-      if (use_adjacent_pairing) {
-        // Adjacent pairing: (x_{2i}, x_{2i+1})
-        x0_idx = head_offset + (2 * i);
-        x1_idx = head_offset + (2 * i + 1);
-      } else {
-        // Split-half pairing: (x_i, x_{i + dim_half})
-        x0_idx = head_offset + i;
-        x1_idx = head_offset + i + dim_half;
-      }
-
-      if (x0_idx >= x.size() || x1_idx >= x.size()) {
-          Logger::warning("RoPE apply_rope_vector: x index out of bounds. x.size(): " + std::to_string(x.size()) +
-                          ", x0_idx: " + std::to_string(x0_idx) + ", x1_idx: " + std::to_string(x1_idx));
-          continue;
-      }
-
-      x0_val = x[x0_idx];
-      x1_val = x[x1_idx];
-      
-      x[x0_idx] = x0_val * cos_theta - x1_val * sin_theta;
-      x[x1_idx] = x0_val * sin_theta + x1_val * cos_theta;
-    }
-  }
-}
 
 void TinyLlamaModel::initialize_weights(const SafeTensorsLoader* loader,
                                         const GGUFData* gguf) {
@@ -3901,6 +4194,156 @@ std::vector<float> TinyLlamaModel::forward_device_batch_prefill(
 }
 #endif // HAS_CUDA
 
+static void update_kv_cache_batch_cpu(
+    KVCache* kv_cache,
+    int layer_idx,
+    const std::vector<float>& k_batch_for_layer, // [num_tokens, num_kv_heads * head_dim] for this layer
+    const std::vector<float>& v_batch_for_layer, // [num_tokens, num_kv_heads * head_dim] for this layer
+    int num_tokens_in_batch,
+    int start_pos_in_sequence, // Starting position of this batch in the overall sequence
+    int num_kv_heads,
+    int head_dim
+);
+
+
+static void update_kv_cache_batch_cpu(
+    KVCache* kv_cache,
+    int layer_idx, // The absolute model layer index
+    const std::vector<float>& k_batch_for_layer, // [num_tokens, num_kv_heads * head_dim] for this layer
+    const std::vector<float>& v_batch_for_layer, // [num_tokens, num_kv_heads * head_dim] for this layer
+    int num_tokens_in_batch,
+    int start_pos_in_sequence, // Starting position of this batch in the overall sequence
+    int num_kv_heads,
+    int head_dim
+) {
+    if (!kv_cache) {
+        Logger::error("update_kv_cache_batch_cpu: KVCache is null.");
+        return;
+    }
+    if (layer_idx < 0 || static_cast<size_t>(layer_idx) >= kv_cache->layers.size()) {
+        Logger::error("update_kv_cache_batch_cpu: layer_idx " + std::to_string(layer_idx) + " is out of bounds for KVCache layers (size " + std::to_string(kv_cache->layers.size()) + ").");
+        return;
+    }
+
+    KVCacheLayer& layer_cache = kv_cache->layers[layer_idx];
+    int kv_dim = num_kv_heads * head_dim;
+
+    if (k_batch_for_layer.size() != static_cast<size_t>(num_tokens_in_batch * kv_dim)) {
+        Logger::error("update_kv_cache_batch_cpu: k_batch_for_layer size mismatch. Expected " +
+                      std::to_string(num_tokens_in_batch * kv_dim) + ", got " + std::to_string(k_batch_for_layer.size()));
+        return;
+    }
+    if (v_batch_for_layer.size() != static_cast<size_t>(num_tokens_in_batch * kv_dim)) {
+        Logger::error("update_kv_cache_batch_cpu: v_batch_for_layer size mismatch. Expected " +
+                      std::to_string(num_tokens_in_batch * kv_dim) + ", got " + std::to_string(v_batch_for_layer.size()));
+        return;
+    }
+
+    for (int token_idx_in_batch = 0; token_idx_in_batch < num_tokens_in_batch; ++token_idx_in_batch) {
+        // Calculate the offset for the current token's K/V data within the k_batch_for_layer/v_batch_for_layer
+        size_t batch_offset = static_cast<size_t>(token_idx_in_batch) * kv_dim;
+
+        // Append the K values for the current token to the layer's K cache
+        layer_cache.k.insert(layer_cache.k.end(),
+                             k_batch_for_layer.begin() + batch_offset,
+                             k_batch_for_layer.begin() + batch_offset + kv_dim);
+
+        // Append the V values for the current token to the layer's V cache
+        layer_cache.v.insert(layer_cache.v.end(),
+                             v_batch_for_layer.begin() + batch_offset,
+                             v_batch_for_layer.begin() + batch_offset + kv_dim);
+    }
+    // The KVCache's main seq_len will be updated after all layers and all tokens in the batch are processed,
+    // not within this per-layer update function.
+}
+
+static void attention_batch_cpu(
+    const std::vector<float>& q_batch_roped, // [num_tokens, num_q_heads * head_dim] (hs dimension)
+    KVCacheLayer& current_layer_kv_cache,    // K and V for the current layer
+    std::vector<float>& batch_attn_output,   // Output: [num_tokens, num_q_heads * head_dim] (hs dimension)
+    int num_tokens_in_batch,
+    int start_pos_in_sequence,               // The sequence position where this batch begins
+    int num_q_heads,
+    int num_kv_heads,
+    int head_dim,
+    float attention_scale
+) {
+    if (q_batch_roped.size() != (size_t)num_tokens_in_batch * num_q_heads * head_dim) {
+        Logger::error("attention_batch_cpu: q_batch_roped size mismatch.");
+        std::fill(batch_attn_output.begin(), batch_attn_output.end(), 0.0f);
+        return;
+    }
+    // Ensure output vector is correctly sized and initialized
+    batch_attn_output.assign((size_t)num_tokens_in_batch * num_q_heads * head_dim, 0.0f);
+
+    // Note: num_q_heads * head_dim == hidden_size (hs)
+
+    // Consider OMP parallel for token_idx if KVCacheLayer access is thread-safe
+    // or if each thread works on a private copy/reduction variables for scores.
+    // For now, processing tokens sequentially for clarity and correctness.
+    for (int token_idx = 0; token_idx < num_tokens_in_batch; ++token_idx) {
+        size_t q_token_offset = (size_t)token_idx * num_q_heads * head_dim;
+        size_t attn_out_token_offset = (size_t)token_idx * num_q_heads * head_dim;
+        int current_token_absolute_pos = start_pos_in_sequence + token_idx;
+
+        for (int h_q = 0; h_q < num_q_heads; ++h_q) {
+            const float* q_head_for_token_ptr = q_batch_roped.data() + q_token_offset + (h_q * head_dim);
+            
+            int kv_group_head_idx = h_q / (num_q_heads / num_kv_heads); // Target KV head for this Q head
+
+            // history_len is the number of K/V pairs to attend to for this token,
+            // which is up to and including its own position.
+            int history_len = current_token_absolute_pos + 1;
+            std::vector<float> scores(history_len);
+
+            for (int t_hist = 0; t_hist < history_len; ++t_hist) { // t_hist is an absolute position in the sequence
+                // Offset to find the start of the relevant KV head's data for historical token t_hist
+                // K cache stores K values as [tok0_kv_head0_dim0,..., tok0_kv_head(N-1)_dim(M-1), 
+                //                           tok1_kv_head0_dim0, ..., tok1_kv_head(N-1)_dim(M-1), ...]
+                // So, for token t_hist, and kv_group_head_idx, the data starts at:
+                // (t_hist * num_kv_heads * head_dim) + (kv_group_head_idx * head_dim)
+                size_t k_cache_offset = ((size_t)t_hist * num_kv_heads + kv_group_head_idx) * head_dim;
+                
+                if (k_cache_offset + head_dim > current_layer_kv_cache.k.size()) {
+                     Logger::error("attention_batch_cpu: K cache out of bounds. Attending token_idx " + std::to_string(token_idx) +
+                                   " (abs_pos " + std::to_string(current_token_absolute_pos) + ") at history_pos " + std::to_string(t_hist) +
+                                   ". Required k_cache_offset " + std::to_string(k_cache_offset + head_dim) +
+                                   " > cache_k_size " + std::to_string(current_layer_kv_cache.k.size()));
+                    scores[t_hist] = -std::numeric_limits<float>::infinity(); 
+                    continue;
+                }
+
+                float current_dot_product = 0.0f;
+                for (int d = 0; d < head_dim; ++d) {
+                    current_dot_product += q_head_for_token_ptr[d] * current_layer_kv_cache.k[k_cache_offset + d];
+                }
+                scores[t_hist] = current_dot_product * attention_scale;
+            }
+
+            softmax_vector_cpu(scores, scores); // In-place softmax
+
+            // Weighted sum with V
+            float* current_attn_out_head_ptr = batch_attn_output.data() + attn_out_token_offset + (h_q * head_dim);
+            // Output for this head is already zeroed by batch_attn_output.assign()
+
+            for (int t_hist = 0; t_hist < history_len; ++t_hist) {
+                if (scores[t_hist] == -std::numeric_limits<float>::infinity() || scores[t_hist] == 0.0f) continue;
+
+                size_t v_cache_offset = ((size_t)t_hist * num_kv_heads + kv_group_head_idx) * head_dim;
+                if (v_cache_offset + head_dim > current_layer_kv_cache.v.size()) {
+                     Logger::error("attention_batch_cpu: V cache out of bounds. Attending token_idx " + std::to_string(token_idx) +
+                                   " (abs_pos " + std::to_string(current_token_absolute_pos) + ") at history_pos " + std::to_string(t_hist) +
+                                   ". Required v_cache_offset " + std::to_string(v_cache_offset + head_dim) +
+                                   " > cache_v_size " + std::to_string(current_layer_kv_cache.v.size()));
+                    continue; 
+                }
+                for (int d = 0; d < head_dim; ++d) {
+                    current_attn_out_head_ptr[d] += scores[t_hist] * current_layer_kv_cache.v[v_cache_offset + d];
+                }
+            }
+        } // End Q heads loop (h_q)
+    } // End tokens_in_batch loop (token_idx)
+}
 std::vector<float> TinyLlamaModel::forward_cpu_batch(
     const std::vector<float>& batch_input_activations, // Batched: [num_tokens, hidden_size]
     int num_tokens_in_batch,
@@ -3909,204 +4352,244 @@ std::vector<float> TinyLlamaModel::forward_cpu_batch(
     KVCache* kv_cache) {
 
     Logger::info("[CPU_BATCH_FWD] Entered. num_tokens_in_batch: " + std::to_string(num_tokens_in_batch) +
-                 ", num_cpu_layers_to_process: " + std::to_string(num_cpu_layers_to_process) +
-                 ", start_pos_in_sequence: " + std::to_string(start_pos_in_sequence));
+                  ", num_cpu_layers_to_process: " + std::to_string(num_cpu_layers_to_process) +
+                  ", start_pos_in_sequence: " + std::to_string(start_pos_in_sequence));
 
     if (num_cpu_layers_to_process <= 0) {
         Logger::info("[CPU_BATCH_FWD] No CPU layers to process. Returning input activations.");
-        return batch_input_activations; // Return original if no CPU layers specified
+        return batch_input_activations;
     }
     if (batch_input_activations.size() != (size_t)num_tokens_in_batch * config_.hidden_size) {
         Logger::error("[CPU_BATCH_FWD] batch_input_activations size mismatch. Expected: " +
                       std::to_string((size_t)num_tokens_in_batch * config_.hidden_size) + " Got: " +
                       std::to_string(batch_input_activations.size()));
-        return {}; // Return empty on error
+        return {};
     }
 
     int hs = config_.hidden_size;
-    int vs = config_.vocab_size; // Not used for logits here, but for consistency
     int is = config_.intermediate_size;
     int n_heads = config_.num_attention_heads;
     int n_kv_heads = config_.num_key_value_heads;
-    if (n_heads == 0) { 
-        Logger::error("[CPU_BATCH_FWD] Error: num_attention_heads is zero."); 
-        return {}; 
+    if (n_heads == 0) {
+        Logger::error("[CPU_BATCH_FWD] Error: num_attention_heads is zero.");
+        return {};
     }
     int head_dim = hs / n_heads;
     float eps = config_.rms_norm_eps;
     int max_pos_embeddings = config_.max_position_embeddings;
+    bool use_rope_adjacent_pairing = config_.is_gguf_file_loaded; // Determine RoPE style
+    float attention_scale = 1.0f / SAFE_SQRT(static_cast<float>(head_dim));
 
-    std::vector<float> batch_output_activations(batch_input_activations.size());
+    std::vector<float> current_batch_activations = batch_input_activations;
 
-    // Process each token in the batch individually through the CPU layers
-    for (int token_idx = 0; token_idx < num_tokens_in_batch; ++token_idx) {
-        // Extract single token's activation
-        std::vector<float> current_token_activation(hs);
-        size_t token_offset_in_batch = (size_t)token_idx * hs;
-        std::copy(batch_input_activations.begin() + token_offset_in_batch,
-                  batch_input_activations.begin() + token_offset_in_batch + hs,
-                  current_token_activation.begin());
+    for (int l = 0; l < num_cpu_layers_to_process; ++l) {
+        const auto& lw = layers[l];
+        
+        std::vector<float> batch_x_norm1(current_batch_activations.size());
+        const std::vector<float>& w_input_norm_vec =
+            lw.input_layernorm_f32.empty()
+                ? bf16vec_to_float_vec(lw.input_layernorm) // Assumes bf16vec_to_float_vec is available
+                : lw.input_layernorm_f32;
+        rmsnorm_batch_cpu(current_batch_activations, w_input_norm_vec, batch_x_norm1, num_tokens_in_batch, hs, eps);
 
-        int current_token_pos_in_sequence = start_pos_in_sequence + token_idx;
+        std::vector<float> residual_batch_component_attn = current_batch_activations; 
 
-        // Layer processing loop - ONLY for CPU-offloaded layers for this token
-        for (int l = 0; l < num_cpu_layers_to_process; ++l) {
-            // --- Start of single token, single CPU layer processing (similar to TinyLlamaModel::forward) ---
-            const auto& lw = layers[l];
-            std::vector<float> x_norm_vec1(hs);
-            const std::vector<float>& w_input_norm_vec =
-                lw.input_layernorm_f32.empty()
-                    ? bf16vec_to_float_vec(lw.input_layernorm)
-                    : lw.input_layernorm_f32;
-            rmsnorm_vector_cpu(current_token_activation, w_input_norm_vec, x_norm_vec1, eps);
-            
-            std::vector<float> q_vec(hs), k_vec(n_kv_heads * head_dim), v_vec(n_kv_heads * head_dim);
-            
-            if (!lw.q_proj_f32.empty()) matvec_f32_f32_vector_cpu(lw.q_proj_f32, x_norm_vec1, q_vec, hs, hs);
-            else if (!lw.q_proj_q8_0.empty() && config_.is_gguf_file_loaded) matvec_q8_0_f32_vector_cpu(lw.q_proj_q8_0, x_norm_vec1, q_vec, hs, hs);
-            else if (!lw.q_proj_q4k.empty() && config_.is_gguf_file_loaded) matvec_q4k_f32_vector_cpu(lw.q_proj_q4k, x_norm_vec1, q_vec, hs, hs);
-            else if (!lw.q_proj_q6k.empty() && config_.is_gguf_file_loaded) matvec_q6k_f32_vector_cpu(lw.q_proj_q6k, x_norm_vec1, q_vec, hs, hs);
-            else if (!lw.q_proj.empty()) matvec_bf16_f32_vector_cpu(lw.q_proj, x_norm_vec1, q_vec, hs, hs); 
-            else { Logger::error("[CPU_BATCH_FWD] Layer " + std::to_string(l) + ": No Q proj weights for CPU"); return {}; }
-            
-            if (!lw.k_proj_f32.empty()) matvec_f32_f32_vector_cpu(lw.k_proj_f32, x_norm_vec1, k_vec, n_kv_heads * head_dim, hs);
-            else if (!lw.k_proj_q8_0.empty() && config_.is_gguf_file_loaded) matvec_q8_0_f32_vector_cpu(lw.k_proj_q8_0, x_norm_vec1, k_vec, n_kv_heads * head_dim, hs);
-            else if (!lw.k_proj_q4k.empty() && config_.is_gguf_file_loaded) matvec_q4k_f32_vector_cpu(lw.k_proj_q4k, x_norm_vec1, k_vec, n_kv_heads * head_dim, hs);
-            else if (!lw.k_proj_q6k.empty() && config_.is_gguf_file_loaded) matvec_q6k_f32_vector_cpu(lw.k_proj_q6k, x_norm_vec1, k_vec, n_kv_heads * head_dim, hs);
-            else if (!lw.k_proj.empty()) matvec_bf16_f32_vector_cpu(lw.k_proj, x_norm_vec1, k_vec, n_kv_heads * head_dim, hs);
-            else { Logger::error("[CPU_BATCH_FWD] Layer " + std::to_string(l) + ": No K proj weights for CPU"); return {}; }
+        std::vector<float> q_batch((size_t)num_tokens_in_batch * hs);
+        std::vector<float> k_batch((size_t)num_tokens_in_batch * n_kv_heads * head_dim);
+        std::vector<float> v_batch((size_t)num_tokens_in_batch * n_kv_heads * head_dim);
 
-            if (!lw.v_proj_f32.empty()) matvec_f32_f32_vector_cpu(lw.v_proj_f32, x_norm_vec1, v_vec, n_kv_heads * head_dim, hs);
-            else if (!lw.v_proj_q8_0.empty() && config_.is_gguf_file_loaded) matvec_q8_0_f32_vector_cpu(lw.v_proj_q8_0, x_norm_vec1, v_vec, n_kv_heads * head_dim, hs);
-            else if (!lw.v_proj_q4k.empty() && config_.is_gguf_file_loaded) matvec_q4k_f32_vector_cpu(lw.v_proj_q4k, x_norm_vec1, v_vec, n_kv_heads * head_dim, hs);
-            else if (!lw.v_proj_q6k.empty() && config_.is_gguf_file_loaded) matvec_q6k_f32_vector_cpu(lw.v_proj_q6k, x_norm_vec1, v_vec, n_kv_heads * head_dim, hs);
-            else if (!lw.v_proj.empty()) matvec_bf16_f32_vector_cpu(lw.v_proj, x_norm_vec1, v_vec, n_kv_heads * head_dim, hs);
-            else { Logger::error("[CPU_BATCH_FWD] Layer " + std::to_string(l) + ": No V proj weights for CPU"); return {}; }
-
-            apply_rope_vector(q_vec, n_heads, head_dim, current_token_pos_in_sequence, precomputed_freqs_cis_, max_pos_embeddings, config_.is_gguf_file_loaded);
-            apply_rope_vector(k_vec, n_kv_heads, head_dim, current_token_pos_in_sequence, precomputed_freqs_cis_, max_pos_embeddings, config_.is_gguf_file_loaded);
-
-            if (kv_cache) {
-                if (static_cast<size_t>(l) < kv_cache->layers.size()) {
-                    KVCacheLayer& kv_layer = kv_cache->layers[l];
-                    size_t layer_max_seq_len = 0;
-                    if (n_kv_heads > 0 && head_dim > 0) { 
-                        layer_max_seq_len = kv_layer.k.size() / (n_kv_heads * head_dim);
-                    }
-                    if (static_cast<size_t>(current_token_pos_in_sequence) >= layer_max_seq_len && layer_max_seq_len > 0) {
-                        Logger::error("[CPU_BATCH_FWD] KV Cache access out of bounds. Layer " + std::to_string(l) + 
-                                      ", current_token_pos_in_sequence: " + std::to_string(current_token_pos_in_sequence) + 
-                                      ", calculated layer_max_seq_len: " + std::to_string(layer_max_seq_len) + ". Skipping KV update.");
-                    } else if (layer_max_seq_len == 0 && current_token_pos_in_sequence > 0) {
-                        Logger::error("[CPU_BATCH_FWD] KV Cache layer_max_seq_len is 0, but current_token_pos_in_sequence > 0. Layer " + std::to_string(l) + ". Skipping KV update.");
-                    } else {
-                        for(int h_idx=0; h_idx < n_kv_heads; ++h_idx) {
-                            size_t k_offset_in_vec = (size_t)h_idx * head_dim;
-                            size_t k_offset_in_cache = ((size_t)current_token_pos_in_sequence * n_kv_heads + h_idx) * head_dim;
-                            std::copy(k_vec.begin() + k_offset_in_vec, k_vec.begin() + k_offset_in_vec + head_dim, kv_layer.k.begin() + k_offset_in_cache);
-                            std::copy(v_vec.begin() + k_offset_in_vec, v_vec.begin() + k_offset_in_vec + head_dim, kv_layer.v.begin() + k_offset_in_cache);
-                        }
-                    }
-                } else {
-                    Logger::error("[CPU_BATCH_FWD] KV Cache layer index " + std::to_string(l) + " out of bounds for kv_cache->layers.size() = " + std::to_string(kv_cache->layers.size()));
-                }
-            }
-            
-            std::vector<float> attn_out_vec(hs);
-            std::vector<float> x_resid1_vec = current_token_activation; 
-            float att_scale = 1.0f / SAFE_SQRT(static_cast<float>(head_dim));
-            std::fill(attn_out_vec.begin(), attn_out_vec.end(), 0.0f);
-
-            for (int h = 0; h < n_heads; ++h) {
-                std::vector<float> q_head(head_dim);
-                std::copy(q_vec.begin() + h * head_dim, q_vec.begin() + (h + 1) * head_dim, q_head.begin());
-                std::vector<float> current_multihead_attn_out(head_dim, 0.0f);
-                int kv_group = n_heads / n_kv_heads;
-                int kv_head_idx = h / kv_group;
-
-                if (kv_cache && static_cast<size_t>(l) < kv_cache->layers.size()) {
-                    const KVCacheLayer& kv_layer = kv_cache->layers[l];
-                    int current_loop_seq_len = current_token_pos_in_sequence + 1;
-                    std::vector<float> scores(current_loop_seq_len);
-                    for (int t = 0; t < current_loop_seq_len; ++t) {
-                        float score = 0.0f;
-                        for (int d = 0; d < head_dim; ++d) {
-                            score += q_head[d] * kv_layer.k[t * (n_kv_heads * head_dim) + kv_head_idx * head_dim + d];
-                        }
-                        scores[t] = score * att_scale;
-                    }
-                    softmax_vector_cpu(scores, scores);
-                    for (int t = 0; t < current_loop_seq_len; ++t) {
-                        for (int d = 0; d < head_dim; ++d) {
-                            current_multihead_attn_out[d] += scores[t] * kv_layer.v[t * (n_kv_heads * head_dim) + kv_head_idx * head_dim + d];
-                        }
-                    }
-                }
-                std::copy(current_multihead_attn_out.begin(), current_multihead_attn_out.end(), attn_out_vec.begin() + h * head_dim);
-            }
-            
-            std::vector<float> attn_proj_vec(hs);
-            if(!lw.o_proj_f32.empty()) matvec_f32_f32_vector_cpu(lw.o_proj_f32, attn_out_vec, attn_proj_vec, hs, hs);
-            else if (!lw.o_proj_q8_0.empty() && config_.is_gguf_file_loaded) matvec_q8_0_f32_vector_cpu(lw.o_proj_q8_0, attn_out_vec, attn_proj_vec, hs, hs);
-            else if (!lw.o_proj_q4k.empty() && config_.is_gguf_file_loaded) matvec_q4k_f32_vector_cpu(lw.o_proj_q4k, attn_out_vec, attn_proj_vec, hs, hs);
-            else if (!lw.o_proj_q6k.empty() && config_.is_gguf_file_loaded) matvec_q6k_f32_vector_cpu(lw.o_proj_q6k, attn_out_vec, attn_proj_vec, hs, hs);
-            else if(!lw.o_proj.empty()) matvec_bf16_f32_vector_cpu(lw.o_proj, attn_out_vec, attn_proj_vec, hs, hs);
-            else { Logger::error("[CPU_BATCH_FWD] Layer " + std::to_string(l) + ": No O proj weights for CPU"); return {}; }
-
-            for(size_t i_res=0; i_res < current_token_activation.size(); ++i_res) current_token_activation[i_res] = x_resid1_vec[i_res] + attn_proj_vec[i_res];
-
-            std::vector<float> x_norm_vec2(hs);
-            std::vector<float> x_resid2_vec = current_token_activation;
-            const std::vector<float>& w_post_attn_norm_vec =
-                lw.post_attention_layernorm_f32.empty()
-                    ? bf16vec_to_float_vec(lw.post_attention_layernorm)
-                    : lw.post_attention_layernorm_f32;
-            rmsnorm_vector_cpu(current_token_activation, w_post_attn_norm_vec, x_norm_vec2, eps);
-
-            std::vector<float> gate_vec(is), up_vec(is);
-            if(!lw.gate_proj_f32.empty()) matvec_f32_f32_vector_cpu(lw.gate_proj_f32, x_norm_vec2, gate_vec, is, hs);
-            else if (!lw.gate_proj_q8_0.empty() && config_.is_gguf_file_loaded) matvec_q8_0_f32_vector_cpu(lw.gate_proj_q8_0, x_norm_vec2, gate_vec, is, hs);
-            else if (!lw.gate_proj_q4k.empty() && config_.is_gguf_file_loaded) matvec_q4k_f32_vector_cpu(lw.gate_proj_q4k, x_norm_vec2, gate_vec, is, hs);
-            else if (!lw.gate_proj_q6k.empty() && config_.is_gguf_file_loaded) matvec_q6k_f32_vector_cpu(lw.gate_proj_q6k, x_norm_vec2, gate_vec, is, hs);
-            else if(!lw.gate_proj.empty()) matvec_bf16_f32_vector_cpu(lw.gate_proj, x_norm_vec2, gate_vec, is, hs);
-            else { Logger::error("[CPU_BATCH_FWD] Layer " + std::to_string(l) + ": No Gate proj weights for CPU"); return {}; }
-
-            if(!lw.up_proj_f32.empty()) matvec_f32_f32_vector_cpu(lw.up_proj_f32, x_norm_vec2, up_vec, is, hs);
-            else if (!lw.up_proj_q8_0.empty() && config_.is_gguf_file_loaded) matvec_q8_0_f32_vector_cpu(lw.up_proj_q8_0, x_norm_vec2, up_vec, is, hs);
-            else if (!lw.up_proj_q4k.empty() && config_.is_gguf_file_loaded) matvec_q4k_f32_vector_cpu(lw.up_proj_q4k, x_norm_vec2, up_vec, is, hs);
-            else if (!lw.up_proj_q6k.empty() && config_.is_gguf_file_loaded) matvec_q6k_f32_vector_cpu(lw.up_proj_q6k, x_norm_vec2, up_vec, is, hs);
-            else if(!lw.up_proj.empty()) matvec_bf16_f32_vector_cpu(lw.up_proj, x_norm_vec2, up_vec, is, hs);
-            else { Logger::error("[CPU_BATCH_FWD] Layer " + std::to_string(l) + ": No Up proj weights for CPU"); return {}; }
-
-            std::vector<float> silu_out_vec(is);
-            silu_cpu(gate_vec, silu_out_vec);
-
-            std::vector<float> swiglu_result_vec(is);
-            for(size_t i_swi=0; i_swi < is; ++i_swi) swiglu_result_vec[i_swi] = silu_out_vec[i_swi] * up_vec[i_swi];
-
-            std::vector<float> mlp_out_vec(hs);
-            if(!lw.down_proj_f32.empty()) matvec_f32_f32_vector_cpu(lw.down_proj_f32, swiglu_result_vec, mlp_out_vec, hs, is);
-            else if (!lw.down_proj_q8_0.empty() && config_.is_gguf_file_loaded) matvec_q8_0_f32_vector_cpu(lw.down_proj_q8_0, swiglu_result_vec, mlp_out_vec, hs, is);
-            else if (!lw.down_proj_q4k.empty() && config_.is_gguf_file_loaded) matvec_q4k_f32_vector_cpu(lw.down_proj_q4k, swiglu_result_vec, mlp_out_vec, hs, is);
-            else if (!lw.down_proj_q6k.empty() && config_.is_gguf_file_loaded) matvec_q6k_f32_vector_cpu(lw.down_proj_q6k, swiglu_result_vec, mlp_out_vec, hs, is);
-            else if(!lw.down_proj.empty()) matvec_bf16_f32_vector_cpu(lw.down_proj, swiglu_result_vec, mlp_out_vec, hs, is);
-            else { Logger::error("[CPU_BATCH_FWD] Layer " + std::to_string(l) + ": No Down proj weights for CPU"); return {}; }
-
-            for(size_t i_res2=0; i_res2 < current_token_activation.size(); ++i_res2) current_token_activation[i_res2] = x_resid2_vec[i_res2] + mlp_out_vec[i_res2];
-            // --- End of single token, single CPU layer processing ---
+        // Q Projection
+        if (!lw.q_proj_f32.empty()) {
+            matmul_f32_f32_batch_cpu(lw.q_proj_f32, batch_x_norm1, q_batch, num_tokens_in_batch, hs, hs);
+        } else if (!lw.q_proj_q8_0.empty()) {
+            matmul_q8_0_f32_batch_cpu(lw.q_proj_q8_0, batch_x_norm1, q_batch, num_tokens_in_batch, hs, hs);
+        } else if (!lw.q_proj_q6k.empty()) {
+            matmul_q6k_f32_batch_cpu(lw.q_proj_q6k, batch_x_norm1, q_batch, num_tokens_in_batch, hs, hs);
+        } else if (!lw.q_proj_q4k.empty()) {
+            matmul_q4k_f32_batch_cpu(lw.q_proj_q4k, batch_x_norm1, q_batch, num_tokens_in_batch, hs, hs);
+        } else {
+            Logger::error("[CPU_BATCH_FWD] Layer " + std::to_string(l) + ": No Q proj weights found for CPU (batched)"); 
+            return {};
         }
-        // Store the processed token's activation back into the batch_output_activations
-        std::copy(current_token_activation.begin(), current_token_activation.end(),
-                  batch_output_activations.begin() + token_offset_in_batch);
-    }
+        
+        // K Projection
+        if (!lw.k_proj_f32.empty()) {
+            matmul_f32_f32_batch_cpu(lw.k_proj_f32, batch_x_norm1, k_batch, num_tokens_in_batch, n_kv_heads * head_dim, hs);
+        } else if (!lw.k_proj_q8_0.empty()) {
+            matmul_q8_0_f32_batch_cpu(lw.k_proj_q8_0, batch_x_norm1, k_batch, num_tokens_in_batch, n_kv_heads * head_dim, hs);
+        } else if (!lw.k_proj_q6k.empty()) {
+            matmul_q6k_f32_batch_cpu(lw.k_proj_q6k, batch_x_norm1, k_batch, num_tokens_in_batch, n_kv_heads * head_dim, hs);
+        } else if (!lw.k_proj_q4k.empty()) {
+            matmul_q4k_f32_batch_cpu(lw.k_proj_q4k, batch_x_norm1, k_batch, num_tokens_in_batch, n_kv_heads * head_dim, hs);
+        } else {
+            Logger::error("[CPU_BATCH_FWD] Layer " + std::to_string(l) + ": No K proj weights found for CPU (batched)"); 
+            return {};
+        }
 
-    // After all tokens in the batch have been processed through all CPU layers,
-    // update the KVCache's sequence length.
+        // V Projection
+        if (!lw.v_proj_f32.empty()) {
+            matmul_f32_f32_batch_cpu(lw.v_proj_f32, batch_x_norm1, v_batch, num_tokens_in_batch, n_kv_heads * head_dim, hs);
+        } else if (!lw.v_proj_q8_0.empty()) {
+            matmul_q8_0_f32_batch_cpu(lw.v_proj_q8_0, batch_x_norm1, v_batch, num_tokens_in_batch, n_kv_heads * head_dim, hs);
+        } else if (!lw.v_proj_q6k.empty()) {
+            matmul_q6k_f32_batch_cpu(lw.v_proj_q6k, batch_x_norm1, v_batch, num_tokens_in_batch, n_kv_heads * head_dim, hs);
+        } else if (!lw.v_proj_q4k.empty()) {
+            matmul_q4k_f32_batch_cpu(lw.v_proj_q4k, batch_x_norm1, v_batch, num_tokens_in_batch, n_kv_heads * head_dim, hs);
+        } else {
+            Logger::error("[CPU_BATCH_FWD] Layer " + std::to_string(l) + ": No V proj weights found for CPU (batched)"); 
+            return {};
+        }
+
+        // Batched RoPE Application
+        apply_rope_batch_cpu(q_batch, k_batch, num_tokens_in_batch, n_heads, n_kv_heads, head_dim, 
+                              start_pos_in_sequence, precomputed_freqs_cis_, max_pos_embeddings, use_rope_adjacent_pairing);
+
+        // Batched KV Cache Update
+        if (kv_cache) {
+            update_kv_cache_batch_cpu(kv_cache, l, k_batch, v_batch, num_tokens_in_batch, 
+                                      start_pos_in_sequence, n_kv_heads, head_dim);        
+        }
+        
+        // --- Batched Attention ---
+        // q_batch now holds the RoPEd Q values from matmul and apply_rope_batch_cpu.
+        // k_batch and v_batch (after RoPE for K) have been used to update kv_cache->layers[l].
+        std::vector<float> batch_attn_output((size_t)num_tokens_in_batch * hs); // hs is num_q_heads * head_dim
+        
+        if (kv_cache && static_cast<size_t>(l) < kv_cache->layers.size()) {
+             // Ensure attention_scale is defined earlier in forward_cpu_batch, after head_dim is known.
+             // float attention_scale = 1.0f / SAFE_SQRT(static_cast<float>(head_dim));
+             attention_batch_cpu(q_batch,          // Input: RoPE'd Q values for the batch
+                                 kv_cache->layers[l], // Input: KV Cache for the current layer (already updated)
+                                 batch_attn_output,   // Output: Where attention results for the batch will be stored
+                                 num_tokens_in_batch, 
+                                 start_pos_in_sequence,
+                                 n_heads,          // This is config_.num_attention_heads
+                                 n_kv_heads,       // This is config_.num_key_value_heads
+                                 head_dim, 
+                                 attention_scale); // This must be defined earlier in forward_cpu_batch
+        } else if (kv_cache) { 
+            // This case means kv_cache exists, but the current layer 'l' is out of bounds.
+            Logger::error("[CPU_BATCH_FWD] Layer " + std::to_string(l) + 
+                          " is out of bounds for KV Cache access during attention. KVCache layers size: " + 
+                          std::to_string(kv_cache->layers.size()) + 
+                          ". Filling attention output with zeros.");
+            std::fill(batch_attn_output.begin(), batch_attn_output.end(), 0.0f); 
+        } else { // kv_cache is null
+            Logger::error("[CPU_BATCH_FWD] KV Cache is null, cannot perform attention for layer " + std::to_string(l) +
+                          ". Filling attention output with zeros.");
+            std::fill(batch_attn_output.begin(), batch_attn_output.end(), 0.0f); 
+        }
+
+        // O-Projection (Batched)
+        std::vector<float> batch_attn_proj_out((size_t)num_tokens_in_batch * hs);
+        if(!lw.o_proj_f32.empty()) {
+              matmul_f32_f32_batch_cpu(lw.o_proj_f32, batch_attn_output, batch_attn_proj_out, num_tokens_in_batch, hs, hs);
+        } else if (!lw.o_proj_q8_0.empty()) {
+            matmul_q8_0_f32_batch_cpu(lw.o_proj_q8_0, batch_attn_output, batch_attn_proj_out, num_tokens_in_batch, hs, hs);
+        } else if (!lw.o_proj_q6k.empty()) {
+            matmul_q6k_f32_batch_cpu(lw.o_proj_q6k, batch_attn_output, batch_attn_proj_out, num_tokens_in_batch, hs, hs);
+        } else if (!lw.o_proj_q4k.empty()) {
+            matmul_q4k_f32_batch_cpu(lw.o_proj_q4k, batch_attn_output, batch_attn_proj_out, num_tokens_in_batch, hs, hs);
+        } else { 
+            Logger::error("[CPU_BATCH_FWD] Layer " + std::to_string(l) + ": No O proj weights found for CPU"); 
+            return {};
+        }
+
+        // First Residual Connection (Batched)
+        // current_batch_activations = residual_batch_component_attn + batch_attn_proj_out;
+        for(size_t i=0; i < current_batch_activations.size(); ++i) {
+            current_batch_activations[i] = residual_batch_component_attn[i] + batch_attn_proj_out[i];
+        }
+
+// ... (previous parts of the layer loop, like Attention and first residual, remain the same) ...
+
+        // --- Batched MLP Part ---
+        std::vector<float> residual_batch_component_mlp = current_batch_activations; // Store for MLP residual
+        std::vector<float> batch_x_norm2(current_batch_activations.size());
+        
+        const std::vector<float>& w_post_attn_norm_vec =
+            lw.post_attention_layernorm_f32.empty()
+                ? bf16vec_to_float_vec(lw.post_attention_layernorm)
+                : lw.post_attention_layernorm_f32;
+        // Batched RMSNorm for MLP
+        rmsnorm_batch_cpu(current_batch_activations, w_post_attn_norm_vec, batch_x_norm2, num_tokens_in_batch, hs, eps);
+        
+        // Batched Gate and Up Projections
+        std::vector<float> batch_gate_proj_out((size_t)num_tokens_in_batch * is);
+        std::vector<float> batch_up_proj_out((size_t)num_tokens_in_batch * is);
+
+        // Gate Projection
+        if (!lw.gate_proj_f32.empty()) {
+            matmul_f32_f32_batch_cpu(lw.gate_proj_f32, batch_x_norm2, batch_gate_proj_out, num_tokens_in_batch, is, hs);
+        } else if (!lw.gate_proj_q8_0.empty()) {
+            matmul_q8_0_f32_batch_cpu(lw.gate_proj_q8_0, batch_x_norm2, batch_gate_proj_out, num_tokens_in_batch, is, hs);
+        } else if (!lw.gate_proj_q6k.empty()) {
+            matmul_q6k_f32_batch_cpu(lw.gate_proj_q6k, batch_x_norm2, batch_gate_proj_out, num_tokens_in_batch, is, hs);
+        } else if (!lw.gate_proj_q4k.empty()) {
+            matmul_q4k_f32_batch_cpu(lw.gate_proj_q4k, batch_x_norm2, batch_gate_proj_out, num_tokens_in_batch, is, hs);
+        } else { 
+            Logger::error("[CPU_BATCH_FWD] Layer " + std::to_string(l) + ": No gate_proj weights found for CPU"); 
+            return {};
+        }
+
+        // Up Projection
+        if (!lw.up_proj_f32.empty()) {
+            matmul_f32_f32_batch_cpu(lw.up_proj_f32, batch_x_norm2, batch_up_proj_out, num_tokens_in_batch, is, hs);
+        } else if (!lw.up_proj_q8_0.empty()) {
+            matmul_q8_0_f32_batch_cpu(lw.up_proj_q8_0, batch_x_norm2, batch_up_proj_out, num_tokens_in_batch, is, hs);
+        } else if (!lw.up_proj_q6k.empty()) {
+            matmul_q6k_f32_batch_cpu(lw.up_proj_q6k, batch_x_norm2, batch_up_proj_out, num_tokens_in_batch, is, hs);
+        } else if (!lw.up_proj_q4k.empty()) {
+            matmul_q4k_f32_batch_cpu(lw.up_proj_q4k, batch_x_norm2, batch_up_proj_out, num_tokens_in_batch, is, hs);
+        } else { 
+            Logger::error("[CPU_BATCH_FWD] Layer " + std::to_string(l) + ": No up_proj weights found for CPU"); 
+            return {};
+        }
+        // Batched SwiGLU: SiLU(gate_proj_out) * up_proj_out
+        // batch_gate_proj_out and batch_up_proj_out are already [num_tokens_in_batch * is]
+        std::vector<float> batch_swiglu_out((size_t)num_tokens_in_batch * is);
+        // This loop processes all elements for all tokens in a flat manner.
+        // It can be parallelized with OpenMP if desired.
+        // #pragma omp parallel for
+        for (size_t i = 0; i < batch_gate_proj_out.size(); ++i) {
+            float gate_val = batch_gate_proj_out[i];
+            // SiLU = x / (1 + exp(-x))
+            float silu_gate_val = gate_val / (1.0f + std::exp(-gate_val));
+            batch_swiglu_out[i] = silu_gate_val * batch_up_proj_out[i];
+        }
+        
+        // Down Projection
+        std::vector<float> batch_mlp_down_proj_out((size_t)num_tokens_in_batch * hs);
+        if (!lw.down_proj_f32.empty()) {
+            matmul_f32_f32_batch_cpu(lw.down_proj_f32, batch_swiglu_out, batch_mlp_down_proj_out, num_tokens_in_batch, hs, is);
+        } else if (!lw.down_proj_q8_0.empty()) {
+            matmul_q8_0_f32_batch_cpu(lw.down_proj_q8_0, batch_swiglu_out, batch_mlp_down_proj_out, num_tokens_in_batch, hs, is);
+        } else if (!lw.down_proj_q6k.empty()) {
+            matmul_q6k_f32_batch_cpu(lw.down_proj_q6k, batch_swiglu_out, batch_mlp_down_proj_out, num_tokens_in_batch, hs, is);
+        } else if (!lw.down_proj_q4k.empty()) {
+            matmul_q4k_f32_batch_cpu(lw.down_proj_q4k, batch_swiglu_out, batch_mlp_down_proj_out, num_tokens_in_batch, hs, is);
+        } else { 
+            Logger::error("[CPU_BATCH_FWD] Layer " + std::to_string(l) + ": No down_proj weights found for CPU"); 
+            return {};
+
+        // Second Residual Connection (Batched)
+        // current_batch_activations = residual_batch_component_mlp + batch_mlp_down_proj_out;
+        // This loop processes all elements for all tokens in a flat manner.
+        // #pragma omp parallel for
+        for(size_t i = 0; i < current_batch_activations.size(); ++i) { // size is num_tokens_in_batch * hs
+            current_batch_activations[i] = residual_batch_component_mlp[i] + batch_mlp_down_proj_out[i];
+        }
+    } // End layer loop (for int l = 0; l < num_cpu_layers_to_process; ++l)
+
     if (kv_cache && num_tokens_in_batch > 0) {
+        // The KVCache seq_len is implicitly updated by update_kv_cache_batch_cpu for each token,
+        // but we need a final update to the main KVCache object if it tracks a global sequence length
+        // beyond individual layer states. Assuming KVCache.seq_len should reflect the end of the processed batch.
         kv_cache->seq_len = start_pos_in_sequence + num_tokens_in_batch;
-        Logger::info("[CPU_BATCH_FWD] KVCache seq_len updated to: " + std::to_string(kv_cache->seq_len));
+        Logger::info("[CPU_BATCH_FWD] KVCache main seq_len updated to: " + std::to_string(kv_cache->seq_len));
     }
 
-    Logger::info("[CPU_BATCH_FWD] Exiting. Output activations size: " + std::to_string(batch_output_activations.size()));
-    return batch_output_activations;
+    Logger::info("[CPU_BATCH_FWD] Exiting. Output activations size: " + std::to_string(current_batch_activations.size()));
+    return current_batch_activations;
+}
 }
