@@ -102,6 +102,9 @@ struct GGUFData {
   size_t mapped_tensor_data_size = 0;               /**< Size of the mapped tensor data block in bytes */
   uint64_t data_alignment = 32;                        /**< Alignment requirement for tensor data */
   size_t offset_diff_for_mmap = 0;                   /**< Difference between aligned mmap offset and actual data start */
+  
+  // Non-mmap tensor data (for when mmap is disabled)
+  std::vector<uint8_t> tensor_data;                  /**< Tensor data loaded into memory (non-mmap mode) */
 
   // Default constructor
 #ifndef _WIN32
@@ -163,6 +166,7 @@ struct GGUFData {
     , mapped_tensor_data_size(other.mapped_tensor_data_size)
     , data_alignment(other.data_alignment)
     , offset_diff_for_mmap(other.offset_diff_for_mmap)
+    , tensor_data(std::move(other.tensor_data))
   {
     // Leave other in a valid but safe state (resources transferred)
 #ifndef _WIN32
@@ -219,6 +223,7 @@ struct GGUFData {
       mapped_tensor_data_size = other.mapped_tensor_data_size;
       data_alignment = other.data_alignment;
       offset_diff_for_mmap = other.offset_diff_for_mmap;
+      tensor_data = std::move(other.tensor_data);
 
       // Leave other in a valid but safe state
 #ifndef _WIN32

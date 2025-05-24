@@ -3,6 +3,7 @@
 #include "model_macros.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
@@ -17,6 +18,8 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <iomanip>
+#include <sstream>
 
 #include "logger.h"
 #include "model.h"
@@ -24,6 +27,40 @@
 #include "tokenizer.h"
 
 namespace tinyllama {
+
+
+static void log_vector_summary_detailed(const std::string& name,
+                                        const std::vector<float>& v,
+                                        int current_pos, int current_layer,
+                                        int N) {
+  if (v.empty()) {
+    Logger::info(name + " (pos=" + std::to_string(current_pos) + ", layer=" +
+                 std::to_string(current_layer) + "): EMPTY VECTOR");
+    return;
+  }
+  std::stringstream ss;
+  ss << name << " (pos=" << std::to_string(current_pos)
+     << ", layer=" << std::to_string(current_layer) << "): size=" << v.size();
+  ss << ", first " << N << ": [";
+  for (int i = 0; i < N && i < v.size(); ++i) {
+    ss << std::fixed << std::setprecision(4) << v[i]
+       << (i == N - 1 || i == v.size() - 1 ? "" : ", ");
+  }
+  ss << "]";
+  float min_val = v[0], max_val = v[0], sum = 0.0f;
+  bool all_finite = true;
+  for (float val : v) {
+    if (val < min_val) min_val = val;
+    if (val > max_val) max_val = val;
+    sum += val;
+    if (!std::isfinite(val)) all_finite = false;
+  }
+  ss << ", min=" << std::fixed << std::setprecision(4) << min_val;
+  ss << ", max=" << std::fixed << std::setprecision(4) << max_val;
+  ss << ", mean=" << std::fixed << std::setprecision(4) << (sum / v.size());
+  ss << ", finite=" << (all_finite ? "yes" : "no");
+  Logger::info(ss.str());
+}
 
 static std::string read_file_api(const std::string& path) {
   std::filesystem::path fs_path(path);
@@ -134,23 +171,30 @@ static int sample_top_k_top_p_temperature(const std::vector<float>& logits,
   return prob_idx[sampled_idx_in_filtered].second;
 }
 
+
 TinyLlamaSession::TinyLlamaSession(const std::string& model_path_arg,
-                                   const std::string& tokenizer_path_arg,
-                                   int threads,
-                                   int num_gpu_layers_from_cli,
-                                   bool cli_use_mmap)
-    : threads_(threads), rng_(std::random_device{}()) {
+                                 const std::string& tokenizer_path_arg,
+                                 int threads,
+                                 int num_gpu_layers_from_cli,
+                                 bool cli_use_mmap,
+                                 bool use_kv_quant,
+                                 bool use_batch_generation,
+                                 int max_batch_size)
+          : threads_(threads), use_batch_generation_(use_batch_generation), 
+            max_batch_size_(max_batch_size), rng_(std::random_device{}()) {
   Logger::info("TinyLlamaSession constructor entered. Model path: " + model_path_arg +
                ", Tokenizer path: " + tokenizer_path_arg +
                ", Threads: " + std::to_string(threads) +
                ", Num GPU Layers (CLI): " + std::to_string(num_gpu_layers_from_cli) +
-               ", Use MMAP (CLI): " + (cli_use_mmap ? "true" : "false"));
+               ", Use MMAP (CLI): " + (cli_use_mmap ? "true" : "false") +
+               ", Use KV Quant (CLI): " + (use_kv_quant ? "true" : "false"));
 
   std::string effective_model_file_path = model_path_arg; 
   std::string path_for_config_json = model_path_arg;
 
   ModelConfig initial_model_config_for_model_ctor;
   initial_model_config_for_model_ctor.use_mmap_for_gguf = cli_use_mmap;
+  initial_model_config_for_model_ctor.use_kvcache_quantization = use_kv_quant;
   if (num_gpu_layers_from_cli < 0) { 
       initial_model_config_for_model_ctor.num_cpu_offload_layers = 0;
   } else {
@@ -225,19 +269,24 @@ TinyLlamaSession::TinyLlamaSession(const std::string& model_path_arg,
     config_ = model_->get_config(); 
     config_.is_gguf_file_loaded = false; // Ensure this is set for session's copy too
 
+    config_.use_kvcache_quantization = use_kv_quant; // Re-apply CLI/constructor preference
+
+    Logger::info("TinyLlamaSession: Finalizing ModelConfig for KVCache initialization. use_kvcache_quantization set to: " + 
+                  std::string(config_.use_kvcache_quantization ? "true" : "false"));
+
+    kv_cache_.initialize(config_, config_.num_hidden_layers, 
+                         config_.num_hidden_layers - config_.num_cpu_offload_layers, 
+                         config_.max_position_embeddings, 
+                         config_.num_key_value_heads, 
+                         config_.hidden_size / config_.num_attention_heads,
+                         max_batch_size_);
+
   } else { // Not a directory, assume it's a file path and check extension
     std::string extension = fs_model_path.extension().string();
     std::transform(extension.begin(), extension.end(), extension.begin(), ::tolower);
 
     if (extension == ".gguf") {
       Logger::info("GGUF model type detected by extension for Session constructor: " + model_path_arg);
-      // For GGUF, num_cpu_offload_layers is determined *after* parsing GGUF meta in TinyLlamaModel constructor.
-      // We pass num_gpu_layers_from_cli as a hint in initial_model_config_for_model_ctor.num_cpu_offload_layers.
-      // The TinyLlamaModel GGUF constructor will interpret it correctly against its loaded num_hidden_layers.
-      // If num_gpu_layers_from_cli is (e.g.) 0 (all CPU), it might be passed as num_cpu_offload_layers = 0 here,
-      // but the model constructor should override this to num_hidden_layers.
-      // This part is tricky; the model constructor has the final say for GGUF based on its own metadata.
-      // The initial_model_config_for_model_ctor.num_cpu_offload_layers set before this branch is used as a hint.
       model_ = std::make_unique<TinyLlamaModel>(initial_model_config_for_model_ctor, model_path_arg);
       config_ = model_->get_config(); 
     } else if (extension == ".safetensors") {
@@ -282,6 +331,20 @@ TinyLlamaSession::TinyLlamaSession(const std::string& model_path_arg,
       model_ = std::make_unique<TinyLlamaModel>(initial_model_config_for_model_ctor, st_loader);
       config_ = model_->get_config(); 
       config_.is_gguf_file_loaded = false; // Ensure this is set for session's copy too
+
+      config_.use_kvcache_quantization = use_kv_quant; // Re-apply CLI/constructor preference
+
+      Logger::info("TinyLlamaSession: Finalizing ModelConfig for KVCache initialization. use_kvcache_quantization set to: " + 
+                    std::string(config_.use_kvcache_quantization ? "true" : "false"));
+
+      // Initialize KVCache with potentially updated config_ (from model load) 
+      // and the now-set use_kvcache_quantization flag.
+      kv_cache_.initialize(config_, config_.num_hidden_layers, 
+                           config_.num_hidden_layers - config_.num_cpu_offload_layers, 
+                           config_.max_position_embeddings, 
+                           config_.num_key_value_heads, 
+                           config_.hidden_size / config_.num_attention_heads,
+                           max_batch_size_);
     } else {
       throw std::runtime_error("Unsupported model file type or extension in Session constructor: " + model_path_arg +
                                ". Please provide a directory for SafeTensors, a .gguf file, or a .safetensors file.");
@@ -291,8 +354,6 @@ TinyLlamaSession::TinyLlamaSession(const std::string& model_path_arg,
   if (!model_) {
       throw std::runtime_error("Model pointer is null after instantiation attempt in Session constructor.");
   }
-  // At this point, model_ is constructed, and model_->get_config() is the definitive one.
-  // config_ member of TinyLlamaSession is now synchronized with model_->get_config().
 
   try {
     if (config_.is_gguf_file_loaded) {
@@ -337,9 +398,6 @@ TinyLlamaSession::TinyLlamaSession(const std::string& model_path_arg,
   const ModelConfig& final_model_config = model_->get_config(); // Explicitly use model's config
   int total_model_layers = final_model_config.num_hidden_layers;
   
-  // Determine actual number of GPU layers based on model's final decision
-  // model_->initialize_gpu_and_rope() would have clamped num_cpu_offload_layers
-  // and thus determined the effective split.
   int effective_cpu_offload_layers = final_model_config.num_cpu_offload_layers;
   int gpu_layers_for_kvcache = total_model_layers - effective_cpu_offload_layers;
   if (gpu_layers_for_kvcache < 0) gpu_layers_for_kvcache = 0; // Sanity check, should not happen if model ctor is correct
@@ -358,11 +416,13 @@ TinyLlamaSession::TinyLlamaSession(const std::string& model_path_arg,
 
   int head_dim = final_model_config.hidden_size / final_model_config.num_attention_heads;
   
-  kv_cache_.initialize(total_model_layers,          // Total layers for CPU part of KVCache
+  kv_cache_.initialize(final_model_config,          // Total layers for CPU part of KVCache
+                       total_model_layers, 
                        gpu_layers_for_kvcache,    // Actual GPU layers for device memory
                        final_model_config.max_position_embeddings,
                        final_model_config.num_key_value_heads, 
-                       head_dim);
+                       head_dim,
+                       max_batch_size_);
   Logger::info("TinyLlamaSession initialization complete (after KVCache init).");
 }
 
@@ -375,6 +435,12 @@ std::string TinyLlamaSession::generate(const std::string& user_prompt, int steps
                                      int top_k, float top_p,
                                      const std::string& system_prompt_arg, // Renamed for clarity inside function
                                      bool apply_q_a_format_cli_hint) { // Renamed for clarity
+  auto t_start = std::chrono::high_resolution_clock::now(); // Start timing
+
+  generated_text_for_api_return_.clear(); // Clear for new generation
+  generated_stream_.str("");             // Clear for new generation
+  generated_stream_.clear();          // Clear error flags
+
   Logger::info("[Generate API] User prompt: \"" + user_prompt + "\", System prompt: \"" + system_prompt_arg + "\", Steps: " + std::to_string(steps));
 
   if (!model_ || !tokenizer_) {
@@ -384,44 +450,74 @@ std::string TinyLlamaSession::generate(const std::string& user_prompt, int steps
   std::string final_prompt_for_encoding;
   bool used_chat_template = false;
 
-  // Priority 1: GGUF Chat Template from Tokenizer
-  if (tokenizer_ && !tokenizer_->get_gguf_chat_template().empty()) {
-    Logger::info("[Generate API] Using GGUF chat template from tokenizer.");
-    final_prompt_for_encoding = tokenizer_->apply_chat_template(user_prompt, system_prompt_arg, config_);
-    used_chat_template = true;
-  } 
-  // Priority 2: Llama 3 family specific template (handled by apply_chat_template's fallback)
-  else if (config_.tokenizer_family == ModelConfig::TokenizerFamily::LLAMA3_TIKTOKEN) {
-    Logger::info("[Generate API] Llama 3 tokenizer family detected, using apply_chat_template.");
-    final_prompt_for_encoding = tokenizer_->apply_chat_template(user_prompt, system_prompt_arg, config_);
-    used_chat_template = true;
+  // Log conditions for chat template application
+  if (tokenizer_) {
+    bool gguf_template_empty = tokenizer_->get_gguf_chat_template().empty();
+    Logger::info("[Generate API] GGUF chat template from tokenizer is empty: " + std::string(gguf_template_empty ? "true" : "false"));
+    if (!gguf_template_empty) {
+        Logger::info("[Generate API] GGUF Template Content (first 100 chars): " + tokenizer_->get_gguf_chat_template().substr(0, 100));
+    }
+  } else {
+    Logger::warning("[Generate API] Tokenizer is null before checking chat template!");
   }
-  // Priority 3: Legacy Q/A formatting if CLI hint is true AND no advanced template was used
-  else if (apply_q_a_format_cli_hint) {
-    Logger::info("[Generate API] No GGUF/Llama3 template, applying legacy Q/A formatting due to CLI hint.");
-    // Simple Q/A formatting - tokenizer_.apply_chat_template might be too complex if it expects specific tokens not present
-    // For non-Llama3 and non-GGUF template scenarios, system_prompt_arg might not be naturally handled by a generic apply_chat_template.
-    // We'll prepend system prompt if present, then Q:A format the user prompt.
+  std::string family_log_str = "UNKNOWN";
+  if (config_.tokenizer_family == ModelConfig::TokenizerFamily::LLAMA_SENTENCEPIECE) family_log_str = "LLAMA_SENTENCEPIECE";
+  else if (config_.tokenizer_family == ModelConfig::TokenizerFamily::LLAMA3_TIKTOKEN) family_log_str = "LLAMA3_TIKTOKEN";
+  Logger::info("[Generate API] Configured tokenizer_family: " + family_log_str);
+
+  // New Priority Logic:
+  // Priority 1 (NEW): Legacy Q/A formatting if CLI hint is true
+  if (apply_q_a_format_cli_hint) {
+    Logger::info("[Generate API] Using legacy Q/A formatting (CLI Hint is true - Priority 1).");
     std::string temp_prompt = user_prompt;
     if (!system_prompt_arg.empty()) {
-        temp_prompt = system_prompt_arg + "\n\nQ: " + user_prompt + "\nA:"; // Basic combination
+        temp_prompt = system_prompt_arg + "\\n\\nQ: " + user_prompt + "\\nA:";
     } else {
-        temp_prompt = "Q: " + user_prompt + "\nA:";
+        temp_prompt = "Q: " + user_prompt + "\\nA:";
     }
     final_prompt_for_encoding = temp_prompt;
-    // No `used_chat_template = true` here, as it's not the full chat templating.
+    used_chat_template = false; // Q/A is not a 'chat template' in the GGUF sense
   }
-  // Priority 4: Raw user prompt (with system prompt prepended if provided)
+  // Priority 2 (WAS 1): GGUF Chat Template from Tokenizer (only if Q/A hint is false)
+  else if (tokenizer_ && !tokenizer_->get_gguf_chat_template().empty()) {
+    std::string gguf_template_content = tokenizer_->get_gguf_chat_template();
+    bool is_llama_sentencepiece_family = (config_.tokenizer_family == ModelConfig::TokenizerFamily::LLAMA_SENTENCEPIECE);
+    bool looks_like_jinja = (gguf_template_content.find("{%") != std::string::npos);
+
+    if (is_llama_sentencepiece_family && looks_like_jinja) {
+        Logger::info("[Generate API] Detected LLAMA_SENTENCEPIECE model with a Jinja-like GGUF template. Forcing Q/A format to avoid C++ Jinja processing issues (Priority 2 Override).");
+        std::string temp_prompt = user_prompt;
+        if (!system_prompt_arg.empty()) {
+            temp_prompt = system_prompt_arg + "\\\\n\\\\nQ: " + user_prompt + "\\\\nA:";
+        } else {
+            temp_prompt = "Q: " + user_prompt + "\\\\nA:";
+        }
+        final_prompt_for_encoding = temp_prompt;
+        used_chat_template = false;
+    } else {
+        Logger::info("[Generate API] Using GGUF chat template from tokenizer (Q/A Hint false - Priority 2).");
+        final_prompt_for_encoding = tokenizer_->apply_chat_template(user_prompt, system_prompt_arg, config_);
+        used_chat_template = true;
+    }
+  } 
+  // Priority 3 (WAS 2): Llama 3 family specific template (only if Q/A hint false and no GGUF template)
+  else if (config_.tokenizer_family == ModelConfig::TokenizerFamily::LLAMA3_TIKTOKEN) {
+    Logger::info("[Generate API] Llama 3 tokenizer family detected, using apply_chat_template (Q/A Hint false, No GGUF template - Priority 3).");
+    final_prompt_for_encoding = tokenizer_->apply_chat_template(user_prompt, system_prompt_arg, config_);
+    used_chat_template = true;
+  }
+  // Priority 4 (WAS 3/4 depending on apply_q_a_format_cli_hint): Raw prompt (if all above are false)
   else {
-    Logger::info("[Generate API] No GGUF/Llama3 template and Q/A formatting hint is false. Using user prompt as is (prepending system prompt if available).");
+    Logger::info("[Generate API] No applicable template/hint. Using user prompt as is (prepending system prompt if available - Priority 4).");
     if (!system_prompt_arg.empty()) {
-        final_prompt_for_encoding = system_prompt_arg + "\n\n" + user_prompt; // Basic prepend
+        final_prompt_for_encoding = system_prompt_arg + "\\n\\n" + user_prompt;
     } else {
         final_prompt_for_encoding = user_prompt;
     }
+    used_chat_template = false;
   }
   
-  Logger::debug("[Generate API] Final prompt for encoding (first 100 chars): \"" + final_prompt_for_encoding.substr(0, 100) + "\"");
+  Logger::debug("[Generate API] Final prompt for encoding (first 100 chars): \\\"" + final_prompt_for_encoding.substr(0, 100) + "\\\"");
 
   std::vector<int> tokens = tokenizer_->encode(final_prompt_for_encoding, true, false, Tokenizer::PreTokenizeMethod::DEFAULT); // add_bos=true, add_eos=false (EOS handled by loop)
 
@@ -432,18 +528,124 @@ std::string TinyLlamaSession::generate(const std::string& user_prompt, int steps
   }
 
   int num_prompt_tokens = tokens.size();
-  // Log the number of prompt tokens
   Logger::info("[Generate API] Number of prompt tokens: " + std::to_string(num_prompt_tokens));
 
-  int total_steps = num_prompt_tokens + steps - 1;
+  int total_steps = num_prompt_tokens + steps -1; // Max total tokens including prompt
   int generated_count = 0;
   int next_token_id = -1;
 
-  kv_cache_.seq_len = 0;
+  std::vector<float> logits; // Declare logits here, to be populated by prefill or loop
+  std::vector<int> generated_token_ids; // Track generated tokens separately
+  
+  kv_cache_.clear_data(); // Clear K/V vector data for all layers
+  kv_cache_.seq_len = 0;  // Reset KVCache logical sequence length for new sequence
 
   std::vector<float> current_data_host; // To hold embedding or output of CPU layers
+  int start_pos_for_loop = 0;
 
-  for (int pos = 0; pos < total_steps; ++pos) {
+bool prefill_enabled = (num_prompt_tokens > 1);
+
+if (prefill_enabled) {
+      Logger::info("[Generate API] Prefill enabled. num_prompt_tokens: " + std::to_string(num_prompt_tokens) + 
+                   ", num_cpu_offload_layers: " + std::to_string(config_.num_cpu_offload_layers) +
+                   ", total_hidden_layers: " + std::to_string(config_.num_hidden_layers));
+      
+      std::vector<float> batch_initial_embeddings(num_prompt_tokens * config_.hidden_size);
+      for (int i = 0; i < num_prompt_tokens; ++i) {
+          std::vector<float> token_embedding = model_->lookup_embedding(tokens[i]);
+          if (token_embedding.empty()) {
+              Logger::error("Prefill: Embedding lookup returned empty vector for token ID: " + std::to_string(tokens[i]) + " at prompt pos " + std::to_string(i));
+              return ""; // Or handle error appropriately
+          }
+          std::copy(token_embedding.begin(), token_embedding.end(), batch_initial_embeddings.begin() + i * config_.hidden_size);
+      }
+
+      // If there are CPU layers to process for prefill
+      std::vector<float> cpu_processed_embeddings;
+      if (config_.num_cpu_offload_layers > 0) {
+          Logger::info("[Generate API] Prefill: Processing " + std::to_string(config_.num_cpu_offload_layers) + " CPU layers for the batch.");
+          cpu_processed_embeddings = model_->forward_cpu_batch(batch_initial_embeddings, num_prompt_tokens, config_.num_cpu_offload_layers, 0, &kv_cache_);
+          if (cpu_processed_embeddings.empty()) {
+               Logger::error("Prefill: forward_cpu_batch returned empty or failed.");
+               return "";
+          }
+      } else {
+          cpu_processed_embeddings = batch_initial_embeddings; // No CPU layers, pass embeddings directly
+      }
+
+      // If all layers are CPU layers (i.e., num_gpu_layers == 0)
+      if (config_.num_cpu_offload_layers == config_.num_hidden_layers) {
+          Logger::info("[Generate API] Prefill: All layers are on CPU. Getting logits from final CPU layer output.");
+          std::vector<float> batch_logits = model_->forward_cpu_logits_batch(cpu_processed_embeddings, num_prompt_tokens);
+          if (batch_logits.empty() || batch_logits.size() % config_.vocab_size != 0) {
+              Logger::error("Prefill: forward_cpu_logits_batch returned invalid logits.");
+              return "";
+          }
+          // Extract logits for the last token of the prompt
+          logits.assign(batch_logits.begin() + (num_prompt_tokens - 1) * config_.vocab_size,
+                        batch_logits.begin() + num_prompt_tokens * config_.vocab_size);
+      } else { // GPU layers exist and need to be processed
+          Logger::info("[Generate API] Prefill: Processing GPU layers for the batch.");
+          // Copy the (potentially CPU-processed) embeddings to the device
+          float* d_temp_batch_embeddings = nullptr;
+          size_t batch_embeddings_size_bytes = cpu_processed_embeddings.size() * sizeof(float);
+
+          if (batch_embeddings_size_bytes == 0) {
+              Logger::error("Prefill: cpu_processed_embeddings is empty, cannot proceed with GPU batch prefill.");
+              return ""; // Or handle error appropriately
+          }
+
+          gpuErrchk(cudaMalloc(&d_temp_batch_embeddings, batch_embeddings_size_bytes));
+          if (!d_temp_batch_embeddings) {
+              Logger::error("Prefill: cudaMalloc failed for d_temp_batch_embeddings.");
+              return ""; // Or handle error appropriately
+          }
+          
+          gpuErrchk(cudaMemcpy(d_temp_batch_embeddings, cpu_processed_embeddings.data(), 
+                               batch_embeddings_size_bytes, cudaMemcpyHostToDevice));
+
+          logits = model_->forward_device_batch_prefill(d_temp_batch_embeddings, num_prompt_tokens, start_pos_for_loop, &kv_cache_, 0);
+            // DEBUG: Check if logits are coherent after GPU batch prefill
+  if (logits.size() >= config_.vocab_size) {
+      std::vector<float> logits_sample(std::min(10, (int)config_.vocab_size));
+      std::copy(logits.begin(), logits.begin() + logits_sample.size(), logits_sample.begin());
+            
+      // Check for NaN/Inf
+      bool has_nan_inf = false;
+      for (float val : logits) {
+          if (std::isnan(val) || std::isinf(val)) {
+              has_nan_inf = true;
+              break;
+          }
+      }
+    if (has_nan_inf) {
+        std::cout << "ERROR: GPU batch prefill produced NaN/Inf logits!" << std::endl;
+    }
+    
+}
+
+          if (d_temp_batch_embeddings) {
+              gpuErrchk(cudaFree(d_temp_batch_embeddings));
+          }
+      }
+      
+      if (logits.empty()) {
+          Logger::error("Prefill: Logits are empty after prefill processing.");
+          return ""; // Critical error
+      }
+      next_token_id = sample_top_k_top_p_temperature(logits, temperature, top_k, top_p, rng_);
+      // DON'T stream yet - token hasn't been processed through model!
+      generated_token_ids.push_back(next_token_id); // Track generated token
+      generated_count++;
+      start_pos_for_loop = num_prompt_tokens; // Next token will be at num_prompt_tokens
+      kv_cache_.seq_len = num_prompt_tokens; // KVCache is now filled up to num_prompt_tokens
+
+      Logger::info("[Generate API] Prefill completed. next_token_id: " + std::to_string(next_token_id) + 
+                   ", Decoded: \"" + tokenizer_->decode({next_token_id}, false) + "\"" + 
+                   ", start_pos_for_loop set to: " + std::to_string(start_pos_for_loop));
+  }
+
+  for (int pos = start_pos_for_loop; pos < total_steps; ++pos) {
     if (pos >= config_.max_position_embeddings) {
       Logger::warning("Reached max sequence length (" +
                       std::to_string(config_.max_position_embeddings) +
@@ -451,121 +653,275 @@ std::string TinyLlamaSession::generate(const std::string& user_prompt, int steps
       break;
     }
 
-    int input_token_id =
-        (pos < num_prompt_tokens) ? tokens[pos] : next_token_id;
-    std::vector<float> logits; // Declare logits here
+    int input_token_id;
 
-    current_data_host = model_->lookup_embedding(input_token_id);
-    if (current_data_host.empty()) {
-        Logger::error("Failed to get embedding for token " + std::to_string(input_token_id) + " at pos " + std::to_string(pos));
-        break;
-    }
-
-    int num_total_layers = config_.num_hidden_layers;
-    int num_cpu = config_.num_cpu_offload_layers;
-    int num_gpu = num_total_layers - num_cpu;
-
-    if (num_cpu > 0) { // Process CPU layers if any
-        Logger::debug("[Generate] Processing " + std::to_string(num_cpu) + " CPU layers for pos " + std::to_string(pos));
-        current_data_host = model_->forward(current_data_host, pos, &kv_cache_, nullptr);
-        // current_data_host now holds output of last CPU layer, or final logits if all layers are CPU (num_gpu == 0)
-    }
-
-#ifdef HAS_CUDA
-    if (num_gpu > 0) { // Process GPU layers if any
-        Logger::debug("[Generate] Processing " + std::to_string(num_gpu) + " GPU layers for pos " + std::to_string(pos));
-        // current_data_host contains either embedding (if num_cpu == 0) or output of CPU layers.
-        // Copy this host data to device model_->x_dev_ to start GPU pipeline.
-        float* x_dev_ptr = model_->get_x_dev();
-        if (!x_dev_ptr) { 
-            Logger::fatal("model_->x_dev_ is null before GPU forward pass!"); 
-            throw std::runtime_error("Critical error: x_dev_ is null in GPU pipeline.");
-        }
-        if (current_data_host.size() * sizeof(float) == 0) {
-             Logger::fatal("current_data_host is empty before cudaMemcpy to x_dev_!"); 
-            throw std::runtime_error("Critical error: current_data_host is empty for GPU pipeline.");
-        }
-        gpuErrchk(cudaMemcpy(x_dev_ptr, current_data_host.data(), current_data_host.size() * sizeof(float), cudaMemcpyHostToDevice));
-        
-        logits = model_->forward_device(x_dev_ptr, pos, &kv_cache_, nullptr);
-    } else if (num_cpu > 0 && num_gpu == 0) { // All layers were CPU, and model_->forward() returned logits
-        logits = current_data_host;
-    } else if (num_total_layers == 0) { // No layers at all
-        Logger::warning("No layers in the model (HAS_CUDA path).");
-        logits.assign(config_.vocab_size > 0 ? config_.vocab_size : 1, 0.0f); // Assign dummy if vocab_size is valid
-    } else if (num_cpu == 0 && num_gpu == 0 && num_total_layers > 0) { // Should not happen if logic is correct
-         Logger::error("Inconsistent state: HAS_CUDA, num_cpu=0, num_gpu=0, but num_total_layers > 0. Defaulting to CPU path for safety.");
-         // Fallback to full CPU path just in case, using original embedding as input to forward.
-         // This assumes model_->forward() is safe to call even if it was configured for GPU layers that are now skipped.
-         current_data_host = model_->lookup_embedding(input_token_id); // Re-fetch original embedding for safety
-         logits = model_->forward(current_data_host, pos, &kv_cache_, nullptr);
-    }
-#else // No CUDA compiled - All layers (if any) run on CPU
-    if (num_total_layers > 0) {
-        // current_data_host already contains embedding if num_cpu_layers was 0, or output of CPU layers if num_cpu_layers > 0.
-        // If num_cpu_layers was > 0, model_->forward has already been called. We call it here if it hasn't (pure CPU path from start)
-        if (num_cpu == 0) { // Only call model->forward if it wasn't called for CPU layers above
-             Logger::debug("[Generate] NO_CUDA: Processing all " + std::to_string(num_total_layers) + " layers on CPU for pos " + std::to_string(pos));
-             logits = model_->forward(current_data_host, pos, &kv_cache_, nullptr);
-        } else { // num_cpu > 0, means model->forward was already called and current_data_host has final logits
-            logits = current_data_host;
-        }
+    if (pos == num_prompt_tokens && start_pos_for_loop == num_prompt_tokens) {
+        // This is the first token *after* a successful prefill.
+        // `next_token_id` was already sampled using prefill's logits from the *last prompt token*.
+        // This `next_token_id` is the actual input for the current position `pos`.
+        input_token_id = next_token_id; 
+        Logger::debug("[Generate Loop] First token post-prefill. Using prefill's next_token_id: " + std::to_string(input_token_id) + " for pos " + std::to_string(pos));
     } else {
-        Logger::warning("No layers in the model (NO_CUDA path).");
-        logits.assign(config_.vocab_size > 0 ? config_.vocab_size : 1, 0.0f); // Assign dummy
+        // Standard iterative logic:
+        // If prefill didn't run (start_pos_for_loop == 0):
+        //   For pos < num_prompt_tokens: use prompt token.
+        //   For pos >= num_prompt_tokens: use previously sampled next_token_id.
+        // If prefill did run (start_pos_for_loop == num_prompt_tokens):
+        //   This 'else' block is for pos > num_prompt_tokens, so use previously sampled next_token_id.
+        input_token_id = (pos < num_prompt_tokens && start_pos_for_loop == 0) ? tokens[pos] : next_token_id;
+        if (start_pos_for_loop == 0 && pos < num_prompt_tokens) {
+             Logger::debug("[Generate Loop] No prefill, prompt token. Using tokens[" + std::to_string(pos) + "]: " + std::to_string(input_token_id) + " for pos " + std::to_string(pos));
+        } else {
+             Logger::debug("[Generate Loop] Standard generation. Using previously sampled next_token_id: " + std::to_string(input_token_id) + " for pos " + std::to_string(pos));
+        }
     }
-#endif
+    
+    current_data_host = model_->lookup_embedding(input_token_id);
+    if (pos == 14 || pos == 15 || pos == 16) {
+        log_vector_summary_detailed("[API_CPP GenLoop] current_data_host after lookup_embedding for input_token_id=" + std::to_string(input_token_id),
+                                    current_data_host, pos, -100, 8);
+    }
 
-    kv_cache_.seq_len = pos + 1;
+    if (current_data_host.empty()) {
+        Logger::error("Embedding lookup returned empty vector for token ID: " + std::to_string(input_token_id) + " at pos " + std::to_string(pos));
+        break; 
+    }
 
-    if (logits.empty()) {
-#ifdef HAS_CUDA
-      Logger::error("Model forward_device returned empty logits at pos " +
-                    std::to_string(pos));
-#else
-      Logger::error("Model forward (CPU) returned empty logits at pos " +
-                    std::to_string(pos));
-#endif
+    // Determine if the rest of the pass for this token should go to GPU
+    bool use_gpu_path = (config_.num_hidden_layers > config_.num_cpu_offload_layers);
+
+    // Single forward pass logic for the current token
+    if (use_gpu_path) {
+      if (use_batch_generation_) {
+        // GPU batch generation path (single token batch)
+        gpuErrchk(cudaMemcpy(model_->get_x_dev(), current_data_host.data(), current_data_host.size() * sizeof(float), cudaMemcpyHostToDevice));
+        std::vector<int> single_token_positions = {pos};
+        auto batch_logits = model_->forward_device_batch_generation(model_->get_x_dev(), single_token_positions, 1, &kv_cache_, 0);
+        if (!batch_logits.empty() && !batch_logits[0].empty()) {
+          logits = batch_logits[0]; // Extract logits for the single token
+        } else {
+          Logger::error("GPU batch generation returned empty logits for single token at pos " + std::to_string(pos));
+          logits.clear();
+        }
+      } else {
+        // Standard GPU single token path
+        gpuErrchk(cudaMemcpy(model_->get_x_dev(), current_data_host.data(), current_data_host.size() * sizeof(float), cudaMemcpyHostToDevice));
+        logits = model_->forward_device(model_->get_x_dev(), pos, &kv_cache_, nullptr);
+      }
+    } else {
+      if (use_batch_generation_) {
+        // CPU batch generation path (single token batch)
+        std::vector<int> single_token_positions = {pos};
+        auto batch_logits = model_->forward_cpu_batch_generation(current_data_host, single_token_positions, 1, &kv_cache_);
+        if (!batch_logits.empty() && !batch_logits[0].empty()) {
+          logits = batch_logits[0]; // Extract logits for the single token
+        } else {
+          Logger::error("CPU batch generation returned empty logits for single token at pos " + std::to_string(pos));
+          logits.clear();
+        }
+      } else {
+        // Standard CPU single token path
+        logits = model_->forward(current_data_host, pos, &kv_cache_, nullptr);
+      }
+    }
+
+    // The following block for prompt tokens (pos < num_prompt_tokens -1) is only relevant if prefill is NOT enabled.
+    // If prefill IS enabled, start_pos_for_loop will be num_prompt_tokens, so this block is skipped.
+    // The 'else if (prefill_enabled && pos == num_prompt_tokens -1)' is also effectively handled by prefill block now.
+    // The main logic for sampling is in the 'else' block below.
+    
+    if (pos < num_prompt_tokens -1 && !prefill_enabled) { 
+      // This is a prompt token (but not the last one if no prefill)
+      // For GGUF/CPU-only, KVCache is updated inside model_->forward().
+      // For GPU layers, KVCache is updated inside model_->forward_device().
+      // No explicit sampling needed here, we just process the prompt token.
+      Logger::debug("[Generate Loop] Prompt token (no prefill, not last). pos: " + std::to_string(pos) + ". KV Cache updated by forward call.");
+      // If this was the *last* prompt token and prefill was off, we'd fall through to sample.
+      // But since it's `pos < num_prompt_tokens - 1`, we just continue to the next prompt token.
+      // `next_token_id` will be tokens[pos+1] in the next iteration via the `input_token_id` logic.
+      // No, this is wrong. If it's a prompt token, `next_token_id` isn't used yet.
+      // The `input_token_id` for the next iteration will correctly pick `tokens[pos+1]`.
+      // We don't sample, we just ensure KV cache is populated.
+    } else if (pos == num_prompt_tokens -1 && !prefill_enabled) { // if it's the last prompt token (and no prefill)
+      next_token_id = sample_top_k_top_p_temperature(logits, temperature, top_k, top_p, rng_);
+      generated_token_ids.push_back(next_token_id); // Track generated token
+      generated_count++;
+      { // Scope for log_str
+        std::string decoded_str = tokenizer_->decode({next_token_id});
+        std::string log_str = "[Generate API Loop EndPromptNoPrefill] Sampled token ID: " + std::to_string(next_token_id) + ", Decoded: \"" + decoded_str + "\"";
+        Logger::info(log_str);
+      }
+    } else { // otherwise, it's a generated token (or first after prefill)
+      next_token_id = sample_top_k_top_p_temperature(logits, temperature, top_k, top_p, rng_);
+      // DON'T stream yet - token hasn't been processed through model!
+      generated_token_ids.push_back(next_token_id); // Track generated token
+      generated_count++;
+    }
+
+    if (next_token_id == eos_token_id_ && pos >= num_prompt_tokens) { // EOS only if we are generating
+      Logger::info("EOS token (" + std::to_string(eos_token_id_) +
+                     ") sampled at pos " + std::to_string(pos) + ". Stopping.");
       break;
     }
 
-    if (pos >= num_prompt_tokens - 1) {
-      next_token_id = sample_top_k_top_p_temperature(logits, temperature, top_k, top_p, rng_);
-      // Logger::debug("[Generate Loop] Pos: " + std::to_string(pos) + ", Prompt Tokens: " + std::to_string(num_prompt_tokens) + ", Generated Token ID: " + std::to_string(next_token_id));
+    // Stream the token that was just processed (input_token_id), not the one just sampled (next_token_id)
+    generated_stream_ << tokenizer_->decode({input_token_id}, false);
+    generated_text_for_api_return_ += tokenizer_->decode({input_token_id}, false);
 
-      // Decode and log the individual token immediately after sampling
-      std::string decoded_next_token = tokenizer_->decode({next_token_id}, true); 
-      Logger::info("[Generate] Sampled Token ID: " + std::to_string(next_token_id) + 
-                   ", Decoded: '" + decoded_next_token + "'");
+    if (generated_count >= steps) { // steps is max new tokens
+      Logger::info("Reached max generation steps (" + std::to_string(steps) + "). Stopping.");
+      break;
+    }
 
-      if (next_token_id == eos_token_id_) {
-        Logger::info("EOS token generated (ID: " + std::to_string(next_token_id) + "). Stopping.");
-        break;
-      }
-
-      tokens.push_back(next_token_id);
-      generated_count++;
-
-      if (generated_count >= steps) {
-        Logger::info("Max steps reached. Stopping.");
-        break;
-      }
+    // KVCache seq_len update for single token pass (already handled by batch prefill for its tokens)
+    // This needs to happen *after* the forward pass for the current 'pos' has updated the cache for 'pos'.
+    // So, after processing 'pos', the cache now contains information up to and including 'pos'.
+    // The length of the sequence in the cache is pos + 1.
+    if (!prefill_enabled || pos >= num_prompt_tokens) { // only update if not prefill, or if we are past prompt token processing in prefill case
+        kv_cache_.seq_len = pos + 1; 
+        // Logger::debug("[Generate Loop] KVCache seq_len updated to: " + std::to_string(kv_cache_.seq_len) + " after processing pos " + std::to_string(pos));
     }
   }
 
-  std::vector<int> generated_only_ids(tokens.begin() + num_prompt_tokens,
-                                      tokens.end());
-
   // Log all generated IDs before decoding
   std::string generated_ids_str = "[Generated IDs Pre-Decode] ";
-  for(int gen_id : generated_only_ids) {
+  for(int gen_id : generated_token_ids) {
     generated_ids_str += std::to_string(gen_id) + " ";
   }
   Logger::debug(generated_ids_str);
 
-  std::string result = tokenizer_->decode(generated_only_ids, true);
+  std::string result = tokenizer_->decode(generated_token_ids, true);
   Logger::info("Generated response: " + result);
+
+  auto t_end = std::chrono::high_resolution_clock::now(); // End timing
+  double time_taken_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
+  
+  // Create a string with the desired precision for the time
+  std::ostringstream time_ss;
+  time_ss << std::fixed << std::setprecision(4) << time_taken_ms;
+  Logger::info("[INFO] Total generation processing time: " + time_ss.str() + " ms");
+
   return result;
+}
+
+std::vector<std::string> TinyLlamaSession::generate_batch(const std::vector<std::string>& prompts,
+                                                         int steps,
+                                                         float temperature,
+                                                         int top_k, float top_p,
+                                                         const std::string& system_prompt_arg,
+                                                         bool apply_q_a_format_cli_hint) {
+  auto t_start = std::chrono::high_resolution_clock::now();
+
+  if (prompts.empty()) {
+    throw std::runtime_error("Cannot process empty prompts vector for batch generation.");
+  }
+
+  if (static_cast<int>(prompts.size()) > max_batch_size_) {
+    throw std::runtime_error("Batch size " + std::to_string(prompts.size()) + 
+                             " exceeds maximum batch size " + std::to_string(max_batch_size_));
+  }
+
+  Logger::info("[Batch Generate API] Processing " + std::to_string(prompts.size()) + 
+               " prompts in batch. Steps: " + std::to_string(steps));
+
+  if (!model_ || !tokenizer_) {
+    throw std::runtime_error("Model or tokenizer not loaded for batch generation.");
+  }
+
+  // Process each prompt to create final prompts and tokenize them
+  std::vector<std::string> final_prompts(prompts.size());
+  std::vector<std::vector<int>> all_tokens(prompts.size());
+  std::vector<int> prompt_lengths(prompts.size());
+  int max_prompt_length = 0;
+
+  for (size_t i = 0; i < prompts.size(); ++i) {
+    // Apply same prompt processing logic as single generate()
+    std::string final_prompt_for_encoding;
+    bool used_chat_template = false;
+
+    // Same priority logic as single generate()
+    if (apply_q_a_format_cli_hint) {
+      Logger::info("[Batch Generate API] Using legacy Q/A formatting for prompt " + std::to_string(i));
+      if (!system_prompt_arg.empty()) {
+        final_prompt_for_encoding = system_prompt_arg + "\\n\\nQ: " + prompts[i] + "\\nA:";
+      } else {
+        final_prompt_for_encoding = "Q: " + prompts[i] + "\\nA:";
+      }
+    } else if (tokenizer_ && !tokenizer_->get_gguf_chat_template().empty()) {
+      std::string gguf_template_content = tokenizer_->get_gguf_chat_template();
+      bool is_llama_sentencepiece_family = (config_.tokenizer_family == ModelConfig::TokenizerFamily::LLAMA_SENTENCEPIECE);
+      bool looks_like_jinja = (gguf_template_content.find("{%") != std::string::npos);
+
+      if (is_llama_sentencepiece_family && looks_like_jinja) {
+        Logger::info("[Batch Generate API] Using Q/A format override for prompt " + std::to_string(i));
+        if (!system_prompt_arg.empty()) {
+          final_prompt_for_encoding = system_prompt_arg + "\\\\n\\\\nQ: " + prompts[i] + "\\\\nA:";
+        } else {
+          final_prompt_for_encoding = "Q: " + prompts[i] + "\\\\nA:";
+        }
+      } else {
+        Logger::info("[Batch Generate API] Using GGUF chat template for prompt " + std::to_string(i));
+        final_prompt_for_encoding = tokenizer_->apply_chat_template(prompts[i], system_prompt_arg, config_);
+        used_chat_template = true;
+      }
+    } else if (config_.tokenizer_family == ModelConfig::TokenizerFamily::LLAMA3_TIKTOKEN) {
+      Logger::info("[Batch Generate API] Using Llama 3 chat template for prompt " + std::to_string(i));
+      final_prompt_for_encoding = tokenizer_->apply_chat_template(prompts[i], system_prompt_arg, config_);
+      used_chat_template = true;
+    } else {
+      Logger::info("[Batch Generate API] Using raw prompt for prompt " + std::to_string(i));
+      if (!system_prompt_arg.empty()) {
+        final_prompt_for_encoding = system_prompt_arg + "\\n\\n" + prompts[i];
+      } else {
+        final_prompt_for_encoding = prompts[i];
+      }
+    }
+
+    final_prompts[i] = final_prompt_for_encoding;
+    all_tokens[i] = tokenizer_->encode(final_prompt_for_encoding, true, false, Tokenizer::PreTokenizeMethod::DEFAULT);
+    
+    if (all_tokens[i].empty()) {
+      Logger::warning("Batch tokenization resulted in empty ID list for prompt " + std::to_string(i));
+      all_tokens[i].push_back(tokenizer_->bos_token_id()); // Fallback to BOS token
+    }
+
+    prompt_lengths[i] = all_tokens[i].size();
+    max_prompt_length = std::max(max_prompt_length, prompt_lengths[i]);
+    
+    Logger::info("[Batch Generate API] Prompt " + std::to_string(i) + ": " + 
+                 std::to_string(prompt_lengths[i]) + " tokens");
+  }
+
+  // Initialize batch mode
+  kv_cache_.initialize_batch(static_cast<int>(prompts.size()));
+  kv_cache_.clear_data();
+
+  // For now, implement sequential processing to maintain correctness
+  // TODO: Implement true parallel batch processing
+  std::vector<std::string> results(prompts.size());
+  
+  for (size_t i = 0; i < prompts.size(); ++i) {
+    Logger::info("[Batch Generate API] Processing prompt " + std::to_string(i + 1) + 
+                 "/" + std::to_string(prompts.size()));
+    
+    // Reset to single-sequence mode for this prompt
+    kv_cache_.seq_len = 0;
+    
+    // Use existing single-sequence generation logic
+    std::string result = generate(prompts[i], steps, temperature, top_k, top_p, 
+                                 system_prompt_arg, apply_q_a_format_cli_hint);
+    results[i] = result;
+  }
+
+  auto t_end = std::chrono::high_resolution_clock::now();
+  double time_taken_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
+  
+  std::ostringstream time_ss;
+  time_ss << std::fixed << std::setprecision(4) << time_taken_ms;
+  Logger::info("[Batch Generate API] Total batch processing time: " + time_ss.str() + " ms for " + 
+               std::to_string(prompts.size()) + " prompts");
+
+  return results;
 }
 
 }  // namespace tinyllama

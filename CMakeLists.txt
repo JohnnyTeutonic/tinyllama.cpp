@@ -185,6 +185,7 @@ install(TARGETS tinyllama_bindings
     ARCHIVE DESTINATION .
 )
 
+
 if(OpenMP_FOUND)
     message(STATUS "Found OpenMP, enabling parallel execution.")
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${OpenMP_C_FLAGS}")
