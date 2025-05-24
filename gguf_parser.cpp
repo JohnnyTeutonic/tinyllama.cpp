@@ -534,7 +534,52 @@ GGUFData load_gguf_meta(const std::string& filename, bool use_mmap) {
   Logger::info("[GGUF_LOAD] Metadata ifstream closed.");
 
   if (!use_mmap) {
-    Logger::info("[GGUF_LOAD] mmap is disabled by configuration. Tensor data will not be memory-mapped from GGUF.");
+    Logger::info("[GGUF_LOAD] mmap is disabled by configuration. Loading tensor data into memory using standard file I/O.");
+    
+    // Calculate total tensor data size
+    uint64_t total_tensor_data_size = 0;
+    for (const auto& tensor_info : result.tensor_infos) {
+      total_tensor_data_size = std::max(total_tensor_data_size, tensor_info.offset + tensor_info.size_in_bytes);
+    }
+    
+    if (total_tensor_data_size > 0) {
+      // Allocate memory for tensor data
+      result.tensor_data.resize(total_tensor_data_size);
+      
+      // Open file for reading tensor data
+      std::ifstream tensor_file(filename, std::ios::binary);
+      if (!tensor_file.is_open()) {
+        throw std::runtime_error("Failed to open file for tensor data reading: " + filename);
+      }
+      
+      // Seek to tensor data start
+      tensor_file.seekg(actual_data_start_offset_in_file);
+      if (!tensor_file) {
+        throw std::runtime_error("Failed to seek to tensor data start in file: " + filename);
+      }
+      
+      // Read all tensor data into memory
+      tensor_file.read(reinterpret_cast<char*>(result.tensor_data.data()), total_tensor_data_size);
+      if (!tensor_file) {
+        throw std::runtime_error("Failed to read tensor data from file: " + filename);
+      }
+      
+      tensor_file.close();
+      Logger::info("[GGUF_LOAD] Successfully loaded " + std::to_string(total_tensor_data_size) + " bytes of tensor data into memory.");
+      
+      // Log first few bytes for debugging
+      if (total_tensor_data_size >= 16) {
+        std::stringstream ss_bytes;
+        ss_bytes << "[GGUF_LOAD] First 16 bytes of tensor data: ";
+        for (int i = 0; i < 16; ++i) {
+          ss_bytes << "0x" << std::hex << static_cast<int>(result.tensor_data[i]) << " ";
+        }
+        Logger::info(ss_bytes.str());
+      }
+    } else {
+      Logger::info("[GGUF_LOAD] No tensor data to load (total size is 0).");
+    }
+    
     return result; 
   }
 

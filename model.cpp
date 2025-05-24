@@ -1439,14 +1439,14 @@ void TinyLlamaModel::initialize_weights(const SafeTensorsLoader* loader,
     Logger::info("[INIT_WEIGHTS_GGUF_PRE_MAP] embed_tokens_f32.empty(): " + std::string(this->embed_tokens_f32.empty() ? "YES" : "NO") + ", size: " + std::to_string(this->embed_tokens_f32.size()));
     Logger::info("[INIT_WEIGHTS_GGUF_PRE_MAP] final_norm_f32.empty(): " + std::string(this->final_norm_f32.empty() ? "YES" : "NO") + ", size: " + std::to_string(this->final_norm_f32.size()));
 
-    if (gguf && gguf->mapped_tensor_data) {
+    if (gguf && (gguf->mapped_tensor_data || !gguf->tensor_data.empty())) {
       map_gguf_weights(*gguf, *this);
       Logger::info("[INIT_WEIGHTS_GGUF] map_gguf_weights(*gguf, *this) CALLED (using function parameter).");
-    } else if (gguf_data_ && gguf_data_->mapped_tensor_data) {
+    } else if (gguf_data_ && (gguf_data_->mapped_tensor_data || !gguf_data_->tensor_data.empty())) {
       map_gguf_weights(*gguf_data_, *this);
       Logger::info("[INIT_WEIGHTS_GGUF] map_gguf_weights(*gguf_data_, *this) CALLED (using member gguf_data_).");
     } else {
-      Logger::error("[INIT_WEIGHTS_GGUF] Neither gguf (parameter) nor gguf_data_ (member) provided valid data for map_gguf_weights. No GGUF weights mapped.");
+      Logger::error("[INIT_WEIGHTS_GGUF] map_gguf_weights failed - tensor data not available. No GGUF weights mapped.");
     }
 
     Logger::info("[INIT_WEIGHTS_GGUF_POST_MAP_CALL] lm_head_f32.empty(): " + std::string(this->lm_head_f32.empty() ? "YES" : "NO") + ", size: " + std::to_string(this->lm_head_f32.size()));
@@ -2469,9 +2469,9 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& initial_config,
       this->model_path_.substr(this->model_path_.size() - 5) == ".gguf") {
     Logger::info("GGUF file detected by path in Model Constructor: " + this->model_path_);
     try {
-      bool force_mmap_for_gguf_load = true; 
-      Logger::info("TinyLlamaModel GGUF path: Forcing mmap to " + std::string(force_mmap_for_gguf_load ? "true" : "false") + 
-                   " for gguf_meta/weight loading. Initial CLI mmap preference was: " + 
+      bool force_mmap_for_gguf_load = cli_mmap_preference; 
+      Logger::info("TinyLlamaModel GGUF path: Using mmap setting " + std::string(force_mmap_for_gguf_load ? "true" : "false") + 
+                   " for gguf_meta/weight loading based on CLI mmap preference: " + 
                    std::string(cli_mmap_preference ? "true" : "false"));
 
       this->gguf_data_ = std::make_unique<GGUFData>(load_gguf_meta(this->model_path_, force_mmap_for_gguf_load));
@@ -3706,16 +3706,40 @@ std::vector<float> TinyLlamaModel::forward_device(
 
 void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
   Logger::info("Mapping GGUF weights to model fields...");
-  if (gguf.mapped_tensor_data == nullptr || gguf.mapped_tensor_data_size == 0) {
-    Logger::warning("GGUF mapped_tensor_data is null or size is 0. Cannot map weights.");
+  
+  // Debug the data sources
+  Logger::info("map_gguf_weights DEBUG: gguf.mapped_tensor_data = " + 
+               std::to_string(reinterpret_cast<uintptr_t>(gguf.mapped_tensor_data)));
+  Logger::info("map_gguf_weights DEBUG: gguf.mapped_tensor_data_size = " + 
+               std::to_string(gguf.mapped_tensor_data_size));
+  Logger::info("map_gguf_weights DEBUG: gguf.tensor_data.size() = " + 
+               std::to_string(gguf.tensor_data.size()));
+  Logger::info("map_gguf_weights DEBUG: gguf.tensor_data.empty() = " + 
+               std::string(gguf.tensor_data.empty() ? "true" : "false"));
+  
+  const uint8_t* actual_data_block_start = nullptr;
+  bool use_mmap_mode = false;
+  
+  // Determine which data source to use
+  if (gguf.mapped_tensor_data != nullptr && gguf.mapped_tensor_data_size > 0) {
+    // Use memory-mapped data
+    use_mmap_mode = true;
+    const uint8_t* mmap_buffer_start = static_cast<const uint8_t*>(gguf.mapped_tensor_data);
+    actual_data_block_start = mmap_buffer_start + gguf.offset_diff_for_mmap;
+    Logger::info("map_gguf_weights: Using mmap mode. Total mmapped region size: " +
+                 std::to_string(gguf.mapped_tensor_data_size) + " bytes. " +
+                 "Offset diff for mmap: " + std::to_string(gguf.offset_diff_for_mmap));
+  } else if (!gguf.tensor_data.empty()) {
+    // Use non-mmap data
+    use_mmap_mode = false;
+    actual_data_block_start = gguf.tensor_data.data();
+    Logger::info("map_gguf_weights: Using non-mmap mode. Total tensor data size: " +
+                 std::to_string(gguf.tensor_data.size()) + " bytes.");
+  } else {
+    Logger::error("map_gguf_weights DEBUG: Neither mmap nor tensor_data available!");
+    Logger::error("GGUF tensor data is not available in either mmap or non-mmap mode. Cannot map weights.");
     return;
   }
-  const uint8_t* mmap_buffer_start = static_cast<const uint8_t*>(gguf.mapped_tensor_data);
-  const uint8_t* actual_data_block_start = mmap_buffer_start + gguf.offset_diff_for_mmap;
-
-  Logger::info("map_gguf_weights: Total mmapped region size: " +
-               std::to_string(gguf.mapped_tensor_data_size) + " bytes. " +
-               "Offset diff for mmap: " + std::to_string(gguf.offset_diff_for_mmap));
 
   for (const auto& pair : gguf.tensor_infos_map) {
     const std::string& target_field_key = pair.first; // This is the key from tensor_infos_map
