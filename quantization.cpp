@@ -1052,3 +1052,186 @@ void dequantize_q8_0_block(const block_q8_0* qblock, float* output) {
     output[i] = d_fp32 * static_cast<float>(qblock->qs[i]);
   }
 }
+
+void dequantize_vector_q6k_to_f32(const std::vector<block_q6_K>& q_weights,
+                                  std::vector<float>& f32_weights,
+                                  size_t total_num_elements,
+                                  int log_first_n_blocks) {
+    if (q_weights.empty()) {
+        Logger::warning("[DEQUANT_VEC_Q6K] Input Q6_K weight vector is empty. Output float vector will be empty.");
+        f32_weights.clear();
+        return;
+    }
+
+    f32_weights.resize(total_num_elements);
+    size_t expected_blocks = (total_num_elements + GGML_QK_K - 1) / GGML_QK_K;
+
+    if (q_weights.size() != expected_blocks) {
+        Logger::error("[DEQUANT_VEC_Q6K] Mismatch in Q6_K block count. Expected: " +
+                      std::to_string(expected_blocks) + ", Got: " + std::to_string(q_weights.size()) +
+                      ". Total elements: " + std::to_string(total_num_elements));
+    }
+    
+    Logger::info("[DEQUANT_VEC_Q6K] Starting dequantization of " + std::to_string(q_weights.size()) +
+                 " Q6_K blocks to " + std::to_string(total_num_elements) + " float elements. GGML_QK_K: " + std::to_string(GGML_QK_K));
+
+    float* current_output_ptr = f32_weights.data();
+    size_t elements_processed = 0;
+
+    for (size_t i = 0; i < q_weights.size(); ++i) {
+        const block_q6_K* current_block_ptr = &q_weights[i];
+        int elements_in_this_block = GGML_QK_K;
+
+        if (elements_processed + GGML_QK_K > total_num_elements) {
+            elements_in_this_block = total_num_elements - elements_processed;
+        }
+        
+        if (elements_in_this_block <= 0) {
+            Logger::warning("[DEQUANT_VEC_Q6K] Zero or negative elements requested for block " + std::to_string(i) + ". Skipping.");
+            continue; 
+        }
+
+        bool log_this_specific_block = (log_first_n_blocks > 0 && static_cast<int>(i) < log_first_n_blocks);
+        
+        // Enhanced logging: Log block index for all blocks during the first dequantization call
+        static std::atomic<bool> first_call_ever{true};
+        bool is_first_call = first_call_ever.exchange(false);
+        
+        if (is_first_call || log_this_specific_block) {
+            Logger::info("[DEQUANT_VEC_Q6K_DETAIL] Processing block_idx=" + std::to_string(i) + 
+                         " out of " + std::to_string(q_weights.size()) + " blocks");
+            
+            // Log Q6_K block structure for first few blocks
+            if (log_this_specific_block) {
+                const float d_scale = fp16_to_fp32(current_block_ptr->d, false);
+                Logger::info("[DEQUANT_VEC_Q6K_DETAIL] Block " + std::to_string(i) + 
+                             " Q6_K scale (d): " + std::to_string(d_scale) + 
+                             " (raw fp16: 0x" + std::to_string(current_block_ptr->d) + ")");
+                
+                // Log first few scales
+                std::stringstream scales_ss;
+                scales_ss << "[DEQUANT_VEC_Q6K_DETAIL] Block " << i << " scales (first 8): ";
+                for (int j = 0; j < 8 && j < 16; ++j) {
+                    scales_ss << static_cast<int>(current_block_ptr->scales[j]) << " ";
+                }
+                Logger::info(scales_ss.str());
+            }
+        }
+        
+        dequantize_q6_k(current_block_ptr, current_output_ptr, elements_in_this_block, log_this_specific_block);
+        
+        // Enhanced logging: Log first few dequantized float values for important blocks
+        if (log_this_specific_block) {
+            std::stringstream values_ss;
+            values_ss << "[DEQUANT_VEC_Q6K_DETAIL] Block " << i << " dequantized float values (first 8): ";
+            values_ss << std::fixed << std::setprecision(6);
+            for (int j = 0; j < 8 && j < elements_in_this_block; ++j) {
+                values_ss << current_output_ptr[j] << " ";
+            }
+            Logger::info(values_ss.str());
+            
+            // For very first block, log more values to check patterns
+            if (i == 0) {
+                std::stringstream extended_values_ss;
+                extended_values_ss << "[DEQUANT_VEC_Q6K_DETAIL] Block 0 extended values (elements 8-23): ";
+                extended_values_ss << std::fixed << std::setprecision(6);
+                for (int j = 8; j < 24 && j < elements_in_this_block; ++j) {
+                    extended_values_ss << current_output_ptr[j] << " ";
+                }
+                Logger::info(extended_values_ss.str());
+                
+                // Check for obvious wrong patterns
+                bool has_inf_or_nan = false;
+                bool all_zeros = true;
+                bool very_large_values = false;
+                for (int j = 0; j < std::min(32, elements_in_this_block); ++j) {
+                    float val = current_output_ptr[j];
+                    if (std::isnan(val) || std::isinf(val)) has_inf_or_nan = true;
+                    if (val != 0.0f) all_zeros = false;
+                    if (std::abs(val) > 100.0f) very_large_values = true;
+                }
+                
+                if (has_inf_or_nan) {
+                    Logger::warning("[DEQUANT_VEC_Q6K_DETAIL] Block 0 contains NaN or Inf values!");
+                }
+                if (all_zeros) {
+                    Logger::warning("[DEQUANT_VEC_Q6K_DETAIL] Block 0 first 32 values are all zeros!");
+                }
+                if (very_large_values) {
+                    Logger::warning("[DEQUANT_VEC_Q6K_DETAIL] Block 0 contains very large values (>100)!");
+                }
+            }
+        }
+        
+        current_output_ptr += elements_in_this_block;
+        elements_processed += elements_in_this_block;
+
+        if (log_this_specific_block) {
+             Logger::info("[DEQUANT_VEC_Q6K] Dequantized block " + std::to_string(i) + ". Processed " +
+                          std::to_string(elements_in_this_block) + " elements. Output ptr advanced.");
+        }
+    }
+
+    if (elements_processed != total_num_elements) {
+        Logger::warning("[DEQUANT_VEC_Q6K] Processed " + std::to_string(elements_processed) +
+                        " elements, but expected " + std::to_string(total_num_elements) + ".");
+    } else {
+        Logger::info("[DEQUANT_VEC_Q6K] Successfully dequantized all blocks. Total elements: " + std::to_string(elements_processed));
+    }
+}
+
+void dequantize_vector_q4k_to_f32(const std::vector<block_q4_K>& q_weights,
+                                  std::vector<float>& f32_weights,
+                                  size_t total_num_elements,
+                                  int log_first_n_blocks) {
+    if (q_weights.empty()) {
+        Logger::warning("[DEQUANT_VEC_Q4K] Input Q4_K weight vector is empty. Output float vector will be empty.");
+        f32_weights.clear();
+        return;
+    }
+
+    f32_weights.resize(total_num_elements);
+    size_t expected_blocks = (total_num_elements + GGML_QK_K - 1) / GGML_QK_K;
+
+    if (q_weights.size() != expected_blocks) {
+        Logger::error("[DEQUANT_VEC_Q4K] Mismatch in Q4_K block count. Expected: " +
+                      std::to_string(expected_blocks) + ", Got: " + std::to_string(q_weights.size()) +
+                      ". Total elements: " + std::to_string(total_num_elements));
+    }
+    
+    float* current_output_ptr = f32_weights.data();
+    size_t elements_processed = 0;
+
+    for (size_t i = 0; i < q_weights.size(); ++i) {
+        const block_q4_K* current_block_ptr = &q_weights[i];
+        int elements_in_this_block = GGML_QK_K;
+
+        if (elements_processed + GGML_QK_K > total_num_elements) {
+            elements_in_this_block = total_num_elements - elements_processed;
+        }
+        
+        if (elements_in_this_block <= 0) {
+            Logger::warning("[DEQUANT_VEC_Q4K] Zero or negative elements requested for block " + std::to_string(i) + ". Skipping.");
+            continue; 
+        }
+
+        bool log_this_specific_block = (log_first_n_blocks > 0 && static_cast<int>(i) < log_first_n_blocks);
+        
+        // Enhanced logging: Log block index for all blocks during the first dequantization call
+        static std::atomic<bool> first_call_ever{true};
+        bool is_first_call = first_call_ever.exchange(false);
+        
+        // Call the Q4_K specific single-block dequantizer
+        dequantize_q4_k_m(current_block_ptr, current_output_ptr, elements_in_this_block, log_this_specific_block);
+        
+        
+        current_output_ptr += elements_in_this_block;
+        elements_processed += elements_in_this_block;
+
+    }
+
+    if (elements_processed != total_num_elements) {
+        Logger::warning("[DEQUANT_VEC_Q4K] Processed " + std::to_string(elements_processed) +
+                        " elements, but expected " + std::to_string(total_num_elements) + ".");
+    }
+}

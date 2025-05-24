@@ -339,6 +339,7 @@ class TinyLlamaModel {
   );
 
   void initialize_gpu_and_rope();
+  
 
   // Processes a batch of activations through a specified number of CPU layers.
   // Updates the KVCache for these layers.

@@ -501,6 +501,15 @@ void update_kv_cache_batch_cuda(
     cudaStream_t stream
 );
 
+// CUTLASS-based double precision accumulation GEMM
+void cutlass_gemm_f32_f32_double_accum(
+    const float* A, int lda,
+    const float* B, int ldb, 
+    float* C, int ldc,
+    int M, int N, int K,
+    float alpha, float beta,
+    cudaStream_t stream = 0);
+
 #endif // HAS_CUDA
 
 #endif // CUDA_KERNELS_H

@@ -28,6 +28,40 @@
 
 namespace tinyllama {
 
+
+static void log_vector_summary_detailed(const std::string& name,
+                                        const std::vector<float>& v,
+                                        int current_pos, int current_layer,
+                                        int N) {
+  if (v.empty()) {
+    Logger::info(name + " (pos=" + std::to_string(current_pos) + ", layer=" +
+                 std::to_string(current_layer) + "): EMPTY VECTOR");
+    return;
+  }
+  std::stringstream ss;
+  ss << name << " (pos=" << std::to_string(current_pos)
+     << ", layer=" << std::to_string(current_layer) << "): size=" << v.size();
+  ss << ", first " << N << ": [";
+  for (int i = 0; i < N && i < v.size(); ++i) {
+    ss << std::fixed << std::setprecision(4) << v[i]
+       << (i == N - 1 || i == v.size() - 1 ? "" : ", ");
+  }
+  ss << "]";
+  float min_val = v[0], max_val = v[0], sum = 0.0f;
+  bool all_finite = true;
+  for (float val : v) {
+    if (val < min_val) min_val = val;
+    if (val > max_val) max_val = val;
+    sum += val;
+    if (!std::isfinite(val)) all_finite = false;
+  }
+  ss << ", min=" << std::fixed << std::setprecision(4) << min_val;
+  ss << ", max=" << std::fixed << std::setprecision(4) << max_val;
+  ss << ", mean=" << std::fixed << std::setprecision(4) << (sum / v.size());
+  ss << ", finite=" << (all_finite ? "yes" : "no");
+  Logger::info(ss.str());
+}
+
 static std::string read_file_api(const std::string& path) {
   std::filesystem::path fs_path(path);
   std::ifstream file(fs_path, std::ios::binary);
@@ -136,6 +170,7 @@ static int sample_top_k_top_p_temperature(const std::vector<float>& logits,
 
   return prob_idx[sampled_idx_in_filtered].second;
 }
+
 
 TinyLlamaSession::TinyLlamaSession(const std::string& model_path_arg,
                                    const std::string& tokenizer_path_arg,
@@ -396,6 +431,10 @@ std::string TinyLlamaSession::generate(const std::string& user_prompt, int steps
                                      bool apply_q_a_format_cli_hint) { // Renamed for clarity
   auto t_start = std::chrono::high_resolution_clock::now(); // Start timing
 
+  generated_text_for_api_return_.clear(); // Clear for new generation
+  generated_stream_.str("");             // Clear for new generation
+  generated_stream_.clear();          // Clear error flags
+
   Logger::info("[Generate API] User prompt: \"" + user_prompt + "\", System prompt: \"" + system_prompt_arg + "\", Steps: " + std::to_string(steps));
 
   if (!model_ || !tokenizer_) {
@@ -490,6 +529,7 @@ std::string TinyLlamaSession::generate(const std::string& user_prompt, int steps
   int next_token_id = -1;
 
   std::vector<float> logits; // Declare logits here, to be populated by prefill or loop
+  std::vector<int> generated_token_ids; // Track generated tokens separately
   
   kv_cache_.clear_data(); // Clear K/V vector data for all layers
   kv_cache_.seq_len = 0;  // Reset KVCache logical sequence length for new sequence
@@ -497,220 +537,89 @@ std::string TinyLlamaSession::generate(const std::string& user_prompt, int steps
   std::vector<float> current_data_host; // To hold embedding or output of CPU layers
   int start_pos_for_loop = 0;
 
+bool prefill_enabled = (num_prompt_tokens > 1);
 
-#ifdef HAS_CUDA
-  int num_total_layers_model = config_.num_hidden_layers;
-  int num_cpu_layers_model = config_.num_cpu_offload_layers;
-  int num_gpu_layers_model = num_total_layers_model - num_cpu_layers_model;
-
-  if (num_gpu_layers_model > 0 && num_prompt_tokens > 0) {
-      Logger::info("[Generate API] Attempting GPU batch prefill for " + std::to_string(num_prompt_tokens) + " prompt tokens.");
+if (prefill_enabled) {
+      Logger::info("[Generate API] Prefill enabled. num_prompt_tokens: " + std::to_string(num_prompt_tokens) + 
+                   ", num_cpu_offload_layers: " + std::to_string(config_.num_cpu_offload_layers) +
+                   ", total_hidden_layers: " + std::to_string(config_.num_hidden_layers));
       
-      std::vector<float> batch_intermediate_activations_host; // Will hold initial embeddings or output of CPU layers
-      batch_intermediate_activations_host.reserve(num_prompt_tokens * config_.hidden_size);
-
-      // 1. Initial Embedding Lookup
+      std::vector<float> batch_initial_embeddings(num_prompt_tokens * config_.hidden_size);
       for (int i = 0; i < num_prompt_tokens; ++i) {
-          std::vector<float> current_token_embedding = model_->lookup_embedding(tokens[i]);
-          if (current_token_embedding.empty()) {
-              Logger::error("Failed to get embedding for prompt token ID " + std::to_string(tokens[i]) + " at index " + std::to_string(i));
-              return ""; 
+          std::vector<float> token_embedding = model_->lookup_embedding(tokens[i]);
+          if (token_embedding.empty()) {
+              Logger::error("Prefill: Embedding lookup returned empty vector for token ID: " + std::to_string(tokens[i]) + " at prompt pos " + std::to_string(i));
+              return ""; // Or handle error appropriately
           }
-          batch_intermediate_activations_host.insert(batch_intermediate_activations_host.end(), current_token_embedding.begin(), current_token_embedding.end());
+          std::copy(token_embedding.begin(), token_embedding.end(), batch_initial_embeddings.begin() + i * config_.hidden_size);
       }
 
-      // 2. CPU Layer Batch Processing (New Step)
-      if (num_cpu_layers_model > 0) {
-          Logger::info("[Generate API] Processing " + std::to_string(num_cpu_layers_model) + " CPU layers in batch for prefill.");
-          // This function needs to be implemented in TinyLlamaModel.
-          // It should update kv_cache_ for the CPU layers it processes.
-          // The '0' for start_pos assumes this batch processing for CPU layers starts from sequence position 0 for this batch.
-          batch_intermediate_activations_host = model_->forward_cpu_batch(
-              batch_intermediate_activations_host, 
-              num_prompt_tokens, 
-              num_cpu_layers_model, 
-              0, // start_pos for this batch segment in CPU processing
-              &kv_cache_
-          ); 
-          if (batch_intermediate_activations_host.empty()) {
-              Logger::error("CPU batch processing for prefill returned empty activations.");
-              return "";
-          }
-          Logger::info("[Generate API] CPU layers processed for prefill. Activations size: " + std::to_string(batch_intermediate_activations_host.size()));
-          // After CPU layers, kv_cache_.seq_len would have been updated by forward_cpu_batch up to num_prompt_tokens
-          // if it processed the entire prompt.
-      }
-
-      // 3. Data Transfer to GPU (activations from CPU layers, or initial embeddings if no CPU layers)
-      float* d_batch_gpu_input_activations = nullptr;
-      if (!batch_intermediate_activations_host.empty()) {
-          gpuErrchk(cudaMalloc(&d_batch_gpu_input_activations, batch_intermediate_activations_host.size() * sizeof(float)));
-          gpuErrchk(cudaMemcpy(d_batch_gpu_input_activations, batch_intermediate_activations_host.data(), batch_intermediate_activations_host.size() * sizeof(float), cudaMemcpyHostToDevice));
-          
-          cudaError_t err_sync_after_memcpy = cudaDeviceSynchronize(); // Existing debug log location
-          if (err_sync_after_memcpy != cudaSuccess) {
-              Logger::error("[Generate API DEBUG] CUDA error after d_batch_gpu_input_activations setup (sync): " + std::string(cudaGetErrorString(err_sync_after_memcpy)));
-          }
-          cudaError_t err_last_after_memcpy = cudaGetLastError();
-          if (err_last_after_memcpy != cudaSuccess) {
-              Logger::error("[Generate API DEBUG] CUDA error after d_batch_gpu_input_activations setup (last): " + std::string(cudaGetErrorString(err_last_after_memcpy)));
-          } else {
-              Logger::info("[Generate API DEBUG] d_batch_gpu_input_activations setup for prefill SYNC OK. Pointer: " + Logger::ptrToString(d_batch_gpu_input_activations));
+      // If there are CPU layers to process for prefill
+      std::vector<float> cpu_processed_embeddings;
+      if (config_.num_cpu_offload_layers > 0) {
+          Logger::info("[Generate API] Prefill: Processing " + std::to_string(config_.num_cpu_offload_layers) + " CPU layers for the batch.");
+          cpu_processed_embeddings = model_->forward_cpu_batch(batch_initial_embeddings, num_prompt_tokens, config_.num_cpu_offload_layers, 0, &kv_cache_);
+          if (cpu_processed_embeddings.empty()) {
+               Logger::error("Prefill: forward_cpu_batch returned empty or failed.");
+               return "";
           }
       } else {
-          Logger::error("Batch intermediate activations host vector is empty before GPU prefill stage.");
-          return "";
+          cpu_processed_embeddings = batch_initial_embeddings; // No CPU layers, pass embeddings directly
       }
 
-      // kv_cache_.seq_len for the GPU part should start from 0 if CPU layers didn't touch it,
-      // or num_prompt_tokens if CPU layers fully processed the prompt.
-      // The current_model_pos for forward_device_batch_prefill is the starting *offset* for RoPE and KV cache updates
-      // for the tokens being processed *by the GPU layers*.
-      // If CPU layers handled tokens 0..N-1, GPU layers handle the same tokens 0..N-1 but for *their* respective layers.
-      // So, current_model_pos for RoPE in GPU layers should still be based on the token's actual position in sequence.
-      // The KVCache update inside forward_device_batch_prefill uses current_model_pos as the offset.
-      // This seems correct: current_model_pos = 0, as this function processes the whole prompt batch from its perspective.
-      // The KVCache itself tracks total length.
-      
-      // Important: If CPU layers modified kv_cache_.seq_len, it should be consistent here.
-      // Let's assume forward_cpu_batch sets kv_cache_.seq_len correctly if it runs.
-      // If no CPU layers ran, kv_cache_.seq_len is still 0 here.
-      // The `forward_device_batch_prefill` will update KV cache from `current_model_pos`.
-      
-      logits = model_->forward_device_batch_prefill(
-          d_batch_gpu_input_activations,
-          num_prompt_tokens,
-          0, // current_model_pos for this batch segment for GPU layers
-          &kv_cache_,
-          0 // default stream
-      );
-      
-      if (d_batch_gpu_input_activations) {
-          gpuErrchk(cudaFree(d_batch_gpu_input_activations));
-      }
+      // If all layers are CPU layers (i.e., num_gpu_layers == 0)
+      if (config_.num_cpu_offload_layers == config_.num_hidden_layers) {
+          Logger::info("[Generate API] Prefill: All layers are on CPU. Getting logits from final CPU layer output.");
+          std::vector<float> batch_logits = model_->forward_cpu_logits_batch(cpu_processed_embeddings, num_prompt_tokens);
+          if (batch_logits.empty() || batch_logits.size() % config_.vocab_size != 0) {
+              Logger::error("Prefill: forward_cpu_logits_batch returned invalid logits.");
+              return "";
+          }
+          // Extract logits for the last token of the prompt
+          logits.assign(batch_logits.begin() + (num_prompt_tokens - 1) * config_.vocab_size,
+                        batch_logits.begin() + num_prompt_tokens * config_.vocab_size);
+      } else { // GPU layers exist and need to be processed
+          Logger::info("[Generate API] Prefill: Processing GPU layers for the batch.");
+          // Copy the (potentially CPU-processed) embeddings to the device
+          float* d_temp_batch_embeddings = nullptr;
+          size_t batch_embeddings_size_bytes = cpu_processed_embeddings.size() * sizeof(float);
 
+          if (batch_embeddings_size_bytes == 0) {
+              Logger::error("Prefill: cpu_processed_embeddings is empty, cannot proceed with GPU batch prefill.");
+              return ""; // Or handle error appropriately
+          }
+
+          gpuErrchk(cudaMalloc(&d_temp_batch_embeddings, batch_embeddings_size_bytes));
+          if (!d_temp_batch_embeddings) {
+              Logger::error("Prefill: cudaMalloc failed for d_temp_batch_embeddings.");
+              return ""; // Or handle error appropriately
+          }
+          
+          gpuErrchk(cudaMemcpy(d_temp_batch_embeddings, cpu_processed_embeddings.data(), 
+                               batch_embeddings_size_bytes, cudaMemcpyHostToDevice));
+
+          logits = model_->forward_device_batch_prefill(d_temp_batch_embeddings, num_prompt_tokens, 0, &kv_cache_, 0);
+          
+          if (d_temp_batch_embeddings) {
+              gpuErrchk(cudaFree(d_temp_batch_embeddings));
+          }
+      }
+      
       if (logits.empty()) {
-          Logger::error("forward_device_batch_prefill returned empty logits.");
-          return "";
+          Logger::error("Prefill: Logits are empty after prefill processing.");
+          return ""; // Critical error
       }
-      
+      next_token_id = sample_top_k_top_p_temperature(logits, temperature, top_k, top_p, rng_);
+      // DON'T stream yet - token hasn't been processed through model!
+      generated_token_ids.push_back(next_token_id); // Track generated token
+      generated_count++;
+      start_pos_for_loop = num_prompt_tokens; // Next token will be at num_prompt_tokens
       kv_cache_.seq_len = num_prompt_tokens; // KVCache is now filled up to num_prompt_tokens
-      start_pos_for_loop = num_prompt_tokens; // Main loop starts after the prompt
-      
-      // Logits for the first token *after* the prompt are now available.
-      // next_token_id will be sampled from these logits before the loop begins if prefill was successful.
-      // This sampling is to prepare `next_token_id` for the very first iteration of the adjusted loop.
-      next_token_id = sample_top_k_top_p_temperature(logits, temperature, top_k, top_p, rng_);
-      Logger::info("[Generate API] Prefill successful. Next token ID (for pos=" + std::to_string(num_prompt_tokens) + "): " + std::to_string(next_token_id));
 
-  } else { // This 'else' means (num_gpu_layers_model == 0 || num_prompt_tokens == 0) when HAS_CUDA is defined
-      Logger::info("[Generate API] Using CPU for prefill (either no GPU layers, or no prompt tokens for GPU prefill). Prompt tokens: " + std::to_string(num_prompt_tokens));
-      if (num_prompt_tokens > 0) {
-          std::vector<float> prompt_embeddings_flat;
-          prompt_embeddings_flat.reserve(num_prompt_tokens * config_.hidden_size);
-          for (int i = 0; i < num_prompt_tokens; ++i) {
-              std::vector<float> current_token_embedding = model_->lookup_embedding(tokens[i]);
-              if (current_token_embedding.empty()) {
-                  Logger::error("Failed to get embedding for prompt token ID " + std::to_string(tokens[i]) + " at index " + std::to_string(i));
-                  return ""; 
-              }
-              prompt_embeddings_flat.insert(prompt_embeddings_flat.end(), current_token_embedding.begin(), current_token_embedding.end());
-          }
-
-          // All layers are processed by CPU in this path
-          std::vector<float> cpu_prefill_output_activations = model_->forward_cpu_batch(
-              prompt_embeddings_flat,
-              num_prompt_tokens,
-              config_.num_hidden_layers, // Process ALL layers on CPU
-              0, // start_pos for this batch segment in CPU processing
-              &kv_cache_
-          );
-
-          if (cpu_prefill_output_activations.empty()) {
-              Logger::error("CPU batch prefill (all layers) returned empty activations.");
-              return "";
-          }
-          Logger::info("[Generate API] CPU batch prefill (all layers) processed. Activations size: " + std::to_string(cpu_prefill_output_activations.size()));
-          
-          // Get logits for all tokens in the prefill batch
-          std::vector<float> all_logits_from_prefill = model_->forward_cpu_logits_batch(
-              cpu_prefill_output_activations,
-              num_prompt_tokens
-          );
-
-          if (all_logits_from_prefill.empty() || all_logits_from_prefill.size() != (size_t)num_prompt_tokens * config_.vocab_size) {
-              Logger::error("CPU batch prefill logit calculation failed or returned unexpected size.");
-              return "";
-          }
-
-          // Extract logits for the LAST token of the prompt to predict the next token
-          logits.resize(config_.vocab_size);
-          size_t last_token_logits_offset = (size_t)(num_prompt_tokens - 1) * config_.vocab_size;
-          std::copy(all_logits_from_prefill.begin() + last_token_logits_offset,
-                    all_logits_from_prefill.begin() + last_token_logits_offset + config_.vocab_size,
-                    logits.begin());
-
-          kv_cache_.seq_len = num_prompt_tokens; // KVCache is now filled up to num_prompt_tokens
-          start_pos_for_loop = num_prompt_tokens; // Main loop starts after the prompt
-          next_token_id = sample_top_k_top_p_temperature(logits, temperature, top_k, top_p, rng_);
-          Logger::info("[Generate API] CPU Prefill successful. Next token ID (for pos=" + std::to_string(num_prompt_tokens) + "): " + std::to_string(next_token_id));
-      } else {
-          start_pos_for_loop = 0; // No prompt tokens, standard loop from beginning
-      }
+      Logger::info("[Generate API] Prefill completed. next_token_id: " + std::to_string(next_token_id) + 
+                   ", Decoded: \"" + tokenizer_->decode({next_token_id}, false) + "\"" + 
+                   ", start_pos_for_loop set to: " + std::to_string(start_pos_for_loop));
   }
-#else // No HAS_CUDA defined - Pure CPU path from the start
-  Logger::info("[Generate API] No CUDA. Using CPU for prefill. Prompt tokens: " + std::to_string(num_prompt_tokens));
-  if (num_prompt_tokens > 0) {
-      std::vector<float> prompt_embeddings_flat;
-      prompt_embeddings_flat.reserve(num_prompt_tokens * config_.hidden_size);
-      for (int i = 0; i < num_prompt_tokens; ++i) {
-          std::vector<float> current_token_embedding = model_->lookup_embedding(tokens[i]);
-          if (current_token_embedding.empty()) {
-              Logger::error("Failed to get embedding for prompt token ID " + std::to_string(tokens[i]) + " at index " + std::to_string(i));
-              return ""; 
-          }
-          prompt_embeddings_flat.insert(prompt_embeddings_flat.end(), current_token_embedding.begin(), current_token_embedding.end());
-      }
-
-      std::vector<float> cpu_prefill_output_activations = model_->forward_cpu_batch(
-          prompt_embeddings_flat,
-          num_prompt_tokens,
-          config_.num_hidden_layers, // Process ALL layers on CPU
-          0, // start_pos
-          &kv_cache_
-      );
-
-      if (cpu_prefill_output_activations.empty()) {
-          Logger::error("CPU batch prefill (all layers, no CUDA path) returned empty activations.");
-          return "";
-      }
-      Logger::info("[Generate API] CPU batch prefill (all layers, no CUDA path) processed. Activations size: " + std::to_string(cpu_prefill_output_activations.size()));
-      
-      std::vector<float> all_logits_from_prefill = model_->forward_cpu_logits_batch(
-          cpu_prefill_output_activations,
-          num_prompt_tokens // Corrected: was num_tokens_in_batch
-      );
-
-      if (all_logits_from_prefill.empty() || all_logits_from_prefill.size() != (size_t)num_prompt_tokens * config_.vocab_size) {
-          Logger::error("CPU batch prefill logit calculation failed or returned unexpected size (no CUDA path).");
-          return "";
-      }
-
-      logits.resize(config_.vocab_size);
-      size_t last_token_logits_offset = (size_t)(num_prompt_tokens - 1) * config_.vocab_size;
-      std::copy(all_logits_from_prefill.begin() + last_token_logits_offset,
-                all_logits_from_prefill.begin() + last_token_logits_offset + config_.vocab_size,
-                logits.begin());
-
-      kv_cache_.seq_len = num_prompt_tokens;
-      start_pos_for_loop = num_prompt_tokens;
-      next_token_id = sample_top_k_top_p_temperature(logits, temperature, top_k, top_p, rng_);
-      Logger::info("[Generate API] CPU Prefill successful (no CUDA path). Next token ID (for pos=" + std::to_string(num_prompt_tokens) + "): " + std::to_string(next_token_id));
-  } else {
-      start_pos_for_loop = 0; // No prompt tokens, standard loop from beginning
-  }
-#endif
-
 
   for (int pos = start_pos_for_loop; pos < total_steps; ++pos) {
     if (pos >= config_.max_position_embeddings) {
@@ -722,147 +631,118 @@ std::string TinyLlamaSession::generate(const std::string& user_prompt, int steps
 
     int input_token_id;
 
-    // If we are at the first position *after* a successful prefill,
-    // `next_token_id` was already sampled using prefill's logits.
-    // `tokens` does not yet contain this `next_token_id`.
-    // The loop's job starts by setting this as the current `input_token_id`
-    // and then proceeding to generate the *next* one.
     if (pos == num_prompt_tokens && start_pos_for_loop == num_prompt_tokens) {
-        // `next_token_id` is from prefill's logits (sampled above if prefill happened)
+        // This is the first token *after* a successful prefill.
+        // `next_token_id` was already sampled using prefill's logits from the *last prompt token*.
+        // This `next_token_id` is the actual input for the current position `pos`.
         input_token_id = next_token_id; 
-        // It's crucial that `next_token_id` was validly sampled if we reach here.
-        // The prefill block should ensure `next_token_id` is set if `logits` were successfully obtained.
+        Logger::debug("[Generate Loop] First token post-prefill. Using prefill's next_token_id: " + std::to_string(input_token_id) + " for pos " + std::to_string(pos));
     } else {
         // Standard iterative logic:
-        // For pos < num_prompt_tokens (only if prefill didn't run, i.e. start_pos_for_loop = 0): use prompt token.
-        // For pos >= num_prompt_tokens (if prefill didn't run OR for subsequent steps after prefill): use previously sampled next_token_id.
-        input_token_id = (pos < num_prompt_tokens) ? tokens[pos] : next_token_id;
+        // If prefill didn't run (start_pos_for_loop == 0):
+        //   For pos < num_prompt_tokens: use prompt token.
+        //   For pos >= num_prompt_tokens: use previously sampled next_token_id.
+        // If prefill did run (start_pos_for_loop == num_prompt_tokens):
+        //   This 'else' block is for pos > num_prompt_tokens, so use previously sampled next_token_id.
+        input_token_id = (pos < num_prompt_tokens && start_pos_for_loop == 0) ? tokens[pos] : next_token_id;
+        if (start_pos_for_loop == 0 && pos < num_prompt_tokens) {
+             Logger::debug("[Generate Loop] No prefill, prompt token. Using tokens[" + std::to_string(pos) + "]: " + std::to_string(input_token_id) + " for pos " + std::to_string(pos));
+        } else {
+             Logger::debug("[Generate Loop] Standard generation. Using previously sampled next_token_id: " + std::to_string(input_token_id) + " for pos " + std::to_string(pos));
+        }
     }
     
-    // Only calculate logits if they weren't provided by prefill for this specific position.
-    // This means if (pos == num_prompt_tokens && start_pos_for_loop == num_prompt_tokens),
-    // we use the `logits` from prefill (already sampled into next_token_id for this iteration's input).
-    // For all other cases (iterative prompt processing or subsequent generation steps), calculate new logits.
-    if (!(pos == num_prompt_tokens && start_pos_for_loop == num_prompt_tokens)) {
     current_data_host = model_->lookup_embedding(input_token_id);
+    if (pos == 14 || pos == 15 || pos == 16) {
+        log_vector_summary_detailed("[API_CPP GenLoop] current_data_host after lookup_embedding for input_token_id=" + std::to_string(input_token_id),
+                                    current_data_host, pos, -100, 8);
+    }
+
     if (current_data_host.empty()) {
-        Logger::error("Failed to get embedding for token " + std::to_string(input_token_id) + " at pos " + std::to_string(pos));
-        break;
+        Logger::error("Embedding lookup returned empty vector for token ID: " + std::to_string(input_token_id) + " at pos " + std::to_string(pos));
+        break; 
     }
 
-    int num_total_layers = config_.num_hidden_layers;
-    int num_cpu = config_.num_cpu_offload_layers;
-    int num_gpu = num_total_layers - num_cpu;
+    // Determine if the rest of the pass for this token should go to GPU
+    bool use_gpu_path = (config_.num_hidden_layers > config_.num_cpu_offload_layers);
 
-        if (num_cpu > 0) {
-        Logger::debug("[Generate] Processing " + std::to_string(num_cpu) + " CPU layers for pos " + std::to_string(pos));
-        current_data_host = model_->forward(current_data_host, pos, &kv_cache_, nullptr);
-    }
-
-#ifdef HAS_CUDA
-        if (num_gpu > 0) {
-        Logger::debug("[Generate] Processing " + std::to_string(num_gpu) + " GPU layers for pos " + std::to_string(pos));
-        float* x_dev_ptr = model_->get_x_dev();
-        if (!x_dev_ptr) { 
-            Logger::fatal("model_->x_dev_ is null before GPU forward pass!"); 
-            throw std::runtime_error("Critical error: x_dev_ is null in GPU pipeline.");
-        }
-            if (current_data_host.empty()) { // Check if current_data_host has valid data
-                Logger::fatal("current_data_host is empty before cudaMemcpy to x_dev_ at pos " + std::to_string(pos)); 
-                throw std::runtime_error("Critical error: current_data_host is empty for GPU pipeline at pos " + std::to_string(pos));
-        }
-        gpuErrchk(cudaMemcpy(x_dev_ptr, current_data_host.data(), current_data_host.size() * sizeof(float), cudaMemcpyHostToDevice));
-        
-        logits = model_->forward_device(x_dev_ptr, pos, &kv_cache_, nullptr);
-        } else if (num_cpu > 0 && num_gpu == 0) {
-        logits = current_data_host;
-        } else if (num_total_layers == 0) {
-        Logger::warning("No layers in the model (HAS_CUDA path).");
-            logits.assign(config_.vocab_size > 0 ? config_.vocab_size : 1, 0.0f);
-        } else if (num_cpu == 0 && num_gpu == 0 && num_total_layers > 0) {
-         Logger::error("Inconsistent state: HAS_CUDA, num_cpu=0, num_gpu=0, but num_total_layers > 0. Defaulting to CPU path for safety.");
-             current_data_host = model_->lookup_embedding(input_token_id);
-         logits = model_->forward(current_data_host, pos, &kv_cache_, nullptr);
-    }
-#else // No CUDA
-    if (num_total_layers > 0) {
-            // If prefill didn't run, num_cpu could be 0 if all layers were meant for GPU (but CUDA not avail).
-            // Or num_cpu > 0 if some were designated for CPU.
-            // model->forward needs to be called if current_data_host is just an embedding.
-        if (num_cpu == 0) { // Only call model->forward if it wasn't called for CPU layers above
-             Logger::debug("[Generate] NO_CUDA: Processing all " + std::to_string(num_total_layers) + " layers on CPU for pos " + std::to_string(pos));
-             logits = model_->forward(current_data_host, pos, &kv_cache_, nullptr);
-        } else { // num_cpu > 0, means model->forward was already called and current_data_host has final logits
-            logits = current_data_host;
-        }
+    // Single forward pass logic for the current token
+    if (use_gpu_path) {
+      // Copy host embeddings to device scratchpad
+      gpuErrchk(cudaMemcpy(model_->get_x_dev(), current_data_host.data(), current_data_host.size() * sizeof(float), cudaMemcpyHostToDevice));
+      // Call forward_device with device pointer, pos, and KVCache
+      logits = model_->forward_device(model_->get_x_dev(), pos, &kv_cache_, nullptr);
     } else {
-        Logger::warning("No layers in the model (NO_CUDA path).");
-            logits.assign(config_.vocab_size > 0 ? config_.vocab_size : 1, 0.0f);
+      // Call forward with host embeddings vector, pos, and KVCache
+      logits = model_->forward(current_data_host, pos, &kv_cache_, nullptr);
     }
-#endif
-        // Update KVCache seq_len *after* the forward pass for this position
-    kv_cache_.seq_len = pos + 1;
-    }
-    // If (pos == num_prompt_tokens && start_pos_for_loop == num_prompt_tokens),
-    // logits are from prefill. kv_cache_.seq_len was already set to num_prompt_tokens.
-    // For the *next* iteration (pos = num_prompt_tokens + 1), kv_cache_.seq_len will be updated
-    // after its forward pass. This seems correct.
 
-    if (logits.empty()) {
-      Logger::error("Logits vector is empty after forward pass at pos " + std::to_string(pos));
+    // The following block for prompt tokens (pos < num_prompt_tokens -1) is only relevant if prefill is NOT enabled.
+    // If prefill IS enabled, start_pos_for_loop will be num_prompt_tokens, so this block is skipped.
+    // The 'else if (prefill_enabled && pos == num_prompt_tokens -1)' is also effectively handled by prefill block now.
+    // The main logic for sampling is in the 'else' block below.
+    
+    if (pos < num_prompt_tokens -1 && !prefill_enabled) { 
+      // This is a prompt token (but not the last one if no prefill)
+      // For GGUF/CPU-only, KVCache is updated inside model_->forward().
+      // For GPU layers, KVCache is updated inside model_->forward_device().
+      // No explicit sampling needed here, we just process the prompt token.
+      Logger::debug("[Generate Loop] Prompt token (no prefill, not last). pos: " + std::to_string(pos) + ". KV Cache updated by forward call.");
+      // If this was the *last* prompt token and prefill was off, we'd fall through to sample.
+      // But since it's `pos < num_prompt_tokens - 1`, we just continue to the next prompt token.
+      // `next_token_id` will be tokens[pos+1] in the next iteration via the `input_token_id` logic.
+      // No, this is wrong. If it's a prompt token, `next_token_id` isn't used yet.
+      // The `input_token_id` for the next iteration will correctly pick `tokens[pos+1]`.
+      // We don't sample, we just ensure KV cache is populated.
+    } else if (pos == num_prompt_tokens -1 && !prefill_enabled) { // if it's the last prompt token (and no prefill)
+      next_token_id = sample_top_k_top_p_temperature(logits, temperature, top_k, top_p, rng_);
+      generated_token_ids.push_back(next_token_id); // Track generated token
+      generated_count++;
+      { // Scope for log_str
+        std::string decoded_str = tokenizer_->decode({next_token_id});
+        std::string log_str = "[Generate API Loop EndPromptNoPrefill] Sampled token ID: " + std::to_string(next_token_id) + ", Decoded: \"" + decoded_str + "\"";
+        Logger::info(log_str);
+      }
+    } else { // otherwise, it's a generated token (or first after prefill)
+      next_token_id = sample_top_k_top_p_temperature(logits, temperature, top_k, top_p, rng_);
+      // DON'T stream yet - token hasn't been processed through model!
+      generated_token_ids.push_back(next_token_id); // Track generated token
+      generated_count++;
+    }
+
+    if (next_token_id == eos_token_id_ && pos >= num_prompt_tokens) { // EOS only if we are generating
+      Logger::info("EOS token (" + std::to_string(eos_token_id_) +
+                     ") sampled at pos " + std::to_string(pos) + ". Stopping.");
       break;
     }
 
-    // Generation part: sample next token if current 'pos' is for a token to be generated,
-    // or if it's the last token of the prompt (and prefill didn't run for the prompt).
-    // If prefill ran, `start_pos_for_loop` is `num_prompt_tokens`.
-    // The first `pos` value in the loop would be `num_prompt_tokens`.
-    // So `pos >= num_prompt_tokens -1` becomes `num_prompt_tokens >= num_prompt_tokens -1` which is true.
-    // If prefill didn't run, `start_pos_for_loop` is `0`.
-    // The condition `pos >= num_prompt_tokens -1` will ensure we start sampling
-    // after processing the last prompt token.
-    if (pos >= num_prompt_tokens -1) { // This condition correctly handles both prefill and non-prefill cases
-      next_token_id = sample_top_k_top_p_temperature(logits, temperature, top_k, top_p, rng_);
-      
-      // If this is the first generated token (i.e., pos == num_prompt_tokens if prefill ran,
-      // or pos == num_prompt_tokens-1 if prefill didn't run but we just processed last prompt token),
-      // `input_token_id` for this iteration was the one *being processed*.
-      // `next_token_id` is the one *to be added* to `tokens`.
+    // Stream the token that was just processed (input_token_id), not the one just sampled (next_token_id)
+    generated_stream_ << tokenizer_->decode({input_token_id}, false);
+    generated_text_for_api_return_ += tokenizer_->decode({input_token_id}, false);
 
-      std::string decoded_next_token = tokenizer_->decode({next_token_id}, true); 
-      Logger::info("[Generate] Pos=" + std::to_string(pos) + 
-                   ", InputID=" + std::to_string(input_token_id) + // This is the token that *led* to these logits
-                   ", Sampled NextID: " + std::to_string(next_token_id) + 
-                   ", Decoded Next: '" + decoded_next_token + "'");
-
-      if (next_token_id == eos_token_id_) {
-        Logger::info("EOS token generated (ID: " + std::to_string(next_token_id) + "). Stopping.");
-        break;
-      }
-
-      tokens.push_back(next_token_id); // Add the *newly sampled* token
-      generated_count++;
-
-      if (generated_count >= steps) { // `steps` is max *new* tokens
-        Logger::info("Max steps (" + std::to_string(steps) + ") reached. Stopping.");
-        break;
-      }
+    if (generated_count >= steps) { // steps is max new tokens
+      Logger::info("Reached max generation steps (" + std::to_string(steps) + "). Stopping.");
+      break;
     }
-  }
 
-  std::vector<int> generated_only_ids;
-  if (num_prompt_tokens < tokens.size()) { // Ensure there are generated tokens
-    generated_only_ids.assign(tokens.begin() + num_prompt_tokens, tokens.end());
+    // KVCache seq_len update for single token pass (already handled by batch prefill for its tokens)
+    // This needs to happen *after* the forward pass for the current 'pos' has updated the cache for 'pos'.
+    // So, after processing 'pos', the cache now contains information up to and including 'pos'.
+    // The length of the sequence in the cache is pos + 1.
+    if (!prefill_enabled || pos >= num_prompt_tokens) { // only update if not prefill, or if we are past prompt token processing in prefill case
+        kv_cache_.seq_len = pos + 1; 
+        // Logger::debug("[Generate Loop] KVCache seq_len updated to: " + std::to_string(kv_cache_.seq_len) + " after processing pos " + std::to_string(pos));
+    }
   }
 
   // Log all generated IDs before decoding
   std::string generated_ids_str = "[Generated IDs Pre-Decode] ";
-  for(int gen_id : generated_only_ids) {
+  for(int gen_id : generated_token_ids) {
     generated_ids_str += std::to_string(gen_id) + " ";
   }
   Logger::debug(generated_ids_str);
 
-  std::string result = tokenizer_->decode(generated_only_ids, true);
+  std::string result = tokenizer_->decode(generated_token_ids, true);
   Logger::info("Generated response: " + result);
 
   auto t_end = std::chrono::high_resolution_clock::now(); // End timing

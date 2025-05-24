@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 #include <random>
+#include <sstream>
 
 #include "model.h"
 #include "tokenizer.h"
@@ -88,6 +89,8 @@ class TinyLlamaSession {
   int eos_token_id_;
   std::mt19937 rng_{std::random_device{}()};  // RNG for sampling
   int threads_;
+  std::stringstream generated_stream_; // Added for streaming output
+  std::string generated_text_for_api_return_; // Added to accumulate full response
 };
 
 }  // namespace tinyllama
