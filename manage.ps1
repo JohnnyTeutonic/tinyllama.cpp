@@ -39,6 +39,7 @@ $DefaultThreads = (Get-WmiObject Win32_Processor).NumberOfLogicalProcessors # Or
 if (-not $DefaultThreads) { $DefaultThreads = 4 }
 $DefaultUseMmap = $true
 $DefaultUseKvQuant = $false # Default for KVCache Quantization
+$DefaultUseBatchGeneration = $false # Default for Batch Generation
 
 $CurrentInteractivePrompt = ""
 
@@ -89,6 +90,7 @@ function Show-Usage {
     Write-Host "                 -NGpuLayers <int>         (default: ${DefaultNGpuLayers}, -1 for all on GPU)"
     Write-Host "                 -Mmap <true|false>        (default: ${DefaultUseMmap})"
     Write-Host "                 -UseKvQuant <true|false>  (default: ${DefaultUseKvQuant})"
+    Write-Host "                 -UseBatchGen <true|false> (default: ${DefaultUseBatchGeneration})"
     Write-Host ""
     Write-Host "  run-prompt   Run the C++ model with a single prompt and exit."
     Write-Host "               Options:"
@@ -101,6 +103,7 @@ function Show-Usage {
     Write-Host "                 -NGpuLayers <int>         (default: ${DefaultNGpuLayers}, -1 for all on GPU)"
     Write-Host "                 -Mmap <true|false>        (default: ${DefaultUseMmap})"
     Write-Host "                 -UseKvQuant <true|false>  (default: ${DefaultUseKvQuant})"
+    Write-Host "                 -UseBatchGen <true|false> (default: ${DefaultUseBatchGeneration})"
     Write-Host ""
     Write-Host "  format       Format C++/CUDA source code using ${FormatTool}."
     Write-Host "               (Assumes .clang-format file in project root)"
@@ -252,6 +255,7 @@ function Invoke-RunChat {
         [bool]$UseMmap = $DefaultUseMmap,
         [string]$SystemPrompt = "",
         [bool]$UseKvQuant = $DefaultUseKvQuant,
+        [bool]$UseBatchGeneration = $DefaultUseBatchGeneration,
         [switch]$NoLog
     )
     $LocalArgs = $PSBoundParameters
@@ -274,6 +278,7 @@ function Invoke-RunChat {
     if ($RemainingArgs.ContainsKey('UseMmap')) { $UseMmap = [bool]::Parse($RemainingArgs['UseMmap']) }
     if ($RemainingArgs.ContainsKey('SystemPrompt')) { $SystemPrompt = $RemainingArgs['SystemPrompt'] }
     if ($RemainingArgs.ContainsKey('UseKvQuant')) { $UseKvQuant = [bool]::Parse($RemainingArgs['UseKvQuant']) }
+    if ($RemainingArgs.ContainsKey('UseBatchGen')) { $UseBatchGeneration = [bool]::Parse($RemainingArgs['UseBatchGen']) }
     if ($RemainingArgs.ContainsKey('NoLog')) { $NoLog = $true }
     
     $ExecutablePath = Join-Path -Path $ProjectRootDir -ChildPath "build/tinyllama.exe"
@@ -298,6 +303,7 @@ function Invoke-RunChat {
     Log-Message "N GPU Layers: $NGpuLayers"
     Log-Message "Use Mmap: $UseMmap"
     Log-Message "Use KVCache Quantization: $UseKvQuant"
+    Log-Message "Use Batch Generation: $UseBatchGeneration"
     Log-Message "System Prompt: $SystemPrompt"
     Log-Message "Initial Prompt (if any): $Prompt"
     Log-Message "Max Tokens (Steps): $Steps"
@@ -320,6 +326,7 @@ function Invoke-RunChat {
     $CmdArgs += "--use-mmap", ([string]$UseMmap).ToLower() 
     $CmdArgs += "--temperature", $Temperature.ToString()
     $CmdArgs += "--use-kv-quant", ([string]$UseKvQuant).ToLower()
+    $CmdArgs += "--use-batch-generation", ([string]$UseBatchGeneration).ToLower()
 
     Log-Message "Executing: & '$ExecutablePath' $CmdArgs"
     & $ExecutablePath $CmdArgs
@@ -340,7 +347,8 @@ function Invoke-RunPrompt {
         [int]$Threads = $DefaultThreads,
         [bool]$UseMmap = $DefaultUseMmap,
         [string]$SystemPrompt = "",
-        [bool]$UseKvQuant = $DefaultUseKvQuant # Added
+        [bool]$UseKvQuant = $DefaultUseKvQuant, # Added
+        [bool]$UseBatchGeneration = $DefaultUseBatchGeneration # Added
     )
     $LocalArgs = $PSBoundParameters
     $RemainingArgs = @{}
@@ -362,6 +370,7 @@ function Invoke-RunPrompt {
     if ($RemainingArgs.ContainsKey('UseMmap')) { $UseMmap = [bool]::Parse($RemainingArgs['UseMmap']) }
     if ($RemainingArgs.ContainsKey('SystemPrompt')) { $SystemPrompt = $RemainingArgs['SystemPrompt'] }
     if ($RemainingArgs.ContainsKey('UseKvQuant')) { $UseKvQuant = [bool]::Parse($RemainingArgs['UseKvQuant']) } # Added
+    if ($RemainingArgs.ContainsKey('UseBatchGen')) { $UseBatchGeneration = [bool]::Parse($RemainingArgs['UseBatchGen']) } # Added
     
     $ExecutablePath = Join-Path -Path $ProjectRootDir -ChildPath "build/tinyllama.exe"
     if (-not (Test-Path $ExecutablePath)) {
@@ -385,6 +394,7 @@ function Invoke-RunPrompt {
     Log-Message "N GPU Layers: $NGpuLayers"
     Log-Message "Use Mmap: $UseMmap"
     Log-Message "Use KVCache Quantization: $UseKvQuant" # Added
+    Log-Message "Use Batch Generation: $UseBatchGeneration" # Added
     Log-Message "System Prompt: $SystemPrompt"
     Log-Message "Prompt: $Prompt"
     Log-Message "Max Tokens (Steps): $Steps"
@@ -405,6 +415,7 @@ function Invoke-RunPrompt {
     $CmdArgs += "--use-mmap", ([string]$UseMmap).ToLower()
     $CmdArgs += "--temperature", $Temperature.ToString()
     $CmdArgs += "--use-kv-quant", ([string]$UseKvQuant).ToLower() # Added
+    $CmdArgs += "--use-batch-generation", ([string]$UseBatchGeneration).ToLower() # Added
 
     Log-Message "Executing: & '$ExecutablePath' $CmdArgs"
     & $ExecutablePath $CmdArgs

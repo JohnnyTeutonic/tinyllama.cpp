@@ -132,14 +132,21 @@ struct KVCacheLayer {
  * 
  * Manages the KV cache across all layers of the transformer model,
  * including memory management for both CPU and GPU implementations.
+ * Supports both single-sequence and multi-sequence batch processing.
  */
 struct KVCache {
     std::vector<KVCacheLayer> layers; /**< KV cache for each layer */
-    int seq_len = 0;                  /**< Current sequence length */
+    
+    // Single-sequence mode (legacy compatibility)
+    int seq_len = 0;                  /**< Current sequence length (single-sequence mode) */
+    
+    // Multi-sequence mode (new batch functionality)
+    std::vector<int> batch_seq_lens;  /**< Sequence lengths for each sequence in batch */
+    int max_batch_size = 1;           /**< Maximum number of sequences that can be cached */
+    int current_batch_size = 0;       /**< Current number of active sequences */
+    
     int total_model_layers_ = 0;       /**< Total number of layers in the model */
-
-    // Add a member to store max_seq_len for resize logic
-    int max_seq_len_config_ = 0; // Store the original max_seq_len
+    int max_seq_len_config_ = 0;       /**< Store the original max_seq_len */
 
     /**
      * @brief Initializes the KV cache with given dimensions
@@ -149,20 +156,39 @@ struct KVCache {
      * @param max_seq_len Maximum sequence length to cache
      * @param num_kv_heads Number of key/value heads
      * @param head_dim Dimension of each attention head
+     * @param max_batch_size_arg Maximum number of sequences for batch processing (default: 1 for single-sequence)
      */
     void initialize(const ModelConfig& config,
                     int total_num_model_layers, int num_gpu_layers_to_allocate,
-                    int max_seq_len_arg, int num_kv_heads, int head_dim);
+                    int max_seq_len_arg, int num_kv_heads, int head_dim,
+                    int max_batch_size_arg = 1);
 
     void clear_data() {
+        // Single-sequence mode (legacy compatibility)
         seq_len = 0;
+        
+        // Multi-sequence mode 
+        current_batch_size = 0;
+        batch_seq_lens.clear();
+        
         // Logger::debug("[KVCache] clear_data() called. seq_len reset to 0. K/V vector sizes remain unchanged.");
         // DO NOT clear layers[i].k and layers[i].v here,
         // as they are pre-sized in initialize() and should retain their full size.
-        // for (size_t i = 0; i < layers.size(); ++i) {
-        //     layers[i].k.clear(); 
-        //     layers[i].v.clear(); 
-        // }
+    }
+    
+    /**
+     * @brief Initialize batch mode with specified number of sequences
+     * @param batch_size Number of sequences to process in batch
+     */
+    void initialize_batch(int batch_size) {
+        if (batch_size > max_batch_size) {
+            Logger::warning("Requested batch size " + std::to_string(batch_size) + 
+                           " exceeds max batch size " + std::to_string(max_batch_size) + 
+                           ". Using max batch size.");
+            batch_size = max_batch_size;
+        }
+        current_batch_size = batch_size;
+        batch_seq_lens.resize(batch_size, 0);
     }
 
 #ifdef HAS_CUDA
@@ -338,6 +364,14 @@ class TinyLlamaModel {
       cudaStream_t stream
   );
 
+  std::vector<std::vector<float>> forward_device_batch_generation(
+      float* d_batch_input_hidden_states, // Device pointer to [num_tokens_in_batch, config_.hidden_size]
+      const std::vector<int>& token_positions, // Position of each token in its respective sequence
+      int num_tokens_in_batch,
+      KVCache* kv_cache,
+      cudaStream_t stream
+  );
+
   void initialize_gpu_and_rope();
   
 
@@ -355,6 +389,13 @@ class TinyLlamaModel {
   std::vector<float> forward_cpu_logits_batch(
       const std::vector<float>& final_batch_activations, // [num_tokens, hidden_size]
       int num_tokens_in_batch
+  );
+
+  std::vector<std::vector<float>> forward_cpu_batch_generation(
+      const std::vector<float>& batch_input_activations, // [num_tokens, hidden_size]
+      const std::vector<int>& token_positions, // Position of each token in its respective sequence
+      int num_tokens_in_batch,
+      KVCache* kv_cache
   );
 
 #endif // HAS_CUDA

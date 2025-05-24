@@ -55,13 +55,19 @@ PYBIND11_MODULE(tinyllama_bindings, m) {
         .export_values();
 
     py::class_<tinyllama::TinyLlamaSession>(m, "TinyLlamaSession")
-        .def(py::init<const std::string &, const std::string &, int, int, bool>(), 
+        .def(py::init<const std::string &, const std::string &, int, int, bool, bool, bool, int>(), 
              py::arg("model_path"),
              py::arg("tokenizer_path"),
              py::arg("threads") = 1,
              py::arg("n_gpu_layers") = 0,
-             py::arg("use_mmap") = false,
-             "Loads the model, config, and tokenizer from the specified model_path (directory or .gguf file)." 
+             py::arg("use_mmap") = true,
+             py::arg("use_kv_quant") = false,
+             py::arg("use_batch_generation") = false,
+             py::arg("max_batch_size") = 1,
+             "Loads the model, config, and tokenizer from the specified model_path (directory or .gguf file). "
+             "use_kv_quant enables INT8 KVCache quantization on GPU. "
+             "use_batch_generation enables single-token batch generation. "
+             "max_batch_size sets the maximum number of sequences for multi-prompt batch processing." 
         )
         .def("generate", &tinyllama::TinyLlamaSession::generate,
              py::arg("prompt"),
@@ -74,6 +80,19 @@ PYBIND11_MODULE(tinyllama_bindings, m) {
              "Generates text based on a prompt with various sampling parameters. "
              "apply_q_a_format defaults to true, applying Q:A style for models like Llama 2 "
              "if no GGUF or Llama 3 chat template is active."
+        )
+        .def("generate_batch", &tinyllama::TinyLlamaSession::generate_batch,
+             py::arg("prompts"),
+             py::arg("steps") = 128,
+             py::arg("temperature") = 0.1f,
+             py::arg("top_k") = 40,
+             py::arg("top_p") = 0.9f,
+             py::arg("system_prompt") = "",
+             py::arg("apply_q_a_format") = true,
+             "Generates text for multiple prompts in a single batch (parallel processing). "
+             "Takes a list of prompt strings and returns a list of generated text strings. "
+             "Each prompt is processed independently with the same sampling parameters. "
+             "Provides significant efficiency gains over multiple generate() calls."
         )
         .def("get_config", &tinyllama::TinyLlamaSession::get_config, 
              py::return_value_policy::reference_internal,

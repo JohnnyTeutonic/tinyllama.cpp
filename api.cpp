@@ -173,12 +173,15 @@ static int sample_top_k_top_p_temperature(const std::vector<float>& logits,
 
 
 TinyLlamaSession::TinyLlamaSession(const std::string& model_path_arg,
-                                   const std::string& tokenizer_path_arg,
-                                   int threads,
-                                   int num_gpu_layers_from_cli,
-                                   bool cli_use_mmap,
-                                   bool use_kv_quant)
-    : threads_(threads), rng_(std::random_device{}()) {
+                                 const std::string& tokenizer_path_arg,
+                                 int threads,
+                                 int num_gpu_layers_from_cli,
+                                 bool cli_use_mmap,
+                                 bool use_kv_quant,
+                                 bool use_batch_generation,
+                                 int max_batch_size)
+          : threads_(threads), use_batch_generation_(use_batch_generation), 
+            max_batch_size_(max_batch_size), rng_(std::random_device{}()) {
   Logger::info("TinyLlamaSession constructor entered. Model path: " + model_path_arg +
                ", Tokenizer path: " + tokenizer_path_arg +
                ", Threads: " + std::to_string(threads) +
@@ -275,7 +278,8 @@ TinyLlamaSession::TinyLlamaSession(const std::string& model_path_arg,
                          config_.num_hidden_layers - config_.num_cpu_offload_layers, 
                          config_.max_position_embeddings, 
                          config_.num_key_value_heads, 
-                         config_.hidden_size / config_.num_attention_heads);
+                         config_.hidden_size / config_.num_attention_heads,
+                         max_batch_size_);
 
   } else { // Not a directory, assume it's a file path and check extension
     std::string extension = fs_model_path.extension().string();
@@ -339,7 +343,8 @@ TinyLlamaSession::TinyLlamaSession(const std::string& model_path_arg,
                            config_.num_hidden_layers - config_.num_cpu_offload_layers, 
                            config_.max_position_embeddings, 
                            config_.num_key_value_heads, 
-                           config_.hidden_size / config_.num_attention_heads);
+                           config_.hidden_size / config_.num_attention_heads,
+                           max_batch_size_);
     } else {
       throw std::runtime_error("Unsupported model file type or extension in Session constructor: " + model_path_arg +
                                ". Please provide a directory for SafeTensors, a .gguf file, or a .safetensors file.");
@@ -416,7 +421,8 @@ TinyLlamaSession::TinyLlamaSession(const std::string& model_path_arg,
                        gpu_layers_for_kvcache,    // Actual GPU layers for device memory
                        final_model_config.max_position_embeddings,
                        final_model_config.num_key_value_heads, 
-                       head_dim);
+                       head_dim,
+                       max_batch_size_);
   Logger::info("TinyLlamaSession initialization complete (after KVCache init).");
 }
 
@@ -686,13 +692,37 @@ if (prefill_enabled) {
 
     // Single forward pass logic for the current token
     if (use_gpu_path) {
-      // Copy host embeddings to device scratchpad
-      gpuErrchk(cudaMemcpy(model_->get_x_dev(), current_data_host.data(), current_data_host.size() * sizeof(float), cudaMemcpyHostToDevice));
-      // Call forward_device with device pointer, pos, and KVCache
-      logits = model_->forward_device(model_->get_x_dev(), pos, &kv_cache_, nullptr);
+      if (use_batch_generation_) {
+        // GPU batch generation path (single token batch)
+        gpuErrchk(cudaMemcpy(model_->get_x_dev(), current_data_host.data(), current_data_host.size() * sizeof(float), cudaMemcpyHostToDevice));
+        std::vector<int> single_token_positions = {pos};
+        auto batch_logits = model_->forward_device_batch_generation(model_->get_x_dev(), single_token_positions, 1, &kv_cache_, 0);
+        if (!batch_logits.empty() && !batch_logits[0].empty()) {
+          logits = batch_logits[0]; // Extract logits for the single token
+        } else {
+          Logger::error("GPU batch generation returned empty logits for single token at pos " + std::to_string(pos));
+          logits.clear();
+        }
+      } else {
+        // Standard GPU single token path
+        gpuErrchk(cudaMemcpy(model_->get_x_dev(), current_data_host.data(), current_data_host.size() * sizeof(float), cudaMemcpyHostToDevice));
+        logits = model_->forward_device(model_->get_x_dev(), pos, &kv_cache_, nullptr);
+      }
     } else {
-      // Call forward with host embeddings vector, pos, and KVCache
-      logits = model_->forward(current_data_host, pos, &kv_cache_, nullptr);
+      if (use_batch_generation_) {
+        // CPU batch generation path (single token batch)
+        std::vector<int> single_token_positions = {pos};
+        auto batch_logits = model_->forward_cpu_batch_generation(current_data_host, single_token_positions, 1, &kv_cache_);
+        if (!batch_logits.empty() && !batch_logits[0].empty()) {
+          logits = batch_logits[0]; // Extract logits for the single token
+        } else {
+          Logger::error("CPU batch generation returned empty logits for single token at pos " + std::to_string(pos));
+          logits.clear();
+        }
+      } else {
+        // Standard CPU single token path
+        logits = model_->forward(current_data_host, pos, &kv_cache_, nullptr);
+      }
     }
 
     // The following block for prompt tokens (pos < num_prompt_tokens -1) is only relevant if prefill is NOT enabled.
@@ -772,6 +802,126 @@ if (prefill_enabled) {
   Logger::info("[INFO] Total generation processing time: " + time_ss.str() + " ms");
 
   return result;
+}
+
+std::vector<std::string> TinyLlamaSession::generate_batch(const std::vector<std::string>& prompts,
+                                                         int steps,
+                                                         float temperature,
+                                                         int top_k, float top_p,
+                                                         const std::string& system_prompt_arg,
+                                                         bool apply_q_a_format_cli_hint) {
+  auto t_start = std::chrono::high_resolution_clock::now();
+
+  if (prompts.empty()) {
+    throw std::runtime_error("Cannot process empty prompts vector for batch generation.");
+  }
+
+  if (static_cast<int>(prompts.size()) > max_batch_size_) {
+    throw std::runtime_error("Batch size " + std::to_string(prompts.size()) + 
+                             " exceeds maximum batch size " + std::to_string(max_batch_size_));
+  }
+
+  Logger::info("[Batch Generate API] Processing " + std::to_string(prompts.size()) + 
+               " prompts in batch. Steps: " + std::to_string(steps));
+
+  if (!model_ || !tokenizer_) {
+    throw std::runtime_error("Model or tokenizer not loaded for batch generation.");
+  }
+
+  // Process each prompt to create final prompts and tokenize them
+  std::vector<std::string> final_prompts(prompts.size());
+  std::vector<std::vector<int>> all_tokens(prompts.size());
+  std::vector<int> prompt_lengths(prompts.size());
+  int max_prompt_length = 0;
+
+  for (size_t i = 0; i < prompts.size(); ++i) {
+    // Apply same prompt processing logic as single generate()
+    std::string final_prompt_for_encoding;
+    bool used_chat_template = false;
+
+    // Same priority logic as single generate()
+    if (apply_q_a_format_cli_hint) {
+      Logger::info("[Batch Generate API] Using legacy Q/A formatting for prompt " + std::to_string(i));
+      if (!system_prompt_arg.empty()) {
+        final_prompt_for_encoding = system_prompt_arg + "\\n\\nQ: " + prompts[i] + "\\nA:";
+      } else {
+        final_prompt_for_encoding = "Q: " + prompts[i] + "\\nA:";
+      }
+    } else if (tokenizer_ && !tokenizer_->get_gguf_chat_template().empty()) {
+      std::string gguf_template_content = tokenizer_->get_gguf_chat_template();
+      bool is_llama_sentencepiece_family = (config_.tokenizer_family == ModelConfig::TokenizerFamily::LLAMA_SENTENCEPIECE);
+      bool looks_like_jinja = (gguf_template_content.find("{%") != std::string::npos);
+
+      if (is_llama_sentencepiece_family && looks_like_jinja) {
+        Logger::info("[Batch Generate API] Using Q/A format override for prompt " + std::to_string(i));
+        if (!system_prompt_arg.empty()) {
+          final_prompt_for_encoding = system_prompt_arg + "\\\\n\\\\nQ: " + prompts[i] + "\\\\nA:";
+        } else {
+          final_prompt_for_encoding = "Q: " + prompts[i] + "\\\\nA:";
+        }
+      } else {
+        Logger::info("[Batch Generate API] Using GGUF chat template for prompt " + std::to_string(i));
+        final_prompt_for_encoding = tokenizer_->apply_chat_template(prompts[i], system_prompt_arg, config_);
+        used_chat_template = true;
+      }
+    } else if (config_.tokenizer_family == ModelConfig::TokenizerFamily::LLAMA3_TIKTOKEN) {
+      Logger::info("[Batch Generate API] Using Llama 3 chat template for prompt " + std::to_string(i));
+      final_prompt_for_encoding = tokenizer_->apply_chat_template(prompts[i], system_prompt_arg, config_);
+      used_chat_template = true;
+    } else {
+      Logger::info("[Batch Generate API] Using raw prompt for prompt " + std::to_string(i));
+      if (!system_prompt_arg.empty()) {
+        final_prompt_for_encoding = system_prompt_arg + "\\n\\n" + prompts[i];
+      } else {
+        final_prompt_for_encoding = prompts[i];
+      }
+    }
+
+    final_prompts[i] = final_prompt_for_encoding;
+    all_tokens[i] = tokenizer_->encode(final_prompt_for_encoding, true, false, Tokenizer::PreTokenizeMethod::DEFAULT);
+    
+    if (all_tokens[i].empty()) {
+      Logger::warning("Batch tokenization resulted in empty ID list for prompt " + std::to_string(i));
+      all_tokens[i].push_back(tokenizer_->bos_token_id()); // Fallback to BOS token
+    }
+
+    prompt_lengths[i] = all_tokens[i].size();
+    max_prompt_length = std::max(max_prompt_length, prompt_lengths[i]);
+    
+    Logger::info("[Batch Generate API] Prompt " + std::to_string(i) + ": " + 
+                 std::to_string(prompt_lengths[i]) + " tokens");
+  }
+
+  // Initialize batch mode
+  kv_cache_.initialize_batch(static_cast<int>(prompts.size()));
+  kv_cache_.clear_data();
+
+  // For now, implement sequential processing to maintain correctness
+  // TODO: Implement true parallel batch processing
+  std::vector<std::string> results(prompts.size());
+  
+  for (size_t i = 0; i < prompts.size(); ++i) {
+    Logger::info("[Batch Generate API] Processing prompt " + std::to_string(i + 1) + 
+                 "/" + std::to_string(prompts.size()));
+    
+    // Reset to single-sequence mode for this prompt
+    kv_cache_.seq_len = 0;
+    
+    // Use existing single-sequence generation logic
+    std::string result = generate(prompts[i], steps, temperature, top_k, top_p, 
+                                 system_prompt_arg, apply_q_a_format_cli_hint);
+    results[i] = result;
+  }
+
+  auto t_end = std::chrono::high_resolution_clock::now();
+  double time_taken_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
+  
+  std::ostringstream time_ss;
+  time_ss << std::fixed << std::setprecision(4) << time_taken_ms;
+  Logger::info("[Batch Generate API] Total batch processing time: " + time_ss.str() + " ms for " + 
+               std::to_string(prompts.size()) + " prompts");
+
+  return results;
 }
 
 }  // namespace tinyllama

@@ -57,7 +57,7 @@ std::string trim_whitespace(const std::string& s) {
 void print_usage(const char* program_name) {
   std::cout << "Usage: " << program_name
             << " <model_path> <tokenizer_path> <num_threads> <prompt|chat> "
-               "[--system-prompt <system_prompt_string>] [initial_user_prompt] [max_tokens] [n_gpu_layers] [use_mmap] [temperature] [use_kv_quant]"
+               "[--system-prompt <system_prompt_string>] [initial_user_prompt] [max_tokens] [n_gpu_layers] [use_mmap] [temperature] [use_kv_quant] [use_batch_generation]"
             << std::endl;
   std::cout << "\nArguments:\n"
                "  model_path          : Path to the model file (.gguf) or directory (SafeTensors).\n"
@@ -71,6 +71,7 @@ void print_usage(const char* program_name) {
                "  use_mmap            : (Optional) Use mmap for GGUF files ('true' or 'false'). Default: true.\n"
                "  temperature         : (Optional) Sampling temperature. Default: 0.1.\n"
                "  use_kv_quant        : (Optional) Use INT8 KVCache quantization on GPU ('true' or 'false'). Default: false.\n"
+               "  use_batch_generation: (Optional) Use GPU batch generation for tokens ('true' or 'false'). Default: false.\n"
             << std::endl;
 }
 
@@ -112,6 +113,7 @@ int main(int argc, char** argv) {
   int n_gpu_layers = -1; // Default: all layers on GPU
   bool use_mmap = true; // Default: use mmap
   bool use_kv_quant = false; // Default: do not use KVCache quantization
+  bool use_batch_generation = false; // Default: do not use batch generation
   
   // Default sampling params for generate
   float temperature = 0.1f; // Default temperature
@@ -166,6 +168,15 @@ int main(int argc, char** argv) {
             else { std::cerr << "ERROR: Invalid use_kv_quant value: " << argv[current_arg_idx+1] << std::endl; return 1; }
             current_arg_idx += 2;
         } else { std::cerr << "ERROR: --use-kv-quant requires a value." << std::endl; return 1;}
+    } else if (arg == "--use-batch-generation" || arg == "-ubg") {
+         if (current_arg_idx + 1 < argc) {
+            std::string ubg_str_val = argv[current_arg_idx+1];
+            std::transform(ubg_str_val.begin(), ubg_str_val.end(), ubg_str_val.begin(), ::tolower);
+            if (ubg_str_val == "false" || ubg_str_val == "0") use_batch_generation = false;
+            else if (ubg_str_val == "true" || ubg_str_val == "1") use_batch_generation = true;
+            else { std::cerr << "ERROR: Invalid use_batch_generation value: " << argv[current_arg_idx+1] << std::endl; return 1; }
+            current_arg_idx += 2;
+        } else { std::cerr << "ERROR: --use-batch-generation requires a value." << std::endl; return 1;}
     } else {
         if (user_prompt_str == "Hello, world!") {
              user_prompt_str = trim_whitespace(argv[current_arg_idx]);
@@ -193,9 +204,10 @@ int main(int argc, char** argv) {
   Logger::info(std::string("Use mmap: ") + (use_mmap ? "true" : "false"));
   Logger::info("Temperature: " + std::to_string(temperature));
   Logger::info(std::string("Use KVCache Quantization: ") + (use_kv_quant ? "true" : "false"));
+  Logger::info(std::string("Use Batch Generation: ") + (use_batch_generation ? "true" : "false"));
 
   try {
-    tinyllama::TinyLlamaSession session(model_path_or_dir, tokenizer_path, num_threads, n_gpu_layers, use_mmap, use_kv_quant);
+    tinyllama::TinyLlamaSession session(model_path_or_dir, tokenizer_path, num_threads, n_gpu_layers, use_mmap, use_kv_quant, use_batch_generation, 1);
     Logger::info("TinyLlamaSession initialized successfully.");
 
     const ModelConfig& config = session.get_config();
