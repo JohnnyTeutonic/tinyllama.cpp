@@ -28,7 +28,7 @@
 #include "model_macros.h"
 #include "safetensors_loader.h"
 
-void cutlass_gemm_f32_f32_double_accum(const float*, int, const float*, int, float*, int, int, int, int, float, float, cudaStream_t);
+
 /**
  * @brief Converts a float32 value to bfloat16 representation.
  * @param val The float32 value to convert.

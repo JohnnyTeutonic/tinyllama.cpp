@@ -95,7 +95,7 @@ if(HAS_CUDA)
         set(CMAKE_CUDA_ARCHITECTURES 60 61 70 75 80 86 CACHE STRING "CUDA architectures") 
         message(STATUS "CUDA Enabled. Will define HAS_CUDA for tinyllama_core library.")
         set(CUDA_ENABLED TRUE)
-        set(CUDA_SOURCES cuda_kernels.cu cutlass_gemm.cu) # Only include CUDA source if enabled
+        set(CUDA_SOURCES cuda_kernels.cu) # Only include CUDA source if enabled
     else()
         message(WARNING "HAS_CUDA option is ON, but CUDA Toolkit or cuBLAS not found. Disabling CUDA support.")
         set(HAS_CUDA FALSE) # Force the option OFF if prerequisites are missing
@@ -137,10 +137,8 @@ target_link_libraries(tinyllama_core PRIVATE
 
 # Conditionally add CUDA definition and link CUDA libs for the library
 if(CUDA_ENABLED)
-    target_compile_definitions(tinyllama_core PUBLIC HAS_CUDA USE_CUTLASS_DOUBLE_ACCUM)
+    target_compile_definitions(tinyllama_core PUBLIC HAS_CUDA)
     target_include_directories(tinyllama_core PUBLIC ${CUDA_INCLUDE_DIRS})
-    # Add CUTLASS include directory
-    target_include_directories(tinyllama_core PRIVATE /usr/local/include/cutlass)
     target_link_libraries(tinyllama_core PRIVATE ${CUDA_LIBRARIES} CUDA::cublas)
 endif()
 
