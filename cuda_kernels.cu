@@ -748,6 +748,7 @@ __global__ void rope_batch_kernel_cuda(
     float x0_val = head_data_start[x0_idx_in_head];
     float x1_val = head_data_start[x1_idx_in_head];
 
+
     head_data_start[x0_idx_in_head] = x0_val * cos_val - x1_val * sin_val;
     head_data_start[x1_idx_in_head] = x0_val * sin_val + x1_val * cos_val;
 }
@@ -769,6 +770,10 @@ void rope_batch_cuda(float* d_q_batch, float* d_k_batch,
                  ", head_dim: " + std::to_string(head_dim) +
                  ", start_pos_offset: " + std::to_string(start_pos_offset) +
                  ", use_adjacent_pairing: " + std::to_string(use_adjacent_pairing));
+    Logger::info("[GPU_ROPE] d_q_batch=" + Logger::ptrToString(d_q_batch) + 
+                ", d_k_batch=" + Logger::ptrToString(d_k_batch) +
+                ", num_tokens=" + std::to_string(num_tokens) +
+                ", start_pos=" + std::to_string(start_pos_offset));
 
     if (head_dim == 0) { 
         Logger::warning("[ROPE_BATCH_CUDA_SKIP] head_dim is 0. Skipping RoPE application.");
@@ -1582,8 +1587,8 @@ void gemm_f32_f32_cuda(cublasHandle_t handle,
 __global__ void attention_batch_prefill_cuda_kernel(
     float* d_output_batch_strided,      // Output: [B, H_q, D_h] effectively, though might be [B, H_q*D_h] and reshaped later
     const float* d_q_batch_strided,     // Q input: [B, H_q, D_h]
-    const float* d_k_batch_strided,     // K input for current batch: [B, H_kv, D_h]
-    const float* d_v_batch_strided,     // V input for current batch: [B, H_kv, D_h]
+    const float* d_k_batch_strided,     // K input for current batch: [B, H_kv, D_h] (may be nullptr)
+    const float* d_v_batch_strided,     // V input for current batch: [B, H_kv, D_h] (may be nullptr)
     float* d_kv_cache_k_base,           // K Cache base: [S_max, H_kv, D_h]
     float* d_kv_cache_v_base,           // V Cache base: [S_max, H_kv, D_h]
     int num_tokens_in_batch,            // B
@@ -1619,45 +1624,39 @@ __global__ void attention_batch_prefill_cuda_kernel(
                                      (size_t)token_idx_in_batch * num_q_heads * head_dim +
                                      (size_t)q_head_idx * head_dim;
 
-    // CRITICAL FIX: All tokens see same context, causal mask applied in QK^T loop
-    int effective_context_len_for_this_token = start_pos_in_kv_cache + num_tokens_in_batch;
+    // CORRECTED: KV cache already contains current batch, so total context is available in cache
+    int total_context_len = start_pos_in_kv_cache + num_tokens_in_batch;
     int max_attend_pos_for_this_token = start_pos_in_kv_cache + token_idx_in_batch;
-    if (effective_context_len_for_this_token > cache_max_seq_len) {
-        effective_context_len_for_this_token = cache_max_seq_len;
+
+    if (total_context_len > cache_max_seq_len) {
+        total_context_len = cache_max_seq_len;
     }
 
     extern __shared__ float sdata[];
-    float* s_scores = sdata; // Size: effective_context_len_for_this_token
-    float* s_dot_product_scratch = &sdata[effective_context_len_for_this_token]; // Size: head_dim
-
+    float* s_scores = sdata; // Size: total_context_len
+    float* s_dot_product_scratch = &sdata[total_context_len]; // Size: head_dim
 
     // Calculate QK^T for each K vector in the context with causal masking
-    for (int k_context_idx = 0; k_context_idx < effective_context_len_for_this_token; ++k_context_idx) {
-        const float* k_vec_ptr;
-        // FIX: Since we're not passing batch K/V anymore, all K/V comes from cache
-        k_vec_ptr = d_kv_cache_k_base +
-                    (size_t)k_context_idx * num_kv_heads * head_dim +
-                    (size_t)kv_head_idx_for_q * head_dim;
+    for (int context_pos = 0; context_pos < total_context_len; ++context_pos) {
+        // CORRECTED: All K/V comes from cache since cache already contains current batch
+        const float* k_vec_ptr = d_kv_cache_k_base +
+                                 (size_t)context_pos * num_kv_heads * head_dim +
+                                 (size_t)kv_head_idx_for_q * head_dim;
                     
-        if (token_idx_in_batch == 0 && q_head_idx == 0 && dim_thread_idx == 0 && k_context_idx < 3) {
-            printf("[GPU_ATTN_MEM] T%d_H%d accessing K_cache[pos=%d,kv_head=%d]: offset=%zu, k_vals=[%.6f,%.6f,%.6f]\n",
-                   token_idx_in_batch, q_head_idx, k_context_idx, kv_head_idx_for_q,
-                   (size_t)k_context_idx * num_kv_heads * head_dim + (size_t)kv_head_idx_for_q * head_dim,
-                   k_vec_ptr[0], k_vec_ptr[1], k_vec_ptr[2]);
-        }
+
         // Initialize score for this context position 
         if (dim_thread_idx == 0) {
             // Apply causal masking: token can only attend to positions <= its own position
-            if (k_context_idx > max_attend_pos_for_this_token) {
-                s_scores[k_context_idx] = -__FLT_MAX__; // Mask out future positions
+            if (context_pos > max_attend_pos_for_this_token) {
+                s_scores[context_pos] = -__FLT_MAX__; // Mask out future positions
             } else {
-                s_scores[k_context_idx] = 0.0f;
+                s_scores[context_pos] = 0.0f;
             }
         }
-         __syncthreads(); // Ensure s_scores[k_context_idx] is initialized before use
+        __syncthreads(); // Ensure s_scores[context_pos] is initialized before use
 
         // Skip computation if this position is masked
-        if (k_context_idx <= max_attend_pos_for_this_token) {
+        if (context_pos <= max_attend_pos_for_this_token) {
             // Parallel dot product: each thread computes one element of Q_d * K_d
             // Store into shared memory scratchpad
             float q_val = q_current_head_ptr[dim_thread_idx];
@@ -1671,20 +1670,19 @@ __global__ void attention_batch_prefill_cuda_kernel(
                 for (int d = 0; d < head_dim; ++d) {
                     dot_prod += (double)s_dot_product_scratch[d];
                 }
-                s_scores[k_context_idx] = (float)(dot_prod * scale); // Scale and cast back to float
+                s_scores[context_pos] = (float)(dot_prod * scale); // Scale and cast back to float
             }
-            __syncthreads(); // Ensure s_scores[k_context_idx] is written by thread 0 before next iteration
+            __syncthreads(); // Ensure s_scores[context_pos] is written by thread 0 before next iteration
         }
     }
 
-
     // --- Softmax ---
-    // Parallel softmax over s_scores[0...effective_context_len_for_this_token-1]
+    // Parallel softmax over s_scores[0...total_context_len-1]
     // 1. Find max score in s_scores (reduction)
     float max_score = -__FLT_MAX__; 
 
     float thread_local_max_for_scores = -__FLT_MAX__;
-    for (int i = dim_thread_idx; i < effective_context_len_for_this_token; i += blockDim.x) {
+    for (int i = dim_thread_idx; i < total_context_len; i += blockDim.x) {
          thread_local_max_for_scores = fmaxf(thread_local_max_for_scores, s_scores[i]);
     }
     s_dot_product_scratch[dim_thread_idx] = thread_local_max_for_scores; 
@@ -1702,9 +1700,8 @@ __global__ void attention_batch_prefill_cuda_kernel(
     __syncthreads(); 
     max_score = s_dot_product_scratch[0]; 
 
-
     float thread_local_sum_exp = 0.0f;
-     for (int i = dim_thread_idx; i < effective_context_len_for_this_token; i += blockDim.x) {
+     for (int i = dim_thread_idx; i < total_context_len; i += blockDim.x) {
          float val = expf(s_scores[i] - max_score);
          s_scores[i] = val; 
          thread_local_sum_exp += val;
@@ -1726,20 +1723,20 @@ __global__ void attention_batch_prefill_cuda_kernel(
     sum_exp_scores = s_dot_product_scratch[0]; 
 
     float inv_sum_exp_scores = 1.0f / (sum_exp_scores + 1e-9f); 
-    for (int i = dim_thread_idx; i < effective_context_len_for_this_token; i += blockDim.x) {
+    for (int i = dim_thread_idx; i < total_context_len; i += blockDim.x) {
         s_scores[i] *= inv_sum_exp_scores; 
     }
     __syncthreads(); 
 
     // --- Weighted Sum of V ---
     double weighted_sum_v_d = 0.0; // USE DOUBLE FOR ACCUMULATION
-    for (int k_context_idx = 0; k_context_idx < effective_context_len_for_this_token; ++k_context_idx) {
-        const float* v_vec_ptr;
-        // FIX: Since we're not passing batch K/V anymore, all K/V comes from cache
-        v_vec_ptr = d_kv_cache_v_base +
-                    (size_t)k_context_idx * num_kv_heads * head_dim +
-                    (size_t)kv_head_idx_for_q * head_dim;
-        weighted_sum_v_d += (double)s_scores[k_context_idx] * (double)v_vec_ptr[dim_thread_idx];
+    for (int context_pos = 0; context_pos < total_context_len; ++context_pos) {
+        // CORRECTED: All V comes from cache since cache already contains current batch
+        const float* v_vec_ptr = d_kv_cache_v_base +
+                                 (size_t)context_pos * num_kv_heads * head_dim +
+                                 (size_t)kv_head_idx_for_q * head_dim;
+        
+        weighted_sum_v_d += (double)s_scores[context_pos] * (double)v_vec_ptr[dim_thread_idx];
     }
     
     output_current_head_ptr[dim_thread_idx] = (float)weighted_sum_v_d;
@@ -2070,9 +2067,9 @@ void attention_batch_prefill_cuda(
     dim3 grid_dim(num_tokens_in_batch, num_q_heads); // One block per (token_in_batch, q_head)
     dim3 block_dim(head_dim); // Threads in block work on one head's computation, primarily along head_dim
 
-    int max_effective_ctx_for_batch = start_pos_in_kv_cache + num_tokens_in_batch;
-    if (max_effective_ctx_for_batch > cache_max_seq_len) max_effective_ctx_for_batch = cache_max_seq_len;
-    size_t shared_mem_bytes = (max_effective_ctx_for_batch + head_dim) * sizeof(float);
+    int total_context_len = start_pos_in_kv_cache + num_tokens_in_batch;
+    if (total_context_len > cache_max_seq_len) total_context_len = cache_max_seq_len;
+    size_t shared_mem_bytes = (total_context_len + head_dim) * sizeof(float);
 
     if (shared_mem_bytes > 48 * 1024) { 
         Logger::warning("[ATTN_BATCH_PREFILL_CUDA_WARN] Requested shared memory (" + std::to_string(shared_mem_bytes) + " bytes) might be large.");
@@ -2095,6 +2092,24 @@ void attention_batch_prefill_cuda(
         attention_mask_cu
     );
     gpuErrchk(cudaGetLastError());
+
+    // Log output values
+    if (num_tokens_in_batch > 0 && num_q_heads > 0 && head_dim > 0 && d_output_batch_strided) {
+        for (int token_to_log_idx = 0; token_to_log_idx < std::min(num_tokens_in_batch, 2); ++token_to_log_idx) {
+            std::vector<float> h_out_sample(log_count_elements);
+            // Output is [B, H_q, D_h]. 
+            const float* out_token_ptr = d_output_batch_strided + (size_t)token_to_log_idx * num_q_heads * head_dim;
+            gpuErrchk(cudaMemcpyAsync(h_out_sample.data(), out_token_ptr, log_count_elements * sizeof(float), cudaMemcpyDeviceToHost, stream));
+            gpuErrchk(cudaStreamSynchronize(stream)); // Sync for each token's log
+            std::string out_str = ""; for(int i=0; i<log_count_elements; ++i) out_str += std::to_string(h_out_sample[i]) + " ";
+            Logger::debug("[ATTN_BATCH_PREFILL_CUDA_POST_KERNEL] Output (T" + std::to_string(token_to_log_idx) + ", H0, first " + std::to_string(log_count_elements) + " els): " + out_str);
+        }
+    }
+    Logger::info("[ATTN_BATCH_PREFILL_CUDA_EXIT] Function finished.");
+
+    Logger::info("[ATTN_BATCH_PREFILL_CUDA] About to sync device to flush GPU printf...");
+    cudaDeviceSynchronize();
+    Logger::info("[ATTN_BATCH_PREFILL_CUDA] Device sync complete - check for GPU printf output above!");
 
     // Log output values
     if (num_tokens_in_batch > 0 && num_q_heads > 0 && head_dim > 0 && d_output_batch_strided) {
@@ -2175,7 +2190,10 @@ void update_kv_cache_batch_cuda(
                  ", num_kv_heads: " + std::to_string(num_kv_heads) +
                  ", head_dim: " + std::to_string(head_dim) +
                  ", cache_max_seq_len: " + std::to_string(cache_max_seq_len));
-
+    Logger::info("[GPU_KV_UPDATE] start_pos=" + std::to_string(start_pos_in_kv_cache) + 
+                ", num_tokens=" + std::to_string(num_tokens_in_batch) +
+                ", k_batch_ptr=" + Logger::ptrToString(d_keys_or_values_batch) +
+                ", cache_k_ptr=" + Logger::ptrToString(d_kv_cache_layer_base));
     if (num_tokens_in_batch == 0 || head_dim == 0 || num_kv_heads == 0) {
         Logger::debug("[UPDATE_KV_CACHE_BATCH_CUDA_SKIP] Nothing to update (num_tokens_in_batch, head_dim, or num_kv_heads is 0).");
         Logger::info("[UPDATE_KV_CACHE_BATCH_CUDA_EXIT] Skipped update.");

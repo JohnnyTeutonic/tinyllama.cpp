@@ -154,7 +154,7 @@ void Logger::fatal(const std::string& message) {
         log_file_stream_.close();
     }
     std::cerr << "[FATAL] " << message << std::endl; // Ensure it goes to cerr
-    std::exit(EXIT_FAILURE);
+  std::exit(EXIT_FAILURE);
 }
 
 void Logger::log_vector_stats(const std::string& name,

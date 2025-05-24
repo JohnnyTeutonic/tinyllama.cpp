@@ -598,8 +598,26 @@ if (prefill_enabled) {
           gpuErrchk(cudaMemcpy(d_temp_batch_embeddings, cpu_processed_embeddings.data(), 
                                batch_embeddings_size_bytes, cudaMemcpyHostToDevice));
 
-          logits = model_->forward_device_batch_prefill(d_temp_batch_embeddings, num_prompt_tokens, 0, &kv_cache_, 0);
-          
+          logits = model_->forward_device_batch_prefill(d_temp_batch_embeddings, num_prompt_tokens, start_pos_for_loop, &kv_cache_, 0);
+            // DEBUG: Check if logits are coherent after GPU batch prefill
+  if (logits.size() >= config_.vocab_size) {
+      std::vector<float> logits_sample(std::min(10, (int)config_.vocab_size));
+      std::copy(logits.begin(), logits.begin() + logits_sample.size(), logits_sample.begin());
+            
+      // Check for NaN/Inf
+      bool has_nan_inf = false;
+      for (float val : logits) {
+          if (std::isnan(val) || std::isinf(val)) {
+              has_nan_inf = true;
+              break;
+          }
+      }
+    if (has_nan_inf) {
+        std::cout << "ERROR: GPU batch prefill produced NaN/Inf logits!" << std::endl;
+    }
+    
+}
+
           if (d_temp_batch_embeddings) {
               gpuErrchk(cudaFree(d_temp_batch_embeddings));
           }
