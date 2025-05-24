@@ -1915,8 +1915,8 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
   if (active_num_gpu_layers > 0) { // Only process if GPU layers are active
     // Path 1: Source is already BF16 (model.embed_tokens is std::vector<uint16_t>)
   if (!embed_tokens.empty()) {
-    gpuErrchk(cudaMalloc(&token_embedding_table_dev_, embed_tokens.size() * sizeof(uint16_t)));
-    gpuErrchk(cudaMemcpy(token_embedding_table_dev_, embed_tokens.data(), embed_tokens.size() * sizeof(uint16_t), cudaMemcpyHostToDevice));
+      gpuErrchk(cudaMalloc(&token_embedding_table_dev_, embed_tokens.size() * sizeof(uint16_t)));
+      gpuErrchk(cudaMemcpy(token_embedding_table_dev_, embed_tokens.data(), embed_tokens.size() * sizeof(uint16_t), cudaMemcpyHostToDevice));
       Logger::info("Copied token_embedding_table (bf16 direct from model.embed_tokens) to GPU.");
       token_embeddings_processed_to_gpu_bf16 = true;
     }
@@ -4817,12 +4817,9 @@ std::vector<float> TinyLlamaModel::forward_device_batch_prefill(
                            num_tokens_in_batch, hidden_size, config_.rms_norm_eps, stream);
 
         const float* w_q_layer_ptr = w_q_f32_dev_ + (size_t)l_gpu_idx * hidden_size * hidden_size;
-        // TEMPORARILY REPLACE GEMM WITH INDIVIDUAL MATVEC CALLS FOR DEBUGGING
-        for (int tok_idx = 0; tok_idx < num_tokens_in_batch; tok_idx++) {
-            float* input_ptr = d_batch_x_norm_out_attn + tok_idx * hidden_size;
-            float* output_ptr = d_batch_q_proj_out + tok_idx * hidden_size;
-            matvec_f32_f32_cuda(cublas_handle_, w_q_layer_ptr, input_ptr, output_ptr, hidden_size, hidden_size, stream);
-        }
+        gemm_f32_f32_cuda(cublas_handle_, false, true, num_tokens_in_batch, hidden_size, hidden_size, &alpha,
+                          d_batch_x_norm_out_attn, hidden_size, w_q_layer_ptr, hidden_size, &beta,
+                          d_batch_q_proj_out, hidden_size, stream);
         Logger::info("[GPU_Q_PROJ] Layer=" + std::to_string(l_model_idx) + 
             ", input_ptr=" + Logger::ptrToString(d_batch_x_norm_out_attn) +
             ", weight_ptr=" + Logger::ptrToString(w_q_layer_ptr) +
@@ -4848,20 +4845,14 @@ std::vector<float> TinyLlamaModel::forward_device_batch_prefill(
         }
 
         const float* w_k_layer_ptr = w_k_f32_dev_ + (size_t)l_gpu_idx * n_kv_dim * hidden_size;
-        // TEMPORARILY REPLACE GEMM WITH INDIVIDUAL MATVEC CALLS FOR DEBUGGING
-        for (int tok_idx = 0; tok_idx < num_tokens_in_batch; tok_idx++) {
-            float* input_ptr = d_batch_x_norm_out_attn + tok_idx * hidden_size;
-            float* output_ptr = d_batch_k_proj_out + tok_idx * n_kv_dim;
-            matvec_f32_f32_cuda(cublas_handle_, w_k_layer_ptr, input_ptr, output_ptr, n_kv_dim, hidden_size, stream);
-        }
+        gemm_f32_f32_cuda(cublas_handle_, false, true, num_tokens_in_batch, n_kv_dim, hidden_size, &alpha,
+                          d_batch_x_norm_out_attn, hidden_size, w_k_layer_ptr, n_kv_dim, &beta,
+                          d_batch_k_proj_out, n_kv_dim, stream);
 
         const float* w_v_layer_ptr = w_v_f32_dev_ + (size_t)l_gpu_idx * n_kv_dim * hidden_size;
-        // TEMPORARILY REPLACE GEMM WITH INDIVIDUAL MATVEC CALLS FOR DEBUGGING
-        for (int tok_idx = 0; tok_idx < num_tokens_in_batch; tok_idx++) {
-            float* input_ptr = d_batch_x_norm_out_attn + tok_idx * hidden_size;
-            float* output_ptr = d_batch_v_proj_out + tok_idx * n_kv_dim;
-            matvec_f32_f32_cuda(cublas_handle_, w_v_layer_ptr, input_ptr, output_ptr, n_kv_dim, hidden_size, stream);
-        }
+        gemm_f32_f32_cuda(cublas_handle_, false, true, num_tokens_in_batch, n_kv_dim, hidden_size, &alpha,
+                          d_batch_x_norm_out_attn, hidden_size, w_v_layer_ptr, n_kv_dim, &beta,
+                          d_batch_v_proj_out, n_kv_dim, stream);
 
         // PRE-ROPE LOGGING (Unchanged)
         if (l_model_idx == config_.num_cpu_offload_layers && num_tokens_in_batch > 0 && head_dim > 0) { // Existing logging condition
@@ -4952,12 +4943,9 @@ std::vector<float> TinyLlamaModel::forward_device_batch_prefill(
                                      kv_cache->max_seq_len_config_, config_.num_attention_heads, 
                                      config_.num_key_value_heads, head_dim, current_attention_scale, stream, nullptr);        
         const float* w_o_layer_ptr = w_o_f32_dev_ + (size_t)l_gpu_idx * hidden_size * hidden_size;
-        // TEMPORARILY REPLACE GEMM WITH INDIVIDUAL MATVEC CALLS FOR DEBUGGING
-        for (int tok_idx = 0; tok_idx < num_tokens_in_batch; tok_idx++) {
-            float* input_ptr = d_batch_attn_heads_concat_out + tok_idx * hidden_size;
-            float* output_ptr = d_batch_attn_final_proj_out + tok_idx * hidden_size;
-            matvec_f32_f32_cuda(cublas_handle_, w_o_layer_ptr, input_ptr, output_ptr, hidden_size, hidden_size, stream);
-        }
+        gemm_f32_f32_cuda(cublas_handle_, false, true, num_tokens_in_batch, hidden_size, hidden_size, &alpha,
+                          d_batch_attn_heads_concat_out, hidden_size, w_o_layer_ptr, hidden_size, &beta,
+                          d_batch_attn_final_proj_out, hidden_size, stream);
 
         // O_PROJ_OUT LOGGING (Unchanged) - Logging Point 1
         if (l_model_idx == config_.num_cpu_offload_layers && num_tokens_in_batch > 1 && hidden_size > 0) { /* ... */ }
@@ -4977,23 +4965,17 @@ std::vector<float> TinyLlamaModel::forward_device_batch_prefill(
 
 
         const float* w1_layer_ptr = w_gate_f32_dev_ + (size_t)l_gpu_idx * hidden_size * ffn_intermediate_dim;
-        // TEMPORARILY REPLACE GEMM WITH INDIVIDUAL MATVEC CALLS FOR DEBUGGING
-        for (int tok_idx = 0; tok_idx < num_tokens_in_batch; tok_idx++) {
-            float* input_ptr = d_batch_x_norm_out_ffn + tok_idx * hidden_size;
-            float* output_ptr = d_batch_ffn_gate_proj_out + tok_idx * ffn_intermediate_dim;
-            matvec_f32_f32_cuda(cublas_handle_, w1_layer_ptr, input_ptr, output_ptr, ffn_intermediate_dim, hidden_size, stream);
-        }
+        gemm_f32_f32_cuda(cublas_handle_, false, true, num_tokens_in_batch, ffn_intermediate_dim, hidden_size, &alpha,
+                          d_batch_x_norm_out_ffn, hidden_size, w1_layer_ptr, ffn_intermediate_dim, &beta,
+                          d_batch_ffn_gate_proj_out, ffn_intermediate_dim, stream);
         // FFN_GATE_PROJ_OUT LOGGING (Unchanged) - Logging Point 4
         if (l_model_idx == config_.num_cpu_offload_layers && num_tokens_in_batch > 1 && ffn_intermediate_dim > 0) { /* ... */ }
 
 
         const float* w3_layer_ptr = w_up_f32_dev_ + (size_t)l_gpu_idx * hidden_size * ffn_intermediate_dim;
-        // TEMPORARILY REPLACE GEMM WITH INDIVIDUAL MATVEC CALLS FOR DEBUGGING
-        for (int tok_idx = 0; tok_idx < num_tokens_in_batch; tok_idx++) {
-            float* input_ptr = d_batch_x_norm_out_ffn + tok_idx * hidden_size;
-            float* output_ptr = d_batch_ffn_up_proj_out + tok_idx * ffn_intermediate_dim;
-            matvec_f32_f32_cuda(cublas_handle_, w3_layer_ptr, input_ptr, output_ptr, ffn_intermediate_dim, hidden_size, stream);
-        }
+        gemm_f32_f32_cuda(cublas_handle_, false, true, num_tokens_in_batch, ffn_intermediate_dim, hidden_size, &alpha,
+                          d_batch_x_norm_out_ffn, hidden_size, w3_layer_ptr, ffn_intermediate_dim, &beta,
+                          d_batch_ffn_up_proj_out, ffn_intermediate_dim, stream);
         // FFN_UP_PROJ_OUT LOGGING (Unchanged) - Logging Point 5
         if (l_model_idx == config_.num_cpu_offload_layers && num_tokens_in_batch > 1 && ffn_intermediate_dim > 0) { /* ... */ }
 
@@ -5005,12 +4987,9 @@ std::vector<float> TinyLlamaModel::forward_device_batch_prefill(
 
 
         const float* w2_layer_ptr = w_down_f32_dev_ + (size_t)l_gpu_idx * ffn_intermediate_dim * hidden_size;
-        // TEMPORARILY REPLACE GEMM WITH INDIVIDUAL MATVEC CALLS FOR DEBUGGING
-        for (int tok_idx = 0; tok_idx < num_tokens_in_batch; tok_idx++) {
-            float* input_ptr = d_batch_ffn_swiglu_out + tok_idx * ffn_intermediate_dim;
-            float* output_ptr = d_batch_ffn_down_proj_out + tok_idx * hidden_size;
-            matvec_f32_f32_cuda(cublas_handle_, w2_layer_ptr, input_ptr, output_ptr, hidden_size, ffn_intermediate_dim, stream);
-        }
+        gemm_f32_f32_cuda(cublas_handle_, false, true, num_tokens_in_batch, hidden_size, ffn_intermediate_dim, &alpha,
+                          d_batch_ffn_swiglu_out, ffn_intermediate_dim, w2_layer_ptr, hidden_size, &beta,
+                          d_batch_ffn_down_proj_out, hidden_size, stream);
         // FFN_DOWN_PROJ_OUT LOGGING (Unchanged) - Logging Point 7
         if (l_model_idx == config_.num_cpu_offload_layers && num_tokens_in_batch > 1 && hidden_size > 0) { /* ... */ }
         

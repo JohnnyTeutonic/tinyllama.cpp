@@ -1514,45 +1514,43 @@ void gemm_f32_f32_cuda(cublasHandle_t handle,
     const float *A_cublas_ptr, *B_cublas_ptr;
     int LDA_cublas, LDB_cublas;
 
+    // Unified strategy for row-major C(m_user, n_user) = opA_user(A_user) * opB_user(B_user)
+    // Based on cuBLAS guidelines: call sgemm with M_c=n_user, N_c=m_user, K_c=k_user.
+    // The first matrix for cuBLAS is B_user, second is A_user.
+    // Transposition flags for cuBLAS are based on user's desired ops for B and A respectively.
+
+    M_cublas = n_user;
+    N_cublas = m_user;
+    K_cublas = k_user;
+
+    A_cublas_ptr = B_user;    // B_user data is the first matrix for cuBLAS call
+    // CRITICAL FIX: When B_user gets transposed (transb_user=true), LDA must be the ROW count
+    LDA_cublas = (transb_user) ? k_user : ldb_user;
+
+    B_cublas_ptr = A_user;    // A_user data is the second matrix for cuBLAS call
+    // CRITICAL FIX: When A_user gets transposed (transa_user=true), LDB must be the ROW count (m_user)
+    LDB_cublas = (transa_user) ? m_user : lda_user;
+
+    // Determine cuBLAS operations for A_cublas_ptr (B_user) and B_cublas_ptr (A_user)
+    // opA_cublas applies to B_user, opB_cublas applies to A_user.
     if (!transa_user && !transb_user) {
-        // Standard C_rowmajor(m,n) = A_rowmajor(m,k) * B_rowmajor(k,n)
-        // This is equivalent to C_colmajor(n,m) = B_colmajor(n,k) * A_colmajor(k,m)
-        // So, we call cublasSgemm with m_blas=n_user, n_blas=m_user, k_blas=k_user
-        // A_blas_ptr = B_user, LDA_blas = ldb_user (which is n_user, the number of columns in B_user)
-        // B_blas_ptr = A_user, LDB_blas = lda_user (which is k_user, the number of columns in A_user)
-        // C_blas_ptr = C_user, LDC_blas = ldc_user (which is n_user, the number of columns in C_user)
-        // All ops are CUBLAS_OP_N because we are passing pointers to row-major matrices
-        // and cuBLAS will interpret them as column-major matrices with dimensions swapped for A and B vs C.
-        // More precisely, cuBLAS expects A to be M_cublas x K_cublas (col-major) and B to be K_cublas x N_cublas (col-major)
-        // If B_user (k_user x n_user row-major) is A_cublas, then A_cublas is n_user x k_user col-major. So M_cublas=n_user, K_cublas=k_user, LDA_cublas=n_user (=ldb_user).
-        // If A_user (m_user x k_user row-major) is B_cublas, then B_cublas is k_user x m_user col-major. So K_cublas=k_user, N_cublas=m_user, LDB_cublas=k_user (=lda_user).
-        // This leads to C_cublas being n_user x m_user.
-
-        opA_cublas = CUBLAS_OP_N; 
-        opB_cublas = CUBLAS_OP_N;
-        M_cublas = n_user;         
-        N_cublas = m_user;          
-        K_cublas = k_user;         
-        A_cublas_ptr = B_user;      
-        LDA_cublas = ldb_user; // For B_user (k_user x n_user RM) treated as A_cublas (n_user x k_user CM), LDA is n_user.
-        B_cublas_ptr = A_user;     
-        LDB_cublas = lda_user; // For A_user (m_user x k_user RM) treated as B_cublas (k_user x m_user CM), LDB is k_user.
-    } else {
-        // User has specified transpositions. This case needs careful review if used,
-        // as lda/ldb are for row-major from user, but cuBLAS needs them for col-major view with trans.
-        // For now, direct pass-through (likely incorrect if transposing row-major matrices).
-        Logger::warning("[GEMM_WRAPPER] transa_user or transb_user is true. Direct pass-through of ops and dims.");
-        opA_cublas = transa_user ? CUBLAS_OP_T : CUBLAS_OP_N;
-        opB_cublas = transb_user ? CUBLAS_OP_T : CUBLAS_OP_N;
-        M_cublas = m_user;
-        N_cublas = n_user;
-        K_cublas = k_user;
-        A_cublas_ptr = A_user;
-        LDA_cublas = lda_user;
-        B_cublas_ptr = B_user;
-        LDB_cublas = ldb_user;
+        // User wants C = A * B
+        opA_cublas = CUBLAS_OP_N; // for B_user
+        opB_cublas = CUBLAS_OP_N; // for A_user
+    } else if (transa_user && !transb_user) {
+        // User wants C = A^T * B
+        opA_cublas = CUBLAS_OP_N; // for B_user
+        opB_cublas = CUBLAS_OP_T; // for A_user (A^T)
+    } else if (!transa_user && transb_user) {
+        // User wants C = A * B^T
+        opA_cublas = CUBLAS_OP_T; // for B_user (B^T)
+        opB_cublas = CUBLAS_OP_N; // for A_user
+    } else { // transa_user && transb_user
+        // User wants C = A^T * B^T
+        opA_cublas = CUBLAS_OP_T; // for B_user (B^T)
+        opB_cublas = CUBLAS_OP_T; // for A_user (A^T)
     }
-
+    
     // Logging before the call
     Logger::info("[GEMM_WRAPPER_DEBUG] cublasSgemm effective call: transA=" + std::to_string(opA_cublas == CUBLAS_OP_T) + 
                  ", transB=" + std::to_string(opB_cublas == CUBLAS_OP_T) + 
@@ -1561,14 +1559,16 @@ void gemm_f32_f32_cuda(cublasHandle_t handle,
                  ", alpha=" + std::to_string(*alpha_user) + ", beta=" + std::to_string(*beta_user) +
                  ", A_ptr=" + Logger::ptrToString(A_cublas_ptr) + ", B_ptr=" + Logger::ptrToString(B_cublas_ptr) + ", C_ptr=" + Logger::ptrToString(C_user) );
 
+    // For swapped computation: C^T result is (n_user x m_user) in column-major
+    int LDC_cublas = ldc_user; // Leading dimension of C (which is n_user for row-major C(m,n))
+    
     status = cublasSgemm(handle, opA_cublas, opB_cublas, 
                            M_cublas, N_cublas, K_cublas, 
                            alpha_user, 
                            A_cublas_ptr, LDA_cublas, 
                            B_cublas_ptr, LDB_cublas, 
                            beta_user, 
-                           C_user, ldc_user); // C_user and ldc_user are for the final C_orig(m_user, n_user) row-major matrix.
-                                          // For C_colmajor(n_user, m_user), ldc should be n_user.
+                           C_user, LDC_cublas); // FIXED: Use LDC_cublas instead of ldc_user
 
     if (status != CUBLAS_STATUS_SUCCESS) {
         Logger::error("cublasSgemm failed in gemm_f32_f32_cuda with error: " + std::to_string(status) + " (" + cublasGetStatusString(status) + ")");
@@ -1577,7 +1577,7 @@ void gemm_f32_f32_cuda(cublasHandle_t handle,
                        " lda=" + std::to_string(lda_user) + " ldb=" + std::to_string(ldb_user) + " ldc=" + std::to_string(ldc_user));
         Logger::error("GEMM params (internal cublas view at failure): transA=" + std::to_string(opA_cublas==CUBLAS_OP_T) + " transB=" + std::to_string(opB_cublas==CUBLAS_OP_T) + 
                        " M_c=" + std::to_string(M_cublas) + " N_c=" + std::to_string(N_cublas) + " K_c=" + std::to_string(K_cublas) + 
-                       " LDA_c=" + std::to_string(LDA_cublas) + " LDB_c=" + std::to_string(LDB_cublas) + " LDC_c(user)=" + std::to_string(ldc_user));
+                       " LDA_c=" + std::to_string(LDA_cublas) + " LDB_c=" + std::to_string(LDB_cublas) + " LDC_c=" + std::to_string(LDC_cublas));
         throw std::runtime_error("cublasSgemm failed");
     }
     Logger::info("[GEMM_F32_CUDA_EXIT] Function finished successfully.");
