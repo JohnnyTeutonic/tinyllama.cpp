@@ -28,6 +28,119 @@
 #include "model_macros.h"
 #include "safetensors_loader.h"
 
+// SIMD intrinsics headers for optimized attention computation
+#if defined(__AVX2__)
+#include <immintrin.h>
+#define SIMD_WIDTH 8
+#elif defined(__SSE2__)
+#include <emmintrin.h>
+#define SIMD_WIDTH 4
+#elif defined(__ARM_NEON)
+#include <arm_neon.h>
+#define SIMD_WIDTH 4
+#endif
+
+// SIMD optimized dot product functions
+static inline float simd_dot_product(const float* a, const float* b, int n) {
+#if defined(__AVX2__)
+    __m256 sum = _mm256_setzero_ps();
+    int i = 0;
+    for (; i <= n - 8; i += 8) {
+        __m256 va = _mm256_loadu_ps(&a[i]);
+        __m256 vb = _mm256_loadu_ps(&b[i]);
+        sum = _mm256_fmadd_ps(va, vb, sum);
+    }
+    float result[8];
+    _mm256_storeu_ps(result, sum);
+    float final_sum = result[0] + result[1] + result[2] + result[3] + 
+                      result[4] + result[5] + result[6] + result[7];
+    for (; i < n; ++i) {
+        final_sum += a[i] * b[i];
+    }
+    return final_sum;
+#elif defined(__SSE2__)
+    __m128 sum = _mm_setzero_ps();
+    int i = 0;
+    for (; i <= n - 4; i += 4) {
+        __m128 va = _mm_loadu_ps(&a[i]);
+        __m128 vb = _mm_loadu_ps(&b[i]);
+        sum = _mm_add_ps(sum, _mm_mul_ps(va, vb));
+    }
+    float result[4];
+    _mm_storeu_ps(result, sum);
+    float final_sum = result[0] + result[1] + result[2] + result[3];
+    for (; i < n; ++i) {
+        final_sum += a[i] * b[i];
+    }
+    return final_sum;
+#elif defined(__ARM_NEON)
+    float32x4_t sum = vdupq_n_f32(0.0f);
+    int i = 0;
+    for (; i <= n - 4; i += 4) {
+        float32x4_t va = vld1q_f32(&a[i]);
+        float32x4_t vb = vld1q_f32(&b[i]);
+        sum = vmlaq_f32(sum, va, vb);
+    }
+    float result[4];
+    vst1q_f32(result, sum);
+    float final_sum = result[0] + result[1] + result[2] + result[3];
+    for (; i < n; ++i) {
+        final_sum += a[i] * b[i];
+    }
+    return final_sum;
+#else
+    float sum = 0.0f;
+    for (int i = 0; i < n; ++i) {
+        sum += a[i] * b[i];
+    }
+    return sum;
+#endif
+}
+
+// SIMD optimized scaled vector addition
+static inline void simd_scaled_add(float* dst, const float* src, float scale, int n) {
+#if defined(__AVX2__)
+    __m256 vscale = _mm256_set1_ps(scale);
+    int i = 0;
+    for (; i <= n - 8; i += 8) {
+        __m256 vdst = _mm256_loadu_ps(&dst[i]);
+        __m256 vsrc = _mm256_loadu_ps(&src[i]);
+        __m256 result = _mm256_fmadd_ps(vsrc, vscale, vdst);
+        _mm256_storeu_ps(&dst[i], result);
+    }
+    for (; i < n; ++i) {
+        dst[i] += src[i] * scale;
+    }
+#elif defined(__SSE2__)
+    __m128 vscale = _mm_set1_ps(scale);
+    int i = 0;
+    for (; i <= n - 4; i += 4) {
+        __m128 vdst = _mm_loadu_ps(&dst[i]);
+        __m128 vsrc = _mm_loadu_ps(&src[i]);
+        __m128 result = _mm_add_ps(vdst, _mm_mul_ps(vsrc, vscale));
+        _mm_storeu_ps(&dst[i], result);
+    }
+    for (; i < n; ++i) {
+        dst[i] += src[i] * scale;
+    }
+#elif defined(__ARM_NEON)
+    float32x4_t vscale = vdupq_n_f32(scale);
+    int i = 0;
+    for (; i <= n - 4; i += 4) {
+        float32x4_t vdst = vld1q_f32(&dst[i]);
+        float32x4_t vsrc = vld1q_f32(&src[i]);
+        float32x4_t result = vmlaq_f32(vdst, vsrc, vscale);
+        vst1q_f32(&dst[i], result);
+    }
+    for (; i < n; ++i) {
+        dst[i] += src[i] * scale;
+    }
+#else
+    for (int i = 0; i < n; ++i) {
+        dst[i] += src[i] * scale;
+    }
+#endif
+}
 
 /**
  * @brief Converts a float32 value to bfloat16 representation.
@@ -4627,7 +4740,7 @@ std::vector<std::vector<float>> TinyLlamaModel::forward_cpu_batch_generation(
                 : lw.input_layernorm_f32;
         rmsnorm_batch_cpu(current_batch_activations, w_input_norm_vec, batch_x_norm1, num_tokens_in_batch, hs, eps);
 
-        std::vector<float> residual_batch_component_attn = current_batch_activations;
+        std::vector<float> residual_batch_component_attn = current_batch_activations; 
 
         // Batch Q, K, V projections
         std::vector<float> q_batch((size_t)num_tokens_in_batch * hs);
@@ -4645,9 +4758,9 @@ std::vector<std::vector<float>> TinyLlamaModel::forward_cpu_batch_generation(
             matmul_q4k_f32_batch_cpu(lw.q_proj_q4k, batch_x_norm1, q_batch, num_tokens_in_batch, hs, hs);
         } else {
             Logger::error("[CPU_BATCH_GENERATION] Layer " + std::to_string(l) + ": No Q proj weights found for CPU (batched)"); 
-         return {};
-    }
-
+            return {};
+        }
+        
         // K Projection (batched)
         if (!lw.k_proj_f32.empty()) {
             matmul_f32_f32_batch_cpu(lw.k_proj_f32, batch_x_norm1, k_batch, num_tokens_in_batch, n_kv_heads * head_dim, hs);
@@ -4676,7 +4789,7 @@ std::vector<std::vector<float>> TinyLlamaModel::forward_cpu_batch_generation(
             return {};
         }
 
-        // Optimized RoPE, KV cache update, and attention with OpenMP
+        // Optimized RoPE, KV cache update, and attention with OpenMP and SIMD
         std::vector<float> batch_attn_output((size_t)num_tokens_in_batch * hs);
         
         #pragma omp parallel if(num_tokens_in_batch > 1)
@@ -4705,6 +4818,7 @@ std::vector<std::vector<float>> TinyLlamaModel::forward_cpu_batch_generation(
                 // Apply RoPE individually
                 apply_rope_vector(q_token, n_heads, head_dim, pos, precomputed_freqs_cis_, max_pos_embeddings, use_rope_adjacent_pairing);
                 apply_rope_vector(k_token, n_kv_heads, head_dim, pos, precomputed_freqs_cis_, max_pos_embeddings, use_rope_adjacent_pairing);
+                
                 // Update KV cache at specific position - Sequence-Major Layout
                 if (kv_cache && static_cast<size_t>(l) < kv_cache->layers.size()) {
                     auto& layer_cache = kv_cache->layers[l];
@@ -4719,44 +4833,51 @@ std::vector<std::vector<float>> TinyLlamaModel::forward_cpu_batch_generation(
                             std::copy(v_token.begin(), v_token.end(), layer_cache.v.begin() + kv_offset);
                         }
                     }
-                }                // Copy back RoPE'd Q values to batch
+                }
+                
+                // Copy back RoPE'd Q values to batch
                 std::copy(q_token.begin(), q_token.end(), q_batch.begin() + (size_t)token_idx * hs);
                 
-                // Optimized attention computation for this token
+                // SIMD-optimized attention computation for this token
                 int seq_idx = original_sequence_indices[token_idx];
                 int history_len = (seq_idx < kv_cache->current_batch_size) ? kv_cache->batch_seq_lens[seq_idx] : pos + 1;
-                //int history_len = pos + 1;
                 scores_buffer.resize(history_len);
                 
                 const float* q_token_ptr = q_batch.data() + (size_t)token_idx * hs;
                 float* attn_output_ptr = batch_attn_output.data() + (size_t)token_idx * hs;
-                
+        
                 if (kv_cache && static_cast<size_t>(l) < kv_cache->layers.size()) {
                     const auto& layer_cache = kv_cache->layers[l];
                     
-                    // Process all heads for this token efficiently
+                    // Process all heads for this token efficiently with SIMD
                     for (int h = 0; h < n_heads; ++h) {
                         int kv_head_idx = h / kv_group;  // Use pre-calculated kv_group
                         const float* q_head_ptr = q_token_ptr + h * head_dim;
                         float* head_output_ptr = attn_output_ptr + h * head_dim;
                         
-
-                        // Compute attention scores for this head
+                        // SIMD-optimized attention score computation
                         for (int t = 0; t < history_len; ++t) {
                             // sequence-major layout: each sequence has contiguous region                            
                             int seq_idx = original_sequence_indices[token_idx];
                             int sequence_base_offset = seq_idx * kv_cache->max_seq_len_config_;
                             const float* k_ptr = layer_cache.k.data() + (sequence_base_offset + t) * n_kv_heads * head_dim + kv_head_idx * head_dim;
+                            
+                            // Use SIMD dot product for Q·K computation
+#if defined(__AVX2__) || defined(__SSE2__) || defined(__ARM_NEON)
+                            float score = simd_dot_product(q_head_ptr, k_ptr, head_dim);
+#else
                             float score = 0.0f;
                             for (int d = 0; d < head_dim; ++d) {
                                 score += q_head_ptr[d] * k_ptr[d];
                             }
+#endif
                             scores_buffer[t] = score * attention_scale;
                         }
                 
                         // Softmax
                         softmax_vector_cpu(scores_buffer, scores_buffer);
-                        // Weighted sum with V - initialize to zero BEFORE the loop
+                        
+                        // SIMD-optimized weighted sum with V
                         std::fill(head_output_ptr, head_output_ptr + head_dim, 0.0f);
                         for (int t = 0; t < history_len; ++t) {
                             // Sequence-major layout: each sequence has contiguous region
@@ -4764,9 +4885,15 @@ std::vector<std::vector<float>> TinyLlamaModel::forward_cpu_batch_generation(
                             int sequence_base_offset = seq_idx * kv_cache->max_seq_len_config_;                    
                             const float* v_ptr = layer_cache.v.data() + (sequence_base_offset + t) * n_kv_heads * head_dim + kv_head_idx * head_dim;
                             float score = scores_buffer[t];
+                            
+                            // Use SIMD scaled vector addition for score * V accumulation
+#if defined(__AVX2__) || defined(__SSE2__) || defined(__ARM_NEON)
+                            simd_scaled_add(head_output_ptr, v_ptr, score, head_dim);
+#else
                             for (int d = 0; d < head_dim; ++d) {
                                 head_output_ptr[d] += score * v_ptr[d];
                             }
+#endif
                         }
                     }
                 } else {
@@ -4774,10 +4901,11 @@ std::vector<std::vector<float>> TinyLlamaModel::forward_cpu_batch_generation(
                 }
             }
         }
+        
         // O-Projection (batched)
         std::vector<float> batch_attn_proj_out((size_t)num_tokens_in_batch * hs);
         if(!lw.o_proj_f32.empty()) {
-            matmul_f32_f32_batch_cpu(lw.o_proj_f32, batch_attn_output, batch_attn_proj_out, num_tokens_in_batch, hs, hs);
+              matmul_f32_f32_batch_cpu(lw.o_proj_f32, batch_attn_output, batch_attn_proj_out, num_tokens_in_batch, hs, hs);
         } else if (!lw.o_proj_q8_0.empty()) {
             matmul_q8_0_f32_batch_cpu(lw.o_proj_q8_0, batch_attn_output, batch_attn_proj_out, num_tokens_in_batch, hs, hs);
         } else if (!lw.o_proj_q6k.empty()) {
@@ -4816,11 +4944,11 @@ std::vector<std::vector<float>> TinyLlamaModel::forward_cpu_batch_generation(
             matmul_q6k_f32_batch_cpu(lw.gate_proj_q6k, batch_x_norm2, batch_gate_proj_out, num_tokens_in_batch, is, hs);
         } else if (!lw.gate_proj_q4k.empty()) {
             matmul_q4k_f32_batch_cpu(lw.gate_proj_q4k, batch_x_norm2, batch_gate_proj_out, num_tokens_in_batch, is, hs);
-    } else {
+        } else { 
             Logger::error("[CPU_BATCH_GENERATION] Layer " + std::to_string(l) + ": No gate_proj weights found for CPU"); 
-        return {};
-    }
-    
+            return {};
+        }
+
         if (!lw.up_proj_f32.empty()) {
             matmul_f32_f32_batch_cpu(lw.up_proj_f32, batch_x_norm2, batch_up_proj_out, num_tokens_in_batch, is, hs);
         } else if (!lw.up_proj_q8_0.empty()) {
@@ -4897,6 +5025,7 @@ std::vector<std::vector<float>> TinyLlamaModel::forward_cpu_batch_generation(
             kv_cache->seq_len = std::max(kv_cache->seq_len, max_pos + 1);
         }
     }
+    
     // Final normalization and logits calculation for ALL tokens
     std::vector<float> batch_logits = forward_cpu_logits_batch(current_batch_activations, num_tokens_in_batch);
     
@@ -4907,8 +5036,6 @@ std::vector<std::vector<float>> TinyLlamaModel::forward_cpu_batch_generation(
                  batch_logits.begin() + (size_t)(token_idx + 1) * vs,
                  all_logits[token_idx].begin());
     }
-
-    Logger::info("[CPU_BATCH_GENERATION] Calculated logits for " + std::to_string(num_tokens_in_batch) + " tokens");
     return all_logits;
 }
 
