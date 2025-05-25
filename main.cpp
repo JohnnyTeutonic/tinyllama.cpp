@@ -8,7 +8,7 @@
  * required for proper model responses in both formats.
  *
  * Usage:
- *   tinyllama <model_path> <tokenizer_path> <num_threads> <prompt|chat|batch> [--system-prompt <system_prompt_string>] [initial_user_prompt] [max_tokens] [n_gpu_layers] [use_mmap] [temperature] [use_kv_quant] [use_batch_generation] [--batch-prompts "prompt1" "prompt2" ...] [--max-batch-size N]
+ *   tinyllama <model_path> <tokenizer_path> <num_threads> <prompt|chat|batch> [--system-prompt <system_prompt_string>] [initial_user_prompt] [max_tokens] [n_gpu_layers] [use_mmap] [temperature] [top_k] [top_p] [use_kv_quant] [use_batch_generation] [--batch-prompts "prompt1" "prompt2" ...] [--max-batch-size N]
  *
  * Arguments:
  *   model_path: Path to the model file (.gguf) or directory (SafeTensors).
@@ -21,13 +21,15 @@
  *   n_gpu_layers: (Optional) Number of layers to offload to GPU (-1 for all, 0 for none). Default: -1 (all layers on GPU if available)
  *   use_mmap: (Optional) Use mmap for GGUF files ('true' or 'false'). Default: true
  *   temperature: (Optional) Sampling temperature (e.g., 0.1). Lower is more deterministic. Default: 0.1
+ *   top_k: (Optional) Top-K sampling parameter (0 to disable). Default: 40
+ *   top_p: (Optional) Top-P/nucleus sampling parameter (0.0-1.0). Default: 0.9
  *   use_kv_quant: (Optional) Use INT8 KVCache quantization on GPU ('true' or 'false'). Default: false
  *   use_batch_generation: (Optional) Use GPU batch generation for tokens ('true' or 'false'). Default: false
  *   --batch-prompts: (For batch mode) Multiple prompts in quotes, e.g., "prompt1" "prompt2" ...
  *   --max-batch-size: (For batch mode) Maximum batch size. Default: 8
  *
  * Example:
- *   ./tinyllama ./models/model.gguf ./models/tokenizer.model 4 prompt --system-prompt "You are a helpful assistant." "What is the capital of France?" 128 0 true 0.1 true
+ *   ./tinyllama ./models/model.gguf ./models/tokenizer.model 4 prompt --system-prompt "You are a helpful assistant." "What is the capital of France?" 128 0 true 0.1 40 0.9 true
  *
  * Note:
  *   The program may automatically apply Q:A formatting to prompts (e.g., "Q: [prompt]\nA:")
@@ -60,7 +62,7 @@ std::string trim_whitespace(const std::string& s) {
 void print_usage(const char* program_name) {
   std::cout << "Usage: " << program_name
             << " <model_path> <tokenizer_path> <num_threads> <prompt|chat|batch> "
-               "[--system-prompt <system_prompt_string>] [initial_user_prompt] [max_tokens] [n_gpu_layers] [use_mmap] [temperature] [use_kv_quant] [use_batch_generation] [--batch-prompts \"prompt1\" \"prompt2\" ...] [--max-batch-size N]"
+               "[--system-prompt <system_prompt_string>] [initial_user_prompt] [max_tokens] [n_gpu_layers] [use_mmap] [temperature] [top_k] [top_p] [use_kv_quant] [use_batch_generation] [--batch-prompts \"prompt1\" \"prompt2\" ...] [--max-batch-size N]"
             << std::endl;
   std::cout << "\nArguments:\n"
                "  model_path          : Path to the model file (.gguf) or directory (SafeTensors).\n"
@@ -73,6 +75,8 @@ void print_usage(const char* program_name) {
                "  n_gpu_layers        : (Optional) Number of layers to offload to GPU (-1 for all, 0 for none). Default: -1.\n"
                "  use_mmap            : (Optional) Use mmap for GGUF files ('true' or 'false'). Default: true.\n"
                "  temperature         : (Optional) Sampling temperature. Default: 0.1.\n"
+               "  top_k               : (Optional) Top-K sampling parameter (0 to disable). Default: 40.\n"
+               "  top_p               : (Optional) Top-P/nucleus sampling parameter (0.0-1.0). Default: 0.9.\n"
                "  use_kv_quant        : (Optional) Use INT8 KVCache quantization on GPU ('true' or 'false'). Default: false.\n"
                "  use_batch_generation: (Optional) Use GPU batch generation for tokens ('true' or 'false'). Default: false.\n"
                "  --batch-prompts     : (For batch mode) Multiple prompts in quotes, e.g., \"prompt1\" \"prompt2\" ...\n"
@@ -126,8 +130,8 @@ int main(int argc, char** argv) {
   
   // Default sampling params for generate
   float temperature = 0.1f; // Default temperature
-  int top_k = 40;           // Default, not exposed via CLI in this version
-  float top_p = 0.9f;       // Default, not exposed via CLI in this version
+  int top_k = 40;           // Default top-k sampling parameter
+  float top_p = 0.9f;       // Default top-p/nucleus sampling parameter
 
   int current_arg_idx = 5;
   while(current_arg_idx < argc) {
@@ -168,6 +172,18 @@ int main(int argc, char** argv) {
             catch (const std::exception& e) { Logger::error("Invalid temperature: " + std::string(argv[current_arg_idx+1]));}
             current_arg_idx += 2;
         } else { std::cerr << "ERROR: --temperature requires a value." << std::endl; return 1;}
+    } else if (arg == "--top-k" || arg == "-k") {
+        if (current_arg_idx + 1 < argc) {
+            try { top_k = std::stoi(argv[current_arg_idx+1]); }
+            catch (const std::exception& e) { Logger::error("Invalid top_k: " + std::string(argv[current_arg_idx+1])); }
+            current_arg_idx += 2;
+        } else { std::cerr << "ERROR: --top-k requires a value." << std::endl; return 1;}
+    } else if (arg == "--top-p" || arg == "-p") {
+        if (current_arg_idx + 1 < argc) {
+            try { top_p = std::stof(argv[current_arg_idx+1]); }
+            catch (const std::exception& e) { Logger::error("Invalid top_p: " + std::string(argv[current_arg_idx+1])); }
+            current_arg_idx += 2;
+        } else { std::cerr << "ERROR: --top-p requires a value." << std::endl; return 1;}
     } else if (arg == "--use-kv-quant" || arg == "-kvq") {
          if (current_arg_idx + 1 < argc) {
             std::string kvq_str_val = argv[current_arg_idx+1];
@@ -228,6 +244,8 @@ int main(int argc, char** argv) {
   Logger::info("N GPU Layers: " + std::to_string(n_gpu_layers));
   Logger::info(std::string("Use mmap: ") + (use_mmap ? "true" : "false"));
   Logger::info("Temperature: " + std::to_string(temperature));
+  Logger::info("Top-K: " + std::to_string(top_k));
+  Logger::info("Top-P: " + std::to_string(top_p));
   Logger::info(std::string("Use KVCache Quantization: ") + (use_kv_quant ? "true" : "false"));
   Logger::info(std::string("Use Batch Generation: ") + (use_batch_generation ? "true" : "false"));
 

@@ -7,36 +7,91 @@ This script demonstrates the new generate_batch() functionality.
 import sys
 import time
 import os
-# Remove current directory from path to avoid local import conflicts
+import pathlib
+import argparse
+
 current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir in sys.path:
     sys.path.remove(current_dir)
     
-try:
-    import tinyllama_cpp as tl
-except ImportError:
-    print("Error: tinyllama_bindings module not found. Please compile the Python bindings first.")
-    print("Run: python setup.py build_ext --inplace")
-    sys.exit(1)
+import tinyllama_cpp as tl
 
-def test_single_vs_batch_generation():
-    """Test that single and batch generation produce consistent results."""
+def parse_arguments():
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Test TinyLlama batch processing Python bindings",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # For Llama 3+ GGUF models (tokenizer embedded)
+  python test_batch_bindings.py path/to/model.gguf
+  
+  # For Llama 2 GGUF models or SafeTensors (separate tokenizer required)
+  python test_batch_bindings.py path/to/model.gguf --tokenizer path/to/tokenizer.json
+  
+  # For SafeTensors format
+  python test_batch_bindings.py path/to/safetensors/directory --tokenizer path/to/tokenizer.json
+        """
+    )
     
+    parser.add_argument(
+        "model_path",
+        type=str,
+        help="Path to model file (.gguf) or directory (SafeTensors)"
+    )
+    
+    parser.add_argument(
+        "--tokenizer", "--tokenizer-path",
+        type=str,
+        default=None,
+        help="Path to tokenizer.json file. Optional for Llama 3+ GGUF models (will use model_path if not specified). Required for SafeTensors and Llama 2 models."
+    )
+    
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=4,
+        help="Number of CPU threads for inference (default: 4)"
+    )
+    
+    parser.add_argument(
+        "--gpu-layers",
+        type=int,
+        default=-1,
+        help="Number of layers to offload to GPU. -1 for all layers, 0 for CPU only (default: -1)"
+    )
+    
+    parser.add_argument(
+        "--max-batch-size",
+        type=int,
+        default=5,
+        help="Maximum batch size for testing (default: 5)"
+    )
+    
+    return parser.parse_args()
+
+def test_single_vs_batch_generation(model_path, tokenizer_path, threads, gpu_layers, max_batch_size):
+    """Test that single and batch generation produce consistent results."""
     print("Initializing TinyLlamaSession with batch support...")
+    
+    # Use model_path as tokenizer_path if not specified (for Llama 3+ GGUF models)
+    if tokenizer_path is None:
+        tokenizer_path = model_path
+        print(f"Using model path as tokenizer path: {tokenizer_path}")
+    
     session = tl.TinyLlamaSession(
-        model_path="../data/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf",
-        tokenizer_path="../data/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf", 
-        threads=4,
-        n_gpu_layers=22,
+        model_path=model_path,
+        tokenizer_path=tokenizer_path, 
+        threads=threads,
+        n_gpu_layers=gpu_layers,
         use_mmap=True,
         use_kv_quant=True,
         use_batch_generation=True,
-        max_batch_size=5
+        max_batch_size=max_batch_size
     )
     
     print(f"Model config: {session.get_config()}")
     
-    # Test prompts
     test_prompts = [
         "What is the capital of France?",
         "Explain quantum computing in simple terms.",
@@ -62,7 +117,6 @@ def test_single_vs_batch_generation():
         single_results.append(result)
     single_time = time.time() - start_time
     
-    # Test batch generation
     print("\n=== Batch Generation ===")
     start_time = time.time()
     batch_results = session.generate_batch(
@@ -74,7 +128,6 @@ def test_single_vs_batch_generation():
     )
     batch_time = time.time() - start_time
     
-    # Compare results
     print(f"\n=== Results Comparison ===")
     print(f"Single generation time: {single_time:.2f}s")
     print(f"Batch generation time: {batch_time:.2f}s")
@@ -93,37 +146,38 @@ def test_single_vs_batch_generation():
         else:
             print("✗ One or both methods produced empty results")
 
-def test_batch_edge_cases():
+def test_batch_edge_cases(model_path, tokenizer_path, threads, gpu_layers):
     """Test batch generation edge cases."""
     print("\n=== Testing Batch Edge Cases ===")
     
+    # Use model_path as tokenizer_path if not specified
+    if tokenizer_path is None:
+        tokenizer_path = model_path
+    
     session = tl.TinyLlamaSession(
-        model_path="../data/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf",
-        tokenizer_path="../data/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf", 
-        threads=4,
-        n_gpu_layers=22,
+        model_path=model_path,
+        tokenizer_path=tokenizer_path, 
+        threads=threads,
+        n_gpu_layers=gpu_layers,
         use_mmap=True,
         use_kv_quant=True,
         use_batch_generation=True,
         max_batch_size=3
     )
     
-    # Test empty batch
     try:
         results = session.generate_batch([])
         print("✗ Empty batch should have thrown an exception")
     except RuntimeError as e:
         print(f"✓ Empty batch correctly threw exception: {e}")
     
-    # Test batch size exceeding limit
     try:
-        large_batch = ["Test prompt"] * 5  # Exceeds max_batch_size=3
+        large_batch = ["Test prompt"] * 5
         results = session.generate_batch(large_batch)
         print("✗ Oversized batch should have thrown an exception")
     except RuntimeError as e:
         print(f"✓ Oversized batch correctly threw exception: {e}")
     
-    # Test valid small batch
     try:
         small_batch = ["Hello", "World"]
         results = session.generate_batch(small_batch, steps=10)
@@ -133,10 +187,31 @@ def test_batch_edge_cases():
 
 if __name__ == "__main__":
     print("TinyLlama Batch Processing Test")
-    print("=" * 40)    
+    print("=" * 40)
+    
+    args = parse_arguments()
+    
+    print(f"Model path: {args.model_path}")
+    print(f"Tokenizer path: {args.tokenizer or 'Using model path'}")
+    print(f"Threads: {args.threads}")
+    print(f"GPU layers: {args.gpu_layers}")
+    print(f"Max batch size: {args.max_batch_size}")
+    print()
+    
     try:
-        test_single_vs_batch_generation()
-        test_batch_edge_cases()
+        test_single_vs_batch_generation(
+            args.model_path, 
+            args.tokenizer, 
+            args.threads, 
+            args.gpu_layers, 
+            args.max_batch_size
+        )
+        test_batch_edge_cases(
+            args.model_path, 
+            args.tokenizer, 
+            args.threads, 
+            args.gpu_layers
+        )
         print("\n✓ All tests completed!")
     except Exception as e:
         print(f"\n✗ Test failed with error: {e}")

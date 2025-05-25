@@ -1,6 +1,6 @@
-# TinyLlama.cpp - A C++ Chat Inference
+# TinyLlama.cpp - Cross-Format LLM Inference Engine
 
-This codebase supports inference for Llama 2/3 architecture models using Safetensors model format as well as GGUF format.
+This codebase supports inference for Llama 2/3 architecture models using both GGUF and Safetensors formats, and additionally contains Python bindings.
 
 The GGUF format support includes loading models with various tensor types such as BF16, FP16, FP32, and the quantised types: Q4_K_M, Q6_K and Q8_0.
 
@@ -48,13 +48,15 @@ To run the model, you need both the model weights and tokenizer information. The
 
 *   **SafeTensors:** This format typically involves three files:
     *   `config.json`: Contains the model architecture, hyperparameters, and other metadata.
-    *   `tokenizer.json`: Defines the vocabulary, merge rules, and other tokenizer configurations.
+    *   `tokenizer.json`: Defines the vocabulary, merge rules, and other tokenizer configurations. **Required for SafeTensors format.**
     *   `model.safetensors`: The file containing the model weights.
     *   *Data Types:* The loader supports `F32`, `BF16`, and `F16` weight types from SafeTensors. `BF16` and `F16` are automatically converted to `F32` upon loading. Internal computation then proceeds in `F32`.
 
 *   **GGUF (GPT-Generated Unified Format):** This format aims to package the model into a single file (`.gguf`).
-    *   Ideally, the GGUF file embeds all necessary metadata, including tokenizer information.
-    *   However, for some GGUF files (especially older ones or those converted with minimal metadata), or if the `tinyllama` executable's argument parsing requires it, a separate `tokenizer.json` compatible with the model (e.g., Llama 2/3 style SentencePiece) might still be needed. Place it in the same directory as the GGUF file or provide its path via the `<tokenizer_path>` argument.
+    *   **Tokenizer Requirements:**
+        *   **Llama 3+ models:** Tokenizer is embedded in the GGUF file. You can set `tokenizer_path` to the same path as the model file, or omit it entirely in Python bindings.
+        *   **Llama 2 models:** Require a separate `tokenizer.json` file even when using GGUF format.
+        *   **Other models:** May require a separate tokenizer depending on how the GGUF file was created.
     *   *Quantizations:* Supports various tensor types including `FP32`, `FP16`, `BF16`, and common quantized types like `Q4_K_M`, `Q6_K`, `Q8_0`, etc., as supported by the underlying GGUF parsing library.
 
 #### Example Model Sources:
@@ -70,9 +72,6 @@ It's recommended to download models from reputable sources like Hugging Face. He
 *   **Meta-Llama-3 8B:**
     *   GGUF (e.g., Q4_K_M): [QuantFactory/Meta-Llama-3-8B-GGUF](https://huggingface.co/QuantFactory/Meta-Llama-3-8B-GGUF)
     *   For Llama 3 SafeTensors, you would typically download from the official Meta Llama repository or a trusted conversion, ensuring you get the Llama 3 specific `tokenizer.json` and `config.json`.
-
-*A Note on Python for Model Acquisition:*
-While not required to build or run the C++ application itself, Python scripts using libraries like `torch`, Hugging Face `transformers`, `safetensors`, and `sentencepiece` are commonly used to download models from the Hugging Face Hub and save them into the required `config.json`, `tokenizer.json`, and `model.safetensors` (or `.gguf`) structure.
 
 ### 3. Build the C++ Application
 
@@ -120,7 +119,9 @@ This process will create executables in the `build/` directory (or a subdirector
 **Key Command-Line Arguments for `tinyllama`:**
 
 *   `<model_path>`: Path to model file (.gguf) or directory (SafeTensors).
-*   `<tokenizer_path>`: Path to `tokenizer.json` or `.model` file. (See "Model Files & Tokenizers" for GGUF notes).
+*   `<tokenizer_path>`: Path to `tokenizer.json` or `.model` file. 
+    *   **Required for:** SafeTensors format and Llama 2 GGUF models
+    *   **Optional for:** Llama 3+ GGUF models (can use same path as model_path)
 *   `<num_threads>`: Number of CPU threads for generation.
 *   `<prompt|chat>`: `prompt` for single generation, `chat` for interactive mode.
 *   `--system-prompt "<text>"` (Optional): System-level instruction.
@@ -129,213 +130,111 @@ This process will create executables in the `build/` directory (or a subdirector
 *   `--n-gpu-layers <N>` (Optional): Layers to offload to GPU (-1 for all, 0 for none. Default: -1).
 *   `--use-mmap <true|false>` (Optional): Memory-map GGUF files (Default: true).
 *   `--temperature <F>` (Optional): Sampling temperature (e.g., 0.1. Default: 0.1).
-*   `--use-kv-quant <true|false>` (Optional): Use INT8 KVCache on GPU (Default: false).*   `--use-batch-generation <true|false>` (Optional): Enable single-token batch generation (Default: false).*   `--max-batch-size <N>` (Optional): Maximum number of sequences for multi-prompt batch processing (Default: 1).
+*   `--top-k <N>` (Optional): Top-K sampling parameter (0 to disable). Default: 40.
+*   `--top-p <F>` (Optional): Top-P/nucleus sampling parameter (0.0-1.0). Default: 0.9.
+*   `--use-kv-quant <true|false>` (Optional): Use INT8 KVCache on GPU (Default: false).
+*   `--use-batch-generation <true|false>` (Optional): Enable single-token batch generation (Default: false).
+*   `--max-batch-size <N>` (Optional): Maximum number of sequences for multi-prompt batch processing (Default: 1).
+
+**Note on Sampling Parameters**: The `tinyllama` executable supports `--temperature`, `--top-k`, and `--top-p` via command line for full control over text generation sampling.
 
 **Example Invocation:**
 
 ```bash
-./build/tinyllama ./models/Llama-3-8B.Q4_K_M.gguf ./models/tokenizer.json 4 chat --system-prompt "You are a helpful AI." --n-gpu-layers -1 --use-kv-quant true "Tell me a joke."
+# For Llama 3+ GGUF models (tokenizer embedded)
+./build/tinyllama ./models/Llama-3-8B.Q4_K_M.gguf ./models/Llama-3-8B.Q4_K_M.gguf 4 chat --system-prompt "You are a helpful AI." --n-gpu-layers -1 --use-kv-quant true --temperature 0.7 --top-k 50 --top-p 0.95 "Tell me a joke."
+
+# For Llama 2 GGUF models (separate tokenizer required)
+./build/tinyllama ./models/Llama-2-7B.Q4_K_M.gguf ./models/tokenizer.json 4 chat --system-prompt "You are a helpful AI." --n-gpu-layers -1 --use-kv-quant true --temperature 0.7 --top-k 50 --top-p 0.95 "Tell me a joke."
+
+# For SafeTensors format (separate tokenizer required)
+./build/tinyllama ./models/safetensors_directory ./models/tokenizer.json 4 chat --system-prompt "You are a helpful AI." --n-gpu-layers -1 --use-kv-quant true --temperature 0.7 --top-k 50 --top-p 0.95 "Tell me a joke."
 ```
 
 For detailed operational logs, inspect `debugging.log` in the application's runtime directory.
 
 ### Python Package Installation
 
-In addition to building and running the C++ executables, you can install `tinyllama.cpp` as a Python package. This allows you to use its core inference capabilities directly from Python scripts.
-
-**Prerequisites:**
-
-*   Ensure you have the C++ build dependencies installed as listed in the "C++ Runtime Dependencies" section above (CMake, C++17 compiler, OpenMP, and crucially **Boost.Regex**).
-*   If you are using a Conda environment, it's highly recommended to install the C++ compilers and other dependencies from Conda channels to ensure ABI compatibility:
-    ```bash
-    conda install -c conda-forge cxx-compiler openmp 'boost<1.83' # Specify boost version if needed for compatibility
-    # Note: 'boost' in conda-forge usually includes the regex component. 
-    # If you encounter issues, you might need to be more specific or ensure the installed boost version is compatible.
-    # For older boost versions, you might need 'conda install -c conda-forge boost-cpp'
-    ```
-
-**Installation Steps:**
-
-1.  **Clone the repository (if you haven't already):**
-    ```bash
-    git clone https://github.com/JohnnyTeutonic/tinyllama.cpp.git # Or your fork
-    cd tinyllama.cpp
-    ```
-
-2.  **Install the Python package using pip:**
-    Navigate to the root of the cloned repository and run:
-    ```bash
-    pip install .
-    ```
-
-**Building with CUDA Support (Optional):**
-
-By default, `pip install .` builds the CPU-only version of the package. To build the version with CUDA acceleration, you must have the NVIDIA CUDA Toolkit installed (see "CUDA Toolkit (Optional - For GPU Acceleration)" under C++ dependencies).
-
-Then, set the `TINYLLAMA_CPP_BUILD_CUDA` environment variable to `1` before running pip:
-
+**Development Installation (CPU-only):**
 ```bash
-# On Linux / macOS
-TINYLLAMA_CPP_BUILD_CUDA=1 pip install .
-
-# For an editable install with CUDA:
-TINYLLAMA_CPP_BUILD_CUDA=1 pip install -e .
+git clone https://github.com/JohnnyTeutonic/tinyllama.cpp.git
+cd tinyllama.cpp
+# Install from the project directory
+pip install .
 ```
 
-```powershell
-# On Windows (PowerShell)
-$env:TINYLLAMA_CPP_BUILD_CUDA="1"
-pip install .
+**Development Installation with CUDA Support:**
+```bash
+git clone https://github.com/JohnnyTeutonic/tinyllama.cpp.git
+cd tinyllama.cpp
+# Set environment variable to enable CUDA build
+export TINYLLAMA_CPP_BUILD_CUDA=1  # Linux/macOS
+# or
+set TINYLLAMA_CPP_BUILD_CUDA=1     # Windows CMD
+# or
+$env:TINYLLAMA_CPP_BUILD_CUDA=1    # Windows PowerShell
 
-# For an editable install with CUDA:
-$env:TINYLLAMA_CPP_BUILD_CUDA="1"
+# Install from the project directory
+pip install .
+```
+
+**Development Installation with PyTorch Dependencies:**
+```bash
+git clone https://github.com/JohnnyTeutonic/tinyllama.cpp.git
+cd tinyllama.cpp
+# Install from the project directory with PyTorch extras
+pip install .[torch]
+```
+
+**Editable Development Installation:**
+```bash
+git clone https://github.com/JohnnyTeutonic/tinyllama.cpp.git
+cd tinyllama.cpp
+# Editable install from the project directory (CPU-only)
+pip install -e .
+
+# For CUDA support with editable install:
+export TINYLLAMA_CPP_BUILD_CUDA=1   # Linux/macOS
+set TINYLLAMA_CPP_BUILD_CUDA=1      # Windows
 pip install -e .
 ```
-If the `TINYLLAMA_CPP_BUILD_CUDA` variable is not set, or set to any other value than `1`, the CPU version will be built.
 
-**Usage in Python:**
+**Prerequisites for CUDA Build:**
+- NVIDIA CUDA Toolkit (11.0 or later) installed and in PATH
+- Compatible NVIDIA GPU drivers
+- CMake 3.18 or later
+- C++17 compatible compiler
 
-Once installed, you can import and use the package in your Python scripts:
-
+**Usage:**
 ```python
 import tinyllama_cpp
 
-# Example: (Ensure model paths are correct)
-model_path = "path/to/your/model_or_gguf_file"
-tokenizer_path = "path/to/your/tokenizer.json_or.model"
-
-# Initialize the session with new enhanced API
-# For GGUF, tokenizer_path can often be the same as model_path if tokenizer is embedded,
-# or a separate tokenizer.model/tokenizer.json.
-# For SafeTensors, model_path is the directory containing model.safetensors, config.json, tokenizer.json,
-# and tokenizer_path should point to the tokenizer.json in that directory.
+# For SafeTensors format (tokenizer_path required)
 session = tinyllama_cpp.TinyLlamaSession(
-    model_path=model_path,
-    tokenizer_path=tokenizer_path,
-    threads=4,                      # Number of CPU threads
-    n_gpu_layers=-1,               # Use -1 for all GPU layers if CUDA enabled
-    use_mmap=True,                 # Memory-map GGUF files for efficiency
-    use_kv_quant=False,            # Enable INT8 KVCache quantization on GPU
-    use_batch_generation=False,     # Enable single-token batch generation
-    max_batch_size=1               # Maximum number of sequences for multi-prompt batch processing
-)
-
-# Define prompts
-user_prompt = "What is the capital of France?"
-system_prompt_optional = "You are a helpful geography expert." # Optional
-
-# Single Generation
-# The `apply_q_a_format` parameter defaults to `true`. This means Q:A style formatting 
-# (e.g., "Q: [prompt]\\nA:") is applied by default if the loaded model is not Llama 3 
-# and does not have an explicit GGUF chat template. This is often preferred for Llama 2 models.
-# Set to `False` if you want to use a raw prompt for such models.
-# If a GGUF or Llama 3 chat template is active, that template takes precedence.
-response = session.generate(
-    prompt=user_prompt, 
-    steps=64, 
-    temperature=0.7,
-    top_k=40,
-    top_p=0.9,
-    system_prompt=system_prompt_optional, # Pass the system prompt here
-    apply_q_a_format=True # This is now the default
-)
-
-print(f"User: {user_prompt}")
-if system_prompt_optional:
-    print(f"System: {system_prompt_optional}")
-print(f"AI: {response}")
-
-# Batch Generation (NEW FEATURE!)
-# Process multiple prompts efficiently in a single batch
-if session.max_batch_size > 1:  # Only if batch processing is enabled
-    batch_prompts = [
-        "What is the capital of France?",
-        "Explain quantum computing in simple terms.",
-        "Write a short poem about coding."
-    ]
-    
-    print("\n--- Batch Generation ---")
-    batch_results = session.generate_batch(
-        prompts=batch_prompts,
-        steps=64,
-        temperature=0.7,
-        top_k=40,
-        top_p=0.9,
-        system_prompt=system_prompt_optional,
-        apply_q_a_format=True
-    )
-    
-    for i, (prompt, result) in enumerate(zip(batch_prompts, batch_results)):
-        print(f"\nPrompt {i+1}: {prompt}")
-        print(f"Response {i+1}: {result}")
-
-# Example for chat interaction (simplified loop)
-print("\nEntering chat mode (type 'quit' to exit)...")
-while True:
-    current_user_input = input("You: ")
-    if current_user_input.lower() == 'quit':
-        break
-    
-    chat_response = session.generate(
-        prompt=current_user_input,
-        steps=128,
-        temperature=0.7,
-        top_k=40,
-        top_p=0.9,
-        system_prompt=system_prompt_optional, # Maintain system prompt across turns if desired
-        apply_q_a_format=True # Default, applies Q:A if no GGUF/Llama3 template
-    )
-    print(f"AI: {chat_response}")
-```
-
-Refer to your Python bindings implementation (`bindings.cpp` and `tinyllama_cpp/__init__.py`) for the exact classes and methods available.
-
-#### New Batch Processing Features
-
-**TinyLlama.cpp** now supports efficient batch processing for multiple prompts:
-
-**Constructor Parameters:**
-- `use_batch_generation` (bool): Enables single-token batch generation for improved performance
-- `max_batch_size` (int): Maximum number of sequences that can be processed in a single batch
-
-**New Methods:**
-- `generate_batch(prompts, steps, temperature, top_k, top_p, system_prompt, apply_q_a_format)`: Process multiple prompts in a single efficient batch operation
-
-**Example for batch processing with enhanced constructor:**
-
-```python
-# Initialize with batch processing enabled
-session = tinyllama_cpp.TinyLlamaSession(
-    model_path="./models/model.gguf",
-    tokenizer_path="./models/tokenizer.json",
+    model_path="path/to/safetensors/directory",
+    tokenizer_path="path/to/tokenizer.json",
     threads=4,
-    n_gpu_layers=-1,
-    use_mmap=True,
-    use_kv_quant=False,
-    use_batch_generation=True,      # Enable batch generation
-    max_batch_size=5               # Support up to 5 prompts per batch
+    n_gpu_layers=-1  # Use GPU if available
 )
 
-# Process multiple prompts efficiently
-prompts = [
-    "What is machine learning?",
-    "Explain neural networks.",
-    "How does AI work?"
-]
-
-batch_results = session.generate_batch(
-    prompts=prompts,
-    steps=100,
-    temperature=0.7,
-    top_k=40,
-    top_p=0.9,
-    system_prompt="You are an AI expert.",
-    apply_q_a_format=True
+# For Llama 3+ GGUF models (tokenizer embedded, can use same path)
+session = tinyllama_cpp.TinyLlamaSession(
+    model_path="path/to/llama3-model.gguf",
+    tokenizer_path="path/to/llama3-model.gguf",  # Same as model_path
+    threads=4,
+    n_gpu_layers=-1
 )
 
-for prompt, result in zip(prompts, batch_results):
-    print(f"Q: {prompt}")
-    print(f"A: {result}\n")
+# For Llama 2 GGUF models (separate tokenizer required)
+session = tinyllama_cpp.TinyLlamaSession(
+    model_path="path/to/llama2-model.gguf",
+    tokenizer_path="path/to/tokenizer.json",  # Separate tokenizer file
+    threads=4,
+    n_gpu_layers=-1
+)
+
+response = session.generate("What is AI?", steps=64)
+print(response)
 ```
 
 ### Using the Management Scripts
@@ -406,34 +305,6 @@ The main way to use this project is via the web server:
 *   Open your web browser and navigate to `http://localhost:8080`.
 *   You should see a basic chat interface where you can interact with the model.
 
-### 4. Other Executables / Command-Line Usage
-
-Besides the web server, you can interact with the models directly via command-line executables. These are typically found in `./build/bin/` or `./build/`.
-
-*   **`tinyllama`** (main executable, usually in `./build/bin/main` or `./build/tinyllama`):
-    *   **Description**: Command-line interface for chat or single prompt generation. Can load models from a SafeTensors model directory (containing `config.json`, `model.safetensors`, `tokenizer.json`) OR by providing a direct path to a `.gguf` model file.
-    *   **Usage**:
-        ```
-        ./build/bin/main <model_path> <tokenizer_path> <num_threads> <mode> [initial_prompt] [max_tokens] [n_gpu_layers] [use_mmap]
-        ```
-        *   `<model_path>`: Path to the model file (.gguf) or directory (SafeTensors).
-        *   `<tokenizer_path>`: Path to the `tokenizer.json` file. For GGUF models that embed tokenizer info, this can often be an empty string `""` or a placeholder if `manage.sh` supplies it, but it's a required positional argument for the C++ executable.
-        *   `<num_threads>`: Number of threads to use for generation (CPU computation).
-        *   `<mode>`: Operation mode. Use `"chat"` for interactive chat or `"prompt"` for single prompt generation.
-        *   `[initial_prompt]`: (Optional) The initial prompt string. For `chat` mode, this starts the conversation. For `prompt` mode, this is the text to complete. (Default: "Hello, world!")
-        *   `[max_tokens]`: (Optional) Maximum number of new tokens to generate. (Default: `256`)
-        *   `[n_gpu_layers]`: (Optional) Number of layers to offload to GPU. `-1` means all layers to GPU, `0` means all layers to CPU. A positive number specifies the exact number of layers for the GPU (remaining on CPU). (Default: `-1`).
-        *   `[use_mmap]`: (Optional) Whether to use memory-mapping for GGUF file metadata reading (`true` or `false`). (Default: `true`). Note: For GGUF weight loading itself, mmap is currently always used internally by the model loader for efficiency; this flag primarily influences the initial metadata peek by `TinyLlamaSession`.
-    *   **Note on Sampling Parameters**: The `tinyllama` executable currently uses default internal values for temperature, top-k, and top-p. To control these, modify them within `main.cpp` or extend `main.cpp` to parse them from the command line.
-    *   **Example (SafeTensors directory, chat mode via `manage.sh` which constructs the correct call):**
-        ```bash
-        ./manage.sh run-chat --model-dir ./data/TinyLlama-1.1B-Chat-v1.0 --tokenizer ./data/TinyLlama-1.1B-Chat-v1.0/tokenizer.json --threads 4 --system-prompt "You are a helpful assistant."
-        ```
-    *   **Example (GGUF file, direct call, prompt mode):**
-        ```bash
-        ./build/bin/main ./models/tinyllama-1.1b-chat-v1.0.Q8_0.gguf ./models/tokenizer.json 4 prompt "Explain black holes in simple terms" 128 0 true
-        ```
-
 ## PyTorch SafeTensors Inference
 
 For users interested in a Python-based reference or for direct PyTorch inference with SafeTensors models (compatible with Llama 2 / TinyLlama architecture), a dedicated implementation is available in the `pytorch/` directory.
@@ -455,20 +326,57 @@ Please refer to the `pytorch/README.md` for detailed usage instructions for this
 
 ## Project Structure
 
-*   `CMakeLists.txt`: Defines the build process, dependencies, and targets.
-*   `manage.sh`: Management script for common tasks (build, clean, run, etc.) on Linux/macOS.
-*   `manage.ps1`: Management script providing equivalent functionality for Windows PowerShell.
-*   `test_pybindings.py`: Python script for testing and demonstrating the Python bindings.
-*   `.clang-format`: Configuration file for the `clang-format` C++ code formatter.
-*   `Doxyfile`: Configuration file for generating API documentation with Doxygen.
-*   Key C++, Header, and CUDA files (typically in the root or organized by CMake):
-    *   `server.cpp`: Implements the `tinyllama_server` HTTP server and its main entry point for web UI interaction.
-    *   `api.cpp`/`api.h`: Defines the `TinyLlamaSession` class, providing a high-level API for loading models and generating text.
-    *   `bindings.cpp`: Implements Python bindings for `TinyLlamaSession` and `ModelConfig` using `pybind11`.
-    *   `model.cpp`/`model.h`: Contains the core Transformer model architecture and logic (attention, feed-forward layers, etc.).
-    *   `model_constants.h`: Defines various constants related to model architecture and parameters.
-    *   `model_macros.h`: Provides utility macros, notably for `NOMINMAX` compatibility (e.g., `SAFE_MIN`, `SAFE_MAX`) and other compile-time helpers.
-    *   `tokenizer.cpp`/`tokenizer.h`: Handles loading of `tokenizer.json`, BPE encoding/decoding, and chat template application.
-    *   `safetensors_loader.cpp`/`safetensors_loader.h`: Logic for parsing metadata and loading tensor data from `.safetensors` files.
-    *   `gguf_parser.cpp`/`gguf_parser.h`: Logic for parsing metadata and loading tensor data from `.gguf` files.
-    *   `cuda_kernels.cu`
+### Root Directory
+*   `CMakeLists.txt`: Main build configuration defining dependencies, targets, and compilation options.
+*   `pyproject.toml`: Modern Python packaging configuration with optional dependencies for GPU and PyTorch support.
+*   `manage.sh`: Comprehensive management script for Linux/macOS (build, clean, run, format, docs, etc.).
+*   `manage.ps1`: Windows PowerShell equivalent of the management script.
+*   `.clang-format`: Code formatting configuration for consistent C++ style.
+*   `Doxyfile`: Doxygen configuration for generating API documentation.
+*   `README.md`: This comprehensive documentation file.
+
+### Core C++ Implementation
+*   **`main.cpp`**: Command-line interface entry point for `tinyllama` executable.
+*   **`server.cpp`**: HTTP server implementation for web UI interaction (`tinyllama_server` executable).
+*   **`api.cpp`/`api.h`**: High-level `TinyLlamaSession` API for model loading and text generation.
+*   **`bindings.cpp`**: Python bindings using `pybind11` with comprehensive documentation for `help()` support.
+*   **`model.cpp`/`model.h`**: Core Transformer architecture (attention, feed-forward, RoPE, etc.) with SIMD optimizations.
+*   **`model_constants.h`**: Architecture constants and configuration parameters.
+*   **`model_macros.h`**: Utility macros for cross-platform compatibility and safe operations.
+
+### Data Loading & Processing
+*   **`tokenizer.cpp`/`tokenizer.h`**: BPE tokenization, chat template application, and multi-format tokenizer support.
+*   **`safetensors_loader.cpp`/`safetensors_loader.h`**: SafeTensors format parsing and tensor loading.
+*   **`gguf_parser.cpp`/`gguf_parser.h`**: GGUF format parsing with support for various quantizations.
+*   **`quantization.cpp`/`quantization.h`**: Quantization utilities and dequantization routines.
+
+### GPU Acceleration (Optional)
+*   **`cuda_kernels.cu`/`cuda_kernels.h`**: CUDA kernels for GPU-accelerated inference.
+*   **`logger.cpp`/`logger.h`**: Logging utilities with GPU memory monitoring.
+
+### Python Package Structure
+*   **`tinyllama_cpp/`**: Python package directory
+    *   `__init__.py`: Package initialization with dynamic versioning and error handling.
+    *   `_version.py`: Auto-generated version file (created during build).
+
+### PyTorch Reference Implementation
+*   **`pytorch/`**: Pure PyTorch implementation for comparison and experimentation
+    *   `run_inference.py`: Main PyTorch inference script.
+    *   `tinyllama.py`: PyTorch model definition.
+    *   `utils.py`: Utility functions for PyTorch implementation.
+    *   `requirements.txt`: PyTorch-specific dependencies.
+    *   `README.md`: PyTorch implementation documentation.
+
+### Build & Development
+*   **`build/`**: CMake build directory (created during compilation)
+    *   Contains compiled executables: `tinyllama`, `tinyllama_server`
+*   **`_skbuild/`**: Python build artifacts (created during `pip install`)
+*   **`debugging.log`**: Runtime debugging output (created during execution)
+
+### Key Features by Component
+*   **Model Loading**: Supports both GGUF (single file) and SafeTensors (multi-file) formats
+*   **Tokenization**: Handles Llama/Llama2 SentencePiece and Llama3 TikToken tokenizers
+*   **Inference**: CPU with OpenMP + optional SIMD, GPU with CUDA acceleration
+*   **Python Bindings**: Full-featured with comprehensive help documentation
+*   **Batch Processing**: Efficient parallel processing of multiple prompts
+*   **Memory Management**: KV cache with optional INT8 quantization, memory mapping support

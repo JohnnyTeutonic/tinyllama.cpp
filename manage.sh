@@ -85,6 +85,8 @@ usage() {
     echo "                 --steps <num>               (default: ${MAX_TOKENS_SERVER})"
     echo "                 --threads <num>             (default: ${DEFAULT_THREADS})"
     echo "                 --temperature <float>       (default: ${DEFAULT_TEMPERATURE})"
+    echo "                 --top-k <int>               (default: ${DEFAULT_TOP_K})"
+    echo "                 --top-p <float>             (default: ${DEFAULT_TOP_P})"
     echo "                 --n-gpu-layers <int>        (default: ${DEFAULT_N_GPU_LAYERS}, -1 for all on GPU)"
     echo "                 --mmap <true|false>          (default: ${DEFAULT_USE_MMAP})"
     echo "                 --use-kv-quant <true|false> (default: ${DEFAULT_USE_KV_QUANT})"
@@ -99,6 +101,8 @@ usage() {
     echo "                 --steps <num>               (default: ${MAX_TOKENS_SERVER})"
     echo "                 --threads <num>             (default: ${DEFAULT_THREADS})"
     echo "                 --temperature <float>       (default: ${DEFAULT_TEMPERATURE})"
+    echo "                 --top-k <int>               (default: ${DEFAULT_TOP_K})"
+    echo "                 --top-p <float>             (default: ${DEFAULT_TOP_P})"
     echo "                 --n-gpu-layers <int>        (default: ${DEFAULT_N_GPU_LAYERS}, -1 for all on GPU)"
     echo "                 --mmap <true|false>         (default: ${DEFAULT_USE_MMAP})"
     echo "                 --use-kv-quant <true|false> (default: ${DEFAULT_USE_KV_QUANT})"
@@ -296,9 +300,11 @@ do_run_chat() {
     log "  Threads: $threads_arg"
     log "  N GPU Layers: $n_gpu_layers_arg"
     log "  Use Mmap: $use_mmap_arg"
+    log "  Temperature: $temperature_arg"
+    log "  Top-K: $top_k_arg"
+    log "  Top-P: $top_p_arg"
     log "  Prompt: ${prompt_arg:-'(interactive)'}"
     log "  Max Tokens (steps): $steps_arg"
-    log "  (Note: Temperature, Top-K, Top-P from manage.sh are not currently passed to C++ main)"
 
     local mode_for_main="chat"
     
@@ -320,6 +326,8 @@ do_run_chat() {
     pass_through_args+=("--use-kv-quant" "${use_kv_quant_arg}")
     pass_through_args+=("--use-batch-generation" "${use_batch_generation_arg}")
     pass_through_args+=("--temperature" "${temperature_arg}")
+    pass_through_args+=("--top-k" "${top_k_arg}")
+    pass_through_args+=("--top-p" "${top_p_arg}")
 
     echo "Invoking C++ main: $executable_path ${pass_through_args[*]}"
     LD_LIBRARY_PATH=./build/lib "$executable_path" "${pass_through_args[@]}"
@@ -333,6 +341,8 @@ do_run_prompt() {
     local steps_arg="${MAX_TOKENS_SERVER}"
     local threads_arg="${DEFAULT_THREADS}"
     local temperature_arg="${DEFAULT_TEMPERATURE}"
+    local top_k_arg="${DEFAULT_TOP_K}"
+    local top_p_arg="${DEFAULT_TOP_P}"
     local n_gpu_layers_arg="${DEFAULT_N_GPU_LAYERS}"
     local use_mmap_arg="${DEFAULT_USE_MMAP}"
     local use_kv_quant_arg="${DEFAULT_USE_KV_QUANT}"
@@ -361,6 +371,12 @@ do_run_prompt() {
             shift; shift;;
             --temperature)
             temperature_arg="$2"
+            shift; shift;;
+            --top-k)
+            top_k_arg="$2"
+            shift; shift;;
+            --top-p)
+            top_p_arg="$2"
             shift; shift;;
             --n-gpu-layers)
             n_gpu_layers_arg="$2"
@@ -391,9 +407,11 @@ do_run_prompt() {
     log "  Model Path: $model_dir_arg"
     log "  Tokenizer Path: $tokenizer_path_arg"
     log "  Threads: $threads_arg"
+    log "  Temperature: $temperature_arg"
+    log "  Top-K: $top_k_arg"
+    log "  Top-P: $top_p_arg"
     log "  Prompt: $prompt_arg"
     log "  Max Tokens (steps): $steps_arg"
-    log "  (Note: Temperature, Top-K, Top-P from manage.sh are not currently passed to C++ main)"
 
     pass_through_args+=("${model_dir_arg}")
     pass_through_args+=("${tokenizer_path_arg}")
@@ -412,6 +430,8 @@ do_run_prompt() {
     pass_through_args+=("--use-kv-quant" "${use_kv_quant_arg}")
     pass_through_args+=("--use-batch-generation" "${use_batch_generation_arg}")
     pass_through_args+=("--temperature" "${temperature_arg}")
+    pass_through_args+=("--top-k" "${top_k_arg}")
+    pass_through_args+=("--top-p" "${top_p_arg}")
 
     echo "N GPU Layers: $n_gpu_layers_arg"
     echo "Use Mmap: $use_mmap_arg"
@@ -428,6 +448,8 @@ do_run_batch() {
     local steps_arg="128"
     local threads_arg="${DEFAULT_THREADS}"
     local temperature_arg="${DEFAULT_TEMPERATURE}"
+    local top_k_arg="${DEFAULT_TOP_K}"
+    local top_p_arg="${DEFAULT_TOP_P}"
     local n_gpu_layers_arg="${DEFAULT_N_GPU_LAYERS}"
     local use_mmap_arg="${DEFAULT_USE_MMAP}"
     local use_kv_quant_arg="${DEFAULT_USE_KV_QUANT}"
@@ -448,6 +470,8 @@ do_run_batch() {
             --steps) steps_arg="$2"; shift 2 ;;
             --threads) threads_arg="$2"; shift 2 ;;
             --temperature) temperature_arg="$2"; shift 2 ;;
+            --top-k) top_k_arg="$2"; shift 2 ;;
+            --top-p) top_p_arg="$2"; shift 2 ;;
             --n-gpu-layers) n_gpu_layers_arg="$2"; shift 2 ;;
             --mmap) use_mmap_arg="$2"; shift 2 ;;
             --use-kv-quant) use_kv_quant_arg="$2"; shift 2 ;;
@@ -475,6 +499,8 @@ do_run_batch() {
     log "  Threads: $threads_arg"
     log "  Steps: $steps_arg"
     log "  Temperature: $temperature_arg"
+    log "  Top-K: $top_k_arg"
+    log "  Top-P: $top_p_arg"
     log "  N GPU Layers: $n_gpu_layers_arg"
     log "  Use KV Quant: $use_kv_quant_arg"
     log "  Max Batch Size: $max_batch_size_arg"
@@ -509,6 +535,8 @@ do_run_batch() {
     pass_through_args+=("--use-mmap" "${use_mmap_arg}")
     pass_through_args+=("--use-kv-quant" "${use_kv_quant_arg}")
     pass_through_args+=("--temperature" "${temperature_arg}")
+    pass_through_args+=("--top-k" "${top_k_arg}")
+    pass_through_args+=("--top-p" "${top_p_arg}")
     pass_through_args+=("--max-batch-size" "${max_batch_size_arg}")
 
     log "Executing C++ batch processing..."

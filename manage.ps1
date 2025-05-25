@@ -100,6 +100,8 @@ function Show-Usage {
     Write-Host "                 -Prompt <text>             (default: ${DefaultPrompt})"
     Write-Host "                 -Steps <num>               (default: ${DefaultSteps})"
     Write-Host "                 -Temperature <float>       (default: ${DefaultTemperature})"
+    Write-Host "                 -TopK <int>               (default: ${DefaultTopK})"
+    Write-Host "                 -TopP <float>             (default: ${DefaultTopP})"
     Write-Host "                 -NGpuLayers <int>         (default: ${DefaultNGpuLayers}, -1 for all on GPU)"
     Write-Host "                 -Mmap <true|false>        (default: ${DefaultUseMmap})"
     Write-Host "                 -UseKvQuant <true|false>  (default: ${DefaultUseKvQuant})"
@@ -114,6 +116,8 @@ function Show-Usage {
     Write-Host "                 -Steps <num>              (default: 128)"
     Write-Host "                 -Threads <num>            (default: ${DefaultThreads})"
     Write-Host "                 -Temperature <float>      (default: ${DefaultTemperature})"
+    Write-Host "                 -TopK <int>               (default: ${DefaultTopK})"
+    Write-Host "                 -TopP <float>             (default: ${DefaultTopP})"
     Write-Host "                 -NGpuLayers <int>         (default: ${DefaultNGpuLayers}, -1 for all on GPU)"
     Write-Host "                 -Mmap <true|false>        (default: ${DefaultUseMmap})"
     Write-Host "                 -UseKvQuant <true|false>  (default: ${DefaultUseKvQuant})"
@@ -322,6 +326,8 @@ function Invoke-RunChat {
     Log-Message "Initial Prompt (if any): $Prompt"
     Log-Message "Max Tokens (Steps): $Steps"
     Log-Message "Temperature: $Temperature"
+    Log-Message "Top-K: $TopK"
+    Log-Message "Top-P: $TopP"
 
     $CmdArgs = @(
         $ModelDir,
@@ -339,6 +345,8 @@ function Invoke-RunChat {
     $CmdArgs += "--n-gpu-layers", $NGpuLayers.ToString()
     $CmdArgs += "--use-mmap", ([string]$UseMmap).ToLower() 
     $CmdArgs += "--temperature", $Temperature.ToString()
+    $CmdArgs += "--top-k", $TopK.ToString()
+    $CmdArgs += "--top-p", $TopP.ToString()
     $CmdArgs += "--use-kv-quant", ([string]$UseKvQuant).ToLower()
     $CmdArgs += "--use-batch-generation", ([string]$UseBatchGeneration).ToLower()
 
@@ -413,6 +421,8 @@ function Invoke-RunPrompt {
     Log-Message "Prompt: $Prompt"
     Log-Message "Max Tokens (Steps): $Steps"
     Log-Message "Temperature: $Temperature"
+    Log-Message "Top-K: $TopK"
+    Log-Message "Top-P: $TopP"
 
     $CmdArgs = @(
         $ModelDir,
@@ -428,6 +438,8 @@ function Invoke-RunPrompt {
     $CmdArgs += "--n-gpu-layers", $NGpuLayers.ToString()
     $CmdArgs += "--use-mmap", ([string]$UseMmap).ToLower()
     $CmdArgs += "--temperature", $Temperature.ToString()
+    $CmdArgs += "--top-k", $TopK.ToString()
+    $CmdArgs += "--top-p", $TopP.ToString()
     $CmdArgs += "--use-kv-quant", ([string]$UseKvQuant).ToLower() # Added
     $CmdArgs += "--use-batch-generation", ([string]$UseBatchGeneration).ToLower() # Added
 
@@ -445,6 +457,8 @@ function Invoke-RunBatch {
         [int]$Steps = 128,
         [int]$Threads = $DefaultThreads,
         [double]$Temperature = $DefaultTemperature,
+        [int]$TopK = $DefaultTopK,
+        [double]$TopP = $DefaultTopP,
         [int]$NGpuLayers = $DefaultNGpuLayers,
         [bool]$UseMmap = $DefaultUseMmap,
         [bool]$UseKvQuant = $DefaultUseKvQuant,
@@ -470,6 +484,8 @@ function Invoke-RunBatch {
             "-Steps" { $Steps = [int]$script:Arguments[$i+1]; $i += 2 }
             "-Threads" { $Threads = [int]$script:Arguments[$i+1]; $i += 2 }
             "-Temperature" { $Temperature = [double]$script:Arguments[$i+1]; $i += 2 }
+            "-TopK" { $TopK = [int]$script:Arguments[$i+1]; $i += 2 }
+            "-TopP" { $TopP = [double]$script:Arguments[$i+1]; $i += 2 }
             "-NGpuLayers" { $NGpuLayers = [int]$script:Arguments[$i+1]; $i += 2 }
             "-Mmap" { $UseMmap = [bool]::Parse($script:Arguments[$i+1]); $i += 2 }
             "-UseKvQuant" { $UseKvQuant = [bool]::Parse($script:Arguments[$i+1]); $i += 2 }
@@ -497,6 +513,8 @@ function Invoke-RunBatch {
     Log-Message "  Threads: $Threads"
     Log-Message "  Steps: $Steps"
     Log-Message "  Temperature: $Temperature"
+    Log-Message "  Top-K: $TopK"
+    Log-Message "  Top-P: $TopP"
     Log-Message "  N GPU Layers: $NGpuLayers"
     Log-Message "  Use KV Quant: $UseKvQuant"
     Log-Message "  Max Batch Size: $MaxBatchSize"
@@ -536,6 +554,8 @@ function Invoke-RunBatch {
     $CmdArgs += "--use-mmap", ([string]$UseMmap).ToLower()
     $CmdArgs += "--use-kv-quant", ([string]$UseKvQuant).ToLower()
     $CmdArgs += "--temperature", $Temperature.ToString()
+    $CmdArgs += "--top-k", $TopK.ToString()
+    $CmdArgs += "--top-p", $TopP.ToString()
     $CmdArgs += "--max-batch-size", $MaxBatchSize.ToString()
 
     Log-Message "Executing C++ batch processing..."
