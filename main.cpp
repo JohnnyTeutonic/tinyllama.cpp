@@ -8,13 +8,13 @@
  * required for proper model responses in both formats.
  *
  * Usage:
- *   tinyllama <model_path> <tokenizer_path> <num_threads> <prompt|chat> [--system-prompt <system_prompt_string>] [initial_user_prompt] [max_tokens] [n_gpu_layers] [use_mmap] [temperature] [use_kv_quant]
+ *   tinyllama <model_path> <tokenizer_path> <num_threads> <prompt|chat|batch> [--system-prompt <system_prompt_string>] [initial_user_prompt] [max_tokens] [n_gpu_layers] [use_mmap] [temperature] [use_kv_quant] [use_batch_generation] [--batch-prompts "prompt1" "prompt2" ...] [--max-batch-size N]
  *
  * Arguments:
  *   model_path: Path to the model file (.gguf) or directory (SafeTensors).
  *   tokenizer_path: Path to the tokenizer file.
  *   num_threads: Number of threads to use for generation.
- *   prompt|chat: 'prompt' for single prompt generation or 'chat' for interactive chat mode.
+ *   prompt|chat|batch: 'prompt' for single prompt generation, 'chat' for interactive chat mode, 'batch' for batch processing.
  *   --system-prompt: (Optional) System prompt to guide the model. Default: empty.
  *   initial_user_prompt: (Optional) Initial user prompt string. Default: "Hello, world!"
  *   max_tokens: (Optional) Maximum number of tokens to generate. Default: 256
@@ -22,6 +22,9 @@
  *   use_mmap: (Optional) Use mmap for GGUF files ('true' or 'false'). Default: true
  *   temperature: (Optional) Sampling temperature (e.g., 0.1). Lower is more deterministic. Default: 0.1
  *   use_kv_quant: (Optional) Use INT8 KVCache quantization on GPU ('true' or 'false'). Default: false
+ *   use_batch_generation: (Optional) Use GPU batch generation for tokens ('true' or 'false'). Default: false
+ *   --batch-prompts: (For batch mode) Multiple prompts in quotes, e.g., "prompt1" "prompt2" ...
+ *   --max-batch-size: (For batch mode) Maximum batch size. Default: 8
  *
  * Example:
  *   ./tinyllama ./models/model.gguf ./models/tokenizer.model 4 prompt --system-prompt "You are a helpful assistant." "What is the capital of France?" 128 0 true 0.1 true
@@ -56,14 +59,14 @@ std::string trim_whitespace(const std::string& s) {
 
 void print_usage(const char* program_name) {
   std::cout << "Usage: " << program_name
-            << " <model_path> <tokenizer_path> <num_threads> <prompt|chat> "
-               "[--system-prompt <system_prompt_string>] [initial_user_prompt] [max_tokens] [n_gpu_layers] [use_mmap] [temperature] [use_kv_quant] [use_batch_generation]"
+            << " <model_path> <tokenizer_path> <num_threads> <prompt|chat|batch> "
+               "[--system-prompt <system_prompt_string>] [initial_user_prompt] [max_tokens] [n_gpu_layers] [use_mmap] [temperature] [use_kv_quant] [use_batch_generation] [--batch-prompts \"prompt1\" \"prompt2\" ...] [--max-batch-size N]"
             << std::endl;
   std::cout << "\nArguments:\n"
                "  model_path          : Path to the model file (.gguf) or directory (SafeTensors).\n"
                "  tokenizer_path      : Path to the tokenizer file.\n"
                "  num_threads         : Number of threads to use for generation.\n"
-               "  prompt|chat         : 'prompt' for single prompt generation or 'chat' for chat mode.\n"
+               "  prompt|chat|batch   : 'prompt' for single prompt, 'chat' for chat mode, 'batch' for batch processing.\n"
                "  --system-prompt     : (Optional) System prompt to guide the model. Default: empty.\n"
                "  initial_user_prompt : (Optional) Initial user prompt string. Default: \"Hello, world!\".\n"
                "  max_tokens          : (Optional) Maximum number of tokens to generate. Default: 256.\n"
@@ -72,6 +75,8 @@ void print_usage(const char* program_name) {
                "  temperature         : (Optional) Sampling temperature. Default: 0.1.\n"
                "  use_kv_quant        : (Optional) Use INT8 KVCache quantization on GPU ('true' or 'false'). Default: false.\n"
                "  use_batch_generation: (Optional) Use GPU batch generation for tokens ('true' or 'false'). Default: false.\n"
+               "  --batch-prompts     : (For batch mode) Multiple prompts in quotes, e.g., \"prompt1\" \"prompt2\" ...\n"
+               "  --max-batch-size    : (For batch mode) Maximum batch size. Default: 8.\n"
             << std::endl;
 }
 
@@ -101,11 +106,11 @@ int main(int argc, char** argv) {
   }
   
   if (argc < 5) { // Check after attempting to parse num_threads
-      std::cerr << "ERROR: Missing mode argument (prompt|chat) after num_threads." << std::endl;
+      std::cerr << "ERROR: Missing mode argument (prompt|chat|batch) after num_threads." << std::endl;
       print_usage(argv[0]);
       return 1;
   }
-  std::string mode_str = argv[4]; // Mode (prompt|chat) is argv[4]
+  std::string mode_str = argv[4]; // Mode (prompt|chat|batch) is argv[4]
 
   std::string system_prompt_str = ""; // Default empty system prompt
   std::string user_prompt_str = "Hello, world!"; // Default user prompt
@@ -114,6 +119,10 @@ int main(int argc, char** argv) {
   bool use_mmap = true; // Default: use mmap
   bool use_kv_quant = false; // Default: do not use KVCache quantization
   bool use_batch_generation = false; // Default: do not use batch generation
+  
+  // Batch processing specific variables
+  std::vector<std::string> batch_prompts;
+  int max_batch_size = 8; // Default max batch size
   
   // Default sampling params for generate
   float temperature = 0.1f; // Default temperature
@@ -177,6 +186,22 @@ int main(int argc, char** argv) {
             else { std::cerr << "ERROR: Invalid use_batch_generation value: " << argv[current_arg_idx+1] << std::endl; return 1; }
             current_arg_idx += 2;
         } else { std::cerr << "ERROR: --use-batch-generation requires a value." << std::endl; return 1;}
+    } else if (arg == "--batch-prompts" || arg == "-bp") {
+        current_arg_idx++; // Move past the --batch-prompts argument
+        while (current_arg_idx < argc && argv[current_arg_idx][0] != '-') {
+            batch_prompts.push_back(std::string(argv[current_arg_idx]));
+            current_arg_idx++;
+        }
+        if (batch_prompts.empty()) {
+            std::cerr << "ERROR: --batch-prompts requires at least one prompt." << std::endl;
+            return 1;
+        }
+    } else if (arg == "--max-batch-size" || arg == "-mbs") {
+        if (current_arg_idx + 1 < argc) {
+            try { max_batch_size = std::stoi(argv[current_arg_idx+1]); }
+            catch (const std::exception& e) { Logger::error("Invalid max_batch_size: " + std::string(argv[current_arg_idx+1])); }
+            current_arg_idx += 2;
+        } else { std::cerr << "ERROR: --max-batch-size requires a value." << std::endl; return 1;}
     } else {
         if (user_prompt_str == "Hello, world!") {
              user_prompt_str = trim_whitespace(argv[current_arg_idx]);
@@ -198,7 +223,7 @@ int main(int argc, char** argv) {
   Logger::info("Num threads: " + std::to_string(num_threads));
   Logger::info("Mode: " + mode_str);
   Logger::info("System Prompt: \"" + system_prompt_str + "\"");
-  Logger::info("Initial User Prompt: \"" + user_prompt_str + "\"");
+  Logger::info("Default User Prompt: \"" + user_prompt_str + "\"");
   Logger::info("Max tokens: " + std::to_string(max_tokens));
   Logger::info("N GPU Layers: " + std::to_string(n_gpu_layers));
   Logger::info(std::string("Use mmap: ") + (use_mmap ? "true" : "false"));
@@ -207,7 +232,11 @@ int main(int argc, char** argv) {
   Logger::info(std::string("Use Batch Generation: ") + (use_batch_generation ? "true" : "false"));
 
   try {
-    tinyllama::TinyLlamaSession session(model_path_or_dir, tokenizer_path, num_threads, n_gpu_layers, use_mmap, use_kv_quant, use_batch_generation, 1);
+    // For batch mode, we need to determine max_batch_size before creating session
+    int session_max_batch_size = (mode_str == "batch") ? max_batch_size : 1;
+    bool session_use_batch_generation = (mode_str == "batch") ? true : use_batch_generation;
+    
+    tinyllama::TinyLlamaSession session(model_path_or_dir, tokenizer_path, num_threads, n_gpu_layers, use_mmap, use_kv_quant, session_use_batch_generation, session_max_batch_size);
     Logger::info("TinyLlamaSession initialized successfully.");
 
     const ModelConfig& config = session.get_config();
@@ -251,8 +280,44 @@ int main(int argc, char** argv) {
         std::string ai_response = session.generate(current_user_message, max_tokens, temperature, top_k, top_p, system_prompt_str, apply_qa_formatting_decision);
         std::cout << "AI: " << ai_response << std::endl;
       }
+    } else if (mode_str == "batch") {
+        // Batch processing logic
+        if (batch_prompts.empty()) {
+            std::cerr << "ERROR: Batch mode requires prompts. Use --batch-prompts \"prompt1\" \"prompt2\" ..." << std::endl;
+            print_usage(argv[0]);
+            return 1;
+        }
+        
+        if (batch_prompts.size() > static_cast<size_t>(max_batch_size)) {
+            std::cerr << "ERROR: Number of prompts (" << batch_prompts.size() 
+                      << ") exceeds max batch size (" << max_batch_size << ")" << std::endl;
+            return 1;
+        }
+        
+        Logger::info("[Batch Mode] Processing " + std::to_string(batch_prompts.size()) + " prompts in batch...");
+        
+        try {
+            std::vector<std::string> results = session.generate_batch(
+                batch_prompts, max_tokens, temperature, top_k, top_p, 
+                system_prompt_str, apply_qa_formatting_decision
+            );
+            
+            std::cout << "\n" << std::string(80, '=') << std::endl;
+            std::cout << "BATCH PROCESSING RESULTS" << std::endl;
+            std::cout << std::string(80, '=') << std::endl;
+            
+            for (size_t i = 0; i < batch_prompts.size(); ++i) {
+                std::cout << "\n--- Prompt " << (i + 1) << " ---" << std::endl;
+                std::cout << "Input: " << batch_prompts[i] << std::endl;
+                std::cout << "Output: " << results[i] << std::endl;
+            }
+            
+        } catch (const std::exception& e) {
+            Logger::error("[Batch Mode] Error during batch processing: " + std::string(e.what()));
+            return 1;
+        }
     } else {
-        std::cerr << "ERROR: Invalid mode '" << mode_str << "'. Expected 'prompt' or 'chat'." << std::endl;
+        std::cerr << "ERROR: Invalid mode '" << mode_str << "'. Expected 'prompt', 'chat', or 'batch'." << std::endl;
         print_usage(argv[0]);
         return 1;
     }

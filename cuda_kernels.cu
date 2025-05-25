@@ -241,30 +241,6 @@ void matvec_f32_f32_cuda(cublasHandle_t handle, const float* mat_f32_dev,
   int N_blas = 1; 
   int K_blas = cols;
 
-  // For C_rowmajor(M,N) = A_rowmajor(M,K) * B_colvector(K,1)
-  // CUBLAS expects C_colmajor(N,M) = op(B_colmajor(K,N)) * op(A_colmajor(M,K)) (if we swap A and B)
-  // Or, more directly for mat * vec: C_colvector(M,1) = A_rowmajor_as_colmajor_Transposed(M,K) * B_colvector(K,1)
-  // If A is (rows x cols)_user_row_major.
-  //   Interpreted by cuBLAS as col-major, A is (cols x rows)_cublas_col_major.
-  //   If opA = CUBLAS_OP_T, then A effectively becomes (rows x cols)_cublas_col_major.
-  // B is vec_f32_dev (cols x 1)_user_col_vector.
-  //   Interpreted by cuBLAS as col-major, B is (cols x 1)_cublas_col_major.
-  //   If opB = CUBLAS_OP_N, then B is (cols x 1)_cublas_col_major.
-  // Result C is out_f32_dev (rows x 1)_user_col_vector.
-  // So for C(M,1) = A_T(M,K) * B(K,1)
-  // M_cublas = rows (output vector length)
-  // N_cublas = 1 (output vector is 1 column)
-  // K_cublas = cols (inner dimension)
-  // For A (mat_f32_dev) with CUBLAS_OP_T:
-  //   mat_f32_dev is user's (rows x cols) row-major.
-  //   Its leading dimension (number of columns in user's view) is `cols`. This is LDA for OP_T.
-  // For B (vec_f32_dev) with CUBLAS_OP_N:
-  //   vec_f32_dev is user's (cols x 1) col-vector.
-  //   Its leading dimension (number of rows in user's view) is `cols`. This is LDB for OP_N.
-  // For C (out_f32_dev):
-  //   out_f32_dev is user's (rows x 1) col-vector.
-  //   Its leading dimension is `rows`. This is LDC.
-
   cublasStatus_t status = cublasSetStream(handle, stream);
   if (status != CUBLAS_STATUS_SUCCESS) {
     Logger::error("cublasSetStream failed in matvec_f32_f32_cuda with error: " + std::to_string(status) + " (" + cublasGetStatusString(status) + ")");
@@ -592,11 +568,6 @@ void swiglu_batch_cuda(
     int intermediate_size,           // This is typically config_.ffn_hidden_size or similar
     cudaStream_t stream) {
 
-    Logger::info("[SWIGLU_BATCH_CUDA_ENTRY] d_out_batch: " + Logger::ptrToString(d_out_batch) +
-                 ", d_gate_act_batch: " + Logger::ptrToString(d_gate_act_batch) +
-                 ", d_up_act_batch: " + Logger::ptrToString(d_up_act_batch) +
-                 ", num_tokens: " + std::to_string(num_tokens) +
-                 ", intermediate_size: " + std::to_string(intermediate_size));
 
     if (num_tokens == 0 || intermediate_size == 0) {
         Logger::info("[SWIGLU_BATCH_CUDA_SKIP] num_tokens or intermediate_size is 0. Nothing to do.");
@@ -611,17 +582,11 @@ void swiglu_batch_cuda(
             std::vector<float> h_gate_sample(log_count_elements);
             // Gate is [num_tokens, intermediate_size]. Offset for T0 is 0.
             gpuErrchk(cudaMemcpyAsync(h_gate_sample.data(), d_gate_act_batch, log_count_elements * sizeof(float), cudaMemcpyDeviceToHost, stream));
-            gpuErrchk(cudaStreamSynchronize(stream));
-            std::string gate_str = ""; for(int i=0; i<log_count_elements; ++i) gate_str += std::to_string(h_gate_sample[i]) + " ";
-            Logger::debug("[SWIGLU_BATCH_CUDA_PRE_KERNEL] Gate (T0, first " + std::to_string(log_count_elements) + " els): " + gate_str);
         }
         if (d_up_act_batch) {
             std::vector<float> h_up_sample(log_count_elements);
             // Up is [num_tokens, intermediate_size]. Offset for T0 is 0.
             gpuErrchk(cudaMemcpyAsync(h_up_sample.data(), d_up_act_batch, log_count_elements * sizeof(float), cudaMemcpyDeviceToHost, stream));
-            gpuErrchk(cudaStreamSynchronize(stream));
-            std::string up_str = ""; for(int i=0; i<log_count_elements; ++i) up_str += std::to_string(h_up_sample[i]) + " ";
-            Logger::debug("[SWIGLU_BATCH_CUDA_PRE_KERNEL] Up (T0, first " + std::to_string(log_count_elements) + " els): " + up_str);
         }
     }
 
@@ -643,11 +608,7 @@ void swiglu_batch_cuda(
         std::vector<float> h_out_sample(log_count_elements);
         // Out is [num_tokens, intermediate_size]. Offset for T0 is 0.
         gpuErrchk(cudaMemcpyAsync(h_out_sample.data(), d_out_batch, log_count_elements * sizeof(float), cudaMemcpyDeviceToHost, stream));
-        gpuErrchk(cudaStreamSynchronize(stream));
-        std::string out_str = ""; for(int i=0; i<log_count_elements; ++i) out_str += std::to_string(h_out_sample[i]) + " ";
-        Logger::debug("[SWIGLU_BATCH_CUDA_POST_KERNEL] Output (T0, first " + std::to_string(log_count_elements) + " els): " + out_str);
     }
-    Logger::info("[SWIGLU_BATCH_CUDA_EXIT] Function finished.");
 }
 __global__ void rope_kernel(float* x, int num_heads, int head_dim,
                             const float* all_freqs_cis_base, int pos, bool use_adjacent_pairing) {
@@ -761,19 +722,6 @@ void rope_batch_cuda(float* d_q_batch, float* d_k_batch,
                      bool use_adjacent_pairing,
                      cudaStream_t stream) {
 
-    Logger::info("[ROPE_BATCH_CUDA_ENTRY] d_q_batch: " + Logger::ptrToString(d_q_batch) +
-                 ", d_k_batch: " + Logger::ptrToString(d_k_batch) +
-                 ", d_all_freqs_cis_base: " + Logger::ptrToString(d_all_freqs_cis_base) +
-                 ", num_tokens: " + std::to_string(num_tokens) +
-                 ", num_q_heads: " + std::to_string(num_q_heads) +
-                 ", num_kv_heads: " + std::to_string(num_kv_heads) +
-                 ", head_dim: " + std::to_string(head_dim) +
-                 ", start_pos_offset: " + std::to_string(start_pos_offset) +
-                 ", use_adjacent_pairing: " + std::to_string(use_adjacent_pairing));
-    Logger::info("[GPU_ROPE] d_q_batch=" + Logger::ptrToString(d_q_batch) + 
-                ", d_k_batch=" + Logger::ptrToString(d_k_batch) +
-                ", num_tokens=" + std::to_string(num_tokens) +
-                ", start_pos=" + std::to_string(start_pos_offset));
 
     if (head_dim == 0) { 
         Logger::warning("[ROPE_BATCH_CUDA_SKIP] head_dim is 0. Skipping RoPE application.");
@@ -801,11 +749,6 @@ void rope_batch_cuda(float* d_q_batch, float* d_k_batch,
                                       d_q_batch + q_offset_elements, 
                                       log_count_elements * sizeof(float), 
                                       cudaMemcpyDeviceToHost, stream));
-            gpuErrchk(cudaStreamSynchronize(stream));
-            std::string q_sample_str = "";
-            for(int i=0; i<log_count_elements; ++i) q_sample_str += std::to_string(h_q_sample_before[i]) + " ";
-            Logger::debug("[ROPE_BATCH_CUDA_PRE_Q] d_q_batch (token " + std::to_string(token_to_log_idx) + 
-                          ", head 0, first " + std::to_string(log_count_elements) + " els): " + q_sample_str);
         }
     }
 
@@ -819,10 +762,6 @@ void rope_batch_cuda(float* d_q_batch, float* d_k_batch,
                                       d_k_batch + k_offset_elements, 
                                       log_count_elements * sizeof(float), 
                                       cudaMemcpyDeviceToHost, stream));
-            gpuErrchk(cudaStreamSynchronize(stream));
-            std::string k_sample_str = "";
-            for(int i=0; i<log_count_elements; ++i) k_sample_str += std::to_string(h_k_sample_before[i]) + " ";
-            Logger::debug("[ROPE_BATCH_CUDA_PRE_K] d_k_batch (token " + std::to_string(token_to_log_idx) + ", H0, first " + std::to_string(log_count_elements) + " els): " + k_sample_str);
         }
     }
 
@@ -868,11 +807,6 @@ void rope_batch_cuda(float* d_q_batch, float* d_k_batch,
                                       d_q_batch + q_offset_elements, 
                                       log_count_elements * sizeof(float), 
                                       cudaMemcpyDeviceToHost, stream));
-            gpuErrchk(cudaStreamSynchronize(stream));
-            std::string q_sample_str = "";
-            for(int i=0; i<log_count_elements; ++i) q_sample_str += std::to_string(h_q_sample_after[i]) + " ";
-            Logger::debug("[ROPE_BATCH_CUDA_POST_Q] d_q_batch (token " + std::to_string(token_to_log_idx) + 
-                          ", head 0, first " + std::to_string(log_count_elements) + " els): " + q_sample_str);
         }
     }
 
@@ -886,14 +820,8 @@ void rope_batch_cuda(float* d_q_batch, float* d_k_batch,
                                       d_k_batch + k_offset_elements, 
                                       log_count_elements * sizeof(float), 
                                       cudaMemcpyDeviceToHost, stream));
-            gpuErrchk(cudaStreamSynchronize(stream));
-            std::string k_sample_str = "";
-            for(int i=0; i<log_count_elements; ++i) k_sample_str += std::to_string(h_k_sample_after[i]) + " ";
-            Logger::debug("[ROPE_BATCH_CUDA_POST_K] d_k_batch (token " + std::to_string(token_to_log_idx) + 
-                          ", head 0, first " + std::to_string(log_count_elements) + " els): " + k_sample_str);
         }
     }
-    Logger::info("[ROPE_BATCH_CUDA_EXIT] Function finished.");
 }
 
 __global__ void attention_kernel(const float* Q_current,
@@ -1096,11 +1024,6 @@ void add_residual_batch_cuda(
     int hidden_size,
     cudaStream_t stream) {
 
-    Logger::info("[ADD_RESIDUAL_BATCH_CUDA_ENTRY] d_output_batch: " + Logger::ptrToString(d_output_batch) +
-                 ", d_input_a_batch: " + Logger::ptrToString(d_input_a_batch) +
-                 ", d_input_b_batch: " + Logger::ptrToString(d_input_b_batch) +
-                 ", num_tokens: " + std::to_string(num_tokens) +
-                 ", hidden_size: " + std::to_string(hidden_size));
 
     if (num_tokens == 0 || hidden_size == 0) {
         Logger::info("[ADD_RESIDUAL_BATCH_CUDA_SKIP] num_tokens or hidden_size is 0. Nothing to do.");
@@ -1115,17 +1038,11 @@ void add_residual_batch_cuda(
             std::vector<float> h_input_a_sample(log_count_elements);
             // Input A is [num_tokens, hidden_size]. Offset for T0 is 0.
             gpuErrchk(cudaMemcpyAsync(h_input_a_sample.data(), d_input_a_batch, log_count_elements * sizeof(float), cudaMemcpyDeviceToHost, stream));
-            gpuErrchk(cudaStreamSynchronize(stream));
-            std::string input_a_str = ""; for(int i=0; i<log_count_elements; ++i) input_a_str += std::to_string(h_input_a_sample[i]) + " ";
-            Logger::debug("[ADD_RESIDUAL_BATCH_CUDA_PRE_KERNEL] Input A (T0, first " + std::to_string(log_count_elements) + " els): " + input_a_str);
         }
         if (d_input_b_batch) {
             std::vector<float> h_input_b_sample(log_count_elements);
             // Input B is [num_tokens, hidden_size]. Offset for T0 is 0.
             gpuErrchk(cudaMemcpyAsync(h_input_b_sample.data(), d_input_b_batch, log_count_elements * sizeof(float), cudaMemcpyDeviceToHost, stream));
-            gpuErrchk(cudaStreamSynchronize(stream));
-            std::string input_b_str = ""; for(int i=0; i<log_count_elements; ++i) input_b_str += std::to_string(h_input_b_sample[i]) + " ";
-            Logger::debug("[ADD_RESIDUAL_BATCH_CUDA_PRE_KERNEL] Input B (T0, first " + std::to_string(log_count_elements) + " els): " + input_b_str);
         }
     }
 
@@ -1147,11 +1064,7 @@ void add_residual_batch_cuda(
         std::vector<float> h_output_sample(log_count_elements);
         // Output is [num_tokens, hidden_size]. Offset for T0 is 0.
         gpuErrchk(cudaMemcpyAsync(h_output_sample.data(), d_output_batch, log_count_elements * sizeof(float), cudaMemcpyDeviceToHost, stream));
-        gpuErrchk(cudaStreamSynchronize(stream));
-        std::string output_str = ""; for(int i=0; i<log_count_elements; ++i) output_str += std::to_string(h_output_sample[i]) + " ";
-        Logger::debug("[ADD_RESIDUAL_BATCH_CUDA_POST_KERNEL] Output (T0, first " + std::to_string(log_count_elements) + " els): " + output_str);
     }
-    Logger::info("[ADD_RESIDUAL_BATCH_CUDA_EXIT] Function finished.");
 }
 __global__ void update_kv_cache_kernel(float* cache_base_ptr,
                                        const float* current_kv_vector, int pos,
@@ -1488,20 +1401,6 @@ void gemm_f32_f32_cuda(cublasHandle_t handle,
                        const float* beta_user, 
                        float* C_user, int ldc_user, 
                        cudaStream_t stream) {
-    Logger::info("[GEMM_F32_CUDA_ENTRY] handle: " + Logger::ptrToString(handle) +
-                 ", transa_user: " + std::to_string(transa_user) +
-                 ", transb_user: " + std::to_string(transb_user) +
-                 ", m_user: " + std::to_string(m_user) +
-                 ", n_user: " + std::to_string(n_user) +
-                 ", k_user: " + std::to_string(k_user) +
-                 ", alpha_user: " + (alpha_user ? std::to_string(*alpha_user) : "nullptr") +
-                 ", A_user: " + Logger::ptrToString(A_user) +
-                 ", lda_user: " + std::to_string(lda_user) +
-                 ", B_user: " + Logger::ptrToString(B_user) +
-                 ", ldb_user: " + std::to_string(ldb_user) +
-                 ", beta_user: " + (beta_user ? std::to_string(*beta_user) : "nullptr") +
-                 ", C_user: " + Logger::ptrToString(C_user) +
-                 ", ldc_user: " + std::to_string(ldc_user));
     
     cublasStatus_t status = cublasSetStream(handle, stream);
     if (status != CUBLAS_STATUS_SUCCESS) {
@@ -1514,21 +1413,15 @@ void gemm_f32_f32_cuda(cublasHandle_t handle,
     const float *A_cublas_ptr, *B_cublas_ptr;
     int LDA_cublas, LDB_cublas;
 
-    // Unified strategy for row-major C(m_user, n_user) = opA_user(A_user) * opB_user(B_user)
-    // Based on cuBLAS guidelines: call sgemm with M_c=n_user, N_c=m_user, K_c=k_user.
-    // The first matrix for cuBLAS is B_user, second is A_user.
-    // Transposition flags for cuBLAS are based on user's desired ops for B and A respectively.
 
     M_cublas = n_user;
     N_cublas = m_user;
     K_cublas = k_user;
 
     A_cublas_ptr = B_user;    // B_user data is the first matrix for cuBLAS call
-    // CRITICAL FIX: When B_user gets transposed (transb_user=true), LDA must be the ROW count
     LDA_cublas = (transb_user) ? k_user : ldb_user;
 
     B_cublas_ptr = A_user;    // A_user data is the second matrix for cuBLAS call
-    // CRITICAL FIX: When A_user gets transposed (transa_user=true), LDB must be the ROW count (m_user)
     LDB_cublas = (transa_user) ? m_user : lda_user;
 
     // Determine cuBLAS operations for A_cublas_ptr (B_user) and B_cublas_ptr (A_user)
@@ -1551,13 +1444,6 @@ void gemm_f32_f32_cuda(cublasHandle_t handle,
         opB_cublas = CUBLAS_OP_T; // for A_user (A^T)
     }
     
-    // Logging before the call
-    Logger::info("[GEMM_WRAPPER_DEBUG] cublasSgemm effective call: transA=" + std::to_string(opA_cublas == CUBLAS_OP_T) + 
-                 ", transB=" + std::to_string(opB_cublas == CUBLAS_OP_T) + 
-                 ", M=" + std::to_string(M_cublas) + ", N=" + std::to_string(N_cublas) + ", K=" + std::to_string(K_cublas) + 
-                 ", LDA=" + std::to_string(LDA_cublas) + ", LDB=" + std::to_string(LDB_cublas) + ", LDC=" + std::to_string(ldc_user) +
-                 ", alpha=" + std::to_string(*alpha_user) + ", beta=" + std::to_string(*beta_user) +
-                 ", A_ptr=" + Logger::ptrToString(A_cublas_ptr) + ", B_ptr=" + Logger::ptrToString(B_cublas_ptr) + ", C_ptr=" + Logger::ptrToString(C_user) );
 
     // For swapped computation: C^T result is (n_user x m_user) in column-major
     int LDC_cublas = ldc_user; // Leading dimension of C (which is n_user for row-major C(m,n))
@@ -1580,7 +1466,6 @@ void gemm_f32_f32_cuda(cublasHandle_t handle,
                        " LDA_c=" + std::to_string(LDA_cublas) + " LDB_c=" + std::to_string(LDB_cublas) + " LDC_c=" + std::to_string(LDC_cublas));
         throw std::runtime_error("cublasSgemm failed");
     }
-    Logger::info("[GEMM_F32_CUDA_EXIT] Function finished successfully.");
 }
 
 
@@ -1883,12 +1768,6 @@ __global__ void rmsnorm_batch_kernel_final_optimized(float* __restrict__ d_out,
 void rmsnorm_batch_cuda(float* d_out, float* d_in, const float* d_weight, 
                         int num_tokens, int hidden_size, float eps, 
                         cudaStream_t stream) {
-    Logger::info("[RMSNORM_BATCH_CUDA_ENTRY] d_out: " + Logger::ptrToString(d_out) + 
-                 ", d_in: " + Logger::ptrToString(d_in) + 
-                 ", d_weight: " + Logger::ptrToString(d_weight) +
-                 ", num_tokens: " + std::to_string(num_tokens) +
-                 ", hidden_size: " + std::to_string(hidden_size) +
-                 ", eps: " + std::to_string(eps));
 
     if (num_tokens == 0 || hidden_size == 0) {
         Logger::info("[RMSNORM_BATCH_CUDA_EXIT] num_tokens or hidden_size is 0. Nothing to do.");
@@ -1900,19 +1779,8 @@ void rmsnorm_batch_cuda(float* d_out, float* d_in, const float* d_weight,
         int log_count = std::min(3, hidden_size);
         std::vector<float> h_in_sample(log_count);
         gpuErrchk(cudaMemcpyAsync(h_in_sample.data(), d_in, log_count * sizeof(float), cudaMemcpyDeviceToHost, stream));
-        // Synchronize for logging, as this is debug info not critical path performance.
-        // Consider removing sync for performance if logging is too slow.
-        gpuErrchk(cudaStreamSynchronize(stream)); 
-        std::string in_sample_str = "";
-        for(int i=0; i<log_count; ++i) in_sample_str += std::to_string(h_in_sample[i]) + " ";
-        Logger::debug("[RMSNORM_BATCH_CUDA_PRE_KERNEL] d_in (first token, first " + std::to_string(log_count) + " els): " + in_sample_str);
-
         std::vector<float> h_weight_sample(log_count);
         gpuErrchk(cudaMemcpyAsync(h_weight_sample.data(), d_weight, log_count * sizeof(float), cudaMemcpyDeviceToHost, stream));
-        gpuErrchk(cudaStreamSynchronize(stream));
-        std::string weight_sample_str = "";
-        for(int i=0; i<log_count; ++i) weight_sample_str += std::to_string(h_weight_sample[i]) + " ";
-        Logger::debug("[RMSNORM_BATCH_CUDA_PRE_KERNEL] d_weight (first " + std::to_string(log_count) + " els): " + weight_sample_str);
     }
 
 
@@ -1942,12 +1810,7 @@ void rmsnorm_batch_cuda(float* d_out, float* d_in, const float* d_weight,
         int log_count = std::min(3, hidden_size);
         std::vector<float> h_out_sample(log_count);
         gpuErrchk(cudaMemcpyAsync(h_out_sample.data(), d_out, log_count * sizeof(float), cudaMemcpyDeviceToHost, stream));
-        gpuErrchk(cudaStreamSynchronize(stream)); // Synchronize for logging
-        std::string out_sample_str = "";
-        for(int i=0; i<log_count; ++i) out_sample_str += std::to_string(h_out_sample[i]) + " ";
-        Logger::debug("[RMSNORM_BATCH_CUDA_POST_KERNEL] d_out (first token, first " + std::to_string(log_count) + " els): " + out_sample_str);
     }
-    Logger::info("[RMSNORM_BATCH_CUDA_EXIT] Function finished.");
 }
 
 // Host wrapper for Batched Attention Prefill
@@ -1969,20 +1832,6 @@ void attention_batch_prefill_cuda(
     const int* attention_mask_cu      // Optional attention mask
     ) {
 
-    Logger::info("[ATTN_BATCH_PREFILL_CUDA_ENTRY] d_q_batch: " + Logger::ptrToString(d_q_batch_strided) +
-                 ", d_k_batch: " + Logger::ptrToString(d_k_batch_strided) +
-                 ", d_v_batch: " + Logger::ptrToString(d_v_batch_strided) +
-                 ", d_kv_cache_k: " + Logger::ptrToString(d_kv_cache_k_base) +
-                 ", d_kv_cache_v: " + Logger::ptrToString(d_kv_cache_v_base) +
-                 ", d_output: " + Logger::ptrToString(d_output_batch_strided) +
-                 ", num_tokens_batch: " + std::to_string(num_tokens_in_batch) +
-                 ", start_pos_kv: " + std::to_string(start_pos_in_kv_cache) +
-                 ", cache_max_len: " + std::to_string(cache_max_seq_len) +
-                 ", num_q_heads: " + std::to_string(num_q_heads) +
-                 ", num_kv_heads: " + std::to_string(num_kv_heads) +
-                 ", head_dim: " + std::to_string(head_dim) +
-                 ", scale: " + std::to_string(scale) +
-                 ", attn_mask: " + Logger::ptrToString(attention_mask_cu));
 
     if (num_tokens_in_batch == 0 || head_dim == 0) {
         Logger::info("[ATTN_BATCH_PREFILL_CUDA_SKIP] num_tokens_in_batch or head_dim is 0. Nothing to do.");
@@ -2008,9 +1857,6 @@ void attention_batch_prefill_cuda(
                 // We are logging the first `log_count_elements` of the first head (H0) for that token.
                 const float* q_token_ptr = d_q_batch_strided + (size_t)token_to_log_idx * num_q_heads * head_dim;
                 gpuErrchk(cudaMemcpyAsync(h_q_sample.data(), q_token_ptr, log_count_elements * sizeof(float), cudaMemcpyDeviceToHost, stream));
-                gpuErrchk(cudaStreamSynchronize(stream)); // Sync for each token's log
-                std::string q_str = ""; for(int i=0; i<log_count_elements; ++i) q_str += std::to_string(h_q_sample[i]) + " ";
-                Logger::debug("[ATTN_BATCH_PREFILL_CUDA_PRE_KERNEL] Q (T" + std::to_string(token_to_log_idx) + ", H0, first " + std::to_string(log_count_elements) + " els): " + q_str);
             }
         }
 
@@ -2021,10 +1867,6 @@ void attention_batch_prefill_cuda(
                 // K_batch is [B, H_kv, D_h].
                 const float* k_token_ptr = d_k_batch_strided + (size_t)token_to_log_idx * num_kv_heads * head_dim;
                 gpuErrchk(cudaMemcpyAsync(h_k_sample.data(), k_token_ptr, log_count_elements * sizeof(float), cudaMemcpyDeviceToHost, stream));
-                gpuErrchk(cudaStreamSynchronize(stream));
-                std::string k_sample_str = "";
-                for(int i=0; i<log_count_elements; ++i) k_sample_str += std::to_string(h_k_sample[i]) + " ";
-                Logger::debug("[ATTN_BATCH_PREFILL_CUDA_PRE_KERNEL] K_batch (T" + std::to_string(token_to_log_idx) + ", H0, first " + std::to_string(log_count_elements) + " els): " + k_sample_str);
             }
         }
 
@@ -2035,9 +1877,6 @@ void attention_batch_prefill_cuda(
                 // V_batch is [B, H_kv, D_h].
                 const float* v_token_ptr = d_v_batch_strided + (size_t)token_to_log_idx * num_kv_heads * head_dim;
                 gpuErrchk(cudaMemcpyAsync(h_v_sample.data(), v_token_ptr, log_count_elements * sizeof(float), cudaMemcpyDeviceToHost, stream));
-                gpuErrchk(cudaStreamSynchronize(stream));
-                std::string v_str = ""; for(int i=0; i<log_count_elements; ++i) v_str += std::to_string(h_v_sample[i]) + " ";
-                Logger::debug("[ATTN_BATCH_PREFILL_CUDA_PRE_KERNEL] V_batch (T" + std::to_string(token_to_log_idx) + ", H0, first " + std::to_string(log_count_elements) + " els): " + v_str);
             }
         }
         
@@ -2049,18 +1888,12 @@ void attention_batch_prefill_cuda(
             // K Cache: [S_max, H_kv, D_h]. Pointer to S_offset, H0.
             float* cache_k_ptr = d_kv_cache_k_base + (size_t)start_pos_in_kv_cache * num_kv_heads * head_dim;
             gpuErrchk(cudaMemcpyAsync(h_kc_sample.data(), cache_k_ptr, log_count_elements * sizeof(float), cudaMemcpyDeviceToHost, stream));
-            gpuErrchk(cudaStreamSynchronize(stream));
-            std::string kc_str = ""; for(int i=0; i<log_count_elements; ++i) kc_str += std::to_string(h_kc_sample[i]) + " ";
-            Logger::debug("[ATTN_BATCH_PREFILL_CUDA_PRE_KERNEL] K_cache (pos " + std::to_string(start_pos_in_kv_cache) + ", H0, first " + std::to_string(log_count_elements) + " els): " + kc_str);
         }
         if (d_kv_cache_v_base && start_pos_in_kv_cache < cache_max_seq_len && num_kv_heads > 0) {
             std::vector<float> h_vc_sample(log_count_elements);
             // V Cache: [S_max, H_kv, D_h]. Pointer to S_offset, H0.
             float* cache_v_ptr = d_kv_cache_v_base + (size_t)start_pos_in_kv_cache * num_kv_heads * head_dim;
             gpuErrchk(cudaMemcpyAsync(h_vc_sample.data(), cache_v_ptr, log_count_elements * sizeof(float), cudaMemcpyDeviceToHost, stream));
-            gpuErrchk(cudaStreamSynchronize(stream));
-            std::string vc_str = ""; for(int i=0; i<log_count_elements; ++i) vc_str += std::to_string(h_vc_sample[i]) + " ";
-            Logger::debug("[ATTN_BATCH_PREFILL_CUDA_PRE_KERNEL] V_cache (pos " + std::to_string(start_pos_in_kv_cache) + ", H0, first " + std::to_string(log_count_elements) + " els): " + vc_str);
         }
     }
 
@@ -2100,16 +1933,9 @@ void attention_batch_prefill_cuda(
             // Output is [B, H_q, D_h]. 
             const float* out_token_ptr = d_output_batch_strided + (size_t)token_to_log_idx * num_q_heads * head_dim;
             gpuErrchk(cudaMemcpyAsync(h_out_sample.data(), out_token_ptr, log_count_elements * sizeof(float), cudaMemcpyDeviceToHost, stream));
-            gpuErrchk(cudaStreamSynchronize(stream)); // Sync for each token's log
-            std::string out_str = ""; for(int i=0; i<log_count_elements; ++i) out_str += std::to_string(h_out_sample[i]) + " ";
-            Logger::debug("[ATTN_BATCH_PREFILL_CUDA_POST_KERNEL] Output (T" + std::to_string(token_to_log_idx) + ", H0, first " + std::to_string(log_count_elements) + " els): " + out_str);
         }
     }
-    Logger::info("[ATTN_BATCH_PREFILL_CUDA_EXIT] Function finished.");
-
-    Logger::info("[ATTN_BATCH_PREFILL_CUDA] About to sync device to flush GPU printf...");
     cudaDeviceSynchronize();
-    Logger::info("[ATTN_BATCH_PREFILL_CUDA] Device sync complete - check for GPU printf output above!");
 
     // Log output values
     if (num_tokens_in_batch > 0 && num_q_heads > 0 && head_dim > 0 && d_output_batch_strided) {
@@ -2118,12 +1944,8 @@ void attention_batch_prefill_cuda(
             // Output is [B, H_q, D_h]. 
             const float* out_token_ptr = d_output_batch_strided + (size_t)token_to_log_idx * num_q_heads * head_dim;
             gpuErrchk(cudaMemcpyAsync(h_out_sample.data(), out_token_ptr, log_count_elements * sizeof(float), cudaMemcpyDeviceToHost, stream));
-            gpuErrchk(cudaStreamSynchronize(stream)); // Sync for each token's log
-            std::string out_str = ""; for(int i=0; i<log_count_elements; ++i) out_str += std::to_string(h_out_sample[i]) + " ";
-            Logger::debug("[ATTN_BATCH_PREFILL_CUDA_POST_KERNEL] Output (T" + std::to_string(token_to_log_idx) + ", H0, first " + std::to_string(log_count_elements) + " els): " + out_str);
         }
     }
-    Logger::info("[ATTN_BATCH_PREFILL_CUDA_EXIT] Function finished.");
 }
 
 __global__ void update_kv_cache_batch_kernel(
@@ -2183,17 +2005,6 @@ void update_kv_cache_batch_cuda(
     int cache_max_seq_len,               // Maximum sequence length capacity of the cache
                                    cudaStream_t stream) {
 
-    Logger::info("[UPDATE_KV_CACHE_BATCH_CUDA_ENTRY] d_kv_cache_layer_base: " + Logger::ptrToString(d_kv_cache_layer_base) +
-                 ", d_keys_or_values_batch: " + Logger::ptrToString(d_keys_or_values_batch) +
-                 ", start_pos_in_kv_cache: " + std::to_string(start_pos_in_kv_cache) +
-                 ", num_tokens_in_batch: " + std::to_string(num_tokens_in_batch) +
-                 ", num_kv_heads: " + std::to_string(num_kv_heads) +
-                 ", head_dim: " + std::to_string(head_dim) +
-                 ", cache_max_seq_len: " + std::to_string(cache_max_seq_len));
-    Logger::info("[GPU_KV_UPDATE] start_pos=" + std::to_string(start_pos_in_kv_cache) + 
-                ", num_tokens=" + std::to_string(num_tokens_in_batch) +
-                ", k_batch_ptr=" + Logger::ptrToString(d_keys_or_values_batch) +
-                ", cache_k_ptr=" + Logger::ptrToString(d_kv_cache_layer_base));
     if (num_tokens_in_batch == 0 || head_dim == 0 || num_kv_heads == 0) {
         Logger::debug("[UPDATE_KV_CACHE_BATCH_CUDA_SKIP] Nothing to update (num_tokens_in_batch, head_dim, or num_kv_heads is 0).");
         Logger::info("[UPDATE_KV_CACHE_BATCH_CUDA_EXIT] Skipped update.");
@@ -2212,10 +2023,6 @@ void update_kv_cache_batch_cuda(
         // d_keys_or_values_batch is [num_tokens_in_batch][num_kv_heads][head_dim]
         // Offset for first token, first head = 0 (assuming data is contiguous for the first head of the first token)
         gpuErrchk(cudaMemcpyAsync(h_kv_sample_in.data(), d_keys_or_values_batch, log_count_elements * sizeof(float), cudaMemcpyDeviceToHost, stream));
-        gpuErrchk(cudaStreamSynchronize(stream)); // Ensure data is on host for logging
-        std::string kv_sample_str = "";
-        for(int i=0; i<log_count_elements; ++i) kv_sample_str += std::to_string(h_kv_sample_in[i]) + " ";
-        Logger::debug("[UPDATE_KV_CACHE_BATCH_CUDA_PRE_KERNEL] d_keys_or_values_batch (token 0, head 0, first " + std::to_string(log_count_elements) + " els): " + kv_sample_str);
     }
 
     // Grid: One block per (token_in_batch, kv_head)
@@ -2245,12 +2052,7 @@ void update_kv_cache_batch_cuda(
             (size_t)start_pos_in_kv_cache * num_kv_heads * head_dim;
             
         gpuErrchk(cudaMemcpyAsync(h_kv_sample_out.data(), first_token_first_head_in_cache_ptr, log_count_elements * sizeof(float), cudaMemcpyDeviceToHost, stream));
-        gpuErrchk(cudaStreamSynchronize(stream)); // Ensure data is on host for logging
-        std::string kv_out_sample_str = "";
-        for(int i=0; i<log_count_elements; ++i) kv_out_sample_str += std::to_string(h_kv_sample_out[i]) + " ";
-        Logger::debug("[UPDATE_KV_CACHE_BATCH_CUDA_POST_KERNEL] d_kv_cache_layer_base (pos " + std::to_string(start_pos_in_kv_cache) + ", head 0, first " + std::to_string(log_count_elements) + " els): " + kv_out_sample_str);
     }
-    Logger::info("[UPDATE_KV_CACHE_BATCH_CUDA_EXIT] Function finished.");
 }
 
 #endif // HAS_CUDA

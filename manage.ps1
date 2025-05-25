@@ -12,7 +12,7 @@
 [CmdletBinding()]
 param (
     [Parameter(Mandatory=$false, Position=0)]
-    [ValidateSet("build", "clean", "run-server", "run-chat", "run-prompt", "format", "docs", "docs-serve", "docs-clean", "package", "help")]
+    [ValidateSet("build", "clean", "run-server", "run-chat", "run-prompt", "run-batch", "format", "docs", "docs-serve", "docs-clean", "package", "help")]
     [string]$Command,
 
     [Parameter(Mandatory=$false, Position=1, ValueFromRemainingArguments=$true)]
@@ -104,6 +104,20 @@ function Show-Usage {
     Write-Host "                 -Mmap <true|false>        (default: ${DefaultUseMmap})"
     Write-Host "                 -UseKvQuant <true|false>  (default: ${DefaultUseKvQuant})"
     Write-Host "                 -UseBatchGen <true|false> (default: ${DefaultUseBatchGeneration})"
+    Write-Host ""
+    Write-Host "  run-batch    Run multiple prompts in parallel using batch processing."
+    Write-Host "               Options:"
+    Write-Host "                 -ModelDir <path>          (default: ${DefaultModelDir})"
+    Write-Host "                 -TokenizerPath <path>     (default: auto-detect from ModelDir)"
+    Write-Host "                 -Prompts @('prompt1','prompt2',...) (Required: Array of prompts)"
+    Write-Host "                 -SystemPrompt <text>      (Optional) System prompt to guide the model."
+    Write-Host "                 -Steps <num>              (default: 128)"
+    Write-Host "                 -Threads <num>            (default: ${DefaultThreads})"
+    Write-Host "                 -Temperature <float>      (default: ${DefaultTemperature})"
+    Write-Host "                 -NGpuLayers <int>         (default: ${DefaultNGpuLayers}, -1 for all on GPU)"
+    Write-Host "                 -Mmap <true|false>        (default: ${DefaultUseMmap})"
+    Write-Host "                 -UseKvQuant <true|false>  (default: ${DefaultUseKvQuant})"
+    Write-Host "                 -MaxBatchSize <int>       (default: 8)"
     Write-Host ""
     Write-Host "  format       Format C++/CUDA source code using ${FormatTool}."
     Write-Host "               (Assumes .clang-format file in project root)"
@@ -422,6 +436,121 @@ function Invoke-RunPrompt {
     if ($LASTEXITCODE -ne 0) { Write-ErrorAndExit "Prompt execution failed."}
 }
 
+function Invoke-RunBatch {
+    param (
+        [string]$ModelDir = $DefaultModelDir,
+        [string]$TokenizerPath = $DefaultTokenizerPath,
+        [string[]]$Prompts = @(),
+        [string]$SystemPrompt = "",
+        [int]$Steps = 128,
+        [int]$Threads = $DefaultThreads,
+        [double]$Temperature = $DefaultTemperature,
+        [int]$NGpuLayers = $DefaultNGpuLayers,
+        [bool]$UseMmap = $DefaultUseMmap,
+        [bool]$UseKvQuant = $DefaultUseKvQuant,
+        [int]$MaxBatchSize = 8
+    )
+
+    # Parse arguments manually (PowerShell parameter parsing is complex for array args)
+    $ParsedPrompts = @()
+    $i = 0
+    while ($i -lt $script:Arguments.Length) {
+        $arg = $script:Arguments[$i]
+        switch ($arg) {
+            "-ModelDir" { $ModelDir = $script:Arguments[$i+1]; $i += 2 }
+            "-TokenizerPath" { $TokenizerPath = $script:Arguments[$i+1]; $i += 2 }
+            "-Prompts" { 
+                $i++
+                while ($i -lt $script:Arguments.Length -and -not $script:Arguments[$i].StartsWith("-")) {
+                    $ParsedPrompts += $script:Arguments[$i]
+                    $i++
+                }
+            }
+            "-SystemPrompt" { $SystemPrompt = $script:Arguments[$i+1]; $i += 2 }
+            "-Steps" { $Steps = [int]$script:Arguments[$i+1]; $i += 2 }
+            "-Threads" { $Threads = [int]$script:Arguments[$i+1]; $i += 2 }
+            "-Temperature" { $Temperature = [double]$script:Arguments[$i+1]; $i += 2 }
+            "-NGpuLayers" { $NGpuLayers = [int]$script:Arguments[$i+1]; $i += 2 }
+            "-Mmap" { $UseMmap = [bool]::Parse($script:Arguments[$i+1]); $i += 2 }
+            "-UseKvQuant" { $UseKvQuant = [bool]::Parse($script:Arguments[$i+1]); $i += 2 }
+            "-MaxBatchSize" { $MaxBatchSize = [int]$script:Arguments[$i+1]; $i += 2 }
+            default { $i++ }
+        }
+    }
+
+    if ($ParsedPrompts.Count -eq 0) {
+        Write-ErrorAndExit "No prompts provided. Use -Prompts 'prompt1' 'prompt2' ..."
+    }
+
+    if ($ParsedPrompts.Count -gt $MaxBatchSize) {
+        Write-ErrorAndExit "Number of prompts ($($ParsedPrompts.Count)) exceeds max batch size ($MaxBatchSize)"
+    }
+
+    # Auto-detect tokenizer if not specified
+    if ([string]::IsNullOrEmpty($TokenizerPath) -or $TokenizerPath -eq $DefaultTokenizerPath) {
+        $TokenizerPath = $ModelDir
+    }
+
+    Log-Message "Starting native C++ batch processing for $($ParsedPrompts.Count) prompts..."
+    Log-Message "  Model Path: $ModelDir"
+    Log-Message "  Tokenizer Path: $TokenizerPath"
+    Log-Message "  Threads: $Threads"
+    Log-Message "  Steps: $Steps"
+    Log-Message "  Temperature: $Temperature"
+    Log-Message "  N GPU Layers: $NGpuLayers"
+    Log-Message "  Use KV Quant: $UseKvQuant"
+    Log-Message "  Max Batch Size: $MaxBatchSize"
+
+    # Find executable
+    $ExecutablePath = Join-Path -Path $ProjectRootDir -ChildPath "build/tinyllama.exe"
+    if (-not (Test-Path $ExecutablePath)) {
+        $ExecutablePath = Join-Path -Path $ProjectRootDir -ChildPath "build/Release/tinyllama.exe"
+    }
+    if (-not (Test-Path $ExecutablePath)) {
+        $ExecutablePath = Join-Path -Path $ProjectRootDir -ChildPath "build/Debug/tinyllama.exe"
+    }
+    if (-not (Test-Path $ExecutablePath)) {
+        Write-ErrorAndExit "Batch executable not found (e.g., $ProjectRootDir\build\tinyllama.exe). Please build the project first."
+    }
+
+    # Build command line arguments for C++ batch mode
+    $CmdArgs = @(
+        $ModelDir,
+        $TokenizerPath,
+        $Threads.ToString(),
+        "batch"  # Mode
+    )
+
+    if (-not [string]::IsNullOrEmpty($SystemPrompt)) {
+        $CmdArgs += "--system-prompt", $SystemPrompt
+    }
+
+    # Add batch-specific arguments
+    $CmdArgs += "--batch-prompts"
+    foreach ($prompt in $ParsedPrompts) {
+        $CmdArgs += $prompt
+    }
+
+    $CmdArgs += "--max-tokens", $Steps.ToString()
+    $CmdArgs += "--n-gpu-layers", $NGpuLayers.ToString()
+    $CmdArgs += "--use-mmap", ([string]$UseMmap).ToLower()
+    $CmdArgs += "--use-kv-quant", ([string]$UseKvQuant).ToLower()
+    $CmdArgs += "--temperature", $Temperature.ToString()
+    $CmdArgs += "--max-batch-size", $MaxBatchSize.ToString()
+
+    Log-Message "Executing C++ batch processing..."
+    Log-Message "Command: & '$ExecutablePath' $CmdArgs"
+    
+    Set-Location $ProjectRootDir
+    & $ExecutablePath $CmdArgs
+    
+    if ($LASTEXITCODE -ne 0) {
+        Write-ErrorAndExit "Batch processing failed"
+    }
+    
+    Log-Message "Batch processing completed successfully"
+}
+
 function Invoke-FormatCode {
     Log-Message "Formatting code with $FormatTool..."
     if (-not (Get-Command $FormatTool -ErrorAction SilentlyContinue)) {
@@ -576,6 +705,7 @@ switch ($Command) {
     "run-server"  { Invoke-RunServer }
     "run-chat"    { Invoke-RunChat }
     "run-prompt"  { Invoke-RunPrompt }
+    "run-batch"   { Invoke-RunBatch }
     "format"      { Invoke-FormatCode }
     "docs"        { Invoke-Docs }
     "docs-serve"  { Invoke-DocsServe }

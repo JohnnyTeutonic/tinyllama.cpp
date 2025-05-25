@@ -367,6 +367,7 @@ class TinyLlamaModel {
   std::vector<std::vector<float>> forward_device_batch_generation(
       float* d_batch_input_hidden_states, // Device pointer to [num_tokens_in_batch, config_.hidden_size]
       const std::vector<int>& token_positions, // Position of each token in its respective sequence
+      const std::vector<int>& original_sequence_indices, // Original sequence index for each token
       int num_tokens_in_batch,
       KVCache* kv_cache,
       cudaStream_t stream
@@ -394,6 +395,7 @@ class TinyLlamaModel {
   std::vector<std::vector<float>> forward_cpu_batch_generation(
       const std::vector<float>& batch_input_activations, // [num_tokens, hidden_size]
       const std::vector<int>& token_positions, // Position of each token in its respective sequence
+      const std::vector<int>& original_sequence_indices, // Original sequence index for each token
       int num_tokens_in_batch,
       KVCache* kv_cache
   );

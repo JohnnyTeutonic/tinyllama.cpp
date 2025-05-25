@@ -219,7 +219,7 @@ TinyLlamaSession::TinyLlamaSession(const std::string& model_path_arg,
     if (st_config_loaded) {
         Logger::info("Successfully loaded config.json directly into initial_model_config_for_model_ctor.");
         // Log tokenizer_family IMMEDIATELY after loading from config.json
-        std::string family_after_json_load = "UNKNOWN_POST_JSON_LOAD";
+        std::string family_after_json_load = "UNKNOWN_POST_JSON_LOAD_DIR_CASE";
         if (initial_model_config_for_model_ctor.tokenizer_family == ModelConfig::TokenizerFamily::LLAMA_SENTENCEPIECE) family_after_json_load = "LLAMA_SENTENCEPIECE";
         else if (initial_model_config_for_model_ctor.tokenizer_family == ModelConfig::TokenizerFamily::LLAMA3_TIKTOKEN) family_after_json_load = "LLAMA3_TIKTOKEN";
         Logger::info("[API_CPP_POST_JSON_LOAD_DIR_CASE] Tokenizer family in initial_model_config_for_model_ctor: " + family_after_json_load);
@@ -696,7 +696,8 @@ if (prefill_enabled) {
         // GPU batch generation path (single token batch)
         gpuErrchk(cudaMemcpy(model_->get_x_dev(), current_data_host.data(), current_data_host.size() * sizeof(float), cudaMemcpyHostToDevice));
         std::vector<int> single_token_positions = {pos};
-        auto batch_logits = model_->forward_device_batch_generation(model_->get_x_dev(), single_token_positions, 1, &kv_cache_, 0);
+        std::vector<int> single_sequence_indices = {0}; // Single sequence at index 0
+        auto batch_logits = model_->forward_device_batch_generation(model_->get_x_dev(), single_token_positions, single_sequence_indices, 1, &kv_cache_, 0);
         if (!batch_logits.empty() && !batch_logits[0].empty()) {
           logits = batch_logits[0]; // Extract logits for the single token
         } else {
@@ -712,7 +713,8 @@ if (prefill_enabled) {
       if (use_batch_generation_) {
         // CPU batch generation path (single token batch)
         std::vector<int> single_token_positions = {pos};
-        auto batch_logits = model_->forward_cpu_batch_generation(current_data_host, single_token_positions, 1, &kv_cache_);
+        std::vector<int> single_sequence_indices = {0}; // Single sequence at index 0
+        auto batch_logits = model_->forward_cpu_batch_generation(current_data_host, single_token_positions, single_sequence_indices, 1, &kv_cache_);
         if (!batch_logits.empty() && !batch_logits[0].empty()) {
           logits = batch_logits[0]; // Extract logits for the single token
         } else {
@@ -896,21 +898,214 @@ std::vector<std::string> TinyLlamaSession::generate_batch(const std::vector<std:
   kv_cache_.initialize_batch(static_cast<int>(prompts.size()));
   kv_cache_.clear_data();
 
-  // For now, implement sequential processing to maintain correctness
-  // TODO: Implement true parallel batch processing
   std::vector<std::string> results(prompts.size());
   
-  for (size_t i = 0; i < prompts.size(); ++i) {
-    Logger::info("[Batch Generate API] Processing prompt " + std::to_string(i + 1) + 
-                 "/" + std::to_string(prompts.size()));
+  // Try parallel batch processing if enabled
+  if (use_batch_generation_) {
+    Logger::info("[Batch Generate API] Using parallel batch processing");
     
-    // Reset to single-sequence mode for this prompt
-    kv_cache_.seq_len = 0;
+    Logger::info("[DEBUG] Initializing KV cache for batch mode");
+    kv_cache_.initialize_batch(static_cast<int>(prompts.size()));
+    Logger::info("[DEBUG] KV cache batch initialization completed");
     
-    // Use existing single-sequence generation logic
-    std::string result = generate(prompts[i], steps, temperature, top_k, top_p, 
-                                 system_prompt_arg, apply_q_a_format_cli_hint);
-    results[i] = result;
+    Logger::info("[DEBUG] Clearing KV cache data");
+    kv_cache_.clear_data();
+    Logger::info("[DEBUG] KV cache clear completed");
+    
+    // Phase 1: Parallel Batch Prefill
+    Logger::info("[DEBUG] About to call batch_prefill_parallel");
+    Logger::info("[DEBUG] all_tokens.size()=" + std::to_string(all_tokens.size()) + ", prompt_lengths.size()=" + std::to_string(prompt_lengths.size()));
+    
+    Logger::info("[EMERGENCY_DEBUG] About to allocate batch_final_logits vector");
+    std::vector<std::vector<float>> batch_final_logits;
+    Logger::info("[EMERGENCY_DEBUG] batch_final_logits vector allocated successfully");
+    
+    Logger::info("[EMERGENCY_DEBUG] About to call batch_prefill_parallel function");
+    bool prefill_success = batch_prefill_parallel(all_tokens, prompt_lengths, batch_final_logits);
+    Logger::info("[EMERGENCY_DEBUG] batch_prefill_parallel call completed");
+    
+    Logger::info("[DEBUG] batch_prefill_parallel returned with prefill_success=" + std::string(prefill_success ? "true" : "false"));
+    Logger::info("[DEBUG] batch_final_logits.size()=" + std::to_string(batch_final_logits.size()));
+    
+    if (prefill_success && batch_final_logits.size() == prompts.size()) {
+      Logger::info("[Batch Generate API] Batch prefill successful, starting parallel generation");
+      
+      // Add safety check for batch_final_logits
+      Logger::info("[DEBUG] Checking batch_final_logits integrity after prefill");
+      for (size_t i = 0; i < batch_final_logits.size(); ++i) {
+        if (batch_final_logits[i].empty()) {
+          Logger::error("[DEBUG] batch_final_logits[" + std::to_string(i) + "] is empty!");
+          goto fallback_sequential;
+        }
+        if (batch_final_logits[i].size() != static_cast<size_t>(config_.vocab_size)) {
+          Logger::error("[DEBUG] batch_final_logits[" + std::to_string(i) + "] has wrong size: " + 
+                       std::to_string(batch_final_logits[i].size()) + " vs expected " + std::to_string(config_.vocab_size));
+          goto fallback_sequential;
+        }
+        // Check for NaN/Inf values
+        for (size_t j = 0; j < std::min(10UL, batch_final_logits[i].size()); ++j) {
+          if (!std::isfinite(batch_final_logits[i][j])) {
+            Logger::error("[DEBUG] batch_final_logits[" + std::to_string(i) + "][" + std::to_string(j) + "] is not finite: " + std::to_string(batch_final_logits[i][j]));
+            goto fallback_sequential;
+          }
+        }
+      }
+      Logger::info("[DEBUG] batch_final_logits integrity check passed");
+      
+      // Sample first tokens for all sequences
+      std::vector<int> current_tokens(prompts.size());
+      std::vector<std::vector<int>> all_generated_tokens(prompts.size());
+      std::vector<int> sequence_positions(prompts.size());
+      std::vector<bool> sequence_finished(prompts.size(), false);
+      
+      Logger::info("[DEBUG] Starting token sampling for " + std::to_string(prompts.size()) + " sequences");
+      
+      for (size_t i = 0; i < prompts.size(); ++i) {
+        Logger::info("[DEBUG] Sampling token for sequence " + std::to_string(i));
+        
+        // Safety check before sampling
+        if (i >= batch_final_logits.size()) {
+          Logger::error("[DEBUG] Index " + std::to_string(i) + " out of bounds for batch_final_logits (size: " + std::to_string(batch_final_logits.size()) + ")");
+          goto fallback_sequential;
+        }
+        
+        try {
+          current_tokens[i] = sample_top_k_top_p_temperature(batch_final_logits[i], temperature, top_k, top_p, rng_);
+          Logger::info("[DEBUG] Sampled token " + std::to_string(current_tokens[i]) + " for sequence " + std::to_string(i));
+        } catch (const std::exception& e) {
+          Logger::error("[DEBUG] Exception during sampling for sequence " + std::to_string(i) + ": " + std::string(e.what()));
+          goto fallback_sequential;
+        }
+        
+        all_generated_tokens[i].push_back(current_tokens[i]);
+        sequence_positions[i] = prompt_lengths[i]; // Position for next token
+        
+        // Check for EOS
+        if (current_tokens[i] == eos_token_id_) {
+          sequence_finished[i] = true;
+          Logger::info("[DEBUG] Sequence " + std::to_string(i) + " finished with EOS token");
+        }
+      }
+      
+      Logger::info("[DEBUG] Token sampling completed, starting generation loop");
+      
+      // Phase 2: Parallel Batch Generation
+      for (int step = 1; step < steps; ++step) {
+        Logger::info("[DEBUG] Starting generation step " + std::to_string(step));
+        
+        // Check if all sequences are finished
+        bool all_finished = true;
+        for (bool finished : sequence_finished) {
+          if (!finished) {
+            all_finished = false;
+            break;
+          }
+        }
+        if (all_finished) {
+          Logger::info("[Batch Generate API] All sequences finished at step " + std::to_string(step));
+          break;
+        }
+        
+        Logger::info("[DEBUG] Collecting active sequences for step " + std::to_string(step));
+        
+        // Collect active sequences
+        std::vector<int> active_tokens;
+        std::vector<int> active_positions;
+        std::vector<int> active_sequence_indices;
+        
+        for (size_t i = 0; i < prompts.size(); ++i) {
+          if (!sequence_finished[i]) {
+            active_tokens.push_back(current_tokens[i]);
+            active_positions.push_back(sequence_positions[i]);
+            active_sequence_indices.push_back(i);
+            Logger::info("[DEBUG] Active sequence " + std::to_string(i) + ": token=" + std::to_string(current_tokens[i]) + ", pos=" + std::to_string(sequence_positions[i]));
+          }
+        }
+        
+        if (active_tokens.empty()) {
+          Logger::info("[DEBUG] No active tokens, breaking from generation loop");
+          break;
+        }
+        
+        Logger::info("[DEBUG] About to call batch_generation_parallel with " + std::to_string(active_tokens.size()) + " active sequences");
+        
+        // Process active sequences in parallel
+        std::vector<std::vector<float>> step_logits;
+        bool generation_success = batch_generation_parallel(active_tokens, active_positions, active_sequence_indices, step_logits);
+        
+        Logger::info("[DEBUG] batch_generation_parallel returned: " + std::string(generation_success ? "success" : "failure"));
+        
+        if (!generation_success || step_logits.size() != active_tokens.size()) {
+          Logger::warning("[Batch Generate API] Parallel generation failed at step " + std::to_string(step) + 
+                         ", falling back to sequential processing");
+          goto fallback_sequential;
+        }
+        
+        Logger::info("[DEBUG] Starting token sampling for step " + std::to_string(step));
+        
+        // Sample next tokens for active sequences
+        for (size_t active_idx = 0; active_idx < active_tokens.size(); ++active_idx) {
+          size_t seq_idx = active_sequence_indices[active_idx];
+          Logger::info("[DEBUG] Sampling for active_idx=" + std::to_string(active_idx) + ", seq_idx=" + std::to_string(seq_idx));
+          
+          // Safety checks
+          if (active_idx >= step_logits.size()) {
+            Logger::error("[DEBUG] active_idx " + std::to_string(active_idx) + " out of bounds for step_logits (size: " + std::to_string(step_logits.size()) + ")");
+            goto fallback_sequential;
+          }
+          if (seq_idx >= prompts.size()) {
+            Logger::error("[DEBUG] seq_idx " + std::to_string(seq_idx) + " out of bounds for prompts (size: " + std::to_string(prompts.size()) + ")");
+            goto fallback_sequential;
+          }
+          
+          try {
+            int next_token = sample_top_k_top_p_temperature(step_logits[active_idx], temperature, top_k, top_p, rng_);
+            Logger::info("[DEBUG] Sampled next token " + std::to_string(next_token) + " for seq_idx " + std::to_string(seq_idx));
+            
+            current_tokens[seq_idx] = next_token;
+            all_generated_tokens[seq_idx].push_back(next_token);
+            sequence_positions[seq_idx]++;
+            
+            // Check for EOS
+            if (next_token == eos_token_id_) {
+              sequence_finished[seq_idx] = true;
+              Logger::info("[DEBUG] Sequence " + std::to_string(seq_idx) + " finished with EOS at step " + std::to_string(step));
+            }
+          } catch (const std::exception& e) {
+            Logger::error("[DEBUG] Exception during sampling at step " + std::to_string(step) + " for seq_idx " + std::to_string(seq_idx) + ": " + std::string(e.what()));
+            goto fallback_sequential;
+          }
+        }
+        
+        Logger::info("[DEBUG] Completed generation step " + std::to_string(step));
+      }
+      
+      // Decode results for all sequences
+      for (size_t i = 0; i < prompts.size(); ++i) {
+        results[i] = tokenizer_->decode(all_generated_tokens[i], true);
+      }
+      
+      Logger::info("[Batch Generate API] Parallel batch processing completed successfully");
+    } else {
+      Logger::warning("[Batch Generate API] Batch prefill failed, falling back to sequential processing");
+      goto fallback_sequential;
+    }
+  } else {
+    fallback_sequential:
+    Logger::info("[Batch Generate API] Using sequential processing");
+    
+    for (size_t i = 0; i < prompts.size(); ++i) {
+      Logger::info("[Batch Generate API] Processing prompt " + std::to_string(i + 1) + 
+                   "/" + std::to_string(prompts.size()));
+      
+      // Reset to single-sequence mode for this prompt
+      kv_cache_.seq_len = 0;
+      
+      // Use existing single-sequence generation logic
+      std::string result = generate(prompts[i], steps, temperature, top_k, top_p, 
+                                   system_prompt_arg, apply_q_a_format_cli_hint);
+      results[i] = result;
+    }
   }
 
   auto t_end = std::chrono::high_resolution_clock::now();
@@ -922,6 +1117,308 @@ std::vector<std::string> TinyLlamaSession::generate_batch(const std::vector<std:
                std::to_string(prompts.size()) + " prompts");
 
   return results;
+}
+
+bool TinyLlamaSession::batch_prefill_parallel(const std::vector<std::vector<int>>& all_tokens,
+                                              const std::vector<int>& prompt_lengths,
+                                              std::vector<std::vector<float>>& batch_final_logits) {
+  Logger::info("[EMERGENCY_DEBUG] batch_prefill_parallel function entry - FIRST LINE");
+  Logger::info("[DEBUG] Entering batch_prefill_parallel");
+  // Calculate total tokens across all prompts for batch prefill
+  int total_tokens_across_all_prompts = 0;
+  for (int len : prompt_lengths) {
+    total_tokens_across_all_prompts += len;
+  }
+  
+  if (total_tokens_across_all_prompts == 0) {
+    Logger::error("[Batch Prefill] No tokens to process in batch prefill.");
+    return false;
+  }
+
+  Logger::info("[Batch Prefill] Processing " + std::to_string(all_tokens.size()) + 
+               " sequences with total " + std::to_string(total_tokens_across_all_prompts) + " tokens");
+
+  // Process all tokens for all sequences in batch
+  Logger::info("[Batch Prefill] Preparing batch embeddings for " + 
+               std::to_string(total_tokens_across_all_prompts) + " tokens");
+  
+  // Calculate required memory
+  size_t required_memory_bytes = static_cast<size_t>(total_tokens_across_all_prompts) * config_.hidden_size * sizeof(float);
+  Logger::info("[DEBUG] About to allocate " + std::to_string(required_memory_bytes) + " bytes (" + 
+               std::to_string(required_memory_bytes / (1024*1024)) + " MB) for batch embeddings");
+  
+  std::vector<float> batch_embeddings(total_tokens_across_all_prompts * config_.hidden_size);
+  Logger::info("[DEBUG] batch_embeddings allocation completed successfully");
+  
+  int token_offset = 0;
+  
+  for (size_t seq_idx = 0; seq_idx < all_tokens.size(); ++seq_idx) {
+    for (int token_idx = 0; token_idx < prompt_lengths[seq_idx]; ++token_idx) {
+      std::vector<float> token_embedding = model_->lookup_embedding(all_tokens[seq_idx][token_idx]);
+      if (token_embedding.empty() || token_embedding.size() != static_cast<size_t>(config_.hidden_size)) {
+        Logger::error("[Batch Prefill] Embedding lookup failed for token " + 
+                     std::to_string(all_tokens[seq_idx][token_idx]) + 
+                     " in sequence " + std::to_string(seq_idx));
+        return false;
+      }
+      
+      // Ensure we don't write beyond bounds
+      size_t target_offset = token_offset * config_.hidden_size;
+      if (target_offset + config_.hidden_size > batch_embeddings.size()) {
+        Logger::error("[Batch Prefill] Buffer overflow detected at token offset " + std::to_string(token_offset));
+        return false;
+      }
+      
+      std::copy(token_embedding.begin(), token_embedding.end(), 
+               batch_embeddings.begin() + target_offset);
+      token_offset++;
+    }
+  }
+
+  // Process CPU layers if any
+  std::vector<float> cpu_processed_embeddings;
+  if (config_.num_cpu_offload_layers > 0) {
+    Logger::info("[Batch Prefill] Processing " + std::to_string(config_.num_cpu_offload_layers) + 
+                 " CPU layers for batch prefill");
+    cpu_processed_embeddings = model_->forward_cpu_batch(batch_embeddings, 
+                                                        total_tokens_across_all_prompts, 
+                                                        config_.num_cpu_offload_layers, 
+                                                        0, &kv_cache_);
+    if (cpu_processed_embeddings.empty()) {
+      Logger::error("[Batch Prefill] CPU batch processing failed.");
+      return false;
+    }
+  } else {
+    cpu_processed_embeddings = batch_embeddings;
+  }
+
+  // Process GPU layers if any
+  std::vector<float> final_batch_logits;
+  
+  if (config_.num_cpu_offload_layers == config_.num_hidden_layers) {
+    // All CPU - get logits from CPU
+    Logger::info("[Batch Prefill] All layers on CPU, computing logits");
+    final_batch_logits = model_->forward_cpu_logits_batch(cpu_processed_embeddings, 
+                                                         total_tokens_across_all_prompts);
+  } else {
+    // GPU layers exist - transfer to GPU and process
+    Logger::info("[Batch Prefill] Processing GPU layers for batch prefill");
+    
+    Logger::info("[DEBUG] About to allocate GPU memory for batch prefill");
+    float* d_batch_embeddings = nullptr;
+    size_t batch_size_bytes = cpu_processed_embeddings.size() * sizeof(float);
+    Logger::info("[DEBUG] GPU allocation size: " + std::to_string(batch_size_bytes) + " bytes (" + 
+                 std::to_string(batch_size_bytes / (1024*1024)) + " MB)");
+    
+    Logger::info("[DEBUG] Calling cudaMalloc...");
+    gpuErrchk(cudaMalloc(&d_batch_embeddings, batch_size_bytes));
+    Logger::info("[DEBUG] cudaMalloc completed successfully");
+    
+    Logger::info("[DEBUG] Calling cudaMemcpy host to device...");
+    gpuErrchk(cudaMemcpy(d_batch_embeddings, cpu_processed_embeddings.data(), 
+                        batch_size_bytes, cudaMemcpyHostToDevice));
+    Logger::info("[DEBUG] cudaMemcpy completed successfully");
+
+    // Call forward_device_batch_prefill ONCE with all the batch data
+    Logger::info("[DEBUG] Calling forward_device_batch_prefill with " + std::to_string(total_tokens_across_all_prompts) + " total tokens");
+    std::vector<float> all_batch_logits = model_->forward_device_batch_prefill(
+      d_batch_embeddings, total_tokens_across_all_prompts, 0, &kv_cache_, 0);
+    
+    Logger::info("[DEBUG] forward_device_batch_prefill completed, returned " + std::to_string(all_batch_logits.size()) + " total logits");
+    
+    gpuErrchk(cudaFree(d_batch_embeddings));
+    
+    // Now extract the logits for the last token of each sequence
+    if (all_batch_logits.size() != static_cast<size_t>(total_tokens_across_all_prompts * config_.vocab_size)) {
+      Logger::error("[Batch Prefill] GPU prefill returned wrong total logit size. Expected: " + 
+                   std::to_string(total_tokens_across_all_prompts * config_.vocab_size) + 
+                   ", got: " + std::to_string(all_batch_logits.size()));
+      return false;
+    }
+    
+    final_batch_logits = all_batch_logits;
+  }
+
+  Logger::info("[Batch Prefill] Successfully processed batch prefill for " + 
+               std::to_string(all_tokens.size()) + " sequences");
+  
+  Logger::info("[DEBUG] About to return from batch_prefill_parallel");
+  Logger::info("[DEBUG] batch_final_logits.size()=" + std::to_string(batch_final_logits.size()));
+  for (size_t i = 0; i < batch_final_logits.size() && i < 3; ++i) {
+    Logger::info("[DEBUG] batch_final_logits[" + std::to_string(i) + "].size()=" + std::to_string(batch_final_logits[i].size()));
+  }
+  
+  // Extract logits for the last token of each sequence
+  batch_final_logits.clear();
+  batch_final_logits.resize(all_tokens.size());
+  
+  if (config_.num_cpu_offload_layers == config_.num_hidden_layers) {
+    // For CPU-only, extract last token logits from the flat array
+    if (final_batch_logits.size() != static_cast<size_t>(total_tokens_across_all_prompts * config_.vocab_size)) {
+      Logger::error("[Batch Prefill] CPU logits size mismatch. Expected: " + 
+                   std::to_string(total_tokens_across_all_prompts * config_.vocab_size) + 
+                   ", got: " + std::to_string(final_batch_logits.size()));
+      return false;
+    }
+    
+    int token_offset = 0;
+    for (size_t seq_idx = 0; seq_idx < all_tokens.size(); ++seq_idx) {
+      int last_token_pos = token_offset + prompt_lengths[seq_idx] - 1;
+      batch_final_logits[seq_idx].resize(config_.vocab_size);
+      
+      // Bounds check before copying
+      size_t src_start = last_token_pos * config_.vocab_size;
+      size_t src_end = src_start + config_.vocab_size;
+      if (src_end > final_batch_logits.size()) {
+        Logger::error("[Batch Prefill] CPU logits bounds check failed for sequence " + std::to_string(seq_idx));
+        return false;
+      }
+      
+      std::copy(final_batch_logits.begin() + src_start,
+               final_batch_logits.begin() + src_end,
+               batch_final_logits[seq_idx].begin());
+      
+      token_offset += prompt_lengths[seq_idx];
+    }
+  } else {
+    // For GPU, check if logits are for all tokens or just last tokens
+    Logger::info("[DEBUG] GPU batch logits size: " + std::to_string(final_batch_logits.size()) + 
+                 ", expected for all tokens: " + std::to_string(total_tokens_across_all_prompts * config_.vocab_size) +
+                 ", expected for last tokens only: " + std::to_string(all_tokens.size() * config_.vocab_size));
+    
+    if (final_batch_logits.size() == static_cast<size_t>(total_tokens_across_all_prompts * config_.vocab_size)) {
+      // GPU returned logits for all tokens, extract last token for each sequence
+      Logger::info("[DEBUG] GPU returned logits for all tokens, extracting last token logits");
+      int token_offset = 0;
+      for (size_t seq_idx = 0; seq_idx < all_tokens.size(); ++seq_idx) {
+        int last_token_pos = token_offset + prompt_lengths[seq_idx] - 1;
+        batch_final_logits[seq_idx].resize(config_.vocab_size);
+        
+        size_t src_start = last_token_pos * config_.vocab_size;
+        size_t src_end = src_start + config_.vocab_size;
+        if (src_end > final_batch_logits.size()) {
+          Logger::error("[Batch Prefill] GPU logits bounds check failed for sequence " + std::to_string(seq_idx));
+          return false;
+        }
+        
+        std::copy(final_batch_logits.begin() + src_start,
+                 final_batch_logits.begin() + src_end,
+                 batch_final_logits[seq_idx].begin());
+        
+        token_offset += prompt_lengths[seq_idx];
+      }
+    } else if (final_batch_logits.size() == static_cast<size_t>(all_tokens.size() * config_.vocab_size)) {
+      // GPU returned logits for last tokens only
+      Logger::info("[DEBUG] GPU returned logits for last tokens only");
+      for (size_t seq_idx = 0; seq_idx < all_tokens.size(); ++seq_idx) {
+        batch_final_logits[seq_idx].resize(config_.vocab_size);
+        
+        size_t src_start = seq_idx * config_.vocab_size;
+        size_t src_end = src_start + config_.vocab_size;
+        if (src_end > final_batch_logits.size()) {
+          Logger::error("[Batch Prefill] GPU logits bounds check failed for sequence " + std::to_string(seq_idx));
+          return false;
+        }
+        
+        std::copy(final_batch_logits.begin() + src_start,
+                 final_batch_logits.begin() + src_end,
+                 batch_final_logits[seq_idx].begin());
+      }
+    } else {
+      Logger::error("[Batch Prefill] GPU logits size doesn't match expected patterns");
+      return false;
+    }
+  }
+  
+  return true;
+}
+
+bool TinyLlamaSession::batch_generation_parallel(const std::vector<int>& current_tokens,
+                                                 const std::vector<int>& token_positions,
+                                                 const std::vector<int>& sequence_indices,
+                                                 std::vector<std::vector<float>>& batch_logits) {
+  Logger::info("[DEBUG] Entering batch_generation_parallel");
+  
+  int num_sequences = current_tokens.size();
+  
+  if (num_sequences == 0 || token_positions.size() != current_tokens.size()) {
+    Logger::error("[Batch Generation] Invalid input sizes");
+    return false;
+  }
+
+  Logger::info("[Batch Generation] Processing " + std::to_string(num_sequences) + 
+               " sequences in parallel generation step");
+
+  // Create batch embeddings for all sequences
+  std::vector<float> batch_embeddings;
+  batch_embeddings.reserve(num_sequences * config_.hidden_size);
+  
+  for (int i = 0; i < num_sequences; ++i) {
+    std::vector<float> token_embedding = model_->lookup_embedding(current_tokens[i]);
+    if (token_embedding.empty()) {
+      Logger::error("[Batch Generation] Embedding lookup failed for token " + std::to_string(current_tokens[i]));
+      return false;
+    }
+    batch_embeddings.insert(batch_embeddings.end(), token_embedding.begin(), token_embedding.end());
+  }
+
+  // Process through CPU layers if any
+  if (config_.num_cpu_offload_layers > 0) {
+    Logger::info("[Batch Generation] Processing " + std::to_string(config_.num_cpu_offload_layers) + 
+                 " CPU layers for batch generation");
+    
+    std::vector<std::vector<float>> cpu_batch_logits = model_->forward_cpu_batch_generation(
+      batch_embeddings, token_positions, sequence_indices, num_sequences, &kv_cache_);
+    
+    if (cpu_batch_logits.size() != static_cast<size_t>(num_sequences)) {
+      Logger::error("[Batch Generation] CPU batch generation returned wrong number of results");
+      return false;
+    }
+
+    // If all layers are on CPU, we're done
+    if (config_.num_cpu_offload_layers == config_.num_hidden_layers) {
+      batch_logits = cpu_batch_logits;
+      Logger::info("[Batch Generation] All CPU layers processed, returning logits");
+      return true;
+    }
+
+    // Convert CPU results back to batch embeddings for GPU processing
+    batch_embeddings.clear();
+    batch_embeddings.resize(num_sequences * config_.hidden_size);
+    // Note: This would need the CPU layer output activations, not logits
+    // For now, fall back to sequential processing if mixed CPU/GPU
+    Logger::warning("[Batch Generation] Mixed CPU/GPU not yet implemented for batch generation");
+    return false;
+  }
+
+  // GPU-only processing
+  if (config_.num_cpu_offload_layers < config_.num_hidden_layers) {
+    Logger::info("[Batch Generation] Processing GPU layers for batch generation");
+    
+    float* d_batch_embeddings = nullptr;
+    size_t batch_size_bytes = batch_embeddings.size() * sizeof(float);
+    
+    gpuErrchk(cudaMalloc(&d_batch_embeddings, batch_size_bytes));
+    gpuErrchk(cudaMemcpy(d_batch_embeddings, batch_embeddings.data(), 
+                        batch_size_bytes, cudaMemcpyHostToDevice));
+
+    std::vector<std::vector<float>> gpu_batch_logits = model_->forward_device_batch_generation(
+      d_batch_embeddings, token_positions, sequence_indices, num_sequences, &kv_cache_, 0);
+    
+    gpuErrchk(cudaFree(d_batch_embeddings));
+    
+    if (gpu_batch_logits.size() != static_cast<size_t>(num_sequences)) {
+      Logger::error("[Batch Generation] GPU batch generation returned wrong number of results");
+      return false;
+    }
+    
+    batch_logits = gpu_batch_logits;
+    Logger::info("[Batch Generation] GPU batch generation completed successfully");
+    return true;
+  }
+  
+  Logger::error("[Batch Generation] No valid processing path found");
+  return false;
 }
 
 }  // namespace tinyllama

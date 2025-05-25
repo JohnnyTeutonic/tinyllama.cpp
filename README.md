@@ -129,7 +129,7 @@ This process will create executables in the `build/` directory (or a subdirector
 *   `--n-gpu-layers <N>` (Optional): Layers to offload to GPU (-1 for all, 0 for none. Default: -1).
 *   `--use-mmap <true|false>` (Optional): Memory-map GGUF files (Default: true).
 *   `--temperature <F>` (Optional): Sampling temperature (e.g., 0.1. Default: 0.1).
-*   `--use-kv-quant <true|false>` (Optional): Use INT8 KVCache on GPU (Default: false).
+*   `--use-kv-quant <true|false>` (Optional): Use INT8 KVCache on GPU (Default: false).*   `--use-batch-generation <true|false>` (Optional): Enable single-token batch generation (Default: false).*   `--max-batch-size <N>` (Optional): Maximum number of sequences for multi-prompt batch processing (Default: 1).
 
 **Example Invocation:**
 
@@ -204,18 +204,27 @@ import tinyllama_cpp
 model_path = "path/to/your/model_or_gguf_file"
 tokenizer_path = "path/to/your/tokenizer.json_or.model"
 
-# Initialize the session
+# Initialize the session with new enhanced API
 # For GGUF, tokenizer_path can often be the same as model_path if tokenizer is embedded,
 # or a separate tokenizer.model/tokenizer.json.
 # For SafeTensors, model_path is the directory containing model.safetensors, config.json, tokenizer.json,
 # and tokenizer_path should point to the tokenizer.json in that directory.
-session = tinyllama_cpp.TinyLlamaSession(model_path, tokenizer_path, num_gpu_layers=-1) # Use -1 for all GPU layers if CUDA enabled
+session = tinyllama_cpp.TinyLlamaSession(
+    model_path=model_path,
+    tokenizer_path=tokenizer_path,
+    threads=4,                      # Number of CPU threads
+    n_gpu_layers=-1,               # Use -1 for all GPU layers if CUDA enabled
+    use_mmap=True,                 # Memory-map GGUF files for efficiency
+    use_kv_quant=False,            # Enable INT8 KVCache quantization on GPU
+    use_batch_generation=False,     # Enable single-token batch generation
+    max_batch_size=1               # Maximum number of sequences for multi-prompt batch processing
+)
 
 # Define prompts
 user_prompt = "What is the capital of France?"
 system_prompt_optional = "You are a helpful geography expert." # Optional
 
-# Generate text
+# Single Generation
 # The `apply_q_a_format` parameter defaults to `true`. This means Q:A style formatting 
 # (e.g., "Q: [prompt]\\nA:") is applied by default if the loaded model is not Llama 3 
 # and does not have an explicit GGUF chat template. This is often preferred for Llama 2 models.
@@ -225,14 +234,40 @@ response = session.generate(
     prompt=user_prompt, 
     steps=64, 
     temperature=0.7,
-    system_prompt=system_prompt_optional # Pass the system prompt here
-    # apply_q_a_format=True # This is now the default
+    top_k=40,
+    top_p=0.9,
+    system_prompt=system_prompt_optional, # Pass the system prompt here
+    apply_q_a_format=True # This is now the default
 )
 
 print(f"User: {user_prompt}")
 if system_prompt_optional:
     print(f"System: {system_prompt_optional}")
 print(f"AI: {response}")
+
+# Batch Generation (NEW FEATURE!)
+# Process multiple prompts efficiently in a single batch
+if session.max_batch_size > 1:  # Only if batch processing is enabled
+    batch_prompts = [
+        "What is the capital of France?",
+        "Explain quantum computing in simple terms.",
+        "Write a short poem about coding."
+    ]
+    
+    print("\n--- Batch Generation ---")
+    batch_results = session.generate_batch(
+        prompts=batch_prompts,
+        steps=64,
+        temperature=0.7,
+        top_k=40,
+        top_p=0.9,
+        system_prompt=system_prompt_optional,
+        apply_q_a_format=True
+    )
+    
+    for i, (prompt, result) in enumerate(zip(batch_prompts, batch_results)):
+        print(f"\nPrompt {i+1}: {prompt}")
+        print(f"Response {i+1}: {result}")
 
 # Example for chat interaction (simplified loop)
 print("\nEntering chat mode (type 'quit' to exit)...")
@@ -245,13 +280,63 @@ while True:
         prompt=current_user_input,
         steps=128,
         temperature=0.7,
+        top_k=40,
+        top_p=0.9,
         system_prompt=system_prompt_optional, # Maintain system prompt across turns if desired
-        # apply_q_a_format=True # Default, applies Q:A if no GGUF/Llama3 template
+        apply_q_a_format=True # Default, applies Q:A if no GGUF/Llama3 template
     )
     print(f"AI: {chat_response}")
 ```
 
 Refer to your Python bindings implementation (`bindings.cpp` and `tinyllama_cpp/__init__.py`) for the exact classes and methods available.
+
+#### New Batch Processing Features
+
+**TinyLlama.cpp** now supports efficient batch processing for multiple prompts:
+
+**Constructor Parameters:**
+- `use_batch_generation` (bool): Enables single-token batch generation for improved performance
+- `max_batch_size` (int): Maximum number of sequences that can be processed in a single batch
+
+**New Methods:**
+- `generate_batch(prompts, steps, temperature, top_k, top_p, system_prompt, apply_q_a_format)`: Process multiple prompts in a single efficient batch operation
+
+**Example for batch processing with enhanced constructor:**
+
+```python
+# Initialize with batch processing enabled
+session = tinyllama_cpp.TinyLlamaSession(
+    model_path="./models/model.gguf",
+    tokenizer_path="./models/tokenizer.json",
+    threads=4,
+    n_gpu_layers=-1,
+    use_mmap=True,
+    use_kv_quant=False,
+    use_batch_generation=True,      # Enable batch generation
+    max_batch_size=5               # Support up to 5 prompts per batch
+)
+
+# Process multiple prompts efficiently
+prompts = [
+    "What is machine learning?",
+    "Explain neural networks.",
+    "How does AI work?"
+]
+
+batch_results = session.generate_batch(
+    prompts=prompts,
+    steps=100,
+    temperature=0.7,
+    top_k=40,
+    top_p=0.9,
+    system_prompt="You are an AI expert.",
+    apply_q_a_format=True
+)
+
+for prompt, result in zip(prompts, batch_results):
+    print(f"Q: {prompt}")
+    print(f"A: {result}\n")
+```
 
 ### Using the Management Scripts
 

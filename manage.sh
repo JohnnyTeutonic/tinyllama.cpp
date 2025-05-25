@@ -90,6 +90,20 @@ usage() {
     echo "                 --use-kv-quant <true|false> (default: ${DEFAULT_USE_KV_QUANT})"
     echo "                 --use-batch-gen <true|false> (default: ${DEFAULT_USE_BATCH_GENERATION})"
     echo ""
+    echo "  run-batch    Run multiple prompts in parallel using batch processing."
+    echo "               Options:"
+    echo "                 --model-dir <path>          (default: ${DEFAULT_MODEL_DIR})"
+    echo "                 --tokenizer <path>          (default: ${DEFAULT_TOKENIZER_PATH})"
+    echo "                 --prompts <\"prompt1\" \"prompt2\" ...> (Required: Multiple prompts in quotes)"
+    echo "                 --system-prompt <text>     (Optional) System prompt to guide the model."
+    echo "                 --steps <num>               (default: ${MAX_TOKENS_SERVER})"
+    echo "                 --threads <num>             (default: ${DEFAULT_THREADS})"
+    echo "                 --temperature <float>       (default: ${DEFAULT_TEMPERATURE})"
+    echo "                 --n-gpu-layers <int>        (default: ${DEFAULT_N_GPU_LAYERS}, -1 for all on GPU)"
+    echo "                 --mmap <true|false>         (default: ${DEFAULT_USE_MMAP})"
+    echo "                 --use-kv-quant <true|false> (default: ${DEFAULT_USE_KV_QUANT})"
+    echo "                 --max-batch-size <int>      (default: 8)"
+    echo ""
     echo "  format       Format C++/CUDA source code using ${FORMAT_TOOL}."
     echo "               (Assumes .clang-format file in project root)"
     echo ""
@@ -406,6 +420,110 @@ do_run_prompt() {
     LD_LIBRARY_PATH=./build/lib "$executable_path" "${pass_through_args[@]}"
 }
 
+do_run_batch() {
+    local model_dir_arg="${DEFAULT_MODEL_DIR}"
+    local tokenizer_path_arg="${DEFAULT_TOKENIZER_PATH}"
+    local system_prompt_arg=""
+    local prompts_array=()
+    local steps_arg="128"
+    local threads_arg="${DEFAULT_THREADS}"
+    local temperature_arg="${DEFAULT_TEMPERATURE}"
+    local n_gpu_layers_arg="${DEFAULT_N_GPU_LAYERS}"
+    local use_mmap_arg="${DEFAULT_USE_MMAP}"
+    local use_kv_quant_arg="${DEFAULT_USE_KV_QUANT}"
+    local max_batch_size_arg="8"
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --model-dir) model_dir_arg="$2"; shift 2 ;;
+            --tokenizer) tokenizer_path_arg="$2"; shift 2 ;;
+            --prompts) 
+                shift
+                while [[ $# -gt 0 && ! "$1" =~ ^-- ]]; do
+                    prompts_array+=("$1")
+                    shift
+                done
+                ;;
+            --system-prompt) system_prompt_arg="$2"; shift 2 ;;
+            --steps) steps_arg="$2"; shift 2 ;;
+            --threads) threads_arg="$2"; shift 2 ;;
+            --temperature) temperature_arg="$2"; shift 2 ;;
+            --n-gpu-layers) n_gpu_layers_arg="$2"; shift 2 ;;
+            --mmap) use_mmap_arg="$2"; shift 2 ;;
+            --use-kv-quant) use_kv_quant_arg="$2"; shift 2 ;;
+            --max-batch-size) max_batch_size_arg="$2"; shift 2 ;;
+            *) error "Unknown option for run-batch: $1"; usage ;;
+        esac
+    done
+
+    if [ ${#prompts_array[@]} -eq 0 ]; then
+        error "No prompts provided. Use --prompts \"prompt1\" \"prompt2\" ..."
+    fi
+
+    if [ ${#prompts_array[@]} -gt "$max_batch_size_arg" ]; then
+        error "Number of prompts (${#prompts_array[@]}) exceeds max batch size ($max_batch_size_arg)"
+    fi
+
+    # Auto-detect tokenizer if not specified
+    if [ -z "$tokenizer_path_arg" ] || [ "$tokenizer_path_arg" = "$DEFAULT_TOKENIZER_PATH" ]; then
+        tokenizer_path_arg="$model_dir_arg"
+    fi
+
+    log "Starting native C++ batch processing for ${#prompts_array[@]} prompts..."
+    log "  Model Path: $model_dir_arg"
+    log "  Tokenizer Path: $tokenizer_path_arg"
+    log "  Threads: $threads_arg"
+    log "  Steps: $steps_arg"
+    log "  Temperature: $temperature_arg"
+    log "  N GPU Layers: $n_gpu_layers_arg"
+    log "  Use KV Quant: $use_kv_quant_arg"
+    log "  Max Batch Size: $max_batch_size_arg"
+
+    local executable_path="${PROJECT_ROOT_DIR}/build/main"
+    if [ ! -f "$executable_path" ]; then
+        executable_path="${PROJECT_ROOT_DIR}/build/tinyllama"
+        if [ ! -f "$executable_path" ]; then
+            error "Main executable not found at ${PROJECT_ROOT_DIR}/build/main or ${PROJECT_ROOT_DIR}/build/tinyllama. Please build the project first."
+        fi
+    fi
+
+    # Build command line arguments for C++ batch mode
+    local pass_through_args=()
+    pass_through_args+=("${model_dir_arg}")
+    pass_through_args+=("${tokenizer_path_arg}")
+    pass_through_args+=("${threads_arg}")
+    pass_through_args+=("batch")  # Mode
+
+    if [ -n "$system_prompt_arg" ]; then
+        pass_through_args+=("--system-prompt" "${system_prompt_arg}")
+    fi
+
+    # Add batch-specific arguments
+    pass_through_args+=("--batch-prompts")
+    for prompt in "${prompts_array[@]}"; do
+        pass_through_args+=("${prompt}")
+    done
+
+    pass_through_args+=("--max-tokens" "${steps_arg}")
+    pass_through_args+=("--n-gpu-layers" "${n_gpu_layers_arg}")
+    pass_through_args+=("--use-mmap" "${use_mmap_arg}")
+    pass_through_args+=("--use-kv-quant" "${use_kv_quant_arg}")
+    pass_through_args+=("--temperature" "${temperature_arg}")
+    pass_through_args+=("--max-batch-size" "${max_batch_size_arg}")
+
+    log "Executing C++ batch processing..."
+    echo "Command: $executable_path ${pass_through_args[*]}"
+    
+    cd "${PROJECT_ROOT_DIR}" || error "Failed to cd to project root"
+    LD_LIBRARY_PATH=./build/lib "$executable_path" "${pass_through_args[@]}"
+    
+    if [ $? -ne 0 ]; then
+        error "Batch processing failed"
+    fi
+    
+    log "Batch processing completed successfully"
+}
+
 do_format() {
     if ! command -v ${FORMAT_TOOL} &> /dev/null; then
         error "${FORMAT_TOOL} could not be found. Please install it and ensure it's in your PATH."
@@ -550,6 +668,7 @@ case $COMMAND in
     run-server) do_run_server "$@" ;;
     run-chat) do_run_chat "$@" ;;
     run-prompt) do_run_prompt "$@" ;;
+    run-batch) do_run_batch "$@" ;;
     format) do_format ;;
     docs) do_generate_docs ;;
     docs-serve) do_docs_serve ;;

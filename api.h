@@ -110,6 +110,16 @@ class TinyLlamaSession {
   TinyLlamaSession(const TinyLlamaSession&) = delete;
   TinyLlamaSession& operator=(const TinyLlamaSession&) = delete;
 
+  // Parallel batch processing methods
+  bool batch_prefill_parallel(const std::vector<std::vector<int>>& all_tokens,
+                              const std::vector<int>& prompt_lengths,
+                              std::vector<std::vector<float>>& batch_final_logits);
+
+  bool batch_generation_parallel(const std::vector<int>& current_tokens,
+                                 const std::vector<int>& token_positions,
+                                 const std::vector<int>& original_sequence_indices,
+                                 std::vector<std::vector<float>>& batch_logits);
+
   std::unique_ptr<TinyLlamaModel> model_;
   std::unique_ptr<Tokenizer> tokenizer_;
   ModelConfig config_;

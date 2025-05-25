@@ -1179,9 +1179,9 @@ void KVCache::initialize(const ModelConfig& config,
   seq_len = 0;
   Logger::info("Allocating KVCache host vectors...");
   size_t cache_size_per_layer = static_cast<size_t>(max_seq_len_arg) *
+                                static_cast<size_t>(max_batch_size_arg) *
                                 static_cast<size_t>(num_kv_heads) *
                                 static_cast<size_t>(head_dim);
-
   if (cache_size_per_layer == 0 && max_seq_len_arg > 0 && total_num_model_layers > 0) { // Check total_num_model_layers too
     throw std::runtime_error(
         "KVCache (CPU): Calculated cache size is zero for non-empty model. Check parameters.");
@@ -4284,7 +4284,7 @@ static void update_kv_cache_batch_cpu(
         return;
     }
     
-    size_t expected_total_elements_in_layer_cache = static_cast<size_t>(kv_cache->max_seq_len_config_) * kv_dim;
+    size_t expected_total_elements_in_layer_cache = static_cast<size_t>(kv_cache->max_seq_len_config_) * static_cast<size_t>(kv_cache->max_batch_size) * kv_dim;
     if (layer_cache.k.size() != expected_total_elements_in_layer_cache || layer_cache.v.size() != expected_total_elements_in_layer_cache) {
         Logger::error("[KV_BATCH_UPDATE L" + std::to_string(layer_idx) + 
                       "] Precondition failed: Layer cache not sized to max_seq_len_config. K size: " + std::to_string(layer_cache.k.size()) +
@@ -4756,9 +4756,10 @@ std::vector<float> TinyLlamaModel::forward_cpu_logits_batch(
 std::vector<std::vector<float>> TinyLlamaModel::forward_cpu_batch_generation(
     const std::vector<float>& batch_input_activations, // [num_tokens, hidden_size]
     const std::vector<int>& token_positions, // Position of each token in its respective sequence
+    const std::vector<int>& original_sequence_indices, // Original sequence index for each token
     int num_tokens_in_batch,
     KVCache* kv_cache) {
-
+            
     if (batch_input_activations.size() != (size_t)num_tokens_in_batch * config_.hidden_size) {
         Logger::error("[CPU_BATCH_GENERATION] batch_input_activations size mismatch. Expected: " +
                       std::to_string((size_t)num_tokens_in_batch * config_.hidden_size) + " Got: " +
@@ -4786,6 +4787,7 @@ std::vector<std::vector<float>> TinyLlamaModel::forward_cpu_batch_generation(
     bool use_rope_adjacent_pairing = config_.is_gguf_file_loaded;
     float attention_scale = 1.0f / SAFE_SQRT(static_cast<float>(head_dim));
     int vs = config_.vocab_size;
+    int kv_group = n_heads / n_kv_heads;  // Pre-calculate GQA grouping
 
     std::vector<float> current_batch_activations = batch_input_activations;
 
@@ -4851,101 +4853,102 @@ std::vector<std::vector<float>> TinyLlamaModel::forward_cpu_batch_generation(
             return {};
         }
 
-        // Apply RoPE and update KV cache individually for each token (position-dependent)
-        for (int token_idx = 0; token_idx < num_tokens_in_batch; ++token_idx) {
-            int pos = token_positions[token_idx];
-            
-            // Extract Q, K, V for this token
+        // Optimized RoPE, KV cache update, and attention with OpenMP
+        std::vector<float> batch_attn_output((size_t)num_tokens_in_batch * hs);
+        
+        #pragma omp parallel if(num_tokens_in_batch > 1)
+        {
+            // Thread-local buffers to avoid allocations in loop
             std::vector<float> q_token(hs);
             std::vector<float> k_token(n_kv_heads * head_dim);
             std::vector<float> v_token(n_kv_heads * head_dim);
+            std::vector<float> scores_buffer;
             
-            std::copy(q_batch.begin() + (size_t)token_idx * hs, 
-                     q_batch.begin() + (size_t)(token_idx + 1) * hs, 
-                     q_token.begin());
-            std::copy(k_batch.begin() + (size_t)token_idx * n_kv_heads * head_dim, 
-                     k_batch.begin() + (size_t)(token_idx + 1) * n_kv_heads * head_dim, 
-                     k_token.begin());
-            std::copy(v_batch.begin() + (size_t)token_idx * n_kv_heads * head_dim, 
-                     v_batch.begin() + (size_t)(token_idx + 1) * n_kv_heads * head_dim, 
-                     v_token.begin());
-            
-            // Apply RoPE individually
-            apply_rope_vector(q_token, n_heads, head_dim, pos, precomputed_freqs_cis_, max_pos_embeddings, use_rope_adjacent_pairing);
-            apply_rope_vector(k_token, n_kv_heads, head_dim, pos, precomputed_freqs_cis_, max_pos_embeddings, use_rope_adjacent_pairing);
-            
-            // Update KV cache at specific position
-            if (kv_cache && static_cast<size_t>(l) < kv_cache->layers.size()) {
-                auto& layer_cache = kv_cache->layers[l];
-                int kv_offset = pos * n_kv_heads * head_dim;
+            #pragma omp for
+            for (int token_idx = 0; token_idx < num_tokens_in_batch; ++token_idx) {
+                int pos = token_positions[token_idx];
                 
-                if (kv_offset + n_kv_heads * head_dim <= (int)layer_cache.k.size()) {
-                    std::copy(k_token.begin(), k_token.end(), layer_cache.k.begin() + kv_offset);
-                    std::copy(v_token.begin(), v_token.end(), layer_cache.v.begin() + kv_offset);
-                }
-            }
-            
-            // Copy back RoPE'd Q values to batch
-            std::copy(q_token.begin(), q_token.end(), q_batch.begin() + (size_t)token_idx * hs);
-        }
-
-        // Batch attention processing (individual attention for each token due to different positions)
-        std::vector<float> batch_attn_output((size_t)num_tokens_in_batch * hs);
-        
-        for (int token_idx = 0; token_idx < num_tokens_in_batch; ++token_idx) {
-            int pos = token_positions[token_idx];
-            
-            // Extract Q for this token
-            std::vector<float> q_token(hs);
-            std::copy(q_batch.begin() + (size_t)token_idx * hs, 
-                     q_batch.begin() + (size_t)(token_idx + 1) * hs, 
-                     q_token.begin());
-            
-            // Compute attention for this token
-            std::vector<float> attn_output_token(hs);
-            if (kv_cache && static_cast<size_t>(l) < kv_cache->layers.size()) {
-                auto& layer_cache = kv_cache->layers[l];
+                // Extract Q, K, V for this token (reuse thread-local buffers)
+                std::copy(q_batch.begin() + (size_t)token_idx * hs, 
+                         q_batch.begin() + (size_t)(token_idx + 1) * hs, 
+                         q_token.begin());
+                std::copy(k_batch.begin() + (size_t)token_idx * n_kv_heads * head_dim, 
+                         k_batch.begin() + (size_t)(token_idx + 1) * n_kv_heads * head_dim, 
+                         k_token.begin());
+                std::copy(v_batch.begin() + (size_t)token_idx * n_kv_heads * head_dim, 
+                         v_batch.begin() + (size_t)(token_idx + 1) * n_kv_heads * head_dim, 
+                         v_token.begin());
+                
+                // Apply RoPE individually
+                apply_rope_vector(q_token, n_heads, head_dim, pos, precomputed_freqs_cis_, max_pos_embeddings, use_rope_adjacent_pairing);
+                apply_rope_vector(k_token, n_kv_heads, head_dim, pos, precomputed_freqs_cis_, max_pos_embeddings, use_rope_adjacent_pairing);
+                // Update KV cache at specific position - Sequence-Major Layout
+                // Update KV cache at specific position - Sequence-Major Layout
+                if (kv_cache && static_cast<size_t>(l) < kv_cache->layers.size()) {
+                    auto& layer_cache = kv_cache->layers[l];
+                    // Each sequence gets its own contiguous region based on original sequence index
+                    int true_sequence_idx = original_sequence_indices[token_idx];
+                    int sequence_base_offset = true_sequence_idx * kv_cache->max_seq_len_config_;
+                    int kv_offset = (sequence_base_offset + pos) * n_kv_heads * head_dim;
+                    
+                    #pragma omp critical
+                    {
+                        if (kv_offset + n_kv_heads * head_dim <= static_cast<int>(layer_cache.k.size())) {
+                            std::copy(k_token.begin(), k_token.end(), layer_cache.k.begin() + kv_offset);
+                            std::copy(v_token.begin(), v_token.end(), layer_cache.v.begin() + kv_offset);
+                        }
+                    }
+                }                // Copy back RoPE'd Q values to batch
+                std::copy(q_token.begin(), q_token.end(), q_batch.begin() + (size_t)token_idx * hs);
+                
+                // Optimized attention computation for this token
                 int history_len = pos + 1;
+                scores_buffer.resize(history_len);
                 
-                for (int h = 0; h < n_heads; ++h) {
-                    std::vector<float> q_head(head_dim);
-                    for (int i = 0; i < head_dim; ++i) {
-                        q_head[i] = q_token[h * head_dim + i];
-                    }
+                const float* q_token_ptr = q_batch.data() + (size_t)token_idx * hs;
+                float* attn_output_ptr = batch_attn_output.data() + (size_t)token_idx * hs;
+                
+                if (kv_cache && static_cast<size_t>(l) < kv_cache->layers.size()) {
+                    const auto& layer_cache = kv_cache->layers[l];
                     
-                    std::vector<float> scores(history_len);
-                    for (int t = 0; t < history_len; ++t) {
-                        float score = 0.0f;
-                        int kv_head_idx = h % n_kv_heads;
-                        for (int i = 0; i < head_dim; ++i) {
-                            int k_idx = t * n_kv_heads * head_dim + kv_head_idx * head_dim + i;
-                            score += q_head[i] * layer_cache.k[k_idx];
+                    // Process all heads for this token efficiently
+                    for (int h = 0; h < n_heads; ++h) {
+                        int kv_head_idx = h / kv_group;  // Use pre-calculated kv_group
+                        const float* q_head_ptr = q_token_ptr + h * head_dim;
+                        float* head_output_ptr = attn_output_ptr + h * head_dim;
+                        
+
+                        // Compute attention scores for this head
+                        for (int t = 0; t < history_len; ++t) {
+                            // Sequence-major layout: each sequence has contiguous region
+                            int true_sequence_idx = original_sequence_indices[token_idx];
+                            int sequence_base_offset = true_sequence_idx * kv_cache->max_seq_len_config_;
+                            const float* k_ptr = layer_cache.k.data() + (sequence_base_offset + t) * n_kv_heads * head_dim + kv_head_idx * head_dim;                        float score = 0.0f;
+                        for (int d = 0; d < head_dim; ++d) {
+                            score += q_head_ptr[d] * k_ptr[d];
                         }
-                        scores[t] = score * attention_scale;
-                    }
-                    
-                    softmax_vector_cpu(scores, scores);
-                    
-                    std::vector<float> head_output(head_dim, 0.0f);
-                    for (int t = 0; t < history_len; ++t) {
-                        int kv_head_idx = h % n_kv_heads;
-                        for (int i = 0; i < head_dim; ++i) {
-                            int v_idx = t * n_kv_heads * head_dim + kv_head_idx * head_dim + i;
-                            head_output[i] += scores[t] * layer_cache.v[v_idx];
+                        
+                        scores_buffer[t] = score * attention_scale;
                         }
+                      // Softmax
+                      softmax_vector_cpu(scores_buffer, scores_buffer);
+                      for (int t = 0; t < history_len; ++t) {
+                      // Sequence-major layout: each sequence has contiguous region
+                      int true_sequence_idx = original_sequence_indices[token_idx];
+                      int sequence_base_offset = true_sequence_idx * kv_cache->max_seq_len_config_;
+                      const float* v_ptr = layer_cache.v.data() + (sequence_base_offset + t) * n_kv_heads * head_dim + kv_head_idx * head_dim;
+                      // Weighted sum with V directly to output
+                      std::fill(head_output_ptr, head_output_ptr + head_dim, 0.0f);
+                      float score = scores_buffer[t];
+                      for (int d = 0; d < head_dim; ++d) {
+                          head_output_ptr[d] += score * v_ptr[d];
+                      }
+                  }
                     }
-                    
-                    for (int i = 0; i < head_dim; ++i) {
-                        attn_output_token[h * head_dim + i] = head_output[i];
-                    }
+                } else {
+                    std::fill(attn_output_ptr, attn_output_ptr + hs, 0.0f);
                 }
-            } else {
-                std::fill(attn_output_token.begin(), attn_output_token.end(), 0.0f);
             }
-            
-            // Copy back to batch output
-            std::copy(attn_output_token.begin(), attn_output_token.end(), 
-                     batch_attn_output.begin() + (size_t)token_idx * hs);
         }
 
         // O-Projection (batched)
@@ -5457,10 +5460,10 @@ std::vector<float> TinyLlamaModel::forward_device_batch_prefill(
 std::vector<std::vector<float>> TinyLlamaModel::forward_device_batch_generation(
     float* d_batch_input_embeddings,    // Device pointer to [num_tokens_in_batch, config_.hidden_size]
     const std::vector<int>& token_positions, // Position of each token in its respective sequence
+    const std::vector<int>& original_sequence_indices, // Original sequence index for each token
     int num_tokens_in_batch,
     KVCache* kv_cache,
     cudaStream_t stream) {
-
     Logger::info("[FWD_DEV_BATCH_GENERATION_ENTRY] num_tokens_in_batch: " + std::to_string(num_tokens_in_batch) +
                  ", d_batch_input_embeddings: " + Logger::ptrToString(d_batch_input_embeddings));
 
@@ -5469,7 +5472,11 @@ std::vector<std::vector<float>> TinyLlamaModel::forward_device_batch_generation(
                       std::to_string(num_tokens_in_batch) + " Got: " + std::to_string(token_positions.size()));
         return {};
     }
-
+    if (original_sequence_indices.size() != static_cast<size_t>(num_tokens_in_batch)) {
+        Logger::error("[CPU_BATCH_GENERATION] original_sequence_indices size mismatch. Expected: " + 
+                      std::to_string(num_tokens_in_batch) + " Got: " + std::to_string(original_sequence_indices.size()));
+        return {};
+    }
     const int hidden_size = config_.hidden_size;
     const int head_dim = config_.hidden_size / config_.num_attention_heads;
     const int ffn_intermediate_dim = config_.intermediate_size;
@@ -5580,34 +5587,37 @@ std::vector<std::vector<float>> TinyLlamaModel::forward_device_batch_generation(
             rope_cuda(k_token_ptr, config_.num_key_value_heads, head_dim, all_freqs_cis_dev, 
                      current_pos, config_.is_gguf_file_loaded, stream);
         }
+// Update KV cache for each token at its specific position with sequence-aware offsets
+float* d_layer_k_cache_ptr = kv_cache->layers[l_model_idx].k_dev_fp32; 
+float* d_layer_v_cache_ptr = kv_cache->layers[l_model_idx].v_dev_fp32;
 
-        // Update KV cache for each token at its specific position  
-        float* d_layer_k_cache_ptr = kv_cache->layers[l_model_idx].k_dev_fp32; 
-        float* d_layer_v_cache_ptr = kv_cache->layers[l_model_idx].v_dev_fp32;
-        
-        for (int token_idx = 0; token_idx < num_tokens_in_batch; ++token_idx) {
-            int current_pos = token_positions[token_idx];
-            
-            const float* k_token_ptr = d_batch_k_proj_out + (size_t)token_idx * config_.num_key_value_heads * head_dim;
-            const float* v_token_ptr = d_batch_v_proj_out + (size_t)token_idx * config_.num_key_value_heads * head_dim;
-            
-            // Update individual positions in the KV cache
-            for (int kvh = 0; kvh < config_.num_key_value_heads; ++kvh) {
-                const float* current_k_head_ptr = k_token_ptr + kvh * head_dim;
-                const float* current_v_head_ptr = v_token_ptr + kvh * head_dim;
+for (int token_idx = 0; token_idx < num_tokens_in_batch; ++token_idx) {
+    int current_pos = token_positions[token_idx];
+    int sequence_idx = original_sequence_indices[token_idx];
+    
+    // Calculate sequence-specific offset in the cache
+    int sequence_cache_offset = sequence_idx * kv_cache->max_seq_len_config_;
+    int actual_cache_pos = sequence_cache_offset + current_pos;
+    
+    const float* k_token_ptr = d_batch_k_proj_out + (size_t)token_idx * config_.num_key_value_heads * head_dim;
+    const float* v_token_ptr = d_batch_v_proj_out + (size_t)token_idx * config_.num_key_value_heads * head_dim;
+    
+    // Update individual positions in the KV cache with sequence-specific offsets
+    for (int kvh = 0; kvh < config_.num_key_value_heads; ++kvh) {
+        const float* current_k_head_ptr = k_token_ptr + kvh * head_dim;
+        const float* current_v_head_ptr = v_token_ptr + kvh * head_dim;
 
-                update_kv_cache_cuda(d_layer_k_cache_ptr, current_k_head_ptr, current_pos,
-                                     kvh, kv_cache->allocated_max_seq_len,
-                                     kv_cache->allocated_num_kv_heads, 
-                                     kv_cache->allocated_head_dim, stream); 
+        update_kv_cache_cuda(d_layer_k_cache_ptr, current_k_head_ptr, actual_cache_pos,
+                             kvh, kv_cache->allocated_max_seq_len * kv_cache->max_batch_size,
+                             kv_cache->allocated_num_kv_heads, 
+                             kv_cache->allocated_head_dim, stream); 
 
-                update_kv_cache_cuda(d_layer_v_cache_ptr, current_v_head_ptr, current_pos,
-                                     kvh, kv_cache->allocated_max_seq_len,
-                                     kv_cache->allocated_num_kv_heads,
-                                     kv_cache->allocated_head_dim, stream);
-            }
-        }
-
+        update_kv_cache_cuda(d_layer_v_cache_ptr, current_v_head_ptr, actual_cache_pos,
+                             kvh, kv_cache->allocated_max_seq_len * kv_cache->max_batch_size,
+                             kv_cache->allocated_num_kv_heads,
+                             kv_cache->allocated_head_dim, stream);
+    }
+}
         // For attention, we need a generation-specific function that handles variable positions
         // For now, we'll use the single-token attention function in a loop
         // TODO: Create a batch attention function for generation
