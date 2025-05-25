@@ -171,9 +171,13 @@ struct KVCache {
         current_batch_size = 0;
         batch_seq_lens.clear();
         
-        // Logger::debug("[KVCache] clear_data() called. seq_len reset to 0. K/V vector sizes remain unchanged.");
-        // DO NOT clear layers[i].k and layers[i].v here,
-        // as they are pre-sized in initialize() and should retain their full size.
+        // For batch processing, we MUST clear the actual KV data to prevent cross-sequence contamination
+        for (auto& layer : layers) {
+            std::fill(layer.k.begin(), layer.k.end(), 0.0f);
+            std::fill(layer.v.begin(), layer.v.end(), 0.0f);
+        }
+        
+        // Logger::debug("[KVCache] clear_data() called. seq_len reset to 0. K/V vectors cleared for batch processing.");
     }
     
     /**
@@ -384,9 +388,9 @@ class TinyLlamaModel {
       int num_tokens_in_batch,
       int num_cpu_layers_to_process,
       int start_pos_in_sequence, // Starting position of this batch in the overall sequence (for KVCache)
-      KVCache* kv_cache
+      KVCache* kv_cache,
+      const std::vector<int>& prompt_lengths = {} // Length of each sequence in the batch (empty = single sequence mode)
   );
-
   std::vector<float> forward_cpu_logits_batch(
       const std::vector<float>& final_batch_activations, // [num_tokens, hidden_size]
       int num_tokens_in_batch

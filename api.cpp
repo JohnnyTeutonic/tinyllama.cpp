@@ -916,16 +916,9 @@ std::vector<std::string> TinyLlamaSession::generate_batch(const std::vector<std:
     Logger::info("[DEBUG] About to call batch_prefill_parallel");
     Logger::info("[DEBUG] all_tokens.size()=" + std::to_string(all_tokens.size()) + ", prompt_lengths.size()=" + std::to_string(prompt_lengths.size()));
     
-    Logger::info("[EMERGENCY_DEBUG] About to allocate batch_final_logits vector");
     std::vector<std::vector<float>> batch_final_logits;
-    Logger::info("[EMERGENCY_DEBUG] batch_final_logits vector allocated successfully");
     
-    Logger::info("[EMERGENCY_DEBUG] About to call batch_prefill_parallel function");
     bool prefill_success = batch_prefill_parallel(all_tokens, prompt_lengths, batch_final_logits);
-    Logger::info("[EMERGENCY_DEBUG] batch_prefill_parallel call completed");
-    
-    Logger::info("[DEBUG] batch_prefill_parallel returned with prefill_success=" + std::string(prefill_success ? "true" : "false"));
-    Logger::info("[DEBUG] batch_final_logits.size()=" + std::to_string(batch_final_logits.size()));
     
     if (prefill_success && batch_final_logits.size() == prompts.size()) {
       Logger::info("[Batch Generate API] Batch prefill successful, starting parallel generation");
@@ -1012,13 +1005,16 @@ std::vector<std::string> TinyLlamaSession::generate_batch(const std::vector<std:
         std::vector<int> active_tokens;
         std::vector<int> active_positions;
         std::vector<int> active_sequence_indices;
+        std::vector<int> batch_to_original_seq_mapping; // Map batch index to original sequence index
         
         for (size_t i = 0; i < prompts.size(); ++i) {
           if (!sequence_finished[i]) {
             active_tokens.push_back(current_tokens[i]);
             active_positions.push_back(sequence_positions[i]);
-            active_sequence_indices.push_back(i);
-            Logger::info("[DEBUG] Active sequence " + std::to_string(i) + ": token=" + std::to_string(current_tokens[i]) + ", pos=" + std::to_string(sequence_positions[i]));
+            active_sequence_indices.push_back(active_tokens.size() - 1); // Use contiguous 0-based index
+            batch_to_original_seq_mapping.push_back(i); // Remember original sequence index
+            Logger::info("[DEBUG] Active sequence " + std::to_string(i) + " mapped to batch index " + std::to_string(active_tokens.size() - 1) + 
+                        ": token=" + std::to_string(current_tokens[i]) + ", pos=" + std::to_string(sequence_positions[i]));
           }
         }
         
@@ -1031,8 +1027,7 @@ std::vector<std::string> TinyLlamaSession::generate_batch(const std::vector<std:
         
         // Process active sequences in parallel
         std::vector<std::vector<float>> step_logits;
-        bool generation_success = batch_generation_parallel(active_tokens, active_positions, active_sequence_indices, step_logits);
-        
+        bool generation_success = batch_generation_parallel(active_tokens, active_positions, batch_to_original_seq_mapping, step_logits);        
         Logger::info("[DEBUG] batch_generation_parallel returned: " + std::string(generation_success ? "success" : "failure"));
         
         if (!generation_success || step_logits.size() != active_tokens.size()) {
@@ -1045,34 +1040,34 @@ std::vector<std::string> TinyLlamaSession::generate_batch(const std::vector<std:
         
         // Sample next tokens for active sequences
         for (size_t active_idx = 0; active_idx < active_tokens.size(); ++active_idx) {
-          size_t seq_idx = active_sequence_indices[active_idx];
-          Logger::info("[DEBUG] Sampling for active_idx=" + std::to_string(active_idx) + ", seq_idx=" + std::to_string(seq_idx));
+          size_t original_seq_idx = batch_to_original_seq_mapping[active_idx]; // Use mapping to get original sequence index
+          Logger::info("[DEBUG] Sampling for active_idx=" + std::to_string(active_idx) + ", original_seq_idx=" + std::to_string(original_seq_idx));
           
           // Safety checks
           if (active_idx >= step_logits.size()) {
             Logger::error("[DEBUG] active_idx " + std::to_string(active_idx) + " out of bounds for step_logits (size: " + std::to_string(step_logits.size()) + ")");
             goto fallback_sequential;
           }
-          if (seq_idx >= prompts.size()) {
-            Logger::error("[DEBUG] seq_idx " + std::to_string(seq_idx) + " out of bounds for prompts (size: " + std::to_string(prompts.size()) + ")");
+          if (original_seq_idx >= prompts.size()) {
+            Logger::error("[DEBUG] original_seq_idx " + std::to_string(original_seq_idx) + " out of bounds for prompts (size: " + std::to_string(prompts.size()) + ")");
             goto fallback_sequential;
           }
           
           try {
             int next_token = sample_top_k_top_p_temperature(step_logits[active_idx], temperature, top_k, top_p, rng_);
-            Logger::info("[DEBUG] Sampled next token " + std::to_string(next_token) + " for seq_idx " + std::to_string(seq_idx));
+            Logger::info("[DEBUG] Sampled next token " + std::to_string(next_token) + " for original_seq_idx " + std::to_string(original_seq_idx));
             
-            current_tokens[seq_idx] = next_token;
-            all_generated_tokens[seq_idx].push_back(next_token);
-            sequence_positions[seq_idx]++;
+            current_tokens[original_seq_idx] = next_token;
+            all_generated_tokens[original_seq_idx].push_back(next_token);
+            sequence_positions[original_seq_idx]++;
             
             // Check for EOS
             if (next_token == eos_token_id_) {
-              sequence_finished[seq_idx] = true;
-              Logger::info("[DEBUG] Sequence " + std::to_string(seq_idx) + " finished with EOS at step " + std::to_string(step));
+              sequence_finished[original_seq_idx] = true;
+              Logger::info("[DEBUG] Sequence " + std::to_string(original_seq_idx) + " finished with EOS at step " + std::to_string(step));
             }
           } catch (const std::exception& e) {
-            Logger::error("[DEBUG] Exception during sampling at step " + std::to_string(step) + " for seq_idx " + std::to_string(seq_idx) + ": " + std::string(e.what()));
+            Logger::error("[DEBUG] Exception during sampling at step " + std::to_string(step) + " for original_seq_idx " + std::to_string(original_seq_idx) + ": " + std::string(e.what()));
             goto fallback_sequential;
           }
         }
@@ -1152,12 +1147,34 @@ bool TinyLlamaSession::batch_prefill_parallel(const std::vector<std::vector<int>
   
   int token_offset = 0;
   
+  // Add detailed logging for token processing
+  Logger::info("[DEBUG] Starting token embedding processing for " + std::to_string(all_tokens.size()) + " sequences");
+  
   for (size_t seq_idx = 0; seq_idx < all_tokens.size(); ++seq_idx) {
+    Logger::info("[DEBUG] Processing sequence " + std::to_string(seq_idx) + " with " + std::to_string(prompt_lengths[seq_idx]) + " tokens");
+    
+    // Log first few tokens of this sequence
+    std::string token_ids_str = "Token IDs: ";
+    for (int i = 0; i < std::min(5, prompt_lengths[seq_idx]); ++i) {
+      token_ids_str += std::to_string(all_tokens[seq_idx][i]) + " ";
+    }
+    if (prompt_lengths[seq_idx] > 5) token_ids_str += "...";
+    Logger::info("[DEBUG] Sequence " + std::to_string(seq_idx) + " " + token_ids_str);
+    
     for (int token_idx = 0; token_idx < prompt_lengths[seq_idx]; ++token_idx) {
-      std::vector<float> token_embedding = model_->lookup_embedding(all_tokens[seq_idx][token_idx]);
+      int current_token_id = all_tokens[seq_idx][token_idx];
+      
+      // Log token placement in batch
+      if (seq_idx < 2 && token_idx < 3) { // Only log first few tokens of first two sequences
+        Logger::info("[DEBUG] Placing token " + std::to_string(current_token_id) + 
+                    " from seq " + std::to_string(seq_idx) + " pos " + std::to_string(token_idx) + 
+                    " at batch offset " + std::to_string(token_offset));
+      }
+      
+      std::vector<float> token_embedding = model_->lookup_embedding(current_token_id);
       if (token_embedding.empty() || token_embedding.size() != static_cast<size_t>(config_.hidden_size)) {
         Logger::error("[Batch Prefill] Embedding lookup failed for token " + 
-                     std::to_string(all_tokens[seq_idx][token_idx]) + 
+                     std::to_string(current_token_id) + 
                      " in sequence " + std::to_string(seq_idx));
         return false;
       }
@@ -1173,6 +1190,8 @@ bool TinyLlamaSession::batch_prefill_parallel(const std::vector<std::vector<int>
                batch_embeddings.begin() + target_offset);
       token_offset++;
     }
+    
+    Logger::info("[DEBUG] Sequence " + std::to_string(seq_idx) + " complete. Next token_offset: " + std::to_string(token_offset));
   }
 
   // Process CPU layers if any
@@ -1183,7 +1202,9 @@ bool TinyLlamaSession::batch_prefill_parallel(const std::vector<std::vector<int>
     cpu_processed_embeddings = model_->forward_cpu_batch(batch_embeddings, 
                                                         total_tokens_across_all_prompts, 
                                                         config_.num_cpu_offload_layers, 
-                                                        0, &kv_cache_);
+                                                        0, &kv_cache_,
+                                                        prompt_lengths);
+
     if (cpu_processed_embeddings.empty()) {
       Logger::error("[Batch Prefill] CPU batch processing failed.");
       return false;
@@ -1264,6 +1285,12 @@ bool TinyLlamaSession::batch_prefill_parallel(const std::vector<std::vector<int>
     int token_offset = 0;
     for (size_t seq_idx = 0; seq_idx < all_tokens.size(); ++seq_idx) {
       int last_token_pos = token_offset + prompt_lengths[seq_idx] - 1;
+      
+      Logger::info("[DEBUG] Extracting logits for sequence " + std::to_string(seq_idx) + 
+                  ": token_offset=" + std::to_string(token_offset) + 
+                  ", prompt_length=" + std::to_string(prompt_lengths[seq_idx]) + 
+                  ", last_token_pos=" + std::to_string(last_token_pos));
+      
       batch_final_logits[seq_idx].resize(config_.vocab_size);
       
       // Bounds check before copying
@@ -1277,6 +1304,15 @@ bool TinyLlamaSession::batch_prefill_parallel(const std::vector<std::vector<int>
       std::copy(final_batch_logits.begin() + src_start,
                final_batch_logits.begin() + src_end,
                batch_final_logits[seq_idx].begin());
+      
+      // Log a few logit values for debugging
+      if (seq_idx < 2) { // Only for first two sequences
+        std::string logit_sample = "First 5 logits: ";
+        for (int i = 0; i < 5 && i < config_.vocab_size; ++i) {
+          logit_sample += std::to_string(batch_final_logits[seq_idx][i]) + " ";
+        }
+        Logger::info("[DEBUG] Sequence " + std::to_string(seq_idx) + " " + logit_sample);
+      }
       
       token_offset += prompt_lengths[seq_idx];
     }
@@ -1292,6 +1328,12 @@ bool TinyLlamaSession::batch_prefill_parallel(const std::vector<std::vector<int>
       int token_offset = 0;
       for (size_t seq_idx = 0; seq_idx < all_tokens.size(); ++seq_idx) {
         int last_token_pos = token_offset + prompt_lengths[seq_idx] - 1;
+        
+        Logger::info("[DEBUG] GPU: Extracting logits for sequence " + std::to_string(seq_idx) + 
+                    ": token_offset=" + std::to_string(token_offset) + 
+                    ", prompt_length=" + std::to_string(prompt_lengths[seq_idx]) + 
+                    ", last_token_pos=" + std::to_string(last_token_pos));
+        
         batch_final_logits[seq_idx].resize(config_.vocab_size);
         
         size_t src_start = last_token_pos * config_.vocab_size;
@@ -1305,12 +1347,24 @@ bool TinyLlamaSession::batch_prefill_parallel(const std::vector<std::vector<int>
                  final_batch_logits.begin() + src_end,
                  batch_final_logits[seq_idx].begin());
         
+        // Log a few logit values for debugging
+        if (seq_idx < 2) { // Only for first two sequences
+          std::string logit_sample = "First 5 logits: ";
+          for (int i = 0; i < 5 && i < config_.vocab_size; ++i) {
+            logit_sample += std::to_string(batch_final_logits[seq_idx][i]) + " ";
+          }
+          Logger::info("[DEBUG] GPU Sequence " + std::to_string(seq_idx) + " " + logit_sample);
+        }
+        
         token_offset += prompt_lengths[seq_idx];
       }
     } else if (final_batch_logits.size() == static_cast<size_t>(all_tokens.size() * config_.vocab_size)) {
       // GPU returned logits for last tokens only
       Logger::info("[DEBUG] GPU returned logits for last tokens only");
       for (size_t seq_idx = 0; seq_idx < all_tokens.size(); ++seq_idx) {
+        Logger::info("[DEBUG] GPU Last-Token-Only: Processing sequence " + std::to_string(seq_idx) + 
+                    " at logit offset " + std::to_string(seq_idx * config_.vocab_size));
+        
         batch_final_logits[seq_idx].resize(config_.vocab_size);
         
         size_t src_start = seq_idx * config_.vocab_size;
@@ -1323,6 +1377,15 @@ bool TinyLlamaSession::batch_prefill_parallel(const std::vector<std::vector<int>
         std::copy(final_batch_logits.begin() + src_start,
                  final_batch_logits.begin() + src_end,
                  batch_final_logits[seq_idx].begin());
+        
+        // Log a few logit values for debugging
+        if (seq_idx < 2) { // Only for first two sequences
+          std::string logit_sample = "First 5 logits: ";
+          for (int i = 0; i < 5 && i < config_.vocab_size; ++i) {
+            logit_sample += std::to_string(batch_final_logits[seq_idx][i]) + " ";
+          }
+          Logger::info("[DEBUG] GPU Last-Token Sequence " + std::to_string(seq_idx) + " " + logit_sample);
+        }
       }
     } else {
       Logger::error("[Batch Prefill] GPU logits size doesn't match expected patterns");

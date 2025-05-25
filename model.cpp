@@ -767,10 +767,6 @@ static void apply_rope_batch_cpu(
 
 
     for (int t = 0; t < num_tokens; ++t) {
-          Logger::info("[CPU_ROPE] T0 pre-rope q_vals=[" + std::to_string(q_batch[0]) + 
-                "," + std::to_string(q_batch[1]) + "," + std::to_string(q_batch[2]) + 
-                "], k_vals=[" + std::to_string(k_batch[0]) + 
-                "," + std::to_string(k_batch[1]) + "," + std::to_string(k_batch[2]) + "]");
         int current_token_pos = start_pos_in_sequence + t;
 
         if (current_token_pos < 0 || current_token_pos >= max_pos_embeddings) {
@@ -1439,10 +1435,6 @@ void TinyLlamaModel::initialize_weights(const SafeTensorsLoader* loader,
   if (gguf) {
     Logger::info("Processing weights from GGUF data source...");
 
-    Logger::info("[INIT_WEIGHTS_GGUF_PRE_MAP] lm_head_f32.empty(): " + std::string(this->lm_head_f32.empty() ? "YES" : "NO") + ", size: " + std::to_string(this->lm_head_f32.size()));
-    Logger::info("[INIT_WEIGHTS_GGUF_PRE_MAP] embed_tokens_f32.empty(): " + std::string(this->embed_tokens_f32.empty() ? "YES" : "NO") + ", size: " + std::to_string(this->embed_tokens_f32.size()));
-    Logger::info("[INIT_WEIGHTS_GGUF_PRE_MAP] final_norm_f32.empty(): " + std::string(this->final_norm_f32.empty() ? "YES" : "NO") + ", size: " + std::to_string(this->final_norm_f32.size()));
-
     if (gguf && (gguf->mapped_tensor_data || !gguf->tensor_data.empty())) {
       map_gguf_weights(*gguf, *this);
       Logger::info("[INIT_WEIGHTS_GGUF] map_gguf_weights(*gguf, *this) CALLED (using function parameter).");
@@ -1453,26 +1445,17 @@ void TinyLlamaModel::initialize_weights(const SafeTensorsLoader* loader,
       Logger::error("[INIT_WEIGHTS_GGUF] map_gguf_weights failed - tensor data not available. No GGUF weights mapped.");
     }
 
-    Logger::info("[INIT_WEIGHTS_GGUF_POST_MAP_CALL] lm_head_f32.empty(): " + std::string(this->lm_head_f32.empty() ? "YES" : "NO") + ", size: " + std::to_string(this->lm_head_f32.size()));
-    Logger::info("[INIT_WEIGHTS_GGUF_POST_MAP_CALL] embed_tokens_f32.empty(): " + std::string(this->embed_tokens_f32.empty() ? "YES" : "NO") + ", size: " + std::to_string(this->embed_tokens_f32.size()));
-    Logger::info("[INIT_WEIGHTS_GGUF_POST_MAP_CALL] final_norm_f32.empty(): " + std::string(this->final_norm_f32.empty() ? "YES" : "NO") + ", size: " + std::to_string(this->final_norm_f32.size()));
-
     // --- LM Head Handling: Post map_gguf_weights ---
     if (this->lm_head_f32.empty()) {
-      Logger::info("[INIT_WEIGHTS_GGUF_DEQUANT] lm_head_f32 is empty. Attempting dequantization or BF16 conversion.");
       size_t total_elements_lm_head = static_cast<size_t>(config_.vocab_size) * config_.hidden_size;
       if (!this->lm_head_q6k.empty()) {
-        Logger::info("[INIT_WEIGHTS_GGUF_DEQUANT] lm_head_q6k is not empty. Dequantizing to lm_head_f32...");
         dequantize_vector_q6k_to_f32(this->lm_head_q6k, this->lm_head_f32, total_elements_lm_head, 1);
       } else if (!this->lm_head_q4k.empty()) {
-        Logger::info("[INIT_WEIGHTS_GGUF_DEQUANT] lm_head_q4k is not empty. Dequantizing to lm_head_f32...");
         dequantize_vector_q4k_to_f32(this->lm_head_q4k, this->lm_head_f32, total_elements_lm_head, 1);
       } else if (!this->lm_head_q8_0.empty()) {
-        Logger::info("[INIT_WEIGHTS_GGUF_DEQUANT] lm_head_q8_0 is not empty. Dequantizing to lm_head_f32 (assuming dequantize_vector_q8_0_to_f32 exists)...");
         // dequantize_vector_q8_0_to_f32(this->lm_head_q8_0, this->lm_head_f32, total_elements_lm_head, 1); // Placeholder
         Logger::warning("[INIT_WEIGHTS_GGUF_DEQUANT] Dequantization for lm_head_q8_0 to F32 is placeholder - ensure function exists.");
       } else if (!this->lm_head.empty()) { 
-        Logger::info("[INIT_WEIGHTS_GGUF_DEQUANT] lm_head (BF16 uint16_t vector) is not empty. Converting to lm_head_f32.");
         this->lm_head_f32 = bf16vec_to_float_vec(this->lm_head);
       }
       if (!this->lm_head_f32.empty()) {
@@ -1486,20 +1469,15 @@ void TinyLlamaModel::initialize_weights(const SafeTensorsLoader* loader,
 
     // --- Token Embeddings Handling: Post map_gguf_weights ---
     if (this->embed_tokens_f32.empty()) {
-      Logger::info("[INIT_WEIGHTS_GGUF_DEQUANT] embed_tokens_f32 is empty. Attempting dequantization or BF16 conversion.");
       size_t total_elements_embed = static_cast<size_t>(config_.vocab_size) * config_.hidden_size;
       if (!this->embed_tokens_q6k.empty()) {
-        Logger::info("[INIT_WEIGHTS_GGUF_DEQUANT] embed_tokens_q6k is not empty. Dequantizing to embed_tokens_f32...");
         dequantize_vector_q6k_to_f32(this->embed_tokens_q6k, this->embed_tokens_f32, total_elements_embed, 1);
       } else if (!this->embed_tokens_q4k.empty()) {
-        Logger::info("[INIT_WEIGHTS_GGUF_DEQUANT] embed_tokens_q4k is not empty. Dequantizing to embed_tokens_f32...");
         dequantize_vector_q4k_to_f32(this->embed_tokens_q4k, this->embed_tokens_f32, total_elements_embed, 1);
       } else if (!this->embed_tokens_q8_0.empty()) {
-        Logger::info("[INIT_WEIGHTS_GGUF_DEQUANT] embed_tokens_q8_0 is not empty. Dequantizing to embed_tokens_f32 (assuming dequantize_vector_q8_0_to_f32 exists)...");
         // dequantize_vector_q8_0_to_f32(this->embed_tokens_q8_0, this->embed_tokens_f32, total_elements_embed, 1); // Placeholder
         Logger::warning("[INIT_WEIGHTS_GGUF_DEQUANT] Dequantization for embed_tokens_q8_0 to F32 is placeholder - ensure function exists.");
       } else if (!this->embed_tokens.empty()) { 
-        Logger::info("[INIT_WEIGHTS_GGUF_DEQUANT] embed_tokens (BF16 uint16_t vector) is not empty. Converting to embed_tokens_f32.");
         this->embed_tokens_f32 = bf16vec_to_float_vec(this->embed_tokens);
       }
       if (!this->embed_tokens_f32.empty()) {
@@ -1512,9 +1490,7 @@ void TinyLlamaModel::initialize_weights(const SafeTensorsLoader* loader,
     }
 
     if (this->final_norm_f32.empty()) {
-        Logger::info("[INIT_WEIGHTS_GGUF_DEQUANT] final_norm_f32 is empty. Attempting BF16 conversion if available.");
         if (!this->final_norm.empty()) { 
-            Logger::info("[INIT_WEIGHTS_GGUF_DEQUANT] Converting final_norm (BF16 uint16_t vector) to final_norm_f32.");
             this->final_norm_f32 = bf16vec_to_float_vec(this->final_norm);
             if (!this->final_norm_f32.empty()) {
                 Logger::info("[INIT_WEIGHTS_GGUF_DEQUANT] Successfully converted final_norm (BF16) to final_norm_f32. Size: " + std::to_string(this->final_norm_f32.size()));
@@ -1528,7 +1504,6 @@ void TinyLlamaModel::initialize_weights(const SafeTensorsLoader* loader,
         Logger::info("[INIT_WEIGHTS_GGUF_DEQUANT] final_norm_f32 was already populated (likely by map_gguf_weights direct F32 mapping). Size: " + std::to_string(this->final_norm_f32.size()));
     }
 
-    Logger::info("[INIT_WEIGHTS_GGUF_DEQUANT] Starting per-layer GGUF dequantization...");
     size_t q_o_proj_elements = static_cast<size_t>(hs) * hs; 
     size_t k_v_proj_elements_specific = static_cast<size_t>(config_.num_key_value_heads * (hs / config_.num_attention_heads)) * hs;
     size_t mlp_gate_up_elements = static_cast<size_t>(is) * hs;
@@ -1536,8 +1511,6 @@ void TinyLlamaModel::initialize_weights(const SafeTensorsLoader* loader,
 
     for (int l = 0; l < nhl; ++l) {
         auto& lw = layers[l];
-        Logger::info("[INIT_WEIGHTS_GGUF_DEQUANT] Processing Layer " + std::to_string(l));
-
         if (lw.q_proj_f32.empty()) {
             if (!lw.q_proj_q6k.empty()) dequantize_vector_q6k_to_f32(lw.q_proj_q6k, lw.q_proj_f32, q_o_proj_elements, (l == 0) ? 1 : 0);
             else if (!lw.q_proj_q4k.empty()) dequantize_vector_q4k_to_f32(lw.q_proj_q4k, lw.q_proj_f32, q_o_proj_elements, (l == 0) ? 1 : 0);            else if (!lw.q_proj_q8_0.empty()) { Logger::warning("[INIT_WEIGHTS_GGUF_DEQUANT] L" + std::to_string(l) + " Q8_0 dequant placeholder"); }
@@ -1550,7 +1523,6 @@ void TinyLlamaModel::initialize_weights(const SafeTensorsLoader* loader,
             else if (!lw.k_proj.empty()) lw.k_proj_f32 = bf16vec_to_float_vec(lw.k_proj);
              if (!lw.k_proj_f32.empty()) Logger::info("  L" + std::to_string(l) + " k_proj_f32 populated. Size: " + std::to_string(lw.k_proj_f32.size()));
         }
-        // Typo fix: v_proj was using k_proj sources
         if (lw.v_proj_f32.empty()) {
             if (!lw.v_proj_q6k.empty()) dequantize_vector_q6k_to_f32(lw.v_proj_q6k, lw.v_proj_f32, k_v_proj_elements_specific, (l == 0) ? 1 : 0);
             else if (!lw.v_proj_q4k.empty()) dequantize_vector_q4k_to_f32(lw.v_proj_q4k, lw.v_proj_f32, k_v_proj_elements_specific, (l == 0) ? 1 : 0);
@@ -1596,9 +1568,6 @@ void TinyLlamaModel::initialize_weights(const SafeTensorsLoader* loader,
             if (!lw.post_attention_layernorm_f32.empty()) Logger::info("  L" + std::to_string(l) + " post_attention_layernorm_f32 populated from BF16. Size: " + std::to_string(lw.post_attention_layernorm_f32.size()));
         }
     }
-    Logger::info("[INIT_WEIGHTS_GGUF_DEQUANT] Finished per-layer GGUF dequantization attempts.");
-
-    Logger::info("[INIT_WEIGHTS_GGUF] Checking per-layer NORM F32 vectors after all GGUF processing...");
     for (int l = 0; l < nhl; ++l) {
         const auto& lw = layers[l]; 
         if (lw.input_layernorm_f32.empty()) {
@@ -1919,8 +1888,8 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
   if (active_num_gpu_layers > 0) { // Only process if GPU layers are active
     // Path 1: Source is already BF16 (model.embed_tokens is std::vector<uint16_t>)
   if (!embed_tokens.empty()) {
-      gpuErrchk(cudaMalloc(&token_embedding_table_dev_, embed_tokens.size() * sizeof(uint16_t)));
-      gpuErrchk(cudaMemcpy(token_embedding_table_dev_, embed_tokens.data(), embed_tokens.size() * sizeof(uint16_t), cudaMemcpyHostToDevice));
+    gpuErrchk(cudaMalloc(&token_embedding_table_dev_, embed_tokens.size() * sizeof(uint16_t)));
+    gpuErrchk(cudaMemcpy(token_embedding_table_dev_, embed_tokens.data(), embed_tokens.size() * sizeof(uint16_t), cudaMemcpyHostToDevice));
       Logger::info("Copied token_embedding_table (bf16 direct from model.embed_tokens) to GPU.");
       token_embeddings_processed_to_gpu_bf16 = true;
     }
@@ -3710,17 +3679,7 @@ std::vector<float> TinyLlamaModel::forward_device(
 
 void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
   Logger::info("Mapping GGUF weights to model fields...");
-  
-  // Debug the data sources
-  Logger::info("map_gguf_weights DEBUG: gguf.mapped_tensor_data = " + 
-               std::to_string(reinterpret_cast<uintptr_t>(gguf.mapped_tensor_data)));
-  Logger::info("map_gguf_weights DEBUG: gguf.mapped_tensor_data_size = " + 
-               std::to_string(gguf.mapped_tensor_data_size));
-  Logger::info("map_gguf_weights DEBUG: gguf.tensor_data.size() = " + 
-               std::to_string(gguf.tensor_data.size()));
-  Logger::info("map_gguf_weights DEBUG: gguf.tensor_data.empty() = " + 
-               std::string(gguf.tensor_data.empty() ? "true" : "false"));
-  
+    
   const uint8_t* actual_data_block_start = nullptr;
   bool use_mmap_mode = false;
   
@@ -3731,8 +3690,8 @@ void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
     const uint8_t* mmap_buffer_start = static_cast<const uint8_t*>(gguf.mapped_tensor_data);
     actual_data_block_start = mmap_buffer_start + gguf.offset_diff_for_mmap;
     Logger::info("map_gguf_weights: Using mmap mode. Total mmapped region size: " +
-                 std::to_string(gguf.mapped_tensor_data_size) + " bytes. " +
-                 "Offset diff for mmap: " + std::to_string(gguf.offset_diff_for_mmap));
+               std::to_string(gguf.mapped_tensor_data_size) + " bytes. " +
+               "Offset diff for mmap: " + std::to_string(gguf.offset_diff_for_mmap));
   } else if (!gguf.tensor_data.empty()) {
     // Use non-mmap data
     use_mmap_mode = false;
@@ -3773,33 +3732,6 @@ void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
         size_t num_blocks = info.size_in_bytes / sizeof(block_q4_K);
         std::vector<block_q4_K> dest_q4k(num_blocks);
         memcpy(dest_q4k.data(), tensor_data_ptr, info.size_in_bytes);
-
-        // ------------ BEGIN DEBUG LOGGING FOR embed_tokens_q4k SCALES ------------
-        if (num_blocks > 0) {
-            const block_q4_K* first_block_ptr_from_source = reinterpret_cast<const block_q4_K*>(tensor_data_ptr);
-            Logger::info("[MAP_GGUF_EMBED_DEBUG] 'token_embd.weight' (Q4_K) - First Block Data from tensor_data_ptr:");
-            Logger::info("[MAP_GGUF_EMBED_DEBUG]   Raw source d (fp16 as uint16_t): 0x" + Logger::uint16ToHex(first_block_ptr_from_source->d));
-            Logger::info("[MAP_GGUF_EMBED_DEBUG]   Raw source dmin (fp16 as uint16_t): 0x" + Logger::uint16ToHex(first_block_ptr_from_source->dmin));
-
-            std::stringstream scales_hex_ss_source;
-            scales_hex_ss_source << "  Raw source scales bytes (first " << std::min(static_cast<size_t>(12), sizeof(first_block_ptr_from_source->scales)) << "): ";
-            for (size_t i = 0; i < std::min(static_cast<size_t>(12), sizeof(first_block_ptr_from_source->scales)); ++i) {
-                scales_hex_ss_source << "0x" << std::hex << static_cast<int>(first_block_ptr_from_source->scales[i]) << " ";
-            }
-            Logger::info("[MAP_GGUF_EMBED_DEBUG] " + scales_hex_ss_source.str());
-
-            Logger::info("[MAP_GGUF_EMBED_DEBUG]   Copied dest_q4k[0].d (fp16 as uint16_t): 0x" + Logger::uint16ToHex(dest_q4k[0].d));
-            Logger::info("[MAP_GGUF_EMBED_DEBUG]   Copied dest_q4k[0].dmin (fp16 as uint16_t): 0x" + Logger::uint16ToHex(dest_q4k[0].dmin));
-            
-            std::stringstream scales_hex_ss_dest;
-            scales_hex_ss_dest << "  Copied dest_q4k[0].scales bytes (first " << std::min(static_cast<size_t>(12), sizeof(dest_q4k[0].scales)) << "): ";
-            for (size_t i = 0; i < std::min(static_cast<size_t>(12), sizeof(dest_q4k[0].scales)); ++i) {
-                scales_hex_ss_dest << "0x" << std::hex << static_cast<int>(dest_q4k[0].scales[i]) << " ";
-            }
-            Logger::info("[MAP_GGUF_EMBED_DEBUG] " + scales_hex_ss_dest.str());
-        }
-        // ------------- END DEBUG LOGGING FOR embed_tokens_q4k SCALES -------------
-
         model.embed_tokens_q4k.swap(dest_q4k);
         Logger::info("[MAP_GGUF_GLOBAL] Mapped 'token_embd.weight' (Q4_K) to model.embed_tokens_q4k. Size: " + std::to_string(model.embed_tokens_q4k.size()) + " blocks.");
       } else if (info.type == GGMLType::GGML_TYPE_F32) {
@@ -3922,9 +3854,6 @@ void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
     }
   } // End loop over tensor_infos_map
 
-  Logger::info("[MAP_GGUF_EXIT_CHECK] model.final_norm_f32.empty(): " + std::string(model.final_norm_f32.empty() ? "YES" : "NO") + ", size: " + std::to_string(model.final_norm_f32.size()));
-  Logger::info("[MAP_GGUF_EXIT_CHECK] model.lm_head_q6k.empty(): " + std::string(model.lm_head_q6k.empty() ? "YES" : "NO") + ", size: " + std::to_string(model.lm_head_q6k.size()));
-  Logger::info("[MAP_GGUF_EXIT_CHECK] model.embed_tokens_q4k.empty(): " + std::string(model.embed_tokens_q4k.empty() ? "YES" : "NO") + ", size: " + std::to_string(model.embed_tokens_q4k.size()));
 
   for(size_t i = 0; i < model.layers.size(); ++i) {
       if (model.layers[i].input_layernorm_f32.empty()) {
@@ -4293,23 +4222,21 @@ static void update_kv_cache_batch_cpu(
                       ". Check KVCache::initialize.");
         return; // Critical error, cannot safely proceed
     }
-
-
     for (int token_idx_in_batch = 0; token_idx_in_batch < num_tokens_in_batch; ++token_idx_in_batch) {
         size_t current_token_batch_offset = static_cast<size_t>(token_idx_in_batch) * kv_dim;
-        int actual_seq_pos_for_this_token = start_pos_in_sequence + token_idx_in_batch;
 
+        // Calculate the global sequence position in the cache where this token's KV vector will be written
+        // This matches the GPU implementation: sequential position regardless of sequence boundaries
+        int global_seq_pos = start_pos_in_sequence + token_idx_in_batch;
 
-        if (static_cast<size_t>(actual_seq_pos_for_this_token) >= static_cast<size_t>(kv_cache->max_seq_len_config_)) {
+        if (global_seq_pos >= kv_cache->max_seq_len_config_ * kv_cache->max_batch_size) {
             Logger::error("[KV_BATCH_UPDATE L" + std::to_string(layer_idx) + 
-                          "] Error: actual_seq_pos_for_this_token (" + std::to_string(actual_seq_pos_for_this_token) +
-                          ") is out of bounds for configured max_seq_len (" + std::to_string(kv_cache->max_seq_len_config_) + 
-                          "). Skipping update for this token.");
+                          "] Error: global_seq_pos (" + std::to_string(global_seq_pos) +
+                          ") is out of bounds for total cache size. Skipping update for this token.");
             continue; 
         }
 
-        size_t destination_offset_in_layer_cache = static_cast<size_t>(actual_seq_pos_for_this_token) * kv_dim;
-
+        size_t destination_offset_in_layer_cache = static_cast<size_t>(global_seq_pos) * kv_dim;
         // Log K cache update
         size_t k_size_before = layer_cache.k.size(); // This should be the full max_seq_len size
         std::string k_vals_to_log = " vals to copy: ";
@@ -4446,247 +4373,6 @@ static void attention_batch_cpu(
         } 
     } 
 }
-std::vector<float> TinyLlamaModel::forward_cpu_batch(
-    const std::vector<float>& batch_input_activations, // Batched: [num_tokens, hidden_size]
-    int num_tokens_in_batch,
-    int num_cpu_layers_to_process,
-    int start_pos_in_sequence, // Starting position of this batch in the overall sequence (for KVCache)
-    KVCache* kv_cache) {
-
-
-    if (batch_input_activations.size() != (size_t)num_tokens_in_batch * config_.hidden_size) {
-        Logger::error("[CPU_BATCH_FWD] batch_input_activations size mismatch. Expected: " +
-                      std::to_string((size_t)num_tokens_in_batch * config_.hidden_size) + " Got: " +
-                      std::to_string(batch_input_activations.size()));
-        return {};
-    }
-
-    int hs = config_.hidden_size;
-    int is = config_.intermediate_size;
-    int n_heads = config_.num_attention_heads;
-    int n_kv_heads = config_.num_key_value_heads;
-    if (n_heads == 0) {
-        Logger::error("[CPU_BATCH_FWD] Error: num_attention_heads is zero.");
-        return {};
-    }
-    int head_dim = hs / n_heads;
-    float eps = config_.rms_norm_eps;
-    int max_pos_embeddings = config_.max_position_embeddings;
-    bool use_rope_adjacent_pairing = config_.is_gguf_file_loaded; // Determine RoPE style
-    float attention_scale = 1.0f / SAFE_SQRT(static_cast<float>(head_dim));
-
-    std::vector<float> current_batch_activations = batch_input_activations;
-
-    for (int l = 0; l < num_cpu_layers_to_process; ++l) {
-        const auto& lw = layers[l];
-        
-        std::vector<float> batch_x_norm1(current_batch_activations.size());
-        const std::vector<float>& w_input_norm_vec =
-            lw.input_layernorm_f32.empty()
-                ? bf16vec_to_float_vec(lw.input_layernorm) // Assumes bf16vec_to_float_vec is available
-                : lw.input_layernorm_f32;
-        rmsnorm_batch_cpu(current_batch_activations, w_input_norm_vec, batch_x_norm1, num_tokens_in_batch, hs, eps);
-
-        std::vector<float> residual_batch_component_attn = current_batch_activations; 
-
-        std::vector<float> q_batch((size_t)num_tokens_in_batch * hs);
-        std::vector<float> k_batch((size_t)num_tokens_in_batch * n_kv_heads * head_dim);
-        std::vector<float> v_batch((size_t)num_tokens_in_batch * n_kv_heads * head_dim);
-
-        // Q Projection
-        if (!lw.q_proj_f32.empty()) {
-          Logger::info("[CPU_Q_PROJ] Layer=" + std::to_string(l) + 
-            ", input_vals=[" + std::to_string(batch_x_norm1[0]) + 
-            "," + std::to_string(batch_x_norm1[1]) + "," + std::to_string(batch_x_norm1[2]) + "]");
-            matmul_f32_f32_batch_cpu(lw.q_proj_f32, batch_x_norm1, q_batch, num_tokens_in_batch, hs, hs);
-        } else if (!lw.q_proj_q8_0.empty()) {
-            matmul_q8_0_f32_batch_cpu(lw.q_proj_q8_0, batch_x_norm1, q_batch, num_tokens_in_batch, hs, hs);
-        } else if (!lw.q_proj_q6k.empty()) {
-            matmul_q6k_f32_batch_cpu(lw.q_proj_q6k, batch_x_norm1, q_batch, num_tokens_in_batch, hs, hs);
-        } else if (!lw.q_proj_q4k.empty()) {
-            matmul_q4k_f32_batch_cpu(lw.q_proj_q4k, batch_x_norm1, q_batch, num_tokens_in_batch, hs, hs);
-        } else {
-            Logger::error("[CPU_BATCH_FWD] Layer " + std::to_string(l) + ": No Q proj weights found for CPU (batched)"); 
-            return {};
-        }
-        
-        // K Projection
-        if (!lw.k_proj_f32.empty()) {
-            matmul_f32_f32_batch_cpu(lw.k_proj_f32, batch_x_norm1, k_batch, num_tokens_in_batch, n_kv_heads * head_dim, hs);
-        } else if (!lw.k_proj_q8_0.empty()) {
-            matmul_q8_0_f32_batch_cpu(lw.k_proj_q8_0, batch_x_norm1, k_batch, num_tokens_in_batch, n_kv_heads * head_dim, hs);
-        } else if (!lw.k_proj_q6k.empty()) {
-            matmul_q6k_f32_batch_cpu(lw.k_proj_q6k, batch_x_norm1, k_batch, num_tokens_in_batch, n_kv_heads * head_dim, hs);
-        } else if (!lw.k_proj_q4k.empty()) {
-            matmul_q4k_f32_batch_cpu(lw.k_proj_q4k, batch_x_norm1, k_batch, num_tokens_in_batch, n_kv_heads * head_dim, hs);
-        } else {
-            Logger::error("[CPU_BATCH_FWD] Layer " + std::to_string(l) + ": No K proj weights found for CPU (batched)"); 
-            return {};
-        }
-
-        // V Projection
-        if (!lw.v_proj_f32.empty()) {
-            matmul_f32_f32_batch_cpu(lw.v_proj_f32, batch_x_norm1, v_batch, num_tokens_in_batch, n_kv_heads * head_dim, hs);
-        } else if (!lw.v_proj_q8_0.empty()) {
-            matmul_q8_0_f32_batch_cpu(lw.v_proj_q8_0, batch_x_norm1, v_batch, num_tokens_in_batch, n_kv_heads * head_dim, hs);
-        } else if (!lw.v_proj_q6k.empty()) {
-            matmul_q6k_f32_batch_cpu(lw.v_proj_q6k, batch_x_norm1, v_batch, num_tokens_in_batch, n_kv_heads * head_dim, hs);
-        } else if (!lw.v_proj_q4k.empty()) {
-            matmul_q4k_f32_batch_cpu(lw.v_proj_q4k, batch_x_norm1, v_batch, num_tokens_in_batch, n_kv_heads * head_dim, hs);
-        } else {
-            Logger::error("[CPU_BATCH_FWD] Layer " + std::to_string(l) + ": No V proj weights found for CPU (batched)"); 
-            return {};
-        }
-
-        // Batched RoPE Application
-        apply_rope_batch_cpu(q_batch, k_batch, num_tokens_in_batch, n_heads, n_kv_heads, head_dim, 
-                              start_pos_in_sequence, precomputed_freqs_cis_, max_pos_embeddings, use_rope_adjacent_pairing);
-
-        // Batched KV Cache Update
-        if (kv_cache) {
-            update_kv_cache_batch_cpu(kv_cache, l, k_batch, v_batch, num_tokens_in_batch, 
-                                      start_pos_in_sequence, n_kv_heads, head_dim);        
-        }
-        
-        // --- Batched Attention ---
-        // q_batch now holds the RoPEd Q values from matmul and apply_rope_batch_cpu.
-        // k_batch and v_batch (after RoPE for K) have been used to update kv_cache->layers[l].
-        std::vector<float> batch_attn_output((size_t)num_tokens_in_batch * hs); // hs is num_q_heads * head_dim
-        
-        if (kv_cache && static_cast<size_t>(l) < kv_cache->layers.size()) {
-             // Ensure attention_scale is defined earlier in forward_cpu_batch, after head_dim is known.
-             // float attention_scale = 1.0f / SAFE_SQRT(static_cast<float>(head_dim));
-             attention_batch_cpu(q_batch,          // Input: RoPE'd Q values for the batch
-                                 kv_cache->layers[l], // Input: KV Cache for the current layer (already updated)
-                                 batch_attn_output,   // Output: Where attention results for the batch will be stored
-                                 num_tokens_in_batch, 
-                                 start_pos_in_sequence,
-                                 n_heads,          // This is config_.num_attention_heads
-                                 n_kv_heads,       // This is config_.num_key_value_heads
-                                 head_dim, 
-                                 attention_scale); // This must be defined earlier in forward_cpu_batch
-        } else if (kv_cache) { 
-            // This case means kv_cache exists, but the current layer 'l' is out of bounds.
-            Logger::error("[CPU_BATCH_FWD] Layer " + std::to_string(l) + 
-                          " is out of bounds for KV Cache access during attention. KVCache layers size: " + 
-                          std::to_string(kv_cache->layers.size()) + 
-                          ". Filling attention output with zeros.");
-            std::fill(batch_attn_output.begin(), batch_attn_output.end(), 0.0f); 
-        } else { // kv_cache is null
-            Logger::error("[CPU_BATCH_FWD] KV Cache is null, cannot perform attention for layer " + std::to_string(l) +
-                          ". Filling attention output with zeros.");
-            std::fill(batch_attn_output.begin(), batch_attn_output.end(), 0.0f); 
-        }
-
-        // O-Projection (Batched)
-        std::vector<float> batch_attn_proj_out((size_t)num_tokens_in_batch * hs);
-        if(!lw.o_proj_f32.empty()) {
-              matmul_f32_f32_batch_cpu(lw.o_proj_f32, batch_attn_output, batch_attn_proj_out, num_tokens_in_batch, hs, hs);
-        } else if (!lw.o_proj_q8_0.empty()) {
-            matmul_q8_0_f32_batch_cpu(lw.o_proj_q8_0, batch_attn_output, batch_attn_proj_out, num_tokens_in_batch, hs, hs);
-        } else if (!lw.o_proj_q6k.empty()) {
-            matmul_q6k_f32_batch_cpu(lw.o_proj_q6k, batch_attn_output, batch_attn_proj_out, num_tokens_in_batch, hs, hs);
-        } else if (!lw.o_proj_q4k.empty()) {
-            matmul_q4k_f32_batch_cpu(lw.o_proj_q4k, batch_attn_output, batch_attn_proj_out, num_tokens_in_batch, hs, hs);
-        } else { 
-            Logger::error("[CPU_BATCH_FWD] Layer " + std::to_string(l) + ": No O proj weights found for CPU"); 
-            return {};
-        }
-
-        // First Residual Connection (Batched)
-        // current_batch_activations = residual_batch_component_attn + batch_attn_proj_out;
-        for(size_t i=0; i < current_batch_activations.size(); ++i) {
-            current_batch_activations[i] = residual_batch_component_attn[i] + batch_attn_proj_out[i];
-        }
-
-        // --- Batched MLP Part ---
-        std::vector<float> residual_batch_component_mlp = current_batch_activations; // Store for MLP residual
-        std::vector<float> batch_x_norm2(current_batch_activations.size());
-        
-        const std::vector<float>& w_post_attn_norm_vec =
-            lw.post_attention_layernorm_f32.empty()
-                ? bf16vec_to_float_vec(lw.post_attention_layernorm)
-                : lw.post_attention_layernorm_f32;
-        // Batched RMSNorm for MLP
-        rmsnorm_batch_cpu(current_batch_activations, w_post_attn_norm_vec, batch_x_norm2, num_tokens_in_batch, hs, eps);
-        
-        // Batched Gate and Up Projections
-        std::vector<float> batch_gate_proj_out((size_t)num_tokens_in_batch * is);
-        std::vector<float> batch_up_proj_out((size_t)num_tokens_in_batch * is);
-
-        // Gate Projection
-        if (!lw.gate_proj_f32.empty()) {
-            matmul_f32_f32_batch_cpu(lw.gate_proj_f32, batch_x_norm2, batch_gate_proj_out, num_tokens_in_batch, is, hs);
-        } else if (!lw.gate_proj_q8_0.empty()) {
-            matmul_q8_0_f32_batch_cpu(lw.gate_proj_q8_0, batch_x_norm2, batch_gate_proj_out, num_tokens_in_batch, is, hs);
-        } else if (!lw.gate_proj_q6k.empty()) {
-            matmul_q6k_f32_batch_cpu(lw.gate_proj_q6k, batch_x_norm2, batch_gate_proj_out, num_tokens_in_batch, is, hs);
-        } else if (!lw.gate_proj_q4k.empty()) {
-            matmul_q4k_f32_batch_cpu(lw.gate_proj_q4k, batch_x_norm2, batch_gate_proj_out, num_tokens_in_batch, is, hs);
-        } else { 
-            Logger::error("[CPU_BATCH_FWD] Layer " + std::to_string(l) + ": No gate_proj weights found for CPU"); 
-            return {};
-        }
-
-        // Up Projection
-        if (!lw.up_proj_f32.empty()) {
-            matmul_f32_f32_batch_cpu(lw.up_proj_f32, batch_x_norm2, batch_up_proj_out, num_tokens_in_batch, is, hs);
-        } else if (!lw.up_proj_q8_0.empty()) {
-            matmul_q8_0_f32_batch_cpu(lw.up_proj_q8_0, batch_x_norm2, batch_up_proj_out, num_tokens_in_batch, is, hs);
-        } else if (!lw.up_proj_q6k.empty()) {
-            matmul_q6k_f32_batch_cpu(lw.up_proj_q6k, batch_x_norm2, batch_up_proj_out, num_tokens_in_batch, is, hs);
-        } else if (!lw.up_proj_q4k.empty()) {
-            matmul_q4k_f32_batch_cpu(lw.up_proj_q4k, batch_x_norm2, batch_up_proj_out, num_tokens_in_batch, is, hs);
-        } else { 
-            Logger::error("[CPU_BATCH_FWD] Layer " + std::to_string(l) + ": No up_proj weights found for CPU"); 
-            return {};
-        }
-        // Batched SwiGLU: SiLU(gate_proj_out) * up_proj_out
-        // batch_gate_proj_out and batch_up_proj_out are already [num_tokens_in_batch * is]
-        std::vector<float> batch_swiglu_out((size_t)num_tokens_in_batch * is);
-        // This loop processes all elements for all tokens in a flat manner.
-        // It can be parallelized with OpenMP if desired.
-        // #pragma omp parallel for
-        for (size_t i = 0; i < batch_gate_proj_out.size(); ++i) {
-            float gate_val = batch_gate_proj_out[i];
-            // SiLU = x / (1 + exp(-x))
-            float silu_gate_val = gate_val / (1.0f + std::exp(-gate_val));
-            batch_swiglu_out[i] = silu_gate_val * batch_up_proj_out[i];
-        }
-        
-        // Down Projection
-        std::vector<float> batch_mlp_down_proj_out((size_t)num_tokens_in_batch * hs);
-        if (!lw.down_proj_f32.empty()) {
-            matmul_f32_f32_batch_cpu(lw.down_proj_f32, batch_swiglu_out, batch_mlp_down_proj_out, num_tokens_in_batch, hs, is);
-        } else if (!lw.down_proj_q8_0.empty()) {
-            matmul_q8_0_f32_batch_cpu(lw.down_proj_q8_0, batch_swiglu_out, batch_mlp_down_proj_out, num_tokens_in_batch, hs, is);
-        } else if (!lw.down_proj_q6k.empty()) {
-            matmul_q6k_f32_batch_cpu(lw.down_proj_q6k, batch_swiglu_out, batch_mlp_down_proj_out, num_tokens_in_batch, hs, is);
-        } else if (!lw.down_proj_q4k.empty()) {
-            matmul_q4k_f32_batch_cpu(lw.down_proj_q4k, batch_swiglu_out, batch_mlp_down_proj_out, num_tokens_in_batch, hs, is);
-        } else { 
-            Logger::error("[CPU_BATCH_FWD] Layer " + std::to_string(l) + ": No down_proj weights found for CPU"); 
-            return {};
-        }
-        // Second Residual Connection (Batched)
-        // current_batch_activations = residual_batch_component_mlp + batch_mlp_down_proj_out;
-        // This loop processes all elements for all tokens in a flat manner.
-        // #pragma omp parallel for
-        for(size_t i = 0; i < current_batch_activations.size(); ++i) { // size is num_tokens_in_batch * hs
-            current_batch_activations[i] = residual_batch_component_mlp[i] + batch_mlp_down_proj_out[i];
-        }
-    } // End layer loop (for int l = 0; l < num_cpu_layers_to_process; ++l)
-
-    if (kv_cache && num_tokens_in_batch > 0) {
-        // The KVCache seq_len is implicitly updated by update_kv_cache_batch_cpu for each token,
-        // but we need a final update to the main KVCache object if it tracks a global sequence length
-        // beyond individual layer states. Assuming KVCache.seq_len should reflect the end of the processed batch.
-        kv_cache->seq_len = start_pos_in_sequence + num_tokens_in_batch;
-    }
-
-    return current_batch_activations;
-}
-
 
 std::vector<float> TinyLlamaModel::forward_cpu_logits_batch(
     const std::vector<float>& final_batch_activations, // [num_tokens, hidden_size]
@@ -4753,13 +4439,150 @@ std::vector<float> TinyLlamaModel::forward_cpu_logits_batch(
     return batch_logits_out;
 }
 
+static void update_kv_cache_batch_cpu_sequence_aware(
+    KVCache* kv_cache,
+    int layer_idx,
+    const std::vector<float>& k_batch_for_layer,
+    const std::vector<float>& v_batch_for_layer,
+    int num_tokens_in_batch,
+    const std::vector<int>& sequence_indices,
+    const std::vector<int>& position_in_sequence,
+    int num_kv_heads,
+    int head_dim
+) {
+    if (!kv_cache) {
+        Logger::error("update_kv_cache_batch_cpu_sequence_aware: KVCache is null.");
+        return;
+    }
+    if (layer_idx < 0 || static_cast<size_t>(layer_idx) >= kv_cache->layers.size()) {
+        Logger::error("update_kv_cache_batch_cpu_sequence_aware: layer_idx " + std::to_string(layer_idx) + 
+                      " is out of bounds for KVCache layers (size " + std::to_string(kv_cache->layers.size()) + ").");
+        return;
+    }
+    
+    KVCacheLayer& layer_cache = kv_cache->layers[layer_idx];
+    int kv_dim = num_kv_heads * head_dim;
+
+    for (int token_idx = 0; token_idx < num_tokens_in_batch; ++token_idx) {
+        size_t current_token_batch_offset = static_cast<size_t>(token_idx) * kv_dim;
+        
+        int seq_idx = sequence_indices[token_idx];
+        int pos_in_seq = position_in_sequence[token_idx];
+        
+        // Calculate sequence-specific base offset
+        int sequence_base_offset = seq_idx * kv_cache->max_seq_len_config_;
+        int actual_cache_position = sequence_base_offset + pos_in_seq;
+        if (actual_cache_position >= kv_cache->max_seq_len_config_ * kv_cache->max_batch_size) {
+            Logger::error("[KV_BATCH_UPDATE_SEQ_AWARE L" + std::to_string(layer_idx) + 
+                          "] Error: actual_cache_position (" + std::to_string(actual_cache_position) +
+                          ") is out of bounds for total cache size. Skipping update for this token.");
+            continue;
+        }
+        
+        size_t destination_offset_in_layer_cache = static_cast<size_t>(actual_cache_position) * kv_dim;
+        
+        std::copy(k_batch_for_layer.begin() + current_token_batch_offset,
+                  k_batch_for_layer.begin() + current_token_batch_offset + kv_dim,
+                  layer_cache.k.begin() + destination_offset_in_layer_cache);
+                  
+        std::copy(v_batch_for_layer.begin() + current_token_batch_offset,
+                  v_batch_for_layer.begin() + current_token_batch_offset + kv_dim,
+                  layer_cache.v.begin() + destination_offset_in_layer_cache);
+    }
+}
+
+static void attention_batch_cpu_sequence_aware(
+    const std::vector<float>& q_batch_roped,
+    KVCacheLayer& current_layer_kv_cache,
+    std::vector<float>& batch_attn_output,
+    int num_tokens_in_batch,
+    const std::vector<int>& sequence_indices,
+    const std::vector<int>& position_in_sequence,
+    int num_q_heads,
+    int num_kv_heads,
+    int head_dim,
+    float attention_scale,
+    int max_seq_len_per_sequence
+) {
+    size_t expected_q_size = (size_t)num_tokens_in_batch * num_q_heads * head_dim;
+    if (q_batch_roped.size() != expected_q_size) {
+        Logger::error("[ATTN_BATCH_CPU_SEQ_AWARE] q_batch_roped size mismatch. Expected: " + std::to_string(expected_q_size) +
+                      ", Got: " + std::to_string(q_batch_roped.size()));
+        std::fill(batch_attn_output.begin(), batch_attn_output.end(), 0.0f);
+        return;
+    }
+    
+    batch_attn_output.assign((size_t)num_tokens_in_batch * num_q_heads * head_dim, 0.0f);
+
+    for (int token_idx = 0; token_idx < num_tokens_in_batch; ++token_idx) {
+        size_t q_token_offset = (size_t)token_idx * num_q_heads * head_dim;
+        size_t attn_out_token_offset = (size_t)token_idx * num_q_heads * head_dim;
+        
+        int seq_idx = sequence_indices[token_idx];
+        int pos_in_seq = position_in_sequence[token_idx];
+        int sequence_base_offset = seq_idx * max_seq_len_per_sequence;
+
+        for (int h_q = 0; h_q < num_q_heads; ++h_q) {
+            const float* q_head_for_token_ptr = q_batch_roped.data() + q_token_offset + (h_q * head_dim);
+            int kv_group_head_idx = h_q / (num_q_heads / num_kv_heads);
+            
+            int history_len = pos_in_seq + 1;
+            std::vector<float> scores(history_len);
+
+            for (int t_hist = 0; t_hist < history_len; ++t_hist) {
+                size_t k_cache_offset = ((size_t)(sequence_base_offset + t_hist) * num_kv_heads + kv_group_head_idx) * head_dim;
+                
+                if (k_cache_offset + head_dim > current_layer_kv_cache.k.size()) {
+                    scores[t_hist] = -std::numeric_limits<float>::infinity();
+                    continue;
+                }
+
+                float current_dot_product = 0.0f;
+                for (int d = 0; d < head_dim; ++d) {
+                    current_dot_product += q_head_for_token_ptr[d] * current_layer_kv_cache.k[k_cache_offset + d];
+                }
+                scores[t_hist] = current_dot_product * attention_scale;
+            }
+
+            softmax_vector_cpu(scores, scores);
+            
+            float* current_attn_out_head_ptr = batch_attn_output.data() + attn_out_token_offset + (h_q * head_dim);
+
+            for (int t_hist = 0; t_hist < history_len; ++t_hist) {
+                if (scores[t_hist] == -std::numeric_limits<float>::infinity() || scores[t_hist] == 0.0f) continue;
+
+                size_t v_cache_offset = ((size_t)(sequence_base_offset + t_hist) * num_kv_heads + kv_group_head_idx) * head_dim;
+                if (v_cache_offset + head_dim > current_layer_kv_cache.v.size()) {
+                    continue;
+                }
+
+                for (int d = 0; d < head_dim; ++d) {
+                    current_attn_out_head_ptr[d] += scores[t_hist] * current_layer_kv_cache.v[v_cache_offset + d];
+                }
+            }
+        }
+    }
+}
+
 std::vector<std::vector<float>> TinyLlamaModel::forward_cpu_batch_generation(
     const std::vector<float>& batch_input_activations, // [num_tokens, hidden_size]
     const std::vector<int>& token_positions, // Position of each token in its respective sequence
     const std::vector<int>& original_sequence_indices, // Original sequence index for each token
     int num_tokens_in_batch,
     KVCache* kv_cache) {
-            
+
+    Logger::info("[CPU_BATCH_GEN] Entry: num_tokens=" + std::to_string(num_tokens_in_batch));
+    std::string pos_str = "token_positions=[";
+    for (int i = 0; i < std::min(num_tokens_in_batch, 3); ++i) {
+        pos_str += std::to_string(token_positions[i]) + " ";
+    }
+    pos_str += "]";
+    std::string seq_str = "original_sequence_indices=[";
+    for (int i = 0; i < std::min(num_tokens_in_batch, 3); ++i) {
+        seq_str += std::to_string(original_sequence_indices[i]) + " ";
+    }
+    seq_str += "]";
+    Logger::info("[CPU_BATCH_GEN] " + pos_str + ", " + seq_str);   
     if (batch_input_activations.size() != (size_t)num_tokens_in_batch * config_.hidden_size) {
         Logger::error("[CPU_BATCH_GENERATION] batch_input_activations size mismatch. Expected: " +
                       std::to_string((size_t)num_tokens_in_batch * config_.hidden_size) + " Got: " +
@@ -4822,9 +4645,9 @@ std::vector<std::vector<float>> TinyLlamaModel::forward_cpu_batch_generation(
             matmul_q4k_f32_batch_cpu(lw.q_proj_q4k, batch_x_norm1, q_batch, num_tokens_in_batch, hs, hs);
         } else {
             Logger::error("[CPU_BATCH_GENERATION] Layer " + std::to_string(l) + ": No Q proj weights found for CPU (batched)"); 
-            return {};
-        }
-        
+         return {};
+    }
+
         // K Projection (batched)
         if (!lw.k_proj_f32.empty()) {
             matmul_f32_f32_batch_cpu(lw.k_proj_f32, batch_x_norm1, k_batch, num_tokens_in_batch, n_kv_heads * head_dim, hs);
@@ -4883,14 +4706,12 @@ std::vector<std::vector<float>> TinyLlamaModel::forward_cpu_batch_generation(
                 apply_rope_vector(q_token, n_heads, head_dim, pos, precomputed_freqs_cis_, max_pos_embeddings, use_rope_adjacent_pairing);
                 apply_rope_vector(k_token, n_kv_heads, head_dim, pos, precomputed_freqs_cis_, max_pos_embeddings, use_rope_adjacent_pairing);
                 // Update KV cache at specific position - Sequence-Major Layout
-                // Update KV cache at specific position - Sequence-Major Layout
                 if (kv_cache && static_cast<size_t>(l) < kv_cache->layers.size()) {
                     auto& layer_cache = kv_cache->layers[l];
-                    // Each sequence gets its own contiguous region based on original sequence index
-                    int true_sequence_idx = original_sequence_indices[token_idx];
-                    int sequence_base_offset = true_sequence_idx * kv_cache->max_seq_len_config_;
+                    // Use sequence-major layout to match prefill behavior
+                    int seq_idx = original_sequence_indices[token_idx];
+                    int sequence_base_offset = seq_idx * kv_cache->max_seq_len_config_;
                     int kv_offset = (sequence_base_offset + pos) * n_kv_heads * head_dim;
-                    
                     #pragma omp critical
                     {
                         if (kv_offset + n_kv_heads * head_dim <= static_cast<int>(layer_cache.k.size())) {
@@ -4902,7 +4723,9 @@ std::vector<std::vector<float>> TinyLlamaModel::forward_cpu_batch_generation(
                 std::copy(q_token.begin(), q_token.end(), q_batch.begin() + (size_t)token_idx * hs);
                 
                 // Optimized attention computation for this token
-                int history_len = pos + 1;
+                int seq_idx = original_sequence_indices[token_idx];
+                int history_len = (seq_idx < kv_cache->current_batch_size) ? kv_cache->batch_seq_lens[seq_idx] : pos + 1;
+                //int history_len = pos + 1;
                 scores_buffer.resize(history_len);
                 
                 const float* q_token_ptr = q_batch.data() + (size_t)token_idx * hs;
@@ -4920,37 +4743,37 @@ std::vector<std::vector<float>> TinyLlamaModel::forward_cpu_batch_generation(
 
                         // Compute attention scores for this head
                         for (int t = 0; t < history_len; ++t) {
+                            // sequence-major layout: each sequence has contiguous region                            
+                            int seq_idx = original_sequence_indices[token_idx];
+                            int sequence_base_offset = seq_idx * kv_cache->max_seq_len_config_;
+                            const float* k_ptr = layer_cache.k.data() + (sequence_base_offset + t) * n_kv_heads * head_dim + kv_head_idx * head_dim;
+                            float score = 0.0f;
+                            for (int d = 0; d < head_dim; ++d) {
+                                score += q_head_ptr[d] * k_ptr[d];
+                            }
+                            scores_buffer[t] = score * attention_scale;
+                        }
+                
+                        // Softmax
+                        softmax_vector_cpu(scores_buffer, scores_buffer);
+                        // Weighted sum with V - initialize to zero BEFORE the loop
+                        std::fill(head_output_ptr, head_output_ptr + head_dim, 0.0f);
+                        for (int t = 0; t < history_len; ++t) {
                             // Sequence-major layout: each sequence has contiguous region
-                            int true_sequence_idx = original_sequence_indices[token_idx];
-                            int sequence_base_offset = true_sequence_idx * kv_cache->max_seq_len_config_;
-                            const float* k_ptr = layer_cache.k.data() + (sequence_base_offset + t) * n_kv_heads * head_dim + kv_head_idx * head_dim;                        float score = 0.0f;
-                        for (int d = 0; d < head_dim; ++d) {
-                            score += q_head_ptr[d] * k_ptr[d];
+                            int seq_idx = original_sequence_indices[token_idx];
+                            int sequence_base_offset = seq_idx * kv_cache->max_seq_len_config_;                    
+                            const float* v_ptr = layer_cache.v.data() + (sequence_base_offset + t) * n_kv_heads * head_dim + kv_head_idx * head_dim;
+                            float score = scores_buffer[t];
+                            for (int d = 0; d < head_dim; ++d) {
+                                head_output_ptr[d] += score * v_ptr[d];
+                            }
                         }
-                        
-                        scores_buffer[t] = score * attention_scale;
-                        }
-                      // Softmax
-                      softmax_vector_cpu(scores_buffer, scores_buffer);
-                      for (int t = 0; t < history_len; ++t) {
-                      // Sequence-major layout: each sequence has contiguous region
-                      int true_sequence_idx = original_sequence_indices[token_idx];
-                      int sequence_base_offset = true_sequence_idx * kv_cache->max_seq_len_config_;
-                      const float* v_ptr = layer_cache.v.data() + (sequence_base_offset + t) * n_kv_heads * head_dim + kv_head_idx * head_dim;
-                      // Weighted sum with V directly to output
-                      std::fill(head_output_ptr, head_output_ptr + head_dim, 0.0f);
-                      float score = scores_buffer[t];
-                      for (int d = 0; d < head_dim; ++d) {
-                          head_output_ptr[d] += score * v_ptr[d];
-                      }
-                  }
                     }
                 } else {
                     std::fill(attn_output_ptr, attn_output_ptr + hs, 0.0f);
                 }
             }
         }
-
         // O-Projection (batched)
         std::vector<float> batch_attn_proj_out((size_t)num_tokens_in_batch * hs);
         if(!lw.o_proj_f32.empty()) {
@@ -4993,11 +4816,11 @@ std::vector<std::vector<float>> TinyLlamaModel::forward_cpu_batch_generation(
             matmul_q6k_f32_batch_cpu(lw.gate_proj_q6k, batch_x_norm2, batch_gate_proj_out, num_tokens_in_batch, is, hs);
         } else if (!lw.gate_proj_q4k.empty()) {
             matmul_q4k_f32_batch_cpu(lw.gate_proj_q4k, batch_x_norm2, batch_gate_proj_out, num_tokens_in_batch, is, hs);
-        } else { 
+    } else {
             Logger::error("[CPU_BATCH_GENERATION] Layer " + std::to_string(l) + ": No gate_proj weights found for CPU"); 
-            return {};
-        }
-
+        return {};
+    }
+    
         if (!lw.up_proj_f32.empty()) {
             matmul_f32_f32_batch_cpu(lw.up_proj_f32, batch_x_norm2, batch_up_proj_out, num_tokens_in_batch, is, hs);
         } else if (!lw.up_proj_q8_0.empty()) {
@@ -5042,10 +4865,38 @@ std::vector<std::vector<float>> TinyLlamaModel::forward_cpu_batch_generation(
 
     // Update KV cache sequence length
     if (kv_cache && num_tokens_in_batch > 0) {
-        int max_pos = *std::max_element(token_positions.begin(), token_positions.end());
-        kv_cache->seq_len = std::max(kv_cache->seq_len, max_pos + 1);
+        // For batch mode, track positions per sequence
+        if (kv_cache->current_batch_size > 0) {
+            // Update batch_seq_lens based on the highest position seen for each sequence
+            std::vector<int> max_positions_per_seq(kv_cache->current_batch_size, -1);
+            
+            for (int i = 0; i < num_tokens_in_batch; ++i) {
+                int seq_idx = original_sequence_indices[i];
+                int pos = token_positions[i];
+                
+                if (seq_idx >= 0 && seq_idx < kv_cache->current_batch_size) {
+                    max_positions_per_seq[seq_idx] = std::max(max_positions_per_seq[seq_idx], pos);
+                }
+            }
+            
+            // Update batch_seq_lens to reflect new positions (pos + 1 since pos is 0-indexed)
+            for (int seq_idx = 0; seq_idx < kv_cache->current_batch_size; ++seq_idx) {
+                if (max_positions_per_seq[seq_idx] >= 0) {
+                    kv_cache->batch_seq_lens[seq_idx] = max_positions_per_seq[seq_idx] + 1;
+                    Logger::info("[CPU_BATCH_GEN] KV Length Max Update: seq_idx=" + std::to_string(seq_idx) + 
+                    ", old_batch_seq_len=" + std::to_string(kv_cache->batch_seq_lens[seq_idx]) + 
+                    ", new_batch_seq_len=" + std::to_string(max_positions_per_seq[seq_idx] + 1));
+                }
+            }
+            // For single-sequence compatibility, update seq_len to the max
+            kv_cache->seq_len = *std::max_element(kv_cache->batch_seq_lens.begin(), 
+                                                  kv_cache->batch_seq_lens.begin() + kv_cache->current_batch_size);
+        } else {
+            // Fallback for single sequence mode
+            int max_pos = *std::max_element(token_positions.begin(), token_positions.end());
+            kv_cache->seq_len = std::max(kv_cache->seq_len, max_pos + 1);
+        }
     }
-
     // Final normalization and logits calculation for ALL tokens
     std::vector<float> batch_logits = forward_cpu_logits_batch(current_batch_activations, num_tokens_in_batch);
     
@@ -5271,7 +5122,7 @@ std::vector<float> TinyLlamaModel::forward_device_batch_prefill(
         update_kv_cache_batch_cuda(d_layer_v_cache_ptr, d_batch_v_proj_out, current_model_pos, num_tokens_in_batch,
                                    config_.num_key_value_heads, head_dim, kv_cache->max_seq_len_config_, stream);
         gpuErrchk(cudaStreamSynchronize(stream)); 
-
+        
         float current_attention_scale = 1.0f / sqrtf((float)head_dim);
         attention_batch_prefill_cuda(d_batch_q_proj_out, nullptr, nullptr, 
                                      d_layer_k_cache_ptr, d_layer_v_cache_ptr, 
@@ -5719,3 +5570,295 @@ for (int token_idx = 0; token_idx < num_tokens_in_batch; ++token_idx) {
     return all_logits;
 }
 #endif // HAS_CUDA
+
+std::vector<float> TinyLlamaModel::forward_cpu_batch(
+    const std::vector<float>& batch_input_activations, // [num_tokens, hidden_size]
+    int num_tokens_in_batch,
+    int num_cpu_layers_to_process,
+    int start_pos_in_sequence, // Starting position of this batch in the overall sequence (for KVCache)
+    KVCache* kv_cache,
+    const std::vector<int>& prompt_lengths) {
+
+    if (batch_input_activations.size() != (size_t)num_tokens_in_batch * config_.hidden_size) {
+        Logger::error("[CPU_BATCH_FWD] Input size mismatch. Expected: " +
+                      std::to_string((size_t)num_tokens_in_batch * config_.hidden_size) + " Got: " +
+                      std::to_string(batch_input_activations.size()));
+        return {};
+    }
+
+    int hs = config_.hidden_size;
+    int is = config_.intermediate_size;
+    int n_heads = config_.num_attention_heads;
+    int n_kv_heads = config_.num_key_value_heads;
+    if (n_heads == 0) {
+        Logger::error("[CPU_BATCH_FWD] Error: num_attention_heads is zero.");
+        return {};
+    }
+    int head_dim = hs / n_heads;
+    float eps = config_.rms_norm_eps;
+    int max_pos_embeddings = config_.max_position_embeddings;
+    bool use_rope_adjacent_pairing = config_.is_gguf_file_loaded;
+    float attention_scale = 1.0f / SAFE_SQRT(static_cast<float>(head_dim));
+
+    std::vector<float> current_batch_activations = batch_input_activations;
+
+    // Calculate sequence boundaries and positions
+    std::vector<int> sequence_indices(num_tokens_in_batch);
+    std::vector<int> position_in_sequence(num_tokens_in_batch);
+    
+    if (!prompt_lengths.empty()) {
+        // Multi-sequence batch mode
+        int token_offset = 0;
+        for (size_t seq_idx = 0; seq_idx < prompt_lengths.size(); ++seq_idx) {
+            for (int pos = 0; pos < prompt_lengths[seq_idx]; ++pos) {
+                if (token_offset >= num_tokens_in_batch) {
+                    Logger::error("[CPU_BATCH_FWD] Token offset exceeded num_tokens_in_batch");
+                    return {};
+                }
+                sequence_indices[token_offset] = seq_idx;
+                position_in_sequence[token_offset] = pos;
+                token_offset++;
+            }
+        }
+    } else {
+        // Single sequence mode (backward compatibility)
+        for (int token_idx = 0; token_idx < num_tokens_in_batch; ++token_idx) {
+            sequence_indices[token_idx] = 0;
+            position_in_sequence[token_idx] = start_pos_in_sequence + token_idx;
+        }
+    }
+
+    for (int l = 0; l < num_cpu_layers_to_process; ++l) {
+        const auto& lw = layers[l];
+        
+        std::vector<float> batch_x_norm1(current_batch_activations.size());
+        const std::vector<float>& w_input_norm_vec =
+            lw.input_layernorm_f32.empty()
+                ? bf16vec_to_float_vec(lw.input_layernorm)
+                : lw.input_layernorm_f32;
+        rmsnorm_batch_cpu(current_batch_activations, w_input_norm_vec, batch_x_norm1, num_tokens_in_batch, hs, eps);
+
+        std::vector<float> residual_batch_component_attn = current_batch_activations;
+
+        // Batch Q, K, V projections
+        std::vector<float> q_batch((size_t)num_tokens_in_batch * hs);
+        std::vector<float> k_batch((size_t)num_tokens_in_batch * n_kv_heads * head_dim);
+        std::vector<float> v_batch((size_t)num_tokens_in_batch * n_kv_heads * head_dim);
+
+        // Q Projection
+        if (!lw.q_proj_f32.empty()) {
+            matmul_f32_f32_batch_cpu(lw.q_proj_f32, batch_x_norm1, q_batch, num_tokens_in_batch, hs, hs);
+        } else if (!lw.q_proj_q8_0.empty()) {
+            matmul_q8_0_f32_batch_cpu(lw.q_proj_q8_0, batch_x_norm1, q_batch, num_tokens_in_batch, hs, hs);
+        } else if (!lw.q_proj_q6k.empty()) {
+            matmul_q6k_f32_batch_cpu(lw.q_proj_q6k, batch_x_norm1, q_batch, num_tokens_in_batch, hs, hs);
+        } else if (!lw.q_proj_q4k.empty()) {
+            matmul_q4k_f32_batch_cpu(lw.q_proj_q4k, batch_x_norm1, q_batch, num_tokens_in_batch, hs, hs);
+        } else {
+            Logger::error("[CPU_BATCH_FWD] Layer " + std::to_string(l) + ": No Q proj weights found for CPU");
+            return {};
+        }
+
+        // K Projection
+        if (!lw.k_proj_f32.empty()) {
+            matmul_f32_f32_batch_cpu(lw.k_proj_f32, batch_x_norm1, k_batch, num_tokens_in_batch, n_kv_heads * head_dim, hs);
+        } else if (!lw.k_proj_q8_0.empty()) {
+            matmul_q8_0_f32_batch_cpu(lw.k_proj_q8_0, batch_x_norm1, k_batch, num_tokens_in_batch, n_kv_heads * head_dim, hs);
+        } else if (!lw.k_proj_q6k.empty()) {
+            matmul_q6k_f32_batch_cpu(lw.k_proj_q6k, batch_x_norm1, k_batch, num_tokens_in_batch, n_kv_heads * head_dim, hs);
+        } else if (!lw.k_proj_q4k.empty()) {
+            matmul_q4k_f32_batch_cpu(lw.k_proj_q4k, batch_x_norm1, k_batch, num_tokens_in_batch, n_kv_heads * head_dim, hs);
+        } else {
+            Logger::error("[CPU_BATCH_FWD] Layer " + std::to_string(l) + ": No K proj weights found for CPU");
+            return {};
+        }
+
+        // V Projection
+        if (!lw.v_proj_f32.empty()) {
+            matmul_f32_f32_batch_cpu(lw.v_proj_f32, batch_x_norm1, v_batch, num_tokens_in_batch, n_kv_heads * head_dim, hs);
+        } else if (!lw.v_proj_q8_0.empty()) {
+            matmul_q8_0_f32_batch_cpu(lw.v_proj_q8_0, batch_x_norm1, v_batch, num_tokens_in_batch, n_kv_heads * head_dim, hs);
+        } else if (!lw.v_proj_q6k.empty()) {
+            matmul_q6k_f32_batch_cpu(lw.v_proj_q6k, batch_x_norm1, v_batch, num_tokens_in_batch, n_kv_heads * head_dim, hs);
+        } else if (!lw.v_proj_q4k.empty()) {
+            matmul_q4k_f32_batch_cpu(lw.v_proj_q4k, batch_x_norm1, v_batch, num_tokens_in_batch, n_kv_heads * head_dim, hs);
+        } else {
+            Logger::error("[CPU_BATCH_FWD] Layer " + std::to_string(l) + ": No V proj weights found for CPU");
+            return {};
+        }
+
+        // FIXED: Sequence-aware RoPE Application
+        if (!prompt_lengths.empty()) {
+            // Multi-sequence mode: use sequence-aware RoPE
+            for (int t = 0; t < num_tokens_in_batch; ++t) {
+                int current_token_pos = position_in_sequence[t];
+                int seq_idx = sequence_indices[t];
+
+                if (current_token_pos < 0 || current_token_pos >= max_pos_embeddings) {
+                    Logger::warning("[CPU_BATCH_FWD] Token " + std::to_string(t) + " (seq=" + std::to_string(seq_idx) + 
+                                    ", pos=" + std::to_string(current_token_pos) + ") is out of range. Skipping RoPE.");
+                    continue;
+                }
+
+                // Extract Q and K for this token
+                std::vector<float> q_token(hs);
+                std::vector<float> k_token(n_kv_heads * head_dim);
+                
+                std::copy(q_batch.begin() + (size_t)t * hs, 
+                         q_batch.begin() + (size_t)(t + 1) * hs, 
+                         q_token.begin());
+                std::copy(k_batch.begin() + (size_t)t * n_kv_heads * head_dim, 
+                         k_batch.begin() + (size_t)(t + 1) * n_kv_heads * head_dim, 
+                         k_token.begin());
+
+                // Apply RoPE with correct position
+                apply_rope_vector(q_token, n_heads, head_dim, current_token_pos, precomputed_freqs_cis_, max_pos_embeddings, use_rope_adjacent_pairing);
+                apply_rope_vector(k_token, n_kv_heads, head_dim, current_token_pos, precomputed_freqs_cis_, max_pos_embeddings, use_rope_adjacent_pairing);
+
+                // Copy back to batch
+                std::copy(q_token.begin(), q_token.end(), q_batch.begin() + (size_t)t * hs);
+                std::copy(k_token.begin(), k_token.end(), k_batch.begin() + (size_t)t * n_kv_heads * head_dim);
+            }
+        } else {
+            // Single sequence mode: use original batch RoPE
+            apply_rope_batch_cpu(q_batch, k_batch, num_tokens_in_batch, n_heads, n_kv_heads, head_dim, 
+                                  start_pos_in_sequence, precomputed_freqs_cis_, max_pos_embeddings, use_rope_adjacent_pairing);
+        }
+
+        // Batched KV Cache Update
+        if (kv_cache) {
+            if (!prompt_lengths.empty()) {
+                // Multi-sequence mode: use sequence-aware update
+                update_kv_cache_batch_cpu_sequence_aware(kv_cache, l, k_batch, v_batch, num_tokens_in_batch,
+                                                         sequence_indices, position_in_sequence, n_kv_heads, head_dim);
+            } else {
+                // Single sequence mode: use original update
+            update_kv_cache_batch_cpu(kv_cache, l, k_batch, v_batch, num_tokens_in_batch, 
+                                      start_pos_in_sequence, n_kv_heads, head_dim);        
+            }
+        }
+        
+        // Batched Attention
+        std::vector<float> batch_attn_output((size_t)num_tokens_in_batch * hs);
+        
+        if (kv_cache && static_cast<size_t>(l) < kv_cache->layers.size()) {
+            if (!prompt_lengths.empty()) {
+                // Multi-sequence mode: use sequence-aware attention
+                attention_batch_cpu_sequence_aware(q_batch, kv_cache->layers[l], batch_attn_output,
+                                                  num_tokens_in_batch, sequence_indices, position_in_sequence,
+                                                  n_heads, n_kv_heads, head_dim, attention_scale,
+                                                  kv_cache->max_seq_len_config_);
+            } else {
+                // Single sequence mode: use original attention
+                attention_batch_cpu(q_batch, kv_cache->layers[l], batch_attn_output,
+                                   num_tokens_in_batch, start_pos_in_sequence,
+                                   n_heads, n_kv_heads, head_dim, attention_scale);
+            }
+        } else if (kv_cache) { 
+            Logger::error("[CPU_BATCH_FWD] Layer " + std::to_string(l) + 
+                          " is out of bounds for KV Cache access during attention. KVCache layers size: " + 
+                          std::to_string(kv_cache->layers.size()) + 
+                          ". Filling attention output with zeros.");
+            std::fill(batch_attn_output.begin(), batch_attn_output.end(), 0.0f); 
+        } else {
+            Logger::error("[CPU_BATCH_FWD] KV Cache is null, cannot perform attention for layer " + std::to_string(l) +
+                          ". Filling attention output with zeros.");
+            std::fill(batch_attn_output.begin(), batch_attn_output.end(), 0.0f); 
+        }
+
+        // O-Projection (Batched)
+        std::vector<float> batch_attn_proj_out((size_t)num_tokens_in_batch * hs);
+        if(!lw.o_proj_f32.empty()) {
+              matmul_f32_f32_batch_cpu(lw.o_proj_f32, batch_attn_output, batch_attn_proj_out, num_tokens_in_batch, hs, hs);
+        } else if (!lw.o_proj_q8_0.empty()) {
+            matmul_q8_0_f32_batch_cpu(lw.o_proj_q8_0, batch_attn_output, batch_attn_proj_out, num_tokens_in_batch, hs, hs);
+        } else if (!lw.o_proj_q6k.empty()) {
+            matmul_q6k_f32_batch_cpu(lw.o_proj_q6k, batch_attn_output, batch_attn_proj_out, num_tokens_in_batch, hs, hs);
+        } else if (!lw.o_proj_q4k.empty()) {
+            matmul_q4k_f32_batch_cpu(lw.o_proj_q4k, batch_attn_output, batch_attn_proj_out, num_tokens_in_batch, hs, hs);
+        } else { 
+            Logger::error("[CPU_BATCH_FWD] Layer " + std::to_string(l) + ": No O proj weights found for CPU"); 
+            return {};
+        }
+
+        // First Residual Connection (Batched)
+        for(size_t i=0; i < current_batch_activations.size(); ++i) {
+            current_batch_activations[i] = residual_batch_component_attn[i] + batch_attn_proj_out[i];
+        }
+
+        // --- Batched MLP Part ---
+        std::vector<float> residual_batch_component_mlp = current_batch_activations;
+        std::vector<float> batch_x_norm2(current_batch_activations.size());
+        
+        const std::vector<float>& w_post_attn_norm_vec =
+            lw.post_attention_layernorm_f32.empty()
+                ? bf16vec_to_float_vec(lw.post_attention_layernorm)
+                : lw.post_attention_layernorm_f32;
+        // Batched RMSNorm for MLP
+        rmsnorm_batch_cpu(current_batch_activations, w_post_attn_norm_vec, batch_x_norm2, num_tokens_in_batch, hs, eps);
+        
+        // Batched Gate and Up Projections
+        std::vector<float> batch_gate_proj_out((size_t)num_tokens_in_batch * is);
+        std::vector<float> batch_up_proj_out((size_t)num_tokens_in_batch * is);
+
+        // Gate Projection
+        if (!lw.gate_proj_f32.empty()) {
+            matmul_f32_f32_batch_cpu(lw.gate_proj_f32, batch_x_norm2, batch_gate_proj_out, num_tokens_in_batch, is, hs);
+        } else if (!lw.gate_proj_q8_0.empty()) {
+            matmul_q8_0_f32_batch_cpu(lw.gate_proj_q8_0, batch_x_norm2, batch_gate_proj_out, num_tokens_in_batch, is, hs);
+        } else if (!lw.gate_proj_q6k.empty()) {
+            matmul_q6k_f32_batch_cpu(lw.gate_proj_q6k, batch_x_norm2, batch_gate_proj_out, num_tokens_in_batch, is, hs);
+        } else if (!lw.gate_proj_q4k.empty()) {
+            matmul_q4k_f32_batch_cpu(lw.gate_proj_q4k, batch_x_norm2, batch_gate_proj_out, num_tokens_in_batch, is, hs);
+        } else { 
+            Logger::error("[CPU_BATCH_FWD] Layer " + std::to_string(l) + ": No gate_proj weights found for CPU"); 
+            return {};
+        }
+
+        // Up Projection
+        if (!lw.up_proj_f32.empty()) {
+            matmul_f32_f32_batch_cpu(lw.up_proj_f32, batch_x_norm2, batch_up_proj_out, num_tokens_in_batch, is, hs);
+        } else if (!lw.up_proj_q8_0.empty()) {
+            matmul_q8_0_f32_batch_cpu(lw.up_proj_q8_0, batch_x_norm2, batch_up_proj_out, num_tokens_in_batch, is, hs);
+        } else if (!lw.up_proj_q6k.empty()) {
+            matmul_q6k_f32_batch_cpu(lw.up_proj_q6k, batch_x_norm2, batch_up_proj_out, num_tokens_in_batch, is, hs);
+        } else if (!lw.up_proj_q4k.empty()) {
+            matmul_q4k_f32_batch_cpu(lw.up_proj_q4k, batch_x_norm2, batch_up_proj_out, num_tokens_in_batch, is, hs);
+        } else { 
+            Logger::error("[CPU_BATCH_FWD] Layer " + std::to_string(l) + ": No up_proj weights found for CPU"); 
+            return {};
+        }
+        // Batched SwiGLU: SiLU(gate_proj_out) * up_proj_out
+        std::vector<float> batch_swiglu_out((size_t)num_tokens_in_batch * is);
+        for (size_t i = 0; i < batch_gate_proj_out.size(); ++i) {
+            float gate_val = batch_gate_proj_out[i];
+            float silu_gate_val = gate_val / (1.0f + std::exp(-gate_val));
+            batch_swiglu_out[i] = silu_gate_val * batch_up_proj_out[i];
+        }
+        
+        // Down Projection
+        std::vector<float> batch_mlp_down_proj_out((size_t)num_tokens_in_batch * hs);
+        if (!lw.down_proj_f32.empty()) {
+            matmul_f32_f32_batch_cpu(lw.down_proj_f32, batch_swiglu_out, batch_mlp_down_proj_out, num_tokens_in_batch, hs, is);
+        } else if (!lw.down_proj_q8_0.empty()) {
+            matmul_q8_0_f32_batch_cpu(lw.down_proj_q8_0, batch_swiglu_out, batch_mlp_down_proj_out, num_tokens_in_batch, hs, is);
+        } else if (!lw.down_proj_q6k.empty()) {
+            matmul_q6k_f32_batch_cpu(lw.down_proj_q6k, batch_swiglu_out, batch_mlp_down_proj_out, num_tokens_in_batch, hs, is);
+        } else if (!lw.down_proj_q4k.empty()) {
+            matmul_q4k_f32_batch_cpu(lw.down_proj_q4k, batch_swiglu_out, batch_mlp_down_proj_out, num_tokens_in_batch, hs, is);
+        } else { 
+            Logger::error("[CPU_BATCH_FWD] Layer " + std::to_string(l) + ": No down_proj weights found for CPU"); 
+            return {};
+        }
+        // Second Residual Connection (Batched)
+        for(size_t i = 0; i < current_batch_activations.size(); ++i) {
+            current_batch_activations[i] = residual_batch_component_mlp[i] + batch_mlp_down_proj_out[i];
+        }
+    } // End layer loop
+
+    if (kv_cache && num_tokens_in_batch > 0) {
+        kv_cache->seq_len = start_pos_in_sequence + num_tokens_in_batch;
+    }
+
+    return current_batch_activations;
+}
