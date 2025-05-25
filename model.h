@@ -337,6 +337,10 @@ class TinyLlamaModel {
       int n_tokens, KVCache* kv_cache,
       const std::vector<int>* attention_mask);
 
+
+void ensure_layer_weights_dequantized(int layer_idx);
+void ensure_lm_head_dequantized();
+void ensure_embed_tokens_dequantized();
 #ifdef HAS_CUDA
   /**
    * @brief Performs forward pass on GPU for the layers designated to run on GPU.

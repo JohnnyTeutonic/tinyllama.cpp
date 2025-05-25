@@ -1535,7 +1535,18 @@ static void calculate_attention_scores(const std::vector<float>& Q,
   }
 }
 
-
+void TinyLlamaModel::ensure_embed_tokens_dequantized() {
+    if (!this->embed_tokens_f32.empty()) return;
+    
+    size_t total_elements_embed = static_cast<size_t>(config_.vocab_size) * config_.hidden_size;
+    if (!this->embed_tokens_q6k.empty()) {
+        dequantize_vector_q6k_to_f32(this->embed_tokens_q6k, this->embed_tokens_f32, total_elements_embed, 1);
+    } else if (!this->embed_tokens_q4k.empty()) {
+        dequantize_vector_q4k_to_f32(this->embed_tokens_q4k, this->embed_tokens_f32, total_elements_embed, 1);
+    } else if (!this->embed_tokens.empty()) { 
+        this->embed_tokens_f32 = bf16vec_to_float_vec(this->embed_tokens);
+    }
+}
 void TinyLlamaModel::initialize_weights(const SafeTensorsLoader* loader,
                                         const GGUFData* gguf) {
   Logger::info("Initializing model weights...");
@@ -1558,29 +1569,10 @@ void TinyLlamaModel::initialize_weights(const SafeTensorsLoader* loader,
       Logger::error("[INIT_WEIGHTS_GGUF] map_gguf_weights failed - tensor data not available. No GGUF weights mapped.");
     }
 
-    // --- LM Head Handling: Post map_gguf_weights ---
-    if (this->lm_head_f32.empty()) {
-      size_t total_elements_lm_head = static_cast<size_t>(config_.vocab_size) * config_.hidden_size;
-      if (!this->lm_head_q6k.empty()) {
-        dequantize_vector_q6k_to_f32(this->lm_head_q6k, this->lm_head_f32, total_elements_lm_head, 1);
-      } else if (!this->lm_head_q4k.empty()) {
-        dequantize_vector_q4k_to_f32(this->lm_head_q4k, this->lm_head_f32, total_elements_lm_head, 1);
-      } else if (!this->lm_head_q8_0.empty()) {
-        // dequantize_vector_q8_0_to_f32(this->lm_head_q8_0, this->lm_head_f32, total_elements_lm_head, 1); // Placeholder
-        Logger::warning("[INIT_WEIGHTS_GGUF_DEQUANT] Dequantization for lm_head_q8_0 to F32 is placeholder - ensure function exists.");
-      } else if (!this->lm_head.empty()) { 
-        this->lm_head_f32 = bf16vec_to_float_vec(this->lm_head);
-      }
-      if (!this->lm_head_f32.empty()) {
-        Logger::info("[INIT_WEIGHTS_GGUF_DEQUANT] lm_head_f32 populated. Size: " + std::to_string(this->lm_head_f32.size()));
-      } else {
-        Logger::warning("[INIT_WEIGHTS_GGUF_DEQUANT] lm_head_f32 remains empty after attempting all available GGUF sources (Q6K, Q4K, Q8_0, BF16).");
-      }
-    } else {
-      Logger::info("[INIT_WEIGHTS_GGUF_DEQUANT] lm_head_f32 was already populated. Size: " + std::to_string(this->lm_head_f32.size()));
-    }
+    // LAZY DEQUANTIZATION: Only dequantize what's immediately needed
+    Logger::info("[INIT_WEIGHTS_GGUF] Using lazy dequantization to prevent OOM");
 
-    // --- Token Embeddings Handling: Post map_gguf_weights ---
+    // Only dequantize embed_tokens and final_norm immediately (small and always needed)
     if (this->embed_tokens_f32.empty()) {
       size_t total_elements_embed = static_cast<size_t>(config_.vocab_size) * config_.hidden_size;
       if (!this->embed_tokens_q6k.empty()) {
@@ -1588,18 +1580,13 @@ void TinyLlamaModel::initialize_weights(const SafeTensorsLoader* loader,
       } else if (!this->embed_tokens_q4k.empty()) {
         dequantize_vector_q4k_to_f32(this->embed_tokens_q4k, this->embed_tokens_f32, total_elements_embed, 1);
       } else if (!this->embed_tokens_q8_0.empty()) {
-        // dequantize_vector_q8_0_to_f32(this->embed_tokens_q8_0, this->embed_tokens_f32, total_elements_embed, 1); // Placeholder
         Logger::warning("[INIT_WEIGHTS_GGUF_DEQUANT] Dequantization for embed_tokens_q8_0 to F32 is placeholder - ensure function exists.");
       } else if (!this->embed_tokens.empty()) { 
         this->embed_tokens_f32 = bf16vec_to_float_vec(this->embed_tokens);
       }
       if (!this->embed_tokens_f32.empty()) {
         Logger::info("[INIT_WEIGHTS_GGUF_DEQUANT] embed_tokens_f32 populated. Size: " + std::to_string(this->embed_tokens_f32.size()));
-      } else {
-        Logger::warning("[INIT_WEIGHTS_GGUF_DEQUANT] embed_tokens_f32 remains empty after attempting all available GGUF sources (Q6K, Q4K, Q8_0, BF16).");
       }
-    } else {
-      Logger::info("[INIT_WEIGHTS_GGUF_DEQUANT] embed_tokens_f32 was already populated. Size: " + std::to_string(this->embed_tokens_f32.size()));
     }
 
     if (this->final_norm_f32.empty()) {
@@ -1607,70 +1594,19 @@ void TinyLlamaModel::initialize_weights(const SafeTensorsLoader* loader,
             this->final_norm_f32 = bf16vec_to_float_vec(this->final_norm);
             if (!this->final_norm_f32.empty()) {
                 Logger::info("[INIT_WEIGHTS_GGUF_DEQUANT] Successfully converted final_norm (BF16) to final_norm_f32. Size: " + std::to_string(this->final_norm_f32.size()));
-            } else {
-                Logger::error("[INIT_WEIGHTS_GGUF_DEQUANT] Failed to convert final_norm (BF16) to final_norm_f32 or result is empty.");
             }
-        } else {
-             Logger::warning("[INIT_WEIGHTS_GGUF_DEQUANT] final_norm_f32 is empty, and no GGUF source (BF16 final_norm) found to populate it from.");
         }
-    } else {
-        Logger::info("[INIT_WEIGHTS_GGUF_DEQUANT] final_norm_f32 was already populated (likely by map_gguf_weights direct F32 mapping). Size: " + std::to_string(this->final_norm_f32.size()));
     }
 
-    size_t q_o_proj_elements = static_cast<size_t>(hs) * hs; 
-    size_t k_v_proj_elements_specific = static_cast<size_t>(config_.num_key_value_heads * (hs / config_.num_attention_heads)) * hs;
-    size_t mlp_gate_up_elements = static_cast<size_t>(is) * hs;
-    size_t mlp_down_elements = static_cast<size_t>(hs) * is;
+    // DEFER lm_head dequantization until actually needed (it's huge)
+    Logger::info("[INIT_WEIGHTS_GGUF] Deferring lm_head dequantization until needed to save memory");
 
+    // DEFER all layer weight dequantization until the layer is actually used
+    Logger::info("[INIT_WEIGHTS_GGUF] Deferring all layer weight dequantization until layers are used");
+
+    // Only populate layer norms immediately (small and needed for validation)
     for (int l = 0; l < nhl; ++l) {
         auto& lw = layers[l];
-        if (lw.q_proj_f32.empty()) {
-            if (!lw.q_proj_q6k.empty()) dequantize_vector_q6k_to_f32(lw.q_proj_q6k, lw.q_proj_f32, q_o_proj_elements, (l == 0) ? 1 : 0);
-            else if (!lw.q_proj_q4k.empty()) dequantize_vector_q4k_to_f32(lw.q_proj_q4k, lw.q_proj_f32, q_o_proj_elements, (l == 0) ? 1 : 0);            else if (!lw.q_proj_q8_0.empty()) { Logger::warning("[INIT_WEIGHTS_GGUF_DEQUANT] L" + std::to_string(l) + " Q8_0 dequant placeholder"); }
-            else if (!lw.q_proj.empty()) lw.q_proj_f32 = bf16vec_to_float_vec(lw.q_proj);
-            if (!lw.q_proj_f32.empty()) Logger::info("  L" + std::to_string(l) + " q_proj_f32 populated. Size: " + std::to_string(lw.q_proj_f32.size()));
-        }
-        if (lw.k_proj_f32.empty()) {
-            if (!lw.k_proj_q6k.empty()) dequantize_vector_q6k_to_f32(lw.k_proj_q6k, lw.k_proj_f32, k_v_proj_elements_specific, (l == 0) ? 1 : 0);
-            else if (!lw.k_proj_q4k.empty()) dequantize_vector_q4k_to_f32(lw.k_proj_q4k, lw.k_proj_f32, k_v_proj_elements_specific, (l == 0) ? 1 : 0);            else if (!lw.k_proj_q8_0.empty()) { Logger::warning("[INIT_WEIGHTS_GGUF_DEQUANT] L" + std::to_string(l) + " K8_0 dequant placeholder"); }
-            else if (!lw.k_proj.empty()) lw.k_proj_f32 = bf16vec_to_float_vec(lw.k_proj);
-             if (!lw.k_proj_f32.empty()) Logger::info("  L" + std::to_string(l) + " k_proj_f32 populated. Size: " + std::to_string(lw.k_proj_f32.size()));
-        }
-        if (lw.v_proj_f32.empty()) {
-            if (!lw.v_proj_q6k.empty()) dequantize_vector_q6k_to_f32(lw.v_proj_q6k, lw.v_proj_f32, k_v_proj_elements_specific, (l == 0) ? 1 : 0);
-            else if (!lw.v_proj_q4k.empty()) dequantize_vector_q4k_to_f32(lw.v_proj_q4k, lw.v_proj_f32, k_v_proj_elements_specific, (l == 0) ? 1 : 0);
-            else if (!lw.v_proj_q8_0.empty()) { Logger::warning("[INIT_WEIGHTS_GGUF_DEQUANT] L" + std::to_string(l) + " V8_0 dequant placeholder"); }
-            else if (!lw.v_proj.empty()) lw.v_proj_f32 = bf16vec_to_float_vec(lw.v_proj);
-            if (!lw.v_proj_f32.empty()) Logger::info("  L" + std::to_string(l) + " v_proj_f32 populated. Size: " + std::to_string(lw.v_proj_f32.size()));
-        }
-        if (lw.o_proj_f32.empty()) {
-            if (!lw.o_proj_q6k.empty()) dequantize_vector_q6k_to_f32(lw.o_proj_q6k, lw.o_proj_f32, q_o_proj_elements, (l == 0) ? 1 : 0);
-            else if (!lw.o_proj_q4k.empty()) dequantize_vector_q4k_to_f32(lw.o_proj_q4k, lw.o_proj_f32, q_o_proj_elements, (l == 0) ? 1 : 0);            else if (!lw.o_proj_q8_0.empty()) { Logger::warning("[INIT_WEIGHTS_GGUF_DEQUANT] L" + std::to_string(l) + " O8_0 dequant placeholder"); }
-            else if (!lw.o_proj.empty()) lw.o_proj_f32 = bf16vec_to_float_vec(lw.o_proj);
-            if (!lw.o_proj_f32.empty()) Logger::info("  L" + std::to_string(l) + " o_proj_f32 populated. Size: " + std::to_string(lw.o_proj_f32.size()));
-        }
-        if (lw.gate_proj_f32.empty()) {
-            if (!lw.gate_proj_q6k.empty()) dequantize_vector_q6k_to_f32(lw.gate_proj_q6k, lw.gate_proj_f32, mlp_gate_up_elements, (l == 0) ? 1 : 0);
-            else if (!lw.gate_proj_q4k.empty()) dequantize_vector_q4k_to_f32(lw.gate_proj_q4k, lw.gate_proj_f32, mlp_gate_up_elements, (l == 0) ? 1 : 0);
-            else if (!lw.gate_proj_q8_0.empty()) { Logger::warning("[INIT_WEIGHTS_GGUF_DEQUANT] L" + std::to_string(l) + " Gate8_0 dequant placeholder"); }
-            else if (!lw.gate_proj.empty()) lw.gate_proj_f32 = bf16vec_to_float_vec(lw.gate_proj);
-            if (!lw.gate_proj_f32.empty()) Logger::info("  L" + std::to_string(l) + " gate_proj_f32 populated. Size: " + std::to_string(lw.gate_proj_f32.size()));
-        }
-        if (lw.up_proj_f32.empty()) {
-            if (!lw.up_proj_q6k.empty()) dequantize_vector_q6k_to_f32(lw.up_proj_q6k, lw.up_proj_f32, mlp_gate_up_elements);
-            else if (!lw.up_proj_q4k.empty()) dequantize_vector_q4k_to_f32(lw.up_proj_q4k, lw.up_proj_f32, mlp_gate_up_elements);
-            else if (!lw.up_proj_q8_0.empty()) { Logger::warning("[INIT_WEIGHTS_GGUF_DEQUANT] L" + std::to_string(l) + " Up8_0 dequant placeholder"); }
-            else if (!lw.up_proj.empty()) lw.up_proj_f32 = bf16vec_to_float_vec(lw.up_proj);
-            if (!lw.up_proj_f32.empty()) Logger::info("  L" + std::to_string(l) + " up_proj_f32 populated. Size: " + std::to_string(lw.up_proj_f32.size()));
-        }
-        if (lw.down_proj_f32.empty()) {
-            if (!lw.down_proj_q6k.empty()) dequantize_vector_q6k_to_f32(lw.down_proj_q6k, lw.down_proj_f32, mlp_down_elements, (l == 0) ? 1 : 0);
-            else if (!lw.down_proj_q4k.empty()) dequantize_vector_q4k_to_f32(lw.down_proj_q4k, lw.down_proj_f32, mlp_down_elements, (l == 0) ? 1 : 0);
-            // Missing Q8_0 check for down_proj, adding BF16 fallback
-            else if (!lw.down_proj_q8_0.empty()) { Logger::warning("[INIT_WEIGHTS_GGUF_DEQUANT] L" + std::to_string(l) + " Down8_0 dequant placeholder"); }
-            else if (!lw.down_proj.empty()) lw.down_proj_f32 = bf16vec_to_float_vec(lw.down_proj);
-            if (!lw.down_proj_f32.empty()) Logger::info("  L" + std::to_string(l) + " down_proj_f32 populated. Size: " + std::to_string(lw.down_proj_f32.size()));
-        }
         
         if (lw.input_layernorm_f32.empty() && !lw.input_layernorm.empty()) {
             lw.input_layernorm_f32 = bf16vec_to_float_vec(lw.input_layernorm);
@@ -1681,6 +1617,8 @@ void TinyLlamaModel::initialize_weights(const SafeTensorsLoader* loader,
             if (!lw.post_attention_layernorm_f32.empty()) Logger::info("  L" + std::to_string(l) + " post_attention_layernorm_f32 populated from BF16. Size: " + std::to_string(lw.post_attention_layernorm_f32.size()));
         }
     }
+
+    // Validation checks for layer norms
     for (int l = 0; l < nhl; ++l) {
         const auto& lw = layers[l]; 
         if (lw.input_layernorm_f32.empty()) {
@@ -1710,13 +1648,11 @@ void TinyLlamaModel::initialize_weights(const SafeTensorsLoader* loader,
     auto process_safetensor = 
         [&](const std::string& name, 
             std::vector<float>& target_f32_vector, 
-            const std::vector<size_t>& expected_shape_elements, // From config (vs, hs)
+            const std::vector<size_t>& expected_shape_elements,
             bool is_essential = true) { 
       
       auto it_bytes = all_tensors_bytes_map.find(name);
       
-      // Calculate total_expected_elements from the *passed-in* expected_shape_elements (from config)
-      // This is for the initial check/warning if config disagrees with metadata.
       size_t total_expected_elements_from_config = 1;
       for(size_t dim : expected_shape_elements) total_expected_elements_from_config *= dim;
 
@@ -1726,23 +1662,17 @@ void TinyLlamaModel::initialize_weights(const SafeTensorsLoader* loader,
              throw std::runtime_error("Essential tensor '" + name + "' not found in SafeTensors model's preloaded map.");
         } else {
             Logger::warning("Non-essential tensor '" + name + "' not found in SafeTensors map. Filling with zeros based on config shape.");
-            // Resize based on total_expected_elements_from_config, as metadata is unavailable.
             target_f32_vector.assign(total_expected_elements_from_config, 0.0f); 
         }
         return;
       }
 
-      // tensor_data_bytes from the loader are expected to be FP32 bytes if original was F16/BF16
       const std::vector<uint8_t>& tensor_data_bytes = it_bytes->second;
       const SafeTensorsLoader::TensorInfo tensor_info = loader->get_tensor_info(name); 
       
-      // Calculate metadata_num_elements from the *tensor's actual metadata*
       size_t metadata_num_elements = 1;
       for(size_t dim : tensor_info.shape) metadata_num_elements *= dim;
 
-      // Log a warning if config-derived shape differs from metadata shape, but proceed with metadata shape.
-      // Avoid warning if expected_shape_elements only had one dimension (e.g. for biases/norms where only hs is passed)
-      // and it matches the metadata_num_elements.
       bool shapes_meaningfully_comparable = expected_shape_elements.size() > 1 || 
                                            (expected_shape_elements.size() == 1 && expected_shape_elements[0] != 0 && expected_shape_elements[0] != 1) ||
                                            metadata_num_elements != total_expected_elements_from_config;
@@ -1762,11 +1692,7 @@ void TinyLlamaModel::initialize_weights(const SafeTensorsLoader* loader,
                         "). Using actual metadata shape for loading.");
       }
       
-      // The loader (SafeTensorsLoader::convert_tensor_data) already converts F16 and BF16 to FP32 bytes.
-      // So, tensor_data_bytes for these types should contain FP32 data.
-      // The target_f32_vector will be resized based on metadata_num_elements.
       if (tensor_info.dtype == "BF16" || tensor_info.dtype == "F16" || tensor_info.dtype == "F32") {
-        // The size check should be against sizeof(float) because the loader provides FP32 bytes
         if (tensor_data_bytes.size() != metadata_num_elements * sizeof(float)) {
           Logger::error("CRITICAL SIZE MISMATCH for tensor '" + name + "' (original dtype " + tensor_info.dtype + 
                         ", expecting FP32 bytes from loader). Expected " +
@@ -1775,18 +1701,17 @@ void TinyLlamaModel::initialize_weights(const SafeTensorsLoader* loader,
                         " This indicates an issue with SafeTensorsLoader or the loaded .safetensors data itself.");
           if(is_essential) throw std::runtime_error("Data size mismatch for essential tensor " + name + 
                                                     " (expected FP32 bytes from loader, got different size).");
-          target_f32_vector.assign(metadata_num_elements, 0.0f); // Fill with zeros on error
+          target_f32_vector.assign(metadata_num_elements, 0.0f);
           return;
         }
-        target_f32_vector.resize(metadata_num_elements); // Resize based on elements from metadata
+        target_f32_vector.resize(metadata_num_elements);
         memcpy(target_f32_vector.data(), tensor_data_bytes.data(), tensor_data_bytes.size());
-        // Logger::info("Loaded tensor '" + name + "' (original dtype: " + tensor_info.dtype + ") as FP32 into target vector. Elements: " + std::to_string(metadata_num_elements));
       } else {
         Logger::error("Unsupported original dtype '" + tensor_info.dtype + "' for tensor '" + name + 
                       "' in SafeTensors CPU path. Loader should have converted supported types (F32, F16, BF16) to FP32 bytes.");
         if(is_essential) throw std::runtime_error("Unsupported original dtype for essential tensor " + name + 
                                                     " after loader stage (expected F32, F16, or BF16).");
-        target_f32_vector.assign(metadata_num_elements, 0.0f); // Fill with zeros on error
+        target_f32_vector.assign(metadata_num_elements, 0.0f);
       }
     };
 
@@ -1822,10 +1747,10 @@ void TinyLlamaModel::initialize_weights(const SafeTensorsLoader* loader,
 
   Logger::info("Finished initializing model weights logic block.");
 
-  if (this->lm_head_f32.empty()) {
-    Logger::error("[INIT_WEIGHTS_FINAL_CHECK] lm_head_f32 is EMPTY before exiting initialize_weights. This WILL cause GPU errors if GPU path is taken and lm_head is needed on GPU.");
+  if (this->final_norm_f32.empty()) {
+      Logger::error("[INIT_WEIGHTS_FINAL_CHECK] final_norm_f32 is EMPTY. This WILL cause errors if final normalization is needed in F32.");
   } else {
-    Logger::info("[INIT_WEIGHTS_FINAL_CHECK] lm_head_f32 is POPULATED. Size: " + std::to_string(this->lm_head_f32.size()));
+      Logger::info("[INIT_WEIGHTS_FINAL_CHECK] final_norm_f32 is POPULATED. Size: " + std::to_string(this->final_norm_f32.size()));
   }
 
   if (this->embed_tokens_f32.empty()) {
@@ -1833,12 +1758,67 @@ void TinyLlamaModel::initialize_weights(const SafeTensorsLoader* loader,
   } else {
     Logger::info("[INIT_WEIGHTS_FINAL_CHECK] embed_tokens_f32 is POPULATED. Size: " + std::to_string(this->embed_tokens_f32.size()));
   }
+}
+void TinyLlamaModel::ensure_layer_weights_dequantized(int layer_idx) {
+    if (layer_idx < 0 || layer_idx >= layers.size()) return;
+    
+    auto& lw = layers[layer_idx];
+    int hs = config_.hidden_size;
+    int is = config_.intermediate_size;
+    
+    size_t q_o_proj_elements = static_cast<size_t>(hs) * hs; 
+    size_t k_v_proj_elements_specific = static_cast<size_t>(config_.num_key_value_heads * (hs / config_.num_attention_heads)) * hs;
+    size_t mlp_gate_up_elements = static_cast<size_t>(is) * hs;
+    size_t mlp_down_elements = static_cast<size_t>(hs) * is;
 
-  if (this->final_norm_f32.empty()) {
-      Logger::error("[INIT_WEIGHTS_FINAL_CHECK] final_norm_f32 is EMPTY. This WILL cause errors if final normalization is needed in F32.");
-  } else {
-      Logger::info("[INIT_WEIGHTS_FINAL_CHECK] final_norm_f32 is POPULATED. Size: " + std::to_string(this->final_norm_f32.size()));
-  }
+    if (lw.q_proj_f32.empty()) {
+        if (!lw.q_proj_q6k.empty()) dequantize_vector_q6k_to_f32(lw.q_proj_q6k, lw.q_proj_f32, q_o_proj_elements, 0);
+        else if (!lw.q_proj_q4k.empty()) dequantize_vector_q4k_to_f32(lw.q_proj_q4k, lw.q_proj_f32, q_o_proj_elements, 0);
+        else if (!lw.q_proj.empty()) lw.q_proj_f32 = bf16vec_to_float_vec(lw.q_proj);
+    }
+    if (lw.k_proj_f32.empty()) {
+        if (!lw.k_proj_q6k.empty()) dequantize_vector_q6k_to_f32(lw.k_proj_q6k, lw.k_proj_f32, k_v_proj_elements_specific, 0);
+        else if (!lw.k_proj_q4k.empty()) dequantize_vector_q4k_to_f32(lw.k_proj_q4k, lw.k_proj_f32, k_v_proj_elements_specific, 0);
+        else if (!lw.k_proj.empty()) lw.k_proj_f32 = bf16vec_to_float_vec(lw.k_proj);
+    }
+    if (lw.v_proj_f32.empty()) {
+        if (!lw.v_proj_q6k.empty()) dequantize_vector_q6k_to_f32(lw.v_proj_q6k, lw.v_proj_f32, k_v_proj_elements_specific, 0);
+        else if (!lw.v_proj_q4k.empty()) dequantize_vector_q4k_to_f32(lw.v_proj_q4k, lw.v_proj_f32, k_v_proj_elements_specific, 0);
+        else if (!lw.v_proj.empty()) lw.v_proj_f32 = bf16vec_to_float_vec(lw.v_proj);
+    }
+    if (lw.o_proj_f32.empty()) {
+        if (!lw.o_proj_q6k.empty()) dequantize_vector_q6k_to_f32(lw.o_proj_q6k, lw.o_proj_f32, q_o_proj_elements, 0);
+        else if (!lw.o_proj_q4k.empty()) dequantize_vector_q4k_to_f32(lw.o_proj_q4k, lw.o_proj_f32, q_o_proj_elements, 0);
+        else if (!lw.o_proj.empty()) lw.o_proj_f32 = bf16vec_to_float_vec(lw.o_proj);
+    }
+    if (lw.gate_proj_f32.empty()) {
+        if (!lw.gate_proj_q6k.empty()) dequantize_vector_q6k_to_f32(lw.gate_proj_q6k, lw.gate_proj_f32, mlp_gate_up_elements, 0);
+        else if (!lw.gate_proj_q4k.empty()) dequantize_vector_q4k_to_f32(lw.gate_proj_q4k, lw.gate_proj_f32, mlp_gate_up_elements, 0);
+        else if (!lw.gate_proj.empty()) lw.gate_proj_f32 = bf16vec_to_float_vec(lw.gate_proj);
+    }
+    if (lw.up_proj_f32.empty()) {
+        if (!lw.up_proj_q6k.empty()) dequantize_vector_q6k_to_f32(lw.up_proj_q6k, lw.up_proj_f32, mlp_gate_up_elements, 0);
+        else if (!lw.up_proj_q4k.empty()) dequantize_vector_q4k_to_f32(lw.up_proj_q4k, lw.up_proj_f32, mlp_gate_up_elements, 0);
+        else if (!lw.up_proj.empty()) lw.up_proj_f32 = bf16vec_to_float_vec(lw.up_proj);
+    }
+    if (lw.down_proj_f32.empty()) {
+        if (!lw.down_proj_q6k.empty()) dequantize_vector_q6k_to_f32(lw.down_proj_q6k, lw.down_proj_f32, mlp_down_elements, 0);
+        else if (!lw.down_proj_q4k.empty()) dequantize_vector_q4k_to_f32(lw.down_proj_q4k, lw.down_proj_f32, mlp_down_elements, 0);
+        else if (!lw.down_proj.empty()) lw.down_proj_f32 = bf16vec_to_float_vec(lw.down_proj);
+    }
+}
+
+void TinyLlamaModel::ensure_lm_head_dequantized() {
+    if (!this->lm_head_f32.empty()) return;
+    
+    size_t total_elements_lm_head = static_cast<size_t>(config_.vocab_size) * config_.hidden_size;
+    if (!this->lm_head_q6k.empty()) {
+        dequantize_vector_q6k_to_f32(this->lm_head_q6k, this->lm_head_f32, total_elements_lm_head, 1);
+    } else if (!this->lm_head_q4k.empty()) {
+        dequantize_vector_q4k_to_f32(this->lm_head_q4k, this->lm_head_f32, total_elements_lm_head, 1);
+    } else if (!this->lm_head.empty()) { 
+        this->lm_head_f32 = bf16vec_to_float_vec(this->lm_head);
+    }
 }
 void TinyLlamaModel::initialize_gpu_and_rope() {
   Logger::info("[INIT_GPU_ROPE_DEBUG_L1113] Absolute Start of initialize_gpu_and_rope: config_.num_cpu_offload_layers = " + std::to_string(config_.num_cpu_offload_layers) + 
@@ -1995,7 +1975,7 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
   // --- TOKEN EMBEDDING TABLE to GPU (as BF16) ---
   SAFE_CUDA_FREE(token_embedding_table_dev_);    // Target for BF16
   SAFE_CUDA_FREE(token_embedding_table_f32_dev_); // Ensure this is cleared and not used by new embedding logic
-
+  ensure_embed_tokens_dequantized();
   bool token_embeddings_processed_to_gpu_bf16 = false;
 
   if (active_num_gpu_layers > 0) { // Only process if GPU layers are active
@@ -2085,7 +2065,7 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
   // --- LM HEAD to GPU (as BF16) ---
   SAFE_CUDA_FREE(lm_head_dev_);    // Target for BF16
   SAFE_CUDA_FREE(lm_head_f32_dev_); // Ensure this is cleared and not used by new LM head logic
-
+  ensure_lm_head_dequantized();
   bool lm_head_processed_to_gpu_bf16 = false;
 
   if (active_num_gpu_layers > 0) { // Only process if GPU layers are active
@@ -3264,6 +3244,7 @@ std::vector<float> TinyLlamaModel::forward(
   rmsnorm_vector_cpu(input, w_final_norm_vec, x_final_norm_vec, eps);
 
   std::vector<float> logits(vs);
+  ensure_lm_head_dequantized();
     if (!lm_head_f32.empty()) matvec_f32_f32_vector_cpu(lm_head_f32, x_final_norm_vec, logits, vs, hs);
     else if (!lm_head_q8_0.empty() && config_.is_gguf_file_loaded) matvec_q8_0_f32_vector_cpu(lm_head_q8_0, x_final_norm_vec, logits, vs, hs);
     else if (!lm_head_q4k.empty() && config_.is_gguf_file_loaded) matvec_q4k_f32_vector_cpu(lm_head_q4k, x_final_norm_vec, logits, vs, hs);
@@ -3346,7 +3327,7 @@ std::vector<float> TinyLlamaModel::forward_device(
       Logger::info("[TM::fw_dev pos=" + std::to_string(pos) + "] GPU Layer Loop: gpu_idx=" + std::to_string(l_gpu_idx) +
                    ", model_idx=" + std::to_string(l_model_idx) + ". Operating on model_->x_dev_.");
     }
-
+    ensure_layer_weights_dequantized(l_model_idx);
     // Get layer sizes (kv_dim calculation was in initialize_gpu_and_rope, ensure it's accessible or recalculated)
     int kv_dim = (config_.hidden_size / config_.num_attention_heads) * config_.num_key_value_heads;
     size_t layer_q_size = (size_t)hs * hs;
@@ -3762,6 +3743,7 @@ std::vector<float> TinyLlamaModel::forward_device(
     Logger::info("[TM::fw_dev pos=" + std::to_string(pos) +
                  "] Processing LM Head.");
 
+  ensure_lm_head_dequantized();
   if (lm_head_dev_) { 
     matvec_bf16_f32_cuda(cublas_handle_, lm_head_dev_, x_norm_dev_, logits_dev_,
                          vs, hs, stream);
@@ -3952,7 +3934,35 @@ void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
             model.layers[layer_idx].up_proj_q6k.swap(dest_q6k);
           } else if (sub_field == "ffn_down.weight") {
             model.layers[layer_idx].down_proj_q6k.swap(dest_q6k);
-        } else {
+        } 
+        else if (info.type == GGMLType::GGML_TYPE_BF16) {
+          size_t num_elements = info.size_in_bytes / sizeof(uint16_t);
+          if (num_elements == 0 && info.size_in_bytes > 0) {
+              Logger::warning("[MAP_GGUF_BF16_TRACE] num_elements is 0 for BF16 tensor: '" + info.name + "' but size_in_bytes is " + std::to_string(info.size_in_bytes) + ". Skipping.");
+            continue;
+          }
+          std::vector<uint16_t> dest_bf16(num_elements);
+          memcpy(dest_bf16.data(), tensor_data_ptr, info.size_in_bytes);
+
+          if (sub_field == "attn_q.weight") {
+            model.layers[layer_idx].q_proj.swap(dest_bf16);
+          } else if (sub_field == "attn_k.weight") {
+            model.layers[layer_idx].k_proj.swap(dest_bf16);
+          } else if (sub_field == "attn_v.weight") {
+            model.layers[layer_idx].v_proj.swap(dest_bf16);
+          } else if (sub_field == "attn_output.weight") {
+            model.layers[layer_idx].o_proj.swap(dest_bf16);
+          } else if (sub_field == "ffn_gate.weight") {
+            model.layers[layer_idx].gate_proj.swap(dest_bf16);
+          } else if (sub_field == "ffn_up.weight") {
+            model.layers[layer_idx].up_proj.swap(dest_bf16);
+          } else if (sub_field == "ffn_down.weight") {
+            model.layers[layer_idx].down_proj.swap(dest_bf16);
+          } else {
+            Logger::warning(std::string("[MAP_GGUF_BF16_TRACE] Unsupported BF16 layer sub-field: '") + sub_field + "' for " + target_field_key + " (GGUF name: " + info.name + ")");
+          }
+        }
+        else {
             Logger::warning(std::string("[MAP_GGUF_Q6K_TRACE] Unsupported Q6_K layer sub-field: '") + sub_field + "' for " + target_field_key + " (GGUF name: " + info.name + ")");
           }
         }
@@ -4285,8 +4295,6 @@ void TinyLlamaModel::initialize_rope_freqs() {
       Logger::info("RoPE frequencies already precomputed.");
   }
 }
-
-
 
 static void update_kv_cache_batch_cpu(
     KVCache* kv_cache,
@@ -4793,7 +4801,8 @@ std::vector<std::vector<float>> TinyLlamaModel::forward_cpu_batch_generation(
         std::vector<float> batch_attn_output((size_t)num_tokens_in_batch * hs);
         
         #pragma omp parallel if(num_tokens_in_batch > 1)
-        {
+        {     
+            ensure_layer_weights_dequantized(l);
             // Thread-local buffers to avoid allocations in loop
             std::vector<float> q_token(hs);
             std::vector<float> k_token(n_kv_heads * head_dim);
@@ -4846,7 +4855,7 @@ std::vector<std::vector<float>> TinyLlamaModel::forward_cpu_batch_generation(
                 const float* q_token_ptr = q_batch.data() + (size_t)token_idx * hs;
                 float* attn_output_ptr = batch_attn_output.data() + (size_t)token_idx * hs;
         
-                if (kv_cache && static_cast<size_t>(l) < kv_cache->layers.size()) {
+        if (kv_cache && static_cast<size_t>(l) < kv_cache->layers.size()) {
                     const auto& layer_cache = kv_cache->layers[l];
                     
                     // Process all heads for this token efficiently with SIMD
@@ -5019,7 +5028,7 @@ std::vector<std::vector<float>> TinyLlamaModel::forward_cpu_batch_generation(
             // For single-sequence compatibility, update seq_len to the max
             kv_cache->seq_len = *std::max_element(kv_cache->batch_seq_lens.begin(), 
                                                   kv_cache->batch_seq_lens.begin() + kv_cache->current_batch_size);
-        } else {
+    } else {
             // Fallback for single sequence mode
             int max_pos = *std::max_element(token_positions.begin(), token_positions.end());
             kv_cache->seq_len = std::max(kv_cache->seq_len, max_pos + 1);
@@ -5123,7 +5132,7 @@ std::vector<float> TinyLlamaModel::forward_device_batch_prefill(
         int l_gpu_idx = l_model_idx - config_.num_cpu_offload_layers;
         Logger::info("[FWD_DEV_BATCH_PREFILL_LAYER_START] Processing Layer: model_idx=" + std::to_string(l_model_idx) + ", gpu_idx=" + std::to_string(l_gpu_idx) + 
                      ". Current d_batch_x_ptr: " + Logger::ptrToString(d_batch_x_ptr));
-        
+        ensure_layer_weights_dequantized(l_model_idx);
         gpuErrchk(cudaMemcpyAsync(d_batch_residual_attn_in, d_batch_x_ptr, batch_hidden_size_bytes, cudaMemcpyDeviceToDevice, stream));
 
         rmsnorm_batch_cuda(d_batch_x_norm_out_attn, d_batch_x_ptr, 
@@ -5535,7 +5544,7 @@ std::vector<std::vector<float>> TinyLlamaModel::forward_device_batch_generation(
         rmsnorm_batch_cuda(d_batch_x_norm_out_attn, d_batch_x_ptr, 
                            layers[l_model_idx].input_layernorm_dev,
                            num_tokens_in_batch, hidden_size, config_.rms_norm_eps, stream);
-
+        ensure_layer_weights_dequantized(l_model_idx);
         const float* w_q_layer_ptr = w_q_f32_dev_ + (size_t)l_gpu_idx * hidden_size * hidden_size;
         gemm_f32_f32_cuda(cublas_handle_, false, true, num_tokens_in_batch, hidden_size, hidden_size, &alpha,
                           d_batch_x_norm_out_attn, hidden_size, w_q_layer_ptr, hidden_size, &beta,

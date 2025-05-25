@@ -543,7 +543,11 @@ std::string TinyLlamaSession::generate(const std::string& user_prompt, int steps
   std::vector<float> current_data_host; // To hold embedding or output of CPU layers
   int start_pos_for_loop = 0;
 
-bool prefill_enabled = (num_prompt_tokens > 1);
+  // Prefill logic: Use batch prefill for longer prompts to maintain coherence
+  // - If batch generation is enabled: use batch prefill for prompts >= 4 tokens
+  // - If batch generation is disabled: use batch prefill only for long prompts >= 16 tokens
+  bool prefill_enabled = (use_batch_generation_ && num_prompt_tokens >= 4) || 
+                         (!use_batch_generation_ && num_prompt_tokens >= 16);
 
 if (prefill_enabled) {
       Logger::info("[Generate API] Prefill enabled. num_prompt_tokens: " + std::to_string(num_prompt_tokens) + 
@@ -727,37 +731,23 @@ if (prefill_enabled) {
       }
     }
 
-    // The following block for prompt tokens (pos < num_prompt_tokens -1) is only relevant if prefill is NOT enabled.
-    // If prefill IS enabled, start_pos_for_loop will be num_prompt_tokens, so this block is skipped.
-    // The 'else if (prefill_enabled && pos == num_prompt_tokens -1)' is also effectively handled by prefill block now.
-    // The main logic for sampling is in the 'else' block below.
-    
-    if (pos < num_prompt_tokens -1 && !prefill_enabled) { 
-      // This is a prompt token (but not the last one if no prefill)
-      // For GGUF/CPU-only, KVCache is updated inside model_->forward().
-      // For GPU layers, KVCache is updated inside model_->forward_device().
-      // No explicit sampling needed here, we just process the prompt token.
-      Logger::debug("[Generate Loop] Prompt token (no prefill, not last). pos: " + std::to_string(pos) + ". KV Cache updated by forward call.");
-      // If this was the *last* prompt token and prefill was off, we'd fall through to sample.
-      // But since it's `pos < num_prompt_tokens - 1`, we just continue to the next prompt token.
-      // `next_token_id` will be tokens[pos+1] in the next iteration via the `input_token_id` logic.
-      // No, this is wrong. If it's a prompt token, `next_token_id` isn't used yet.
-      // The `input_token_id` for the next iteration will correctly pick `tokens[pos+1]`.
-      // We don't sample, we just ensure KV cache is populated.
-    } else if (pos == num_prompt_tokens -1 && !prefill_enabled) { // if it's the last prompt token (and no prefill)
+    // Sampling logic: Only sample if we're at the last prompt token or generating
+    if (pos == num_prompt_tokens - 1 || pos >= num_prompt_tokens) {
       next_token_id = sample_top_k_top_p_temperature(logits, temperature, top_k, top_p, rng_);
-      generated_token_ids.push_back(next_token_id); // Track generated token
-      generated_count++;
-      { // Scope for log_str
-        std::string decoded_str = tokenizer_->decode({next_token_id});
-        std::string log_str = "[Generate API Loop EndPromptNoPrefill] Sampled token ID: " + std::to_string(next_token_id) + ", Decoded: \"" + decoded_str + "\"";
-        Logger::info(log_str);
+      
+      // Only add to generated tokens if we're actually generating (not just finishing prompt)
+      if (pos >= num_prompt_tokens) {
+        generated_token_ids.push_back(next_token_id);
+        generated_count++;
+        
+        // Stream the generated token
+        generated_stream_ << tokenizer_->decode({next_token_id}, false);
+        generated_text_for_api_return_ += tokenizer_->decode({next_token_id}, false);
+      } else {
+        // This is the first token sampled from the last prompt position
+        Logger::info("[Generate API] First token sampled from prompt: " + std::to_string(next_token_id) + 
+                     ", Decoded: \"" + tokenizer_->decode({next_token_id}, false) + "\"");
       }
-    } else { // otherwise, it's a generated token (or first after prefill)
-      next_token_id = sample_top_k_top_p_temperature(logits, temperature, top_k, top_p, rng_);
-      // DON'T stream yet - token hasn't been processed through model!
-      generated_token_ids.push_back(next_token_id); // Track generated token
-      generated_count++;
     }
 
     if (next_token_id == eos_token_id_ && pos >= num_prompt_tokens) { // EOS only if we are generating
@@ -765,10 +755,6 @@ if (prefill_enabled) {
                      ") sampled at pos " + std::to_string(pos) + ". Stopping.");
       break;
     }
-
-    // Stream the token that was just processed (input_token_id), not the one just sampled (next_token_id)
-    generated_stream_ << tokenizer_->decode({input_token_id}, false);
-    generated_text_for_api_return_ += tokenizer_->decode({input_token_id}, false);
 
     if (generated_count >= steps) { // steps is max new tokens
       Logger::info("Reached max generation steps (" + std::to_string(steps) + "). Stopping.");
