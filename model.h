@@ -283,6 +283,8 @@ struct LayerWeights {
   std::vector<block_q6_K> gate_proj_q6k, up_proj_q6k, down_proj_q6k;
   std::vector<block_q8_0> q_proj_q8_0, k_proj_q8_0, v_proj_q8_0, o_proj_q8_0;
   std::vector<block_q8_0> gate_proj_q8_0, up_proj_q8_0, down_proj_q8_0;
+  std::vector<block_q8_K> q_proj_q8k, k_proj_q8k, v_proj_q8k, o_proj_q8k;
+  std::vector<block_q8_K> gate_proj_q8k, up_proj_q8k, down_proj_q8k;
 
 #ifdef HAS_CUDA
 
@@ -451,6 +453,7 @@ void ensure_embed_tokens_dequantized();
   std::vector<block_q4_K> embed_tokens_q4k, lm_head_q4k, final_norm_q4k;
   std::vector<block_q6_K> embed_tokens_q6k, lm_head_q6k, final_norm_q6k;
   std::vector<block_q8_0> embed_tokens_q8_0, lm_head_q8_0;
+  std::vector<block_q8_K> embed_tokens_q8k, lm_head_q8k;
   std::vector<LayerWeights> layers;
 
 #ifdef HAS_CUDA

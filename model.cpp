@@ -204,6 +204,11 @@ static void matvec_f32_f32_vector_cpu(const std::vector<float>& mat_f32,
                                       std::vector<float>& out_f32, int rows,
                                       int cols);
 
+static void matvec_q8k_f32_vector_cpu(const std::vector<block_q8_K>& mat_q8k,
+                                      const std::vector<float>& vec_f32,
+                                      std::vector<float>& out_f32, int rows,
+                                      int cols, bool log_first_block = false);
+
 /**
  * @brief Dequantizes a vector of Q8_K blocks to float32.
  * @param q8k_vec The quantized vector.
@@ -296,6 +301,13 @@ static void matvec_q6k_f32_vector_cpu(const std::vector<block_q6_K>& mat_q6k,
 
   out_f32.resize(rows);
   float dequantized_block[GGML_QK_K];
+  
+  if (log_first_block) {
+    Logger::info("[MATVEC_Q6K_DEBUG] Matrix shape: " + std::to_string(rows) + "x" + std::to_string(cols) + 
+                 ", blocks_per_row=" + std::to_string(num_blocks_per_row) + 
+                 ", total_blocks=" + std::to_string(mat_q6k.size()) +
+                 ", input_vec_size=" + std::to_string(vec_f32.size()));
+  }
 
 #pragma omp parallel for private(dequantized_block)
   for (int64_t r = 0; r < static_cast<int64_t>(rows); ++r) {
@@ -310,6 +322,22 @@ static void matvec_q6k_f32_vector_cpu(const std::vector<block_q6_K>& mat_q6k,
       dequantize_q6_k(qblock, dequantized_block, GGML_QK_K);
 
       size_t vec_offset = block_col_idx * GGML_QK_K;
+      
+      // Debug logging for first few rows and blocks
+      if (log_first_block && r < 2 && block_col_idx < 2) {
+        Logger::info("[MATVEC_Q6K_INNER] Row " + std::to_string(r) + 
+                     " Block " + std::to_string(block_col_idx) + 
+                     " d=" + std::to_string(fp16_to_fp32(qblock->d, false)) +
+                     " first_4_dequant=[" + std::to_string(dequantized_block[0]) + 
+                     ", " + std::to_string(dequantized_block[1]) + 
+                     ", " + std::to_string(dequantized_block[2]) + 
+                     ", " + std::to_string(dequantized_block[3]) + "]" +
+                     " first_4_input=[" + std::to_string(vec_f32[vec_offset]) + 
+                     ", " + std::to_string(vec_f32[vec_offset + 1]) + 
+                     ", " + std::to_string(vec_f32[vec_offset + 2]) + 
+                     ", " + std::to_string(vec_f32[vec_offset + 3]) + "]");
+      }
+      
       for (int i = 0; i < GGML_QK_K; ++i) {
         double term = static_cast<double>(dequantized_block[i]) *
                       static_cast<double>(vec_f32[vec_offset + i]);
@@ -321,6 +349,13 @@ static void matvec_q6k_f32_vector_cpu(const std::vector<block_q6_K>& mat_q6k,
       }
     }
     out_f32[r] = static_cast<float>(row_sum);
+    
+    // Debug logging for first few output values
+    if (log_first_block && r < 3) {
+      Logger::info("[MATVEC_Q6K_OUTPUT] Row " + std::to_string(r) + 
+                   " final_sum=" + std::to_string(row_sum) + 
+                   " output=" + std::to_string(out_f32[r]));
+    }
   }
 }
 static void matvec_q4k_f32_vector_cpu(const std::vector<block_q4_K>& mat_q4k,
@@ -348,6 +383,13 @@ static void matvec_q4k_f32_vector_cpu(const std::vector<block_q4_K>& mat_q4k,
 
   out_f32.resize(rows);
   float dequantized_block[GGML_QK_K];
+  
+  if (log_first_block) {
+    Logger::info("[MATVEC_Q4K_DEBUG] Matrix shape: " + std::to_string(rows) + "x" + std::to_string(cols) + 
+                 ", blocks_per_row=" + std::to_string(num_blocks_per_row) + 
+                 ", total_blocks=" + std::to_string(mat_q4k.size()) +
+                 ", input_vec_size=" + std::to_string(vec_f32.size()));
+  }
 
 #pragma omp parallel for private(dequantized_block)
   for (int64_t r = 0; r < static_cast<int64_t>(rows); ++r) {
@@ -362,6 +404,23 @@ static void matvec_q4k_f32_vector_cpu(const std::vector<block_q4_K>& mat_q4k,
       dequantize_q4_k_m(qblock, dequantized_block, GGML_QK_K, enable_dequant_log);
 
       size_t vec_offset = block_col_idx * GGML_QK_K;
+      
+      // Debug logging for first few rows and blocks
+      if (log_first_block && r < 2 && block_col_idx < 2) {
+        Logger::info("[MATVEC_Q4K_INNER] Row " + std::to_string(r) + 
+                     " Block " + std::to_string(block_col_idx) + 
+                     " d=" + std::to_string(fp16_to_fp32(qblock->d, false)) +
+                     " dmin=" + std::to_string(fp16_to_fp32(qblock->dmin, false)) +
+                     " first_4_dequant=[" + std::to_string(dequantized_block[0]) + 
+                     ", " + std::to_string(dequantized_block[1]) + 
+                     ", " + std::to_string(dequantized_block[2]) + 
+                     ", " + std::to_string(dequantized_block[3]) + "]" +
+                     " first_4_input=[" + std::to_string(vec_f32[vec_offset]) + 
+                     ", " + std::to_string(vec_f32[vec_offset + 1]) + 
+                     ", " + std::to_string(vec_f32[vec_offset + 2]) + 
+                     ", " + std::to_string(vec_f32[vec_offset + 3]) + "]");
+      }
+      
       for (int i = 0; i < GGML_QK_K; ++i) {
         double term = static_cast<double>(dequantized_block[i]) *
                       static_cast<double>(vec_f32[vec_offset + i]);
@@ -373,6 +432,13 @@ static void matvec_q4k_f32_vector_cpu(const std::vector<block_q4_K>& mat_q4k,
       }
     }
     out_f32[r] = static_cast<float>(row_sum);
+    
+    // Debug logging for first few output values
+    if (log_first_block && r < 3) {
+      Logger::info("[MATVEC_Q4K_OUTPUT] Row " + std::to_string(r) + 
+                   " final_sum=" + std::to_string(row_sum) + 
+                   " output=" + std::to_string(out_f32[r]));
+    }
   }
 }
 static void matvec_q8_0_f32_vector_cpu(const std::vector<block_q8_0>& mat_q8_0,
@@ -400,6 +466,13 @@ static void matvec_q8_0_f32_vector_cpu(const std::vector<block_q8_0>& mat_q8_0,
 
   out_f32.resize(rows);
   float dequantized_block[GGML_QK8_0];
+  
+  if (log_first_block) {
+    Logger::info("[MATVEC_Q8_0_DEBUG] Matrix shape: " + std::to_string(rows) + "x" + std::to_string(cols) + 
+                 ", blocks_per_row=" + std::to_string(num_blocks_per_row) + 
+                 ", total_blocks=" + std::to_string(mat_q8_0.size()) +
+                 ", input_vec_size=" + std::to_string(vec_f32.size()));
+  }
 
 #pragma omp parallel for private(dequantized_block)
   for (int64_t r = 0; r < static_cast<int64_t>(rows); ++r) {
@@ -413,6 +486,26 @@ static void matvec_q8_0_f32_vector_cpu(const std::vector<block_q8_0>& mat_q8_0,
       dequantize_q8_0_block(qblock, dequantized_block);
 
       size_t vec_offset = block_col_idx * GGML_QK8_0;
+      
+      // Debug logging for first few rows and blocks
+      if (log_first_block && r < 2 && block_col_idx < 2) {
+        Logger::info("[MATVEC_Q8_0_INNER] Row " + std::to_string(r) + 
+                     " Block " + std::to_string(block_col_idx) + 
+                     " scale=" + std::to_string(fp16_to_fp32(qblock->d, true)) +
+                     " first_4_quant=[" + std::to_string(qblock->qs[0]) + 
+                     ", " + std::to_string(qblock->qs[1]) + 
+                     ", " + std::to_string(qblock->qs[2]) + 
+                     ", " + std::to_string(qblock->qs[3]) + "]" +
+                     " first_4_dequant=[" + std::to_string(dequantized_block[0]) + 
+                     ", " + std::to_string(dequantized_block[1]) + 
+                     ", " + std::to_string(dequantized_block[2]) + 
+                     ", " + std::to_string(dequantized_block[3]) + "]" +
+                     " first_4_input=[" + std::to_string(vec_f32[vec_offset]) + 
+                     ", " + std::to_string(vec_f32[vec_offset + 1]) + 
+                     ", " + std::to_string(vec_f32[vec_offset + 2]) + 
+                     ", " + std::to_string(vec_f32[vec_offset + 3]) + "]");
+      }
+      
       for (int i = 0; i < GGML_QK8_0; ++i) {
         double term = static_cast<double>(dequantized_block[i]) *
                       static_cast<double>(vec_f32[vec_offset + i]);
@@ -424,6 +517,13 @@ static void matvec_q8_0_f32_vector_cpu(const std::vector<block_q8_0>& mat_q8_0,
       }
     }
     out_f32[r] = static_cast<float>(row_sum);
+    
+    // Debug logging for first few output values
+    if (log_first_block && r < 3) {
+      Logger::info("[MATVEC_Q8_0_OUTPUT] Row " + std::to_string(r) + 
+                   " final_sum=" + std::to_string(row_sum) + 
+                   " output=" + std::to_string(out_f32[r]));
+    }
   }
 }
 static void matvec_f32_f32_vector_cpu(const std::vector<float>& mat_f32,
@@ -475,6 +575,37 @@ static void matvec_f32_f32_vector_cpu(const std::vector<float>& mat_f32,
       k_sum = t;
     }
     out_f32[r] = static_cast<float>(k_sum);
+  }
+}
+
+static void matvec_q8k_f32_vector_cpu(const std::vector<block_q8_K>& mat_q8k,
+                                      const std::vector<float>& vec_f32,
+                                      std::vector<float>& out_f32, int rows,
+                                      int cols, bool log_first_block) {
+  if (cols % GGML_QK_K != 0) {
+    throw std::runtime_error("matvec_q8k_f32_vector_cpu: cols must be divisible by GGML_QK_K");
+  }
+  
+  size_t num_blocks_per_row = cols / GGML_QK_K;
+  size_t total_blocks_expected = (size_t)rows * num_blocks_per_row;
+  if (mat_q8k.size() != total_blocks_expected) {
+    throw std::runtime_error("matvec_q8k_f32_vector_cpu: mat_q8k size mismatch");
+  }
+  if (vec_f32.size() != (size_t)cols) {
+    throw std::runtime_error("matvec_q8k_f32_vector_cpu: vec_f32 size mismatch");
+  }
+  
+  out_f32.resize(rows);
+  
+  // Dequantize the Q8_K matrix to F32 and use regular F32 matrix-vector multiplication
+  std::vector<float> mat_f32;
+  dequantize_q8_k(mat_q8k, mat_f32, rows * cols, log_first_block);
+  
+  // Use the existing F32 matrix-vector multiplication
+  matvec_f32_f32_vector_cpu(mat_f32, vec_f32, out_f32, rows, cols);
+  
+  if (log_first_block && rows > 0) {
+    Logger::info("[Q8K_MATVEC_DEBUG] First output: " + std::to_string(out_f32[0]));
   }
 }
 
@@ -683,6 +814,50 @@ static void matmul_q8_0_f32_batch_cpu(
         float* output_slice_start = batch_output_activations.data() + (size_t)token_idx * output_dim;
         std::copy(current_token_output.begin(), current_token_output.end(), output_slice_start);
 
+    }
+}
+
+static void matmul_q8k_f32_batch_cpu(
+    const std::vector<block_q8_K>& mat_q8k,             // Quantized matrix weights
+    const std::vector<float>& batch_input_activations,  // Batched input: [num_tokens, input_dim]
+    std::vector<float>& batch_output_activations,       // Batched output: [num_tokens, output_dim]
+    int num_tokens,
+    int output_dim, // rows of the matrix
+    int input_dim   // cols of the matrix
+) {
+    if (input_dim % GGML_QK_K != 0) {
+        throw std::runtime_error("matmul_q8k_f32_batch_cpu: input_dim (" + std::to_string(input_dim) + 
+                                 ") must be divisible by GGML_QK_K (" + std::to_string(GGML_QK_K) + ")");
+    }
+    
+    size_t expected_input_size = (size_t)num_tokens * input_dim;
+    if (batch_input_activations.size() != expected_input_size) {
+        throw std::runtime_error("matmul_q8k_f32_batch_cpu: batch_input_activations size mismatch. Expected " +
+                                 std::to_string(expected_input_size) + ", got " + std::to_string(batch_input_activations.size()));
+    }
+    
+    size_t num_blocks_per_row = input_dim / GGML_QK_K;
+    size_t total_blocks_expected = (size_t)output_dim * num_blocks_per_row;
+    if (mat_q8k.size() != total_blocks_expected) {
+        throw std::runtime_error("matmul_q8k_f32_batch_cpu: mat_q8k size mismatch. Expected " +
+                                 std::to_string(total_blocks_expected) + " blocks, got " + std::to_string(mat_q8k.size()));
+    }
+    
+    batch_output_activations.resize((size_t)num_tokens * output_dim);
+    
+    for (int t = 0; t < num_tokens; ++t) {
+        std::vector<float> current_token_input(input_dim);
+        for (int i = 0; i < input_dim; ++i) {
+            current_token_input[i] = batch_input_activations[t * input_dim + i];
+        }
+        
+        std::vector<float> current_token_output(output_dim);
+        
+        matvec_q8k_f32_vector_cpu(mat_q8k, current_token_input, current_token_output, output_dim, input_dim, false);
+        
+        for (int i = 0; i < output_dim; ++i) {
+            batch_output_activations[t * output_dim + i] = current_token_output[i];
+        }
     }
 }
 
@@ -1543,6 +1718,10 @@ void TinyLlamaModel::ensure_embed_tokens_dequantized() {
         dequantize_vector_q6k_to_f32(this->embed_tokens_q6k, this->embed_tokens_f32, total_elements_embed, 1);
     } else if (!this->embed_tokens_q4k.empty()) {
         dequantize_vector_q4k_to_f32(this->embed_tokens_q4k, this->embed_tokens_f32, total_elements_embed, 1);
+    } else if (!this->embed_tokens_q8k.empty()) {
+        dequantize_q8_k(this->embed_tokens_q8k, this->embed_tokens_f32, total_elements_embed, true);
+    } else if (!this->embed_tokens_q8_0.empty()) {
+        dequantize_vector_q8_0_to_f32(this->embed_tokens_q8_0, this->embed_tokens_f32, total_elements_embed, 1);
     } else if (!this->embed_tokens.empty()) { 
         this->embed_tokens_f32 = bf16vec_to_float_vec(this->embed_tokens);
     }
@@ -1579,8 +1758,10 @@ void TinyLlamaModel::initialize_weights(const SafeTensorsLoader* loader,
         dequantize_vector_q6k_to_f32(this->embed_tokens_q6k, this->embed_tokens_f32, total_elements_embed, 1);
       } else if (!this->embed_tokens_q4k.empty()) {
         dequantize_vector_q4k_to_f32(this->embed_tokens_q4k, this->embed_tokens_f32, total_elements_embed, 1);
+      } else if (!this->embed_tokens_q8k.empty()) {
+        dequantize_q8_k(this->embed_tokens_q8k, this->embed_tokens_f32, total_elements_embed, true);
       } else if (!this->embed_tokens_q8_0.empty()) {
-        Logger::warning("[INIT_WEIGHTS_GGUF_DEQUANT] Dequantization for embed_tokens_q8_0 to F32 is placeholder - ensure function exists.");
+        dequantize_vector_q8_0_to_f32(this->embed_tokens_q8_0, this->embed_tokens_f32, total_elements_embed, 1);
       } else if (!this->embed_tokens.empty()) { 
         this->embed_tokens_f32 = bf16vec_to_float_vec(this->embed_tokens);
       }
@@ -1774,36 +1955,66 @@ void TinyLlamaModel::ensure_layer_weights_dequantized(int layer_idx) {
     if (lw.q_proj_f32.empty()) {
         if (!lw.q_proj_q6k.empty()) dequantize_vector_q6k_to_f32(lw.q_proj_q6k, lw.q_proj_f32, q_o_proj_elements, 0);
         else if (!lw.q_proj_q4k.empty()) dequantize_vector_q4k_to_f32(lw.q_proj_q4k, lw.q_proj_f32, q_o_proj_elements, 0);
+        else if (!lw.q_proj_q8k.empty()) {
+            Logger::info("[Q8_K_DEQUANT_DEBUG] Dequantizing q_proj layer " + std::to_string(layer_idx) + 
+                         " from " + std::to_string(lw.q_proj_q8k.size()) + " Q8_K blocks");
+            dequantize_q8_k(lw.q_proj_q8k, lw.q_proj_f32, q_o_proj_elements, true);
+            Logger::info("[Q8_K_DEQUANT_RESULT] q_proj layer " + std::to_string(layer_idx) + 
+                         " dequantized to " + std::to_string(lw.q_proj_f32.size()) + " elements, first_4=[" + 
+                         std::to_string(lw.q_proj_f32[0]) + ", " + std::to_string(lw.q_proj_f32[1]) + 
+                         ", " + std::to_string(lw.q_proj_f32[2]) + ", " + std::to_string(lw.q_proj_f32[3]) + "]");
+        }
+        else if (!lw.q_proj_q8_0.empty()) {
+            Logger::info("[Q8_0_DEQUANT_DEBUG] Dequantizing q_proj layer " + std::to_string(layer_idx) + 
+                         " from " + std::to_string(lw.q_proj_q8_0.size()) + " Q8_0 blocks");
+            dequantize_vector_q8_0_to_f32(lw.q_proj_q8_0, lw.q_proj_f32, q_o_proj_elements, 3);
+            Logger::info("[Q8_0_DEQUANT_RESULT] q_proj layer " + std::to_string(layer_idx) + 
+                         " dequantized to " + std::to_string(lw.q_proj_f32.size()) + " elements, first_4=[" + 
+                         std::to_string(lw.q_proj_f32[0]) + ", " + std::to_string(lw.q_proj_f32[1]) + 
+                         ", " + std::to_string(lw.q_proj_f32[2]) + ", " + std::to_string(lw.q_proj_f32[3]) + "]");
+        }
         else if (!lw.q_proj.empty()) lw.q_proj_f32 = bf16vec_to_float_vec(lw.q_proj);
     }
     if (lw.k_proj_f32.empty()) {
         if (!lw.k_proj_q6k.empty()) dequantize_vector_q6k_to_f32(lw.k_proj_q6k, lw.k_proj_f32, k_v_proj_elements_specific, 0);
         else if (!lw.k_proj_q4k.empty()) dequantize_vector_q4k_to_f32(lw.k_proj_q4k, lw.k_proj_f32, k_v_proj_elements_specific, 0);
+        else if (!lw.k_proj_q8k.empty()) dequantize_q8_k(lw.k_proj_q8k, lw.k_proj_f32, k_v_proj_elements_specific, false);
+        else if (!lw.k_proj_q8_0.empty()) dequantize_vector_q8_0_to_f32(lw.k_proj_q8_0, lw.k_proj_f32, k_v_proj_elements_specific, 0);
         else if (!lw.k_proj.empty()) lw.k_proj_f32 = bf16vec_to_float_vec(lw.k_proj);
     }
     if (lw.v_proj_f32.empty()) {
         if (!lw.v_proj_q6k.empty()) dequantize_vector_q6k_to_f32(lw.v_proj_q6k, lw.v_proj_f32, k_v_proj_elements_specific, 0);
         else if (!lw.v_proj_q4k.empty()) dequantize_vector_q4k_to_f32(lw.v_proj_q4k, lw.v_proj_f32, k_v_proj_elements_specific, 0);
+        else if (!lw.v_proj_q8k.empty()) dequantize_q8_k(lw.v_proj_q8k, lw.v_proj_f32, k_v_proj_elements_specific, false);
+        else if (!lw.v_proj_q8_0.empty()) dequantize_vector_q8_0_to_f32(lw.v_proj_q8_0, lw.v_proj_f32, k_v_proj_elements_specific, 0);
         else if (!lw.v_proj.empty()) lw.v_proj_f32 = bf16vec_to_float_vec(lw.v_proj);
     }
     if (lw.o_proj_f32.empty()) {
         if (!lw.o_proj_q6k.empty()) dequantize_vector_q6k_to_f32(lw.o_proj_q6k, lw.o_proj_f32, q_o_proj_elements, 0);
         else if (!lw.o_proj_q4k.empty()) dequantize_vector_q4k_to_f32(lw.o_proj_q4k, lw.o_proj_f32, q_o_proj_elements, 0);
+        else if (!lw.o_proj_q8k.empty()) dequantize_q8_k(lw.o_proj_q8k, lw.o_proj_f32, q_o_proj_elements, false);
+        else if (!lw.o_proj_q8_0.empty()) dequantize_vector_q8_0_to_f32(lw.o_proj_q8_0, lw.o_proj_f32, q_o_proj_elements, 0);
         else if (!lw.o_proj.empty()) lw.o_proj_f32 = bf16vec_to_float_vec(lw.o_proj);
     }
     if (lw.gate_proj_f32.empty()) {
         if (!lw.gate_proj_q6k.empty()) dequantize_vector_q6k_to_f32(lw.gate_proj_q6k, lw.gate_proj_f32, mlp_gate_up_elements, 0);
         else if (!lw.gate_proj_q4k.empty()) dequantize_vector_q4k_to_f32(lw.gate_proj_q4k, lw.gate_proj_f32, mlp_gate_up_elements, 0);
+        else if (!lw.gate_proj_q8k.empty()) dequantize_q8_k(lw.gate_proj_q8k, lw.gate_proj_f32, mlp_gate_up_elements, false);
+        else if (!lw.gate_proj_q8_0.empty()) dequantize_vector_q8_0_to_f32(lw.gate_proj_q8_0, lw.gate_proj_f32, mlp_gate_up_elements, 0);
         else if (!lw.gate_proj.empty()) lw.gate_proj_f32 = bf16vec_to_float_vec(lw.gate_proj);
     }
     if (lw.up_proj_f32.empty()) {
         if (!lw.up_proj_q6k.empty()) dequantize_vector_q6k_to_f32(lw.up_proj_q6k, lw.up_proj_f32, mlp_gate_up_elements, 0);
         else if (!lw.up_proj_q4k.empty()) dequantize_vector_q4k_to_f32(lw.up_proj_q4k, lw.up_proj_f32, mlp_gate_up_elements, 0);
+        else if (!lw.up_proj_q8k.empty()) dequantize_q8_k(lw.up_proj_q8k, lw.up_proj_f32, mlp_gate_up_elements, false);
+        else if (!lw.up_proj_q8_0.empty()) dequantize_vector_q8_0_to_f32(lw.up_proj_q8_0, lw.up_proj_f32, mlp_gate_up_elements, 0);
         else if (!lw.up_proj.empty()) lw.up_proj_f32 = bf16vec_to_float_vec(lw.up_proj);
     }
     if (lw.down_proj_f32.empty()) {
         if (!lw.down_proj_q6k.empty()) dequantize_vector_q6k_to_f32(lw.down_proj_q6k, lw.down_proj_f32, mlp_down_elements, 0);
         else if (!lw.down_proj_q4k.empty()) dequantize_vector_q4k_to_f32(lw.down_proj_q4k, lw.down_proj_f32, mlp_down_elements, 0);
+        else if (!lw.down_proj_q8k.empty()) dequantize_q8_k(lw.down_proj_q8k, lw.down_proj_f32, mlp_down_elements, false);
+        else if (!lw.down_proj_q8_0.empty()) dequantize_vector_q8_0_to_f32(lw.down_proj_q8_0, lw.down_proj_f32, mlp_down_elements, 0);
         else if (!lw.down_proj.empty()) lw.down_proj_f32 = bf16vec_to_float_vec(lw.down_proj);
     }
 }
@@ -1816,6 +2027,10 @@ void TinyLlamaModel::ensure_lm_head_dequantized() {
         dequantize_vector_q6k_to_f32(this->lm_head_q6k, this->lm_head_f32, total_elements_lm_head, 1);
     } else if (!this->lm_head_q4k.empty()) {
         dequantize_vector_q4k_to_f32(this->lm_head_q4k, this->lm_head_f32, total_elements_lm_head, 1);
+    } else if (!this->lm_head_q8k.empty()) {
+        dequantize_q8_k(this->lm_head_q8k, this->lm_head_f32, total_elements_lm_head, true);
+    } else if (!this->lm_head_q8_0.empty()) {
+        dequantize_vector_q8_0_to_f32(this->lm_head_q8_0, this->lm_head_f32, total_elements_lm_head, 1);
     } else if (!this->lm_head.empty()) { 
         this->lm_head_f32 = bf16vec_to_float_vec(this->lm_head);
     }
@@ -2977,6 +3192,15 @@ std::vector<float> TinyLlamaModel::lookup_embedding(int token_id) {
     }
 
     float dequantized_block[GGML_QK8_0];
+    
+    // Debug logging for first few tokens
+    if (token_id < 3) {
+      Logger::info("[Q8_0_EMBED_DEBUG] Token " + std::to_string(token_id) + 
+                   ": blocks_per_row=" + std::to_string(blocks_per_row) + 
+                   ", start_block_idx=" + std::to_string(start_block_idx) + 
+                   ", total_table_size=" + std::to_string(embed_tokens_q8_0.size()));
+    }
+    
     for (size_t block_n = 0; block_n < blocks_per_row; ++block_n) {
       dequantize_q8_0_block(&embed_tokens_q8_0[start_block_idx + block_n],
                             dequantized_block);
@@ -2984,6 +3208,35 @@ std::vector<float> TinyLlamaModel::lookup_embedding(int token_id) {
       size_t elements_to_copy = SAFE_MIN(static_cast<size_t>(GGML_QK8_0), static_cast<size_t>(hs - dest_offset));
       std::memcpy(&embedding_vec[dest_offset], dequantized_block,
                   elements_to_copy * sizeof(float));
+      
+      // Debug logging for first token, first few blocks
+      if (token_id < 2 && block_n < 3) {
+        Logger::info("[Q8_0_EMBED_DEBUG] Token " + std::to_string(token_id) + 
+                     " Block " + std::to_string(block_n) + 
+                     " first 4 values: " + std::to_string(dequantized_block[0]) + 
+                     ", " + std::to_string(dequantized_block[1]) + 
+                     ", " + std::to_string(dequantized_block[2]) + 
+                     ", " + std::to_string(dequantized_block[3]));
+      }
+    }
+    
+    // Log final embedding vector stats for first few tokens
+    if (token_id < 2) {
+      float sum = 0.0f, min_val = embedding_vec[0], max_val = embedding_vec[0];
+      for (int i = 0; i < hs; ++i) {
+        sum += embedding_vec[i];
+        min_val = std::min(min_val, embedding_vec[i]);
+        max_val = std::max(max_val, embedding_vec[i]);
+      }
+      Logger::info("[Q8_0_EMBED_FINAL] Token " + std::to_string(token_id) + 
+                   " embedding stats: sum=" + std::to_string(sum) + 
+                   ", mean=" + std::to_string(sum / hs) + 
+                   ", min=" + std::to_string(min_val) + 
+                   ", max=" + std::to_string(max_val) + 
+                   ", first_4=[" + std::to_string(embedding_vec[0]) + 
+                   ", " + std::to_string(embedding_vec[1]) + 
+                   ", " + std::to_string(embedding_vec[2]) + 
+                   ", " + std::to_string(embedding_vec[3]) + "]");
     }
     return embedding_vec;
   }
@@ -3050,7 +3303,7 @@ std::vector<float> TinyLlamaModel::lookup_embedding(int token_id) {
 
   } else {
     Logger::error(
-        "No valid embedding table found (Q4_K, F32, BF16) for token: " +
+        "No valid embedding table found (Q4_K, Q8_0, Q6_K, F32, BF16) for token: " +
         std::to_string(token_id));
 
     return embedding_vec;
@@ -3094,27 +3347,31 @@ std::vector<float> TinyLlamaModel::forward(
     
     std::vector<float> q_vec(hs), k_vec(n_kv_heads * head_dim), v_vec(n_kv_heads * head_dim);
     // Example: Q-projection (adapt for other projections and quantization types)
+    bool enable_debug_logging = (l == 0); // Only log for first layer
     if (!lw.q_proj_f32.empty()) matvec_f32_f32_vector_cpu(lw.q_proj_f32, x_norm_vec1, q_vec, hs, hs);
-    else if (!lw.q_proj_q8_0.empty() && config_.is_gguf_file_loaded) matvec_q8_0_f32_vector_cpu(lw.q_proj_q8_0, x_norm_vec1, q_vec, hs, hs);
-    else if (!lw.q_proj_q4k.empty() && config_.is_gguf_file_loaded) matvec_q4k_f32_vector_cpu(lw.q_proj_q4k, x_norm_vec1, q_vec, hs, hs);
-    else if (!lw.q_proj_q6k.empty() && config_.is_gguf_file_loaded) matvec_q6k_f32_vector_cpu(lw.q_proj_q6k, x_norm_vec1, q_vec, hs, hs);
+    else if (!lw.q_proj_q8k.empty() && config_.is_gguf_file_loaded) matvec_q8k_f32_vector_cpu(lw.q_proj_q8k, x_norm_vec1, q_vec, hs, hs, enable_debug_logging);
+    else if (!lw.q_proj_q8_0.empty() && config_.is_gguf_file_loaded) matvec_q8_0_f32_vector_cpu(lw.q_proj_q8_0, x_norm_vec1, q_vec, hs, hs, enable_debug_logging);
+    else if (!lw.q_proj_q4k.empty() && config_.is_gguf_file_loaded) matvec_q4k_f32_vector_cpu(lw.q_proj_q4k, x_norm_vec1, q_vec, hs, hs, enable_debug_logging);
+    else if (!lw.q_proj_q6k.empty() && config_.is_gguf_file_loaded) matvec_q6k_f32_vector_cpu(lw.q_proj_q6k, x_norm_vec1, q_vec, hs, hs, enable_debug_logging);
     else if (!lw.q_proj.empty()) matvec_bf16_f32_vector_cpu(lw.q_proj, x_norm_vec1, q_vec, hs, hs); // BF16 from SafeTensors
-    else throw std::runtime_error("Layer " + std::to_string(l) + ": No Q proj weights (f32, q8, q4k, q6k, bf16) for CPU");
+    else throw std::runtime_error("Layer " + std::to_string(l) + ": No Q proj weights (f32, q8k, q8, q4k, q6k, bf16) for CPU");
     
     // ... K, V projections ...
     if (!lw.k_proj_f32.empty()) matvec_f32_f32_vector_cpu(lw.k_proj_f32, x_norm_vec1, k_vec, n_kv_heads * head_dim, hs);
-    else if (!lw.k_proj_q8_0.empty() && config_.is_gguf_file_loaded) matvec_q8_0_f32_vector_cpu(lw.k_proj_q8_0, x_norm_vec1, k_vec, n_kv_heads * head_dim, hs);
-    else if (!lw.k_proj_q4k.empty() && config_.is_gguf_file_loaded) matvec_q4k_f32_vector_cpu(lw.k_proj_q4k, x_norm_vec1, k_vec, n_kv_heads * head_dim, hs);
-    else if (!lw.k_proj_q6k.empty() && config_.is_gguf_file_loaded) matvec_q6k_f32_vector_cpu(lw.k_proj_q6k, x_norm_vec1, k_vec, n_kv_heads * head_dim, hs);
+    else if (!lw.k_proj_q8k.empty() && config_.is_gguf_file_loaded) matvec_q8k_f32_vector_cpu(lw.k_proj_q8k, x_norm_vec1, k_vec, n_kv_heads * head_dim, hs, enable_debug_logging);
+    else if (!lw.k_proj_q8_0.empty() && config_.is_gguf_file_loaded) matvec_q8_0_f32_vector_cpu(lw.k_proj_q8_0, x_norm_vec1, k_vec, n_kv_heads * head_dim, hs, enable_debug_logging);
+    else if (!lw.k_proj_q4k.empty() && config_.is_gguf_file_loaded) matvec_q4k_f32_vector_cpu(lw.k_proj_q4k, x_norm_vec1, k_vec, n_kv_heads * head_dim, hs, enable_debug_logging);
+    else if (!lw.k_proj_q6k.empty() && config_.is_gguf_file_loaded) matvec_q6k_f32_vector_cpu(lw.k_proj_q6k, x_norm_vec1, k_vec, n_kv_heads * head_dim, hs, enable_debug_logging);
     else if (!lw.k_proj.empty()) matvec_bf16_f32_vector_cpu(lw.k_proj, x_norm_vec1, k_vec, n_kv_heads * head_dim, hs);
-    else throw std::runtime_error("Layer " + std::to_string(l) + ": No K proj weights (f32, q8, q4k, q6k, bf16) for CPU");
+    else throw std::runtime_error("Layer " + std::to_string(l) + ": No K proj weights (f32, q8k, q8, q4k, q6k, bf16) for CPU");
 
     if (!lw.v_proj_f32.empty()) matvec_f32_f32_vector_cpu(lw.v_proj_f32, x_norm_vec1, v_vec, n_kv_heads * head_dim, hs);
-    else if (!lw.v_proj_q8_0.empty() && config_.is_gguf_file_loaded) matvec_q8_0_f32_vector_cpu(lw.v_proj_q8_0, x_norm_vec1, v_vec, n_kv_heads * head_dim, hs);
-    else if (!lw.v_proj_q4k.empty() && config_.is_gguf_file_loaded) matvec_q4k_f32_vector_cpu(lw.v_proj_q4k, x_norm_vec1, v_vec, n_kv_heads * head_dim, hs);
-    else if (!lw.v_proj_q6k.empty() && config_.is_gguf_file_loaded) matvec_q6k_f32_vector_cpu(lw.v_proj_q6k, x_norm_vec1, v_vec, n_kv_heads * head_dim, hs);
+    else if (!lw.v_proj_q8k.empty() && config_.is_gguf_file_loaded) matvec_q8k_f32_vector_cpu(lw.v_proj_q8k, x_norm_vec1, v_vec, n_kv_heads * head_dim, hs, enable_debug_logging);
+    else if (!lw.v_proj_q8_0.empty() && config_.is_gguf_file_loaded) matvec_q8_0_f32_vector_cpu(lw.v_proj_q8_0, x_norm_vec1, v_vec, n_kv_heads * head_dim, hs, enable_debug_logging);
+    else if (!lw.v_proj_q4k.empty() && config_.is_gguf_file_loaded) matvec_q4k_f32_vector_cpu(lw.v_proj_q4k, x_norm_vec1, v_vec, n_kv_heads * head_dim, hs, enable_debug_logging);
+    else if (!lw.v_proj_q6k.empty() && config_.is_gguf_file_loaded) matvec_q6k_f32_vector_cpu(lw.v_proj_q6k, x_norm_vec1, v_vec, n_kv_heads * head_dim, hs, enable_debug_logging);
     else if (!lw.v_proj.empty()) matvec_bf16_f32_vector_cpu(lw.v_proj, x_norm_vec1, v_vec, n_kv_heads * head_dim, hs);
-    else throw std::runtime_error("Layer " + std::to_string(l) + ": No V proj weights (f32, q8, q4k, q6k, bf16) for CPU");
+    else throw std::runtime_error("Layer " + std::to_string(l) + ": No V proj weights (f32, q8k, q8, q4k, q6k, bf16) for CPU");
 
     apply_rope_vector(q_vec, n_heads, head_dim, n_tokens, precomputed_freqs_cis_, max_pos_embeddings, config_.is_gguf_file_loaded);
     apply_rope_vector(k_vec, n_kv_heads, head_dim, n_tokens, precomputed_freqs_cis_, max_pos_embeddings, config_.is_gguf_file_loaded);
@@ -3177,11 +3434,12 @@ std::vector<float> TinyLlamaModel::forward(
 
     std::vector<float> attn_proj_vec(hs);
     if(!lw.o_proj_f32.empty()) matvec_f32_f32_vector_cpu(lw.o_proj_f32, attn_out_vec, attn_proj_vec, hs, hs);
-    else if (!lw.o_proj_q8_0.empty() && config_.is_gguf_file_loaded) matvec_q8_0_f32_vector_cpu(lw.o_proj_q8_0, attn_out_vec, attn_proj_vec, hs, hs);
-    else if (!lw.o_proj_q4k.empty() && config_.is_gguf_file_loaded) matvec_q4k_f32_vector_cpu(lw.o_proj_q4k, attn_out_vec, attn_proj_vec, hs, hs);
-    else if (!lw.o_proj_q6k.empty() && config_.is_gguf_file_loaded) matvec_q6k_f32_vector_cpu(lw.o_proj_q6k, attn_out_vec, attn_proj_vec, hs, hs);
+    else if (!lw.o_proj_q8k.empty() && config_.is_gguf_file_loaded) matvec_q8k_f32_vector_cpu(lw.o_proj_q8k, attn_out_vec, attn_proj_vec, hs, hs, enable_debug_logging);
+    else if (!lw.o_proj_q8_0.empty() && config_.is_gguf_file_loaded) matvec_q8_0_f32_vector_cpu(lw.o_proj_q8_0, attn_out_vec, attn_proj_vec, hs, hs, enable_debug_logging);
+    else if (!lw.o_proj_q4k.empty() && config_.is_gguf_file_loaded) matvec_q4k_f32_vector_cpu(lw.o_proj_q4k, attn_out_vec, attn_proj_vec, hs, hs, enable_debug_logging);
+    else if (!lw.o_proj_q6k.empty() && config_.is_gguf_file_loaded) matvec_q6k_f32_vector_cpu(lw.o_proj_q6k, attn_out_vec, attn_proj_vec, hs, hs, enable_debug_logging);
     else if(!lw.o_proj.empty()) matvec_bf16_f32_vector_cpu(lw.o_proj, attn_out_vec, attn_proj_vec, hs, hs);
-    else throw std::runtime_error("Layer " + std::to_string(l) + ": No O proj weights (f32, q8, q4k, q6k, bf16) for CPU");
+    else throw std::runtime_error("Layer " + std::to_string(l) + ": No O proj weights (f32, q8k, q8, q4k, q6k, bf16) for CPU");
 
     for(size_t i=0; i<input.size(); ++i) input[i] = x_resid1_vec[i] + attn_proj_vec[i]; // Update input by reference
 
@@ -3197,19 +3455,21 @@ std::vector<float> TinyLlamaModel::forward(
     std::vector<float> gate_vec(is), up_vec(is);
     // Gate-projection
     if(!lw.gate_proj_f32.empty()) matvec_f32_f32_vector_cpu(lw.gate_proj_f32, x_norm_vec2, gate_vec, is, hs);
-    else if (!lw.gate_proj_q8_0.empty() && config_.is_gguf_file_loaded) matvec_q8_0_f32_vector_cpu(lw.gate_proj_q8_0, x_norm_vec2, gate_vec, is, hs);
-    else if (!lw.gate_proj_q4k.empty() && config_.is_gguf_file_loaded) matvec_q4k_f32_vector_cpu(lw.gate_proj_q4k, x_norm_vec2, gate_vec, is, hs);
-    else if (!lw.gate_proj_q6k.empty() && config_.is_gguf_file_loaded) matvec_q6k_f32_vector_cpu(lw.gate_proj_q6k, x_norm_vec2, gate_vec, is, hs);
+    else if (!lw.gate_proj_q8k.empty() && config_.is_gguf_file_loaded) matvec_q8k_f32_vector_cpu(lw.gate_proj_q8k, x_norm_vec2, gate_vec, is, hs, enable_debug_logging);
+    else if (!lw.gate_proj_q8_0.empty() && config_.is_gguf_file_loaded) matvec_q8_0_f32_vector_cpu(lw.gate_proj_q8_0, x_norm_vec2, gate_vec, is, hs, enable_debug_logging);
+    else if (!lw.gate_proj_q4k.empty() && config_.is_gguf_file_loaded) matvec_q4k_f32_vector_cpu(lw.gate_proj_q4k, x_norm_vec2, gate_vec, is, hs, enable_debug_logging);
+    else if (!lw.gate_proj_q6k.empty() && config_.is_gguf_file_loaded) matvec_q6k_f32_vector_cpu(lw.gate_proj_q6k, x_norm_vec2, gate_vec, is, hs, enable_debug_logging);
     else if(!lw.gate_proj.empty()) matvec_bf16_f32_vector_cpu(lw.gate_proj, x_norm_vec2, gate_vec, is, hs);
-    else throw std::runtime_error("Layer " + std::to_string(l) + ": No Gate proj weights (f32, q8, q4k, q6k, bf16) for CPU");
+    else throw std::runtime_error("Layer " + std::to_string(l) + ": No Gate proj weights (f32, q8k, q8, q4k, q6k, bf16) for CPU");
 
     // Up-projection
     if(!lw.up_proj_f32.empty()) matvec_f32_f32_vector_cpu(lw.up_proj_f32, x_norm_vec2, up_vec, is, hs);
-    else if (!lw.up_proj_q8_0.empty() && config_.is_gguf_file_loaded) matvec_q8_0_f32_vector_cpu(lw.up_proj_q8_0, x_norm_vec2, up_vec, is, hs);
-    else if (!lw.up_proj_q4k.empty() && config_.is_gguf_file_loaded) matvec_q4k_f32_vector_cpu(lw.up_proj_q4k, x_norm_vec2, up_vec, is, hs);
-    else if (!lw.up_proj_q6k.empty() && config_.is_gguf_file_loaded) matvec_q6k_f32_vector_cpu(lw.up_proj_q6k, x_norm_vec2, up_vec, is, hs);
+    else if (!lw.up_proj_q8k.empty() && config_.is_gguf_file_loaded) matvec_q8k_f32_vector_cpu(lw.up_proj_q8k, x_norm_vec2, up_vec, is, hs, enable_debug_logging);
+    else if (!lw.up_proj_q8_0.empty() && config_.is_gguf_file_loaded) matvec_q8_0_f32_vector_cpu(lw.up_proj_q8_0, x_norm_vec2, up_vec, is, hs, enable_debug_logging);
+    else if (!lw.up_proj_q4k.empty() && config_.is_gguf_file_loaded) matvec_q4k_f32_vector_cpu(lw.up_proj_q4k, x_norm_vec2, up_vec, is, hs, enable_debug_logging);
+    else if (!lw.up_proj_q6k.empty() && config_.is_gguf_file_loaded) matvec_q6k_f32_vector_cpu(lw.up_proj_q6k, x_norm_vec2, up_vec, is, hs, enable_debug_logging);
     else if(!lw.up_proj.empty()) matvec_bf16_f32_vector_cpu(lw.up_proj, x_norm_vec2, up_vec, is, hs);
-    else throw std::runtime_error("Layer " + std::to_string(l) + ": No Up proj weights (f32, q8, q4k, q6k, bf16) for CPU");
+    else throw std::runtime_error("Layer " + std::to_string(l) + ": No Up proj weights (f32, q8k, q8, q4k, q6k, bf16) for CPU");
 
     std::vector<float> silu_out_vec(is);
     silu_cpu(gate_vec, silu_out_vec);
@@ -3220,11 +3480,12 @@ std::vector<float> TinyLlamaModel::forward(
     std::vector<float> mlp_out_vec(hs);
     // Down-projection
     if(!lw.down_proj_f32.empty()) matvec_f32_f32_vector_cpu(lw.down_proj_f32, swiglu_result_vec, mlp_out_vec, hs, is);
-    else if (!lw.down_proj_q8_0.empty() && config_.is_gguf_file_loaded) matvec_q8_0_f32_vector_cpu(lw.down_proj_q8_0, swiglu_result_vec, mlp_out_vec, hs, is);
-    else if (!lw.down_proj_q4k.empty() && config_.is_gguf_file_loaded) matvec_q4k_f32_vector_cpu(lw.down_proj_q4k, swiglu_result_vec, mlp_out_vec, hs, is);
-    else if (!lw.down_proj_q6k.empty() && config_.is_gguf_file_loaded) matvec_q6k_f32_vector_cpu(lw.down_proj_q6k, swiglu_result_vec, mlp_out_vec, hs, is);
+    else if (!lw.down_proj_q8k.empty() && config_.is_gguf_file_loaded) matvec_q8k_f32_vector_cpu(lw.down_proj_q8k, swiglu_result_vec, mlp_out_vec, hs, is, enable_debug_logging);
+    else if (!lw.down_proj_q8_0.empty() && config_.is_gguf_file_loaded) matvec_q8_0_f32_vector_cpu(lw.down_proj_q8_0, swiglu_result_vec, mlp_out_vec, hs, is, enable_debug_logging);
+    else if (!lw.down_proj_q4k.empty() && config_.is_gguf_file_loaded) matvec_q4k_f32_vector_cpu(lw.down_proj_q4k, swiglu_result_vec, mlp_out_vec, hs, is, enable_debug_logging);
+    else if (!lw.down_proj_q6k.empty() && config_.is_gguf_file_loaded) matvec_q6k_f32_vector_cpu(lw.down_proj_q6k, swiglu_result_vec, mlp_out_vec, hs, is, enable_debug_logging);
     else if(!lw.down_proj.empty()) matvec_bf16_f32_vector_cpu(lw.down_proj, swiglu_result_vec, mlp_out_vec, hs, is);
-    else throw std::runtime_error("Layer " + std::to_string(l) + ": No Down proj weights (f32, q8, q4k, q6k, bf16) for CPU");
+    else throw std::runtime_error("Layer " + std::to_string(l) + ": No Down proj weights (f32, q8k, q8, q4k, q6k, bf16) for CPU");
 
     for(size_t i=0; i<input.size(); ++i) input[i] = x_resid2_vec[i] + mlp_out_vec[i]; // Update input by reference
     
@@ -3245,12 +3506,14 @@ std::vector<float> TinyLlamaModel::forward(
 
   std::vector<float> logits(vs);
   ensure_lm_head_dequantized();
+    bool enable_lm_head_debug_logging = true; // Always log LM head for debugging
     if (!lm_head_f32.empty()) matvec_f32_f32_vector_cpu(lm_head_f32, x_final_norm_vec, logits, vs, hs);
-    else if (!lm_head_q8_0.empty() && config_.is_gguf_file_loaded) matvec_q8_0_f32_vector_cpu(lm_head_q8_0, x_final_norm_vec, logits, vs, hs);
-    else if (!lm_head_q4k.empty() && config_.is_gguf_file_loaded) matvec_q4k_f32_vector_cpu(lm_head_q4k, x_final_norm_vec, logits, vs, hs);
-    else if (!lm_head_q6k.empty() && config_.is_gguf_file_loaded) matvec_q6k_f32_vector_cpu(lm_head_q6k, x_final_norm_vec, logits, vs, hs);
+    else if (!lm_head_q8k.empty() && config_.is_gguf_file_loaded) matvec_q8k_f32_vector_cpu(lm_head_q8k, x_final_norm_vec, logits, vs, hs, enable_lm_head_debug_logging);
+    else if (!lm_head_q8_0.empty() && config_.is_gguf_file_loaded) matvec_q8_0_f32_vector_cpu(lm_head_q8_0, x_final_norm_vec, logits, vs, hs, enable_lm_head_debug_logging);
+    else if (!lm_head_q4k.empty() && config_.is_gguf_file_loaded) matvec_q4k_f32_vector_cpu(lm_head_q4k, x_final_norm_vec, logits, vs, hs, enable_lm_head_debug_logging);
+    else if (!lm_head_q6k.empty() && config_.is_gguf_file_loaded) matvec_q6k_f32_vector_cpu(lm_head_q6k, x_final_norm_vec, logits, vs, hs, enable_lm_head_debug_logging);
     else if (!lm_head.empty()) matvec_bf16_f32_vector_cpu(lm_head, x_final_norm_vec, logits, vs, hs); // Fallback for BF16 SafeTensors
-    else throw std::runtime_error("No valid LM Head weights (f32, q8, q4k, q6k, bf16) found for CPU final stage.");
+    else throw std::runtime_error("No valid LM Head weights (f32, q8k, q8, q4k, q6k, bf16) found for CPU final stage.");
 
   if (log_this_step || log_first_gen_step) {
         log_vector_summary("[CPU_FWD] Final Logits (all CPU, pos=" + std::to_string(n_tokens) + ")", logits, 15);
@@ -3812,6 +4075,24 @@ void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
         memcpy(dest_q6k.data(), tensor_data_ptr, info.size_in_bytes);
         model.lm_head_q6k.swap(dest_q6k);
         Logger::info("[MAP_GGUF_GLOBAL] Mapped 'output.weight' (Q6_K) to model.lm_head_q6k. Size: " + std::to_string(model.lm_head_q6k.size()) + " blocks.");
+      } else if (info.type == GGMLType::GGML_TYPE_Q4_K) {
+        size_t num_blocks = info.size_in_bytes / sizeof(block_q4_K);
+        std::vector<block_q4_K> dest_q4k(num_blocks);
+        memcpy(dest_q4k.data(), tensor_data_ptr, info.size_in_bytes);
+        model.lm_head_q4k.swap(dest_q4k);
+        Logger::info("[MAP_GGUF_GLOBAL] Mapped 'output.weight' (Q4_K) to model.lm_head_q4k. Size: " + std::to_string(model.lm_head_q4k.size()) + " blocks.");
+      } else if (info.type == GGMLType::GGML_TYPE_Q8_0) {
+        size_t num_blocks = info.size_in_bytes / sizeof(block_q8_0);
+        std::vector<block_q8_0> dest_q8_0(num_blocks);
+        memcpy(dest_q8_0.data(), tensor_data_ptr, info.size_in_bytes);
+        model.lm_head_q8_0.swap(dest_q8_0);
+        Logger::info("[MAP_GGUF_GLOBAL] Mapped 'output.weight' (Q8_0) to model.lm_head_q8_0. Size: " + std::to_string(model.lm_head_q8_0.size()) + " blocks.");
+      } else if (info.type == GGMLType::GGML_TYPE_Q8_K) {
+        size_t num_blocks = info.size_in_bytes / sizeof(block_q8_K);
+        std::vector<block_q8_K> dest_q8k(num_blocks);
+        memcpy(dest_q8k.data(), tensor_data_ptr, info.size_in_bytes);
+        model.lm_head_q8k.swap(dest_q8k);
+        Logger::info("[MAP_GGUF_GLOBAL] Mapped 'output.weight' (Q8_K) to model.lm_head_q8k. Size: " + std::to_string(model.lm_head_q8k.size()) + " blocks.");
       } else if (info.type == GGMLType::GGML_TYPE_F32) {
       size_t num_elements = info.size_in_bytes / sizeof(float);
       std::vector<float> dest_f32(num_elements);
@@ -3829,6 +4110,24 @@ void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
         memcpy(dest_q4k.data(), tensor_data_ptr, info.size_in_bytes);
         model.embed_tokens_q4k.swap(dest_q4k);
         Logger::info("[MAP_GGUF_GLOBAL] Mapped 'token_embd.weight' (Q4_K) to model.embed_tokens_q4k. Size: " + std::to_string(model.embed_tokens_q4k.size()) + " blocks.");
+      } else if (info.type == GGMLType::GGML_TYPE_Q8_0) {
+        size_t num_blocks = info.size_in_bytes / sizeof(block_q8_0);
+        std::vector<block_q8_0> dest_q8_0(num_blocks);
+        memcpy(dest_q8_0.data(), tensor_data_ptr, info.size_in_bytes);
+        model.embed_tokens_q8_0.swap(dest_q8_0);
+        Logger::info("[MAP_GGUF_GLOBAL] Mapped 'token_embd.weight' (Q8_0) to model.embed_tokens_q8_0. Size: " + std::to_string(model.embed_tokens_q8_0.size()) + " blocks.");
+      } else if (info.type == GGMLType::GGML_TYPE_Q8_K) {
+        size_t num_blocks = info.size_in_bytes / sizeof(block_q8_K);
+        std::vector<block_q8_K> dest_q8k(num_blocks);
+        memcpy(dest_q8k.data(), tensor_data_ptr, info.size_in_bytes);
+        model.embed_tokens_q8k.swap(dest_q8k);
+        Logger::info("[MAP_GGUF_GLOBAL] Mapped 'token_embd.weight' (Q8_K) to model.embed_tokens_q8k. Size: " + std::to_string(model.embed_tokens_q8k.size()) + " blocks.");
+      } else if (info.type == GGMLType::GGML_TYPE_Q6_K) {
+        size_t num_blocks = info.size_in_bytes / sizeof(block_q6_K);
+        std::vector<block_q6_K> dest_q6k(num_blocks);
+        memcpy(dest_q6k.data(), tensor_data_ptr, info.size_in_bytes);
+        model.embed_tokens_q6k.swap(dest_q6k);
+        Logger::info("[MAP_GGUF_GLOBAL] Mapped 'token_embd.weight' (Q6_K) to model.embed_tokens_q6k. Size: " + std::to_string(model.embed_tokens_q6k.size()) + " blocks.");
       } else if (info.type == GGMLType::GGML_TYPE_F32) {
         size_t num_elements = info.size_in_bytes / sizeof(float);
         std::vector<float> dest_f32(num_elements);
@@ -3893,6 +4192,11 @@ void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
           std::vector<block_q4_K> dest_q4k(num_blocks);
           memcpy(dest_q4k.data(), tensor_data_ptr, info.size_in_bytes);
 
+          Logger::info("[MAP_GGUF_Q4K_BLOCK_COUNT] Layer " + std::to_string(layer_idx) + 
+                       " " + sub_field + ": " + std::to_string(num_blocks) + 
+                       " blocks (GGML_QK_K=" + std::to_string(GGML_QK_K) + 
+                       ", size_in_bytes=" + std::to_string(info.size_in_bytes) + ")");
+
           if (sub_field == "attn_q.weight") {
             model.layers[layer_idx].q_proj_q4k.swap(dest_q4k);
           } else if (sub_field == "attn_k.weight") {
@@ -3934,8 +4238,69 @@ void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
             model.layers[layer_idx].up_proj_q6k.swap(dest_q6k);
           } else if (sub_field == "ffn_down.weight") {
             model.layers[layer_idx].down_proj_q6k.swap(dest_q6k);
-        } 
-        else if (info.type == GGMLType::GGML_TYPE_BF16) {
+          } else {
+            Logger::warning(std::string("[MAP_GGUF_Q6K_TRACE] Unsupported Q6_K layer sub-field: '") + sub_field + "' for " + target_field_key + " (GGUF name: " + info.name + ")");
+          }
+        }
+        else if (info.type == GGMLType::GGML_TYPE_Q8_0) {
+          size_t num_blocks = info.size_in_bytes / sizeof(block_q8_0);
+          if (num_blocks == 0 && info.size_in_bytes > 0) {
+              Logger::warning("[MAP_GGUF_Q8_0_TRACE] num_blocks is 0 for Q8_0 tensor: '" + info.name + "' but size_in_bytes is " + std::to_string(info.size_in_bytes) + ". Skipping.");
+            continue;
+          }
+          std::vector<block_q8_0> dest_q8_0(num_blocks);
+          memcpy(dest_q8_0.data(), tensor_data_ptr, info.size_in_bytes);
+
+          Logger::info("[MAP_GGUF_Q8_0_BLOCK_COUNT] Layer " + std::to_string(layer_idx) + 
+                       " " + sub_field + ": " + std::to_string(num_blocks) + 
+                       " blocks (GGML_QK8_0=" + std::to_string(GGML_QK8_0) + 
+                       ", size_in_bytes=" + std::to_string(info.size_in_bytes) + ")");
+
+          if (sub_field == "attn_q.weight") {
+            model.layers[layer_idx].q_proj_q8_0.swap(dest_q8_0);
+          } else if (sub_field == "attn_k.weight") {
+            model.layers[layer_idx].k_proj_q8_0.swap(dest_q8_0);
+          } else if (sub_field == "attn_v.weight") {
+            model.layers[layer_idx].v_proj_q8_0.swap(dest_q8_0);
+          } else if (sub_field == "attn_output.weight") {
+            model.layers[layer_idx].o_proj_q8_0.swap(dest_q8_0);
+          } else if (sub_field == "ffn_gate.weight") {
+            model.layers[layer_idx].gate_proj_q8_0.swap(dest_q8_0);
+          } else if (sub_field == "ffn_up.weight") {
+            model.layers[layer_idx].up_proj_q8_0.swap(dest_q8_0);
+          } else if (sub_field == "ffn_down.weight") {
+            model.layers[layer_idx].down_proj_q8_0.swap(dest_q8_0);
+          } else {
+            Logger::warning(std::string("[MAP_GGUF_Q8_0_TRACE] Unsupported Q8_0 layer sub-field: '") + sub_field + "' for " + target_field_key + " (GGUF name: " + info.name + ")");
+          }
+        }
+        else if (info.type == GGMLType::GGML_TYPE_Q8_K) {
+          size_t num_blocks = info.size_in_bytes / sizeof(block_q8_K);
+          if (num_blocks == 0 && info.size_in_bytes > 0) {
+              Logger::warning("[MAP_GGUF_Q8_K_TRACE] num_blocks is 0 for Q8_K tensor: '" + info.name + "' but size_in_bytes is " + std::to_string(info.size_in_bytes) + ". Skipping.");
+            continue;
+          }
+          std::vector<block_q8_K> dest_q8k(num_blocks);
+          memcpy(dest_q8k.data(), tensor_data_ptr, info.size_in_bytes);
+
+          if (sub_field == "attn_q.weight") {
+            model.layers[layer_idx].q_proj_q8k.swap(dest_q8k);
+          } else if (sub_field == "attn_k.weight") {
+            model.layers[layer_idx].k_proj_q8k.swap(dest_q8k);
+          } else if (sub_field == "attn_v.weight") {
+            model.layers[layer_idx].v_proj_q8k.swap(dest_q8k);
+          } else if (sub_field == "attn_output.weight") {
+            model.layers[layer_idx].o_proj_q8k.swap(dest_q8k);
+          } else if (sub_field == "ffn_gate.weight") {
+            model.layers[layer_idx].gate_proj_q8k.swap(dest_q8k);
+          } else if (sub_field == "ffn_up.weight") {
+            model.layers[layer_idx].up_proj_q8k.swap(dest_q8k);
+          } else if (sub_field == "ffn_down.weight") {
+            model.layers[layer_idx].down_proj_q8k.swap(dest_q8k);
+          } else {
+            Logger::warning(std::string("[MAP_GGUF_Q8_K_TRACE] Unsupported Q8_K layer sub-field: '") + sub_field + "' for " + target_field_key + " (GGUF name: " + info.name + ")");
+          }
+        } else if (info.type == GGMLType::GGML_TYPE_BF16) {
           size_t num_elements = info.size_in_bytes / sizeof(uint16_t);
           if (num_elements == 0 && info.size_in_bytes > 0) {
               Logger::warning("[MAP_GGUF_BF16_TRACE] num_elements is 0 for BF16 tensor: '" + info.name + "' but size_in_bytes is " + std::to_string(info.size_in_bytes) + ". Skipping.");
@@ -3960,10 +4325,6 @@ void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
             model.layers[layer_idx].down_proj.swap(dest_bf16);
           } else {
             Logger::warning(std::string("[MAP_GGUF_BF16_TRACE] Unsupported BF16 layer sub-field: '") + sub_field + "' for " + target_field_key + " (GGUF name: " + info.name + ")");
-          }
-        }
-        else {
-            Logger::warning(std::string("[MAP_GGUF_Q6K_TRACE] Unsupported Q6_K layer sub-field: '") + sub_field + "' for " + target_field_key + " (GGUF name: " + info.name + ")");
           }
         }
           else {

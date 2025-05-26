@@ -299,3 +299,15 @@ void dequantize_vector_q4k_to_f32(const std::vector<block_q4_K>& q_weights,
                                   std::vector<float>& f32_weights,
                                   size_t total_num_elements,
                                   int log_first_n_blocks = 0);
+
+/**
+ * @brief Dequantizes a vector of Q8_0 blocks to a vector of float32
+ * @param q_weights Input vector of Q8_0 blocks
+ * @param f32_weights Output vector of float32 values (will be resized)
+ * @param total_num_elements Total number of float elements expected after dequantization
+ * @param log_first_n_blocks Number of initial blocks to log dequantization details for (0 for no logging)
+ */
+void dequantize_vector_q8_0_to_f32(const std::vector<block_q8_0>& q_weights,
+                                   std::vector<float>& f32_weights,
+                                   size_t total_num_elements,
+                                   int log_first_n_blocks = 0);

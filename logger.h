@@ -45,6 +45,10 @@ class Logger {
   // Helper to convert uint16_t to hex string for logging
   static std::string uint16ToHex(uint16_t val);
 
+  // Templated helper to convert unsigned integral types to hex string
+  template <typename T>
+  static std::string to_hex(T val);
+
   // Helper for vector stats (if it's part of public API, otherwise private)
   static void log_vector_stats(const std::string& name, const std::vector<float>& v, int n_show = 5);
   static void log_vector_stats_int8(const std::string& name, const std::vector<int8_t>& v, int n_show = 5);

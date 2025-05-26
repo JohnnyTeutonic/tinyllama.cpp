@@ -223,14 +223,22 @@ void Logger::log_vector_stats_int8(const std::string& name, const std::vector<in
 }
 
 std::string Logger::ptrToString(const void* ptr) {
-    std::ostringstream ss;
-    ss << ptr;
-    return ss.str();
+    std::ostringstream oss;
+    oss << ptr;
+    return oss.str();
 }
 
-// Helper to convert uint16_t to hex string for logging
+// Templated helper to convert unsigned integral types to hex string
+template <typename T>
+std::string Logger::to_hex(T val) {
+    std::ostringstream oss;
+    oss << "0x" << std::hex << static_cast<unsigned long long>(val); // Cast to larger type if necessary
+    return oss.str();
+}
+
+// Explicit template instantiation for uint16_t if needed, or ensure it's defined in a way that uint16ToHex can find it.
+// Or, make uint16ToHex call the templated version directly.
+
 std::string Logger::uint16ToHex(uint16_t val) {
-    std::ostringstream ss;
-    ss << std::hex << std::setfill('0') << std::setw(4) << val;
-    return ss.str();
+    return to_hex(val); // Now calls the templated version
 }
