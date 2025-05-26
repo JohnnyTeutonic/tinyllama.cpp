@@ -544,10 +544,9 @@ std::string TinyLlamaSession::generate(const std::string& user_prompt, int steps
   int start_pos_for_loop = 0;
 
   // Prefill logic: Use batch prefill for longer prompts to maintain coherence
-  // - If batch generation is enabled: use batch prefill for prompts >= 4 tokens
-  // - If batch generation is disabled: use batch prefill only for long prompts >= 16 tokens
-  bool prefill_enabled = (use_batch_generation_ && num_prompt_tokens >= 4) || 
-                         (!use_batch_generation_ && num_prompt_tokens >= 16);
+  // For single sequences, only use batch prefill for very long prompts (>= 32 tokens)
+  // to avoid the overhead of CUDA batch processing for short sequences
+  bool prefill_enabled = num_prompt_tokens >= 32;
 
 if (prefill_enabled) {
       Logger::info("[Generate API] Prefill enabled. num_prompt_tokens: " + std::to_string(num_prompt_tokens) + 
@@ -691,44 +690,22 @@ if (prefill_enabled) {
         break; 
     }
 
-    // Determine if the rest of the pass for this token should go to GPU
-    bool use_gpu_path = (config_.num_hidden_layers > config_.num_cpu_offload_layers);
-
-    // Single forward pass logic for the current token
-    if (use_gpu_path) {
-      if (use_batch_generation_) {
-        // GPU batch generation path (single token batch)
-        gpuErrchk(cudaMemcpy(model_->get_x_dev(), current_data_host.data(), current_data_host.size() * sizeof(float), cudaMemcpyHostToDevice));
-        std::vector<int> single_token_positions = {pos};
-        std::vector<int> single_sequence_indices = {0}; // Single sequence at index 0
-        auto batch_logits = model_->forward_device_batch_generation(model_->get_x_dev(), single_token_positions, single_sequence_indices, 1, &kv_cache_, 0);
-        if (!batch_logits.empty() && !batch_logits[0].empty()) {
-          logits = batch_logits[0]; // Extract logits for the single token
-        } else {
-          Logger::error("GPU batch generation returned empty logits for single token at pos " + std::to_string(pos));
-          logits.clear();
-        }
-      } else {
-        // Standard GPU single token path
-        gpuErrchk(cudaMemcpy(model_->get_x_dev(), current_data_host.data(), current_data_host.size() * sizeof(float), cudaMemcpyHostToDevice));
-        logits = model_->forward_device(model_->get_x_dev(), pos, &kv_cache_, nullptr);
-      }
+    // Mixed-mode forward pass logic
+    if (config_.num_cpu_offload_layers > 0 && config_.num_cpu_offload_layers < config_.num_hidden_layers) {
+      // Mixed CPU/GPU mode: First process CPU layers, then GPU layers
+      Logger::debug("[Mixed Mode] Processing " + std::to_string(config_.num_cpu_offload_layers) + " CPU layers first");
+      std::vector<float> intermediate_activations = model_->forward(current_data_host, pos, &kv_cache_, nullptr);
+      
+      Logger::debug("[Mixed Mode] CPU layers complete, transferring to GPU for remaining layers");
+      gpuErrchk(cudaMemcpy(model_->get_x_dev(), intermediate_activations.data(), intermediate_activations.size() * sizeof(float), cudaMemcpyHostToDevice));
+      logits = model_->forward_device(model_->get_x_dev(), pos, &kv_cache_, nullptr);
+    } else if (config_.num_cpu_offload_layers == 0) {
+      // GPU-only mode
+      gpuErrchk(cudaMemcpy(model_->get_x_dev(), current_data_host.data(), current_data_host.size() * sizeof(float), cudaMemcpyHostToDevice));
+      logits = model_->forward_device(model_->get_x_dev(), pos, &kv_cache_, nullptr);
     } else {
-      if (use_batch_generation_) {
-        // CPU batch generation path (single token batch)
-        std::vector<int> single_token_positions = {pos};
-        std::vector<int> single_sequence_indices = {0}; // Single sequence at index 0
-        auto batch_logits = model_->forward_cpu_batch_generation(current_data_host, single_token_positions, single_sequence_indices, 1, &kv_cache_);
-        if (!batch_logits.empty() && !batch_logits[0].empty()) {
-          logits = batch_logits[0]; // Extract logits for the single token
-        } else {
-          Logger::error("CPU batch generation returned empty logits for single token at pos " + std::to_string(pos));
-          logits.clear();
-        }
-      } else {
-        // Standard CPU single token path
-        logits = model_->forward(current_data_host, pos, &kv_cache_, nullptr);
-      }
+      // CPU-only mode
+      logits = model_->forward(current_data_host, pos, &kv_cache_, nullptr);
     }
 
     // Sampling logic: Only sample if we're at the last prompt token or generating
