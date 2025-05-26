@@ -47,33 +47,9 @@ static std::atomic<int> g_vec_dot_q4_k_q8_k_log_count{0};
 float fp16_to_fp32(uint16_t h, bool is_gguf_scale_field) {
   uint16_t h_to_convert = h;
   bool original_sign_bit_was_set = (h & 0x8000);
-
-  if (is_gguf_scale_field) {
-    static std::atomic<int> q8_scale_log_count{0};
-    if (q8_scale_log_count < 10) {
-        Logger::info("[FP16_DEBUG_Q8_SCALE] Original h: 0x" + 
-                     Logger::to_hex(h) + 
-                     ", h_to_convert (before sign strip): 0x" + Logger::to_hex(h_to_convert) +
-                     ", original_sign_bit_was_set: " + std::to_string(original_sign_bit_was_set));
-        q8_scale_log_count++;
-    }
-  }
-
-  if (is_gguf_scale_field && original_sign_bit_was_set) {
-    h_to_convert = h & 0x7FFF;
-    static std::atomic<int> q8_scale_strip_log_count{0};
-     if (is_gguf_scale_field && q8_scale_strip_log_count < 10) {
-        Logger::info("[FP16_DEBUG_Q8_SCALE_STRIPPED] Original h: 0x" + 
-                     Logger::to_hex(h) + 
-                     ", h_to_convert (after sign strip): 0x" + Logger::to_hex(h_to_convert));
-        q8_scale_strip_log_count++;
-    }
-  }
-
   uint32_t sign = (h_to_convert >> 15) & 1;
   uint32_t exp_fp16 = (h_to_convert >> 10) & 0x1f;
   uint32_t mant_fp16 = h_to_convert & 0x3ff;
-
   uint32_t x;
 
   if (exp_fp16 == 0) {
@@ -104,35 +80,12 @@ float fp16_to_fp32(uint16_t h, bool is_gguf_scale_field) {
 
   if (is_gguf_scale_field) {
     static std::atomic<int> q8_scale_f_log_count{0};
-    if (q8_scale_f_log_count < 10) {
-        Logger::info("[FP16_DEBUG_Q8_SCALE_F] Original h: 0x" + 
-                     Logger::to_hex(h) + 
-                     ", Converted float f (before abs): " + std::to_string(f));
-        q8_scale_f_log_count++;
-    }
   }
 
   if (is_gguf_scale_field && f < 0.0f && !(std::isnan(f) || std::isinf(f))) {
     f = std::abs(f);
-    static std::atomic<int> q8_scale_abs_log_count{0};
-    if (is_gguf_scale_field && q8_scale_abs_log_count < 10) {
-        Logger::info("[FP16_DEBUG_Q8_SCALE_ABS] Original h: 0x" + 
-                     Logger::to_hex(h) + 
-                     ", Converted float f (after abs): " + std::to_string(f));
-        q8_scale_abs_log_count++;
-    }
   }
   
-  if (is_gguf_scale_field) {
-    static std::atomic<int> q8_scale_final_log_count{0};
-    if (q8_scale_final_log_count < 10) {
-        Logger::info("[FP16_DEBUG_Q8_FINAL_F] Original h: 0x" + 
-                     Logger::to_hex(h) + 
-                     ", Final float f: " + std::to_string(f));
-        q8_scale_final_log_count++;
-    }
-  }
-
   return f;
 }
 
@@ -1223,12 +1176,6 @@ void dequantize_vector_q8_0_to_f32(const std::vector<block_q8_0>& q_weights,
 
     f32_weights.resize(total_num_elements);
     
-    // Enhanced debug logging
-    if (log_first_n_blocks > 0) {
-        Logger::info("[DEQUANT_VEC_Q8_0_DEBUG] Starting dequantization: " +
-                     std::to_string(q_weights.size()) + " blocks -> " +
-                     std::to_string(total_num_elements) + " elements");
-    }
     size_t expected_blocks = (total_num_elements + GGML_QK8_0 - 1) / GGML_QK8_0;
 
     if (q_weights.size() != expected_blocks) {
@@ -1266,21 +1213,7 @@ void dequantize_vector_q8_0_to_f32(const std::vector<block_q8_0>& q_weights,
             dequantize_q8_0_block(current_block_ptr, temp_block);
             std::memcpy(current_output_ptr, temp_block, elements_in_this_block * sizeof(float));
         }
-        
-        // Debug logging for first few blocks
-        if (log_first_n_blocks > 0 && i < static_cast<size_t>(log_first_n_blocks)) {
-            Logger::info("[DEQUANT_VEC_Q8_0_BLOCK] Block " + std::to_string(i) + 
-                         ": scale=" + std::to_string(fp16_to_fp32(current_block_ptr->d, true)) +
-                         ", first_4_quant=[" + std::to_string(current_block_ptr->qs[0]) + 
-                         ", " + std::to_string(current_block_ptr->qs[1]) + 
-                         ", " + std::to_string(current_block_ptr->qs[2]) + 
-                         ", " + std::to_string(current_block_ptr->qs[3]) + "]" +
-                         ", first_4_dequant=[" + std::to_string(current_output_ptr[0]) + 
-                         ", " + std::to_string(current_output_ptr[1]) + 
-                         ", " + std::to_string(current_output_ptr[2]) + 
-                         ", " + std::to_string(current_output_ptr[3]) + "]");
-        }
-        
+                
         current_output_ptr += elements_in_this_block;
         elements_processed += elements_in_this_block;
     }
@@ -1288,7 +1221,5 @@ void dequantize_vector_q8_0_to_f32(const std::vector<block_q8_0>& q_weights,
     if (elements_processed != total_num_elements) {
         Logger::warning("[DEQUANT_VEC_Q8_0] Processed " + std::to_string(elements_processed) +
                         " elements, but expected " + std::to_string(total_num_elements) + ".");
-    } else {
-        Logger::info("[DEQUANT_VEC_Q8_0] Successfully dequantized all blocks. Total elements: " + std::to_string(elements_processed));
     }
 }
