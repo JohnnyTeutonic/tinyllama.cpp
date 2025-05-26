@@ -637,9 +637,13 @@ if (prefill_enabled) {
           return ""; // Critical error
       }
       next_token_id = sample_top_k_top_p_temperature(logits, temperature, top_k, top_p, rng_);
-      // DON'T stream yet - token hasn't been processed through model!
       generated_token_ids.push_back(next_token_id); // Track generated token
       generated_count++;
+      
+      // Stream the first generated token from prefill
+      generated_stream_ << tokenizer_->decode({next_token_id}, false);
+      generated_text_for_api_return_ += tokenizer_->decode({next_token_id}, false);
+      
       start_pos_for_loop = num_prompt_tokens; // Next token will be at num_prompt_tokens
       kv_cache_.seq_len = num_prompt_tokens; // KVCache is now filled up to num_prompt_tokens
 
@@ -722,6 +726,13 @@ if (prefill_enabled) {
         generated_text_for_api_return_ += tokenizer_->decode({next_token_id}, false);
       } else {
         // This is the first token sampled from the last prompt position
+        generated_token_ids.push_back(next_token_id);
+        generated_count++;
+        
+        // Stream the first generated token
+        generated_stream_ << tokenizer_->decode({next_token_id}, false);
+        generated_text_for_api_return_ += tokenizer_->decode({next_token_id}, false);
+        
         Logger::info("[Generate API] First token sampled from prompt: " + std::to_string(next_token_id) + 
                      ", Decoded: \"" + tokenizer_->decode({next_token_id}, false) + "\"");
       }

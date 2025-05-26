@@ -124,6 +124,11 @@ usage() {
     echo "                 --version <semver>          (default: ${DEFAULT_RELEASE_VERSION})"
     echo "                 --build-type <Release|Debug> (default: Release, for packaging)"
     echo ""
+    echo "  install      Install the Python package."
+    echo "               Options:"
+    echo "                 --gpu                       Enable GPU support (CUDA)"
+    echo "                 --cpu                       CPU-only mode (default)"
+    echo ""
     echo "  help         Show this help message."
     echo ""
     echo "  --n-gpu-layers <num> Number of layers to offload to GPU (-1 for all, 0 for none, default: ${DEFAULT_N_GPU_LAYERS})"
@@ -682,6 +687,42 @@ do_package_release() {
     cd "${PROJECT_ROOT_DIR}" || error "Failed to cd back to project root"
 }
 
+do_install() {
+    local use_gpu="false"
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --gpu) use_gpu="true"; shift ;;
+            --cpu) use_gpu="false"; shift ;;
+            *) error "Unknown option for install: $1"; usage ;;
+        esac
+    done
+
+    log "Installing Python package..."
+    if [ "$use_gpu" = "true" ]; then
+        log "Installing with GPU (CUDA) support..."
+        export TINYLLAMA_CPP_BUILD_CUDA=ON
+    else
+        log "Installing with CPU-only support..."
+        export TINYLLAMA_CPP_BUILD_CUDA=OFF
+    fi
+
+    cd "${PROJECT_ROOT_DIR}" || error "Failed to cd to project root"
+    
+    if ! command -v pip &> /dev/null; then
+        error "pip could not be found. Please install pip and ensure it's in your PATH."
+    fi
+
+    log "Running pip install in editable mode..."
+    pip install -e . --verbose
+    
+    if [ $? -ne 0 ]; then
+        error "Python package installation failed"
+    fi
+    
+    log "Python package installed successfully"
+}
+
 # --- Main Script Logic ---
 if [ $# -eq 0 ]; then
     usage
@@ -702,6 +743,7 @@ case $COMMAND in
     docs-serve) do_docs_serve ;;
     docs-clean) do_docs_clean ;;
     package) do_package_release "$@" ;;
+    install) do_install "$@" ;;
     help|--help|-h) usage ;;
     *)
         echo "[ERROR] Unknown command: $COMMAND"

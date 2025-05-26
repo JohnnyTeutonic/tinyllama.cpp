@@ -2,13 +2,13 @@
 
 This codebase supports inference for Llama 2/3 architecture models using both GGUF and Safetensors formats, and additionally contains Python bindings.
 
-The GGUF format support includes loading models with various tensor types such as BF16, FP16, FP32, and the quantised types: Q4_K_M, Q6_K and Q8_0.
+The GGUF format support includes loading models with various tensor types such as BF16, FP16, FP32, and the quantised types: Q4_K_M, Q6_K, Q8_0, and Q8_K.
 
 ## Features
 
 *   Pure C++ inference core (CPU-based).
 *   Optional CUDA backend for GPU acceleration.
-*   Support for both safetensors and GGUF formats (various quantizations like Q4_K_M, Q6_K, Q8_0 for GGUF).
+*   Support for both safetensors and GGUF formats (various quantizations like Q4_K_M, Q6_K, Q8_0, Q8_K for GGUF).
 *   Python bindings
 *   Built-in web server (`cpp-httplib`) for easy interaction via a web UI.
 *   Minimal external dependencies managed via CMake.
@@ -57,7 +57,7 @@ To run the model, you need both the model weights and tokenizer information. The
         *   **Llama 3+ models:** Tokenizer is embedded in the GGUF file. You can set `tokenizer_path` to the same path as the model file, or omit it entirely in Python bindings.
         *   **Llama 2 models:** Require a separate `tokenizer.json` file even when using GGUF format.
         *   **Other models:** May require a separate tokenizer depending on how the GGUF file was created.
-    *   *Quantizations:* Supports various tensor types including `FP32`, `FP16`, `BF16`, and common quantized types like `Q4_K_M`, `Q6_K`, `Q8_0`, etc., as supported by the underlying GGUF parsing library.
+    *   *Quantizations:* Supports various tensor types including `FP32`, `FP16`, `BF16`, and common quantized types like `Q4_K_M`, `Q6_K`, `Q8_0`, `Q8_K`, etc., as supported by the underlying GGUF parsing library.
 
 #### Example Model Sources:
 
@@ -259,6 +259,11 @@ chmod +x manage.sh
     *   This command runs the model with a single provided prompt and then exits.
     *   If `--model-dir` is not provided, you can specify the model directory/GGUF file path as a single positional argument after `run-prompt`.
     *   Example: `./manage.sh run-prompt path/to/your/model --prompt "Translate to French: Hello"`
+*   `./manage.sh install [--gpu|--cpu]`
+    *   Installs the Python package in editable mode with optional GPU support.
+    *   `--cpu` (default): CPU-only installation
+    *   `--gpu`: Installation with CUDA support (requires CUDA toolkit)
+    *   Example: `./manage.sh install --gpu` for GPU support or `./manage.sh install --cpu` for CPU-only
 
 It is recommended to use this script for most routine operations. For detailed options for each command, please run `./manage.sh help`.
 
@@ -283,6 +288,11 @@ This script provides equivalent functionality to `manage.sh` for Windows users.
     *   This command runs the model with a single provided prompt and then exits.
     *   If `-ModelDir` is not provided, you can specify the model directory/GGUF file path as a single positional argument after `run-prompt`.
     *   Example: `.\\manage.ps1 run-prompt -ModelDir path\\to\\your\\model -Prompt "What is the capital of France?"`
+*   `.\\manage.ps1 install [-Gpu|-Cpu]`
+    *   Installs the Python package in editable mode with optional GPU support.
+    *   `-Cpu` (default): CPU-only installation
+    *   `-Gpu`: Installation with CUDA support (requires CUDA toolkit)
+    *   Example: `.\\manage.ps1 install -Gpu` for GPU support or `.\\manage.ps1 install -Cpu` for CPU-only
 
 
 For detailed options for each command, run `.\\manage.ps1 help`.

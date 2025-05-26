@@ -12,7 +12,7 @@
 [CmdletBinding()]
 param (
     [Parameter(Mandatory=$false, Position=0)]
-    [ValidateSet("build", "clean", "run-server", "run-chat", "run-prompt", "run-batch", "format", "docs", "docs-serve", "docs-clean", "package", "help")]
+    [ValidateSet("build", "clean", "run-server", "run-chat", "run-prompt", "run-batch", "format", "docs", "docs-serve", "docs-clean", "package", "install", "help")]
     [string]$Command,
 
     [Parameter(Mandatory=$false, Position=1, ValueFromRemainingArguments=$true)]
@@ -138,6 +138,11 @@ function Show-Usage {
     Write-Host "               Options:"
     Write-Host "                 -Version <semver>          (default: ${DefaultReleaseVersion})"
     Write-Host "                 -BuildType <Release|Debug> (default: Release, for packaging)"
+    Write-Host ""
+    Write-Host "  install      Install the Python package."
+    Write-Host "               Options:"
+    Write-Host "                 -Gpu                       Enable GPU support (CUDA)"
+    Write-Host "                 -Cpu                       CPU-only mode (default)"
     Write-Host ""
     Write-Host "  help         Show this help message."
     Write-Host ""
@@ -706,6 +711,48 @@ function Invoke-Package {
     Log-Message "Package created successfully: $ZipFilePath"
 }
 
+function Invoke-Install {
+    Log-Message "Installing Python package..."
+    
+    $UseGpu = $false
+    
+    # Parse arguments for GPU/CPU mode
+    for ($i = 0; $i -lt $script:Arguments.Length; $i++) {
+        switch ($script:Arguments[$i]) {
+            "-Gpu" { $UseGpu = $true }
+            "-Cpu" { $UseGpu = $false }
+            default {
+                if ($script:Arguments[$i] -match "^-") {
+                    Write-ErrorAndExit "Unknown option for install: $($script:Arguments[$i])"
+                }
+            }
+        }
+    }
+
+    if ($UseGpu) {
+        Log-Message "Installing with GPU (CUDA) support..."
+        $env:TINYLLAMA_CPP_BUILD_CUDA = "ON"
+    } else {
+        Log-Message "Installing with CPU-only support..."
+        $env:TINYLLAMA_CPP_BUILD_CUDA = "OFF"
+    }
+
+    Set-Location $ProjectRootDir
+    
+    if (-not (Get-Command pip -ErrorAction SilentlyContinue)) {
+        Write-ErrorAndExit "pip could not be found. Please install pip and ensure it's in your PATH."
+    }
+
+    Log-Message "Running pip install in editable mode..."
+    pip install -e . --verbose
+    
+    if ($LASTEXITCODE -ne 0) {
+        Write-ErrorAndExit "Python package installation failed"
+    }
+    
+    Log-Message "Python package installed successfully"
+}
+
 
 # --- Main Script Logic ---
 if (-not $Command -or $Command -eq "help") {
@@ -731,6 +778,7 @@ switch ($Command) {
     "docs-serve"  { Invoke-DocsServe }
     "docs-clean"  { Invoke-DocsClean }
     "package"     { Invoke-Package }
+    "install"     { Invoke-Install }
     default {
         Write-ErrorAndExit "Unknown command: $Command"
         Show-Usage

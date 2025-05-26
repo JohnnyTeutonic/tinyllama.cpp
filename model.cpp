@@ -1415,27 +1415,9 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& initial_config,
   Logger::info("  use_mmap_for_gguf: " + std::string(config_.use_mmap_for_gguf ? "true" : "false"));
     // --- BEGIN GGUFData Integrity Check ---
   if (this->config_.is_gguf_file_loaded && this->gguf_data_) {
-    Logger::info("[CTOR_GGUF_PRE_INIT_W] Checking gguf_data_ integrity before calling initialize_weights.");
-    Logger::info("[CTOR_GGUF_PRE_INIT_W] gguf_data_ pointer is NOT NULL.");
-    Logger::info("[CTOR_GGUF_PRE_INIT_W] config_.use_mmap_for_gguf (model's perspective): " + std::string(this->config_.use_mmap_for_gguf ? "true" : "false"));
-    Logger::info("[CTOR_GGUF_PRE_INIT_W] gguf_data_->tensor_infos_map.size(): " + std::to_string(this->gguf_data_->tensor_infos_map.size()));
     if (this->gguf_data_->tensor_infos_map.empty()) {
         Logger::error("[CTOR_GGUF_PRE_INIT_W] CRITICAL: gguf_data_->tensor_infos_map is EMPTY. Weights will not be loaded by map_gguf_weights.");
-    } else {
-        Logger::info("[CTOR_GGUF_PRE_INIT_W] tensor_infos_map is NOT empty. First few tensor names from map:");
-        int count = 0;
-        for (const auto& pair : this->gguf_data_->tensor_infos_map) {
-            Logger::info("[CTOR_GGUF_PRE_INIT_W]   TensorInfo in map: " + pair.first);
-            count++;
-            if (count >= 5) break;
-        }
     }
-    Logger::info("[CTOR_GGUF_PRE_INIT_W] gguf_data_->tensor_infos (vector) size: " + std::to_string(this->gguf_data_->tensor_infos.size()));
-    if (!this->gguf_data_->tensor_infos.empty()) {
-        Logger::info("[CTOR_GGUF_PRE_INIT_W] First tensor_info in vector: " + this->gguf_data_->tensor_infos[0].name);
-    }
-
-
   } else if (this->config_.is_gguf_file_loaded && !this->gguf_data_) {
     Logger::error("[CTOR_GGUF_PRE_INIT_W] CRITICAL: config_.is_gguf_file_loaded is TRUE, but gguf_data_ pointer IS NULL. Weights cannot be loaded.");
   } else if (!this->config_.is_gguf_file_loaded) {
@@ -3830,7 +3812,6 @@ std::vector<float> TinyLlamaModel::forward_device_batch_prefill(
                     gpuErrchk(cudaMemcpyAsync(h_q_pre_rope.data(), d_batch_q_proj_out + q_log_offset, log_elements_rope * sizeof(float), cudaMemcpyDeviceToHost, stream));
                     gpuErrchk(cudaStreamSynchronize(stream)); 
                     std::string str_q_pre_rope = ""; for(float val : h_q_pre_rope) { str_q_pre_rope += std::to_string(val) + " "; }
-                    Logger::critical("[PRE-ROPE Q_PROJ] (L" + std::to_string(l_model_idx) + " T" + std::to_string(token_to_log_idx_rope) + " H0 first " + std::to_string(log_elements_rope) + "): " + str_q_pre_rope);
                 }
                 if (d_batch_k_proj_out && config_.num_key_value_heads > 0) {
                     std::vector<float> h_k_pre_rope(log_elements_rope);
@@ -3838,7 +3819,6 @@ std::vector<float> TinyLlamaModel::forward_device_batch_prefill(
                     gpuErrchk(cudaMemcpyAsync(h_k_pre_rope.data(), d_batch_k_proj_out + k_log_offset, log_elements_rope * sizeof(float), cudaMemcpyDeviceToHost, stream));
                     gpuErrchk(cudaStreamSynchronize(stream)); 
                     std::string str_k_pre_rope = ""; for(float val : h_k_pre_rope) { str_k_pre_rope += std::to_string(val) + " "; }
-                    Logger::critical("[PRE-ROPE K_PROJ] (L" + std::to_string(l_model_idx) + " T" + std::to_string(token_to_log_idx_rope) + " H0 first " + std::to_string(log_elements_rope) + "): " + str_k_pre_rope);
                 }
             }
         }
@@ -3848,7 +3828,6 @@ std::vector<float> TinyLlamaModel::forward_device_batch_prefill(
                         current_model_pos, config_.is_gguf_file_loaded, stream);
         gpuErrchk(cudaStreamSynchronize(stream));
 
-        // POST-ROPE LOGGING (Unchanged)
         if (l_model_idx == config_.num_cpu_offload_layers && num_tokens_in_batch > 0 && head_dim > 0) { // Existing logging condition
             int log_elements_rope = std::min(3, head_dim);
             for (int token_to_log_idx_rope = 0; token_to_log_idx_rope < std::min(num_tokens_in_batch, 2); ++token_to_log_idx_rope) {
@@ -3857,19 +3836,16 @@ std::vector<float> TinyLlamaModel::forward_device_batch_prefill(
                     size_t q_log_offset = (size_t)token_to_log_idx_rope * config_.num_attention_heads * head_dim;
                     gpuErrchk(cudaMemcpy(h_q_post_rope.data(), d_batch_q_proj_out + q_log_offset, log_elements_rope * sizeof(float), cudaMemcpyDeviceToHost));
                     std::string str_q_post_rope = ""; for(float val : h_q_post_rope) { str_q_post_rope += std::to_string(val) + " "; }
-                    Logger::critical("[POST-ROPE Q_PROJ] (L" + std::to_string(l_model_idx) + " T" + std::to_string(token_to_log_idx_rope) + " H0 first " + std::to_string(log_elements_rope) + "): " + str_q_post_rope);
                 }
                 if (d_batch_k_proj_out && config_.num_key_value_heads > 0) {
                     std::vector<float> h_k_post_rope(log_elements_rope);
                     size_t k_log_offset = (size_t)token_to_log_idx_rope * config_.num_key_value_heads * head_dim;
                     gpuErrchk(cudaMemcpy(h_k_post_rope.data(), d_batch_k_proj_out + k_log_offset, log_elements_rope * sizeof(float), cudaMemcpyDeviceToHost));
                     std::string str_k_post_rope = ""; for(float val : h_k_post_rope) { str_k_post_rope += std::to_string(val) + " "; }
-                    Logger::critical("[POST-ROPE K_PROJ] (L" + std::to_string(l_model_idx) + " T" + std::to_string(token_to_log_idx_rope) + " H0 first " + std::to_string(log_elements_rope) + "): " + str_k_post_rope);
                 }
             }
         }
 
-        // PRE-KCACHE LOGGING (Unchanged)
         if (l_model_idx == config_.num_cpu_offload_layers && num_tokens_in_batch > 0 && head_dim > 0 && config_.num_key_value_heads > 0) { // Existing logging
             int log_elements = std::min(3, head_dim);
             if (d_batch_k_proj_out) {
@@ -3878,9 +3854,6 @@ std::vector<float> TinyLlamaModel::forward_device_batch_prefill(
                 std::vector<float> h_k_log_token1(log_elements);
                 if (num_tokens_in_batch > 1) { gpuErrchk(cudaMemcpyAsync(h_k_log_token1.data(), d_batch_k_proj_out + n_kv_dim, log_elements * sizeof(float), cudaMemcpyDeviceToHost, stream));}
                 gpuErrchk(cudaStreamSynchronize(stream));
-                std::string str_k_log_t0 = ""; for(float val : h_k_log_token0) { str_k_log_t0 += std::to_string(val) + " "; }
-                Logger::critical("[PRE-KCACHE K_PROJ] (L" + std::to_string(l_model_idx) + " T0 H0 first " + std::to_string(log_elements) + "): " + str_k_log_t0);
-                if (num_tokens_in_batch > 1) { std::string str_k_log_t1 = ""; for(float val : h_k_log_token1) { str_k_log_t1 += std::to_string(val) + " "; } Logger::critical("[PRE-KCACHE K_PROJ] (L" + std::to_string(l_model_idx) + " T1 H0 first " + std::to_string(log_elements) + "): " + str_k_log_t1); }
             }
             if (d_batch_v_proj_out) {
                 std::vector<float> h_v_log_token0(log_elements);
@@ -3888,9 +3861,6 @@ std::vector<float> TinyLlamaModel::forward_device_batch_prefill(
                 std::vector<float> h_v_log_token1(log_elements);
                 if (num_tokens_in_batch > 1) { gpuErrchk(cudaMemcpyAsync(h_v_log_token1.data(), d_batch_v_proj_out + n_kv_dim, log_elements * sizeof(float), cudaMemcpyDeviceToHost, stream));}
                 gpuErrchk(cudaStreamSynchronize(stream));
-                std::string str_v_log_t0 = ""; for(float val : h_v_log_token0) { str_v_log_t0 += std::to_string(val) + " "; }
-                Logger::critical("[PRE-KCACHE V_PROJ] (L" + std::to_string(l_model_idx) + " T0 H0 first " + std::to_string(log_elements) + "): " + str_v_log_t0);
-                if (num_tokens_in_batch > 1) { std::string str_v_log_t1 = ""; for(float val : h_v_log_token1) { str_v_log_t1 += std::to_string(val) + " "; } Logger::critical("[PRE-KCACHE V_PROJ] (L" + std::to_string(l_model_idx) + " T1 H0 first " + std::to_string(log_elements) + "): " + str_v_log_t1); }
             }
         }
 
@@ -4015,10 +3985,6 @@ std::vector<float> TinyLlamaModel::forward_device_batch_prefill(
     // =============== BEGIN KVCache DUMP AFTER BATCH PREFILL ===============
     if (config_.num_hidden_layers > config_.num_cpu_offload_layers && kv_cache != nullptr && num_tokens_in_batch > 0) {
         int first_gpu_layer_model_idx = config_.num_cpu_offload_layers;
-        Logger::critical("[KVDUMP_POST_BATCH_PREFILL] Dumping KVCache for L" + std::to_string(first_gpu_layer_model_idx) + 
-                         " (num_tokens_in_batch=" + std::to_string(num_tokens_in_batch) + 
-                         ", current_model_pos_arg_to_func=" + std::to_string(current_model_pos) + ")");
-
         if (static_cast<size_t>(first_gpu_layer_model_idx) < kv_cache->layers.size()) {
             const KVCacheLayer& cache_layer_to_log = kv_cache->layers[first_gpu_layer_model_idx];
             const float* d_k_cache_ptr = cache_layer_to_log.k_dev_fp32;
@@ -4043,16 +4009,9 @@ std::vector<float> TinyLlamaModel::forward_device_batch_prefill(
                         std::vector<float> h_k_dump(log_elems_kv);
                         gpuErrchk(cudaMemcpy(h_k_dump.data(), d_k_cache_ptr + offset_in_cache, log_elems_kv * sizeof(float), cudaMemcpyDeviceToHost));
                         std::string str_k_dump = ""; for(float val : h_k_dump) { str_k_dump += std::to_string(val) + " "; }
-                        Logger::critical("[KVDUMP_POST_BATCH_PREFILL] L" + std::to_string(first_gpu_layer_model_idx) + 
-                                         " K (CachePos " + std::to_string(cache_pos_for_token) + 
-                                         " H" + std::to_string(kvh_idx) + " first " + std::to_string(log_elems_kv) + "): " + str_k_dump);
-
                         std::vector<float> h_v_dump(log_elems_kv);
                         gpuErrchk(cudaMemcpy(h_v_dump.data(), d_v_cache_ptr + offset_in_cache, log_elems_kv * sizeof(float), cudaMemcpyDeviceToHost));
                         std::string str_v_dump = ""; for(float val : h_v_dump) { str_v_dump += std::to_string(val) + " "; }
-                        Logger::critical("[KVDUMP_POST_BATCH_PREFILL] L" + std::to_string(first_gpu_layer_model_idx) + 
-                                         " V (CachePos " + std::to_string(cache_pos_for_token) + 
-                                         " H" + std::to_string(kvh_idx) + " first " + std::to_string(log_elems_kv) + "): " + str_v_dump);
                     }
                 }
             } else {

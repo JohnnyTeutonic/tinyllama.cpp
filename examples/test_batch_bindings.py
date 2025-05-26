@@ -135,7 +135,7 @@ def test_single_vs_batch_generation(model_path, tokenizer_path, threads, gpu_lay
     print(f"\nNumber of results - Single: {len(single_results)}, Batch: {len(batch_results)}")
     
     print(f"\n=== Sample Results ===")
-    for i in range(min(2, len(test_prompts))):
+    for i in range(len(test_prompts)):
         print(f"\nPrompt {i+1}: {test_prompts[i]}")
         print(f"Single result: {single_results[i][:100]}...")
         print(f"Batch result:  {batch_results[i][:100]}...")
