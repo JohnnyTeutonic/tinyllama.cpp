@@ -27,590 +27,15 @@
 #include "model_constants.h"
 #include "model_macros.h"
 #include "safetensors_loader.h"
+#include "utils.h"
 
-/**
- * @brief Converts a float32 value to bfloat16 representation.
- * @param val The float32 value to convert.
- * @return The bfloat16 representation as uint16_t.
- */
-inline uint16_t float32_to_bfloat16(float val);
 
-/**
- * @brief Matrix-vector multiplication for Q6_K quantized weights and float32 vector.
- * @param mat_q6k The quantized matrix.
- * @param vec_f32 The input float32 vector.
- * @param out_f32 The output float32 vector.
- * @param rows Number of rows in the matrix.
- * @param cols Number of columns in the matrix.
- * @param log_first_block Whether to log the first block for debugging.
- */
-static void matvec_q6k_f32_vector_cpu(const std::vector<block_q6_K>& mat_q6k,
-                                      const std::vector<float>& vec_f32,
-                                      std::vector<float>& out_f32, int rows,
-                                      int cols, bool log_first_block = false);
 
-/**
- * @brief Matrix-vector multiplication for Q4_K quantized weights and float32 vector.
- * @param mat_q4k The quantized matrix.
- * @param vec_f32 The input float32 vector.
- * @param out_f32 The output float32 vector.
- * @param rows Number of rows in the matrix.
- * @param cols Number of columns in the matrix.
- * @param log_first_block Whether to log the first block for debugging.
- */
-static void matvec_q4k_f32_vector_cpu(const std::vector<block_q4_K>& mat_q4k,
-                                      const std::vector<float>& vec_f32,
-                                      std::vector<float>& out_f32, int rows,
-                                      int cols, bool log_first_block = false);
 
-/**
- * @brief Matrix-vector multiplication for Q8_0 quantized weights and float32 vector.
- * @param mat_q8_0 The quantized matrix.
- * @param vec_f32 The input float32 vector.
- * @param out_f32 The output float32 vector.
- * @param rows Number of rows in the matrix.
- * @param cols Number of columns in the matrix.
- * @param log_first_block Whether to log the first block for debugging.
- */
-static void matvec_q8_0_f32_vector_cpu(const std::vector<block_q8_0>& mat_q8_0,
-                                      const std::vector<float>& vec_f32,
-                                      std::vector<float>& out_f32, int rows,
-                                      int cols, bool log_first_block = false);
 
-/**
- * @brief Matrix-vector multiplication for float32 matrix and float32 vector.
- * @param mat_f32 The float32 matrix.
- * @param vec_f32 The input float32 vector.
- * @param out_f32 The output float32 vector.
- * @param rows Number of rows in the matrix.
- * @param cols Number of columns in the matrix.
- */
-static void matvec_f32_f32_vector_cpu(const std::vector<float>& mat_f32,
-                                      const std::vector<float>& vec_f32,
-                                      std::vector<float>& out_f32, int rows,
-                                      int cols);
 
-/**
- * @brief Dequantizes a vector of Q8_K blocks to float32.
- * @param q8k_vec The quantized vector.
- * @param out_f32 The output float32 vector.
- * @param n Number of elements.
- * @param log_this_block Whether to log this block for debugging.
- */
-void dequantize_q8_k(const std::vector<block_q8_K>& q8k_vec,
-                     std::vector<float>& out_f32, int n, bool log_this_block);
 
-/**
- * @brief Logs a detailed summary of a float vector for debugging.
- * @param name Name for the log entry.
- * @param v The vector to log.
- * @param current_pos Current position (e.g., token position).
- * @param current_layer Current layer index.
- * @param N Number of elements to log.
- */
-static void log_vector_summary_detailed(const std::string& name,
-                                        const std::vector<float>& v,
-                                        int current_pos, int current_layer,
-                                        int N = 5);
 
-inline uint16_t float32_to_bfloat16(float val) {
-  uint32_t bits;
-  std::memcpy(&bits, &val, sizeof(float));
-
-  bits += 0x7FFF + ((bits >> 16) & 1);
-  return static_cast<uint16_t>(bits >> 16);
-}
-static void matvec_q6k_f32_vector_cpu(const std::vector<block_q6_K>& mat_q6k,
-                                      const std::vector<float>& vec_f32,
-                                      std::vector<float>& out_f32, int rows,
-                                      int cols, bool log_first_block) {
-  if (cols % GGML_QK_K != 0) {
-    throw std::runtime_error(
-        "matvec_q6k_f32_vector_cpu: cols (" + std::to_string(cols) +
-        ") must be divisible by GGML_QK_K (" + std::to_string(GGML_QK_K) + ")");
-  }
-  if (vec_f32.size() != cols) {
-    throw std::runtime_error(
-        "matvec_q6k_f32_vector_cpu: vec_f32 size mismatch. Expected " +
-        std::to_string(cols) + ", got " + std::to_string(vec_f32.size()));
-  }
-  size_t num_blocks_per_row = cols / GGML_QK_K;
-  size_t total_blocks_expected = (size_t)rows * num_blocks_per_row;
-  if (mat_q6k.size() != total_blocks_expected) {
-    throw std::runtime_error(
-        "matvec_q6k_f32_vector_cpu: mat_q6k size mismatch. Expected " +
-        std::to_string(total_blocks_expected) + " blocks, got " +
-        std::to_string(mat_q6k.size()));
-  }
-
-  out_f32.resize(rows);
-  float dequantized_block[GGML_QK_K];
-
-#pragma omp parallel for private(dequantized_block)
-  for (int64_t r = 0; r < static_cast<int64_t>(rows); ++r) {
-    double row_sum = 0.0;
-    double kahan_c = 0.0;
-
-    size_t block_row_offset = r * num_blocks_per_row;
-
-    for (size_t block_col_idx = 0; block_col_idx < num_blocks_per_row; ++block_col_idx) {
-      const block_q6_K* qblock = &mat_q6k[block_row_offset + block_col_idx];
-      bool enable_dequant_log = log_first_block && (r == 0 && block_col_idx == 0);
-      dequantize_q6_k(qblock, dequantized_block, GGML_QK_K);
-
-      size_t vec_offset = block_col_idx * GGML_QK_K;
-      for (int i = 0; i < GGML_QK_K; ++i) {
-        double term = static_cast<double>(dequantized_block[i]) *
-                      static_cast<double>(vec_f32[vec_offset + i]);
-
-        double y = term - kahan_c;
-        double t = row_sum + y;
-        kahan_c = (t - row_sum) - y;
-        row_sum = t;
-      }
-    }
-    out_f32[r] = static_cast<float>(row_sum);
-  }
-}
-static void matvec_q4k_f32_vector_cpu(const std::vector<block_q4_K>& mat_q4k,
-                                      const std::vector<float>& vec_f32,
-                                      std::vector<float>& out_f32, int rows,
-                                      int cols, bool log_first_block) {
-  if (cols % GGML_QK_K != 0) {
-    throw std::runtime_error(
-        "matvec_q4k_f32_vector_cpu: cols (" + std::to_string(cols) +
-        ") must be divisible by GGML_QK_K (" + std::to_string(GGML_QK_K) + ")");
-  }
-  if (vec_f32.size() != cols) {
-    throw std::runtime_error(
-        "matvec_q4k_f32_vector_cpu: vec_f32 size mismatch. Expected " +
-        std::to_string(cols) + ", got " + std::to_string(vec_f32.size()));
-  }
-  size_t num_blocks_per_row = cols / GGML_QK_K;
-  size_t total_blocks_expected = (size_t)rows * num_blocks_per_row;
-  if (mat_q4k.size() != total_blocks_expected) {
-    throw std::runtime_error(
-        "matvec_q4k_f32_vector_cpu: mat_q4k size mismatch. Expected " +
-        std::to_string(total_blocks_expected) + " blocks, got " +
-        std::to_string(mat_q4k.size()));
-  }
-
-  out_f32.resize(rows);
-  float dequantized_block[GGML_QK_K];
-
-#pragma omp parallel for private(dequantized_block)
-  for (int64_t r = 0; r < static_cast<int64_t>(rows); ++r) {
-    double row_sum = 0.0;
-    double kahan_c = 0.0;
-
-    size_t block_row_offset = r * num_blocks_per_row;
-
-    for (size_t block_col_idx = 0; block_col_idx < num_blocks_per_row; ++block_col_idx) {
-      const block_q4_K* qblock = &mat_q4k[block_row_offset + block_col_idx];
-      bool enable_dequant_log = log_first_block && (r == 0 && block_col_idx == 0);
-      dequantize_q4_k_m(qblock, dequantized_block, GGML_QK_K, enable_dequant_log);
-
-      size_t vec_offset = block_col_idx * GGML_QK_K;
-      for (int i = 0; i < GGML_QK_K; ++i) {
-        double term = static_cast<double>(dequantized_block[i]) *
-                      static_cast<double>(vec_f32[vec_offset + i]);
-
-        double y = term - kahan_c;
-        double t = row_sum + y;
-        kahan_c = (t - row_sum) - y;
-        row_sum = t;
-      }
-    }
-    out_f32[r] = static_cast<float>(row_sum);
-  }
-}
-static void matvec_q8_0_f32_vector_cpu(const std::vector<block_q8_0>& mat_q8_0,
-                                      const std::vector<float>& vec_f32,
-                                      std::vector<float>& out_f32, int rows,
-                                      int cols, bool log_first_block) {
-  if (cols % GGML_QK8_0 != 0) {
-    throw std::runtime_error(
-        "matvec_q8_0_f32_vector_cpu: cols (" + std::to_string(cols) +
-        ") must be divisible by GGML_QK8_0 (" + std::to_string(GGML_QK8_0) + ")");
-  }
-  if (vec_f32.size() != static_cast<size_t>(cols)) {
-    throw std::runtime_error(
-        "matvec_q8_0_f32_vector_cpu: vec_f32 size mismatch. Expected " +
-        std::to_string(cols) + ", got " + std::to_string(vec_f32.size()));
-  }
-  size_t num_blocks_per_row = cols / GGML_QK8_0;
-  size_t total_blocks_expected = static_cast<size_t>(rows) * num_blocks_per_row;
-  if (mat_q8_0.size() != total_blocks_expected) {
-    throw std::runtime_error(
-        "matvec_q8_0_f32_vector_cpu: mat_q8_0 size mismatch. Expected " +
-        std::to_string(total_blocks_expected) + " blocks, got " +
-        std::to_string(mat_q8_0.size()));
-  }
-
-  out_f32.resize(rows);
-  float dequantized_block[GGML_QK8_0];
-
-#pragma omp parallel for private(dequantized_block)
-  for (int64_t r = 0; r < static_cast<int64_t>(rows); ++r) {
-    double row_sum = 0.0;
-    double kahan_c = 0.0;
-
-    size_t block_row_offset = static_cast<size_t>(r) * num_blocks_per_row;
-
-    for (size_t block_col_idx = 0; block_col_idx < num_blocks_per_row; ++block_col_idx) {
-      const block_q8_0* qblock = &mat_q8_0[block_row_offset + block_col_idx];
-      dequantize_q8_0_block(qblock, dequantized_block);
-
-      size_t vec_offset = block_col_idx * GGML_QK8_0;
-      for (int i = 0; i < GGML_QK8_0; ++i) {
-        double term = static_cast<double>(dequantized_block[i]) *
-                      static_cast<double>(vec_f32[vec_offset + i]);
-
-        double y = term - kahan_c;
-        double t = row_sum + y;
-        kahan_c = (t - row_sum) - y;
-        row_sum = t;
-      }
-    }
-    out_f32[r] = static_cast<float>(row_sum);
-  }
-}
-static void matvec_f32_f32_vector_cpu(const std::vector<float>& mat_f32,
-                                      const std::vector<float>& vec_f32,
-                                      std::vector<float>& out_f32, int rows,
-                                      int cols) {
-  if (mat_f32.empty() || vec_f32.empty()) {
-    Logger::error(
-        "matvec_f32_f32_vector_cpu: Input matrix or vector is empty.");
-    out_f32.assign(rows, 0.0f);
-    return;
-  }
-  if (mat_f32.size() != (size_t)rows * cols) {
-    Logger::error(
-        "matvec_f32_f32_vector_cpu: Matrix dimensions mismatch. Expected " +
-        std::to_string((size_t)rows * cols) + ", got " +
-        std::to_string(mat_f32.size()));
-    out_f32.assign(rows, 0.0f);
-    return;
-  }
-  if (vec_f32.size() != (size_t)cols) {
-    Logger::error(
-        "matvec_f32_f32_vector_cpu: Vector dimension mismatch. Expected " +
-        std::to_string(cols) + ", got " + std::to_string(vec_f32.size()));
-    out_f32.assign(rows, 0.0f);
-    return;
-  }
-
-  out_f32.resize(rows);
-
-#pragma omp parallel for schedule(static)
-  for (int64_t r = 0; r < static_cast<int64_t>(rows); ++r) {
-    float sum = 0.0f;
-    size_t row_offset = static_cast<size_t>(r) * cols;
-
-    const float* mat_row_ptr = mat_f32.data() + row_offset;
-    const float* vec_ptr = vec_f32.data();
-
-    // Kahan summation variables
-    double k_sum = 0.0;
-    double k_c = 0.0;
-
-    for (int c = 0; c < cols; ++c) {
-      // sum += mat_row_ptr[c] * vec_ptr[c]; // Old direct summation
-      double term = static_cast<double>(mat_row_ptr[c]) * static_cast<double>(vec_ptr[c]);
-      double y = term - k_c;
-      double t = k_sum + y;
-      k_c = (t - k_sum) - y;
-      k_sum = t;
-    }
-    out_f32[r] = static_cast<float>(k_sum);
-  }
-}
-void log_vector_summary(const std::string& name, const std::vector<float>& v,
-                        int head_count) {
-  if (v.empty()) {
-    Logger::info(name + ": EMPTY");
-    return;
-  }
-  std::stringstream ss;
-  size_t actual_head_count = SAFE_MIN(static_cast<size_t>(head_count), v.size());
-
-  ss << name << ": size=" << v.size();
-
-  if (actual_head_count > 0) {
-    ss << ", first " << actual_head_count << ": [";
-    for (size_t i = 0; i < actual_head_count; ++i) {
-      ss << (i > 0 ? " " : "") << std::fixed << std::setprecision(4) << v[i];
-    }
-    ss << "]";
-  }
-  float minv = *std::min_element(v.begin(), v.end());
-  float maxv = *std::max_element(v.begin(), v.end());
-  double sum = std::accumulate(v.begin(), v.end(), 0.0);
-  float mean = sum / v.size();
-  bool all_finite =
-      std::all_of(v.begin(), v.end(), [](float x) { return std::isfinite(x); });
-  ss << ", min=" << minv << ", max=" << maxv << ", mean=" << mean
-     << ", finite=" << (all_finite ? "yes" : "NO");
-  Logger::info(ss.str());
-}
-
-void log_vector_summary_with_tail(const std::string& name,
-                                  const std::vector<float>& v, int head_count,
-                                  int tail_count) {
-  if (v.empty()) {
-    Logger::info(name + ": EMPTY");
-    return;
-  }
-  std::stringstream ss;
-
-  size_t actual_head_count = SAFE_MIN(static_cast<size_t>(head_count), v.size());
-  size_t actual_tail_count = SAFE_MIN(static_cast<size_t>(tail_count), v.size());
-  size_t total_shown = actual_head_count + actual_tail_count;
-  bool overlap = total_shown > v.size();
-  if (overlap) {
-    actual_tail_count = v.size() - actual_head_count;
-    if (actual_tail_count > SAFE_MIN(static_cast<size_t>(tail_count), v.size())) {
-      actual_tail_count = SAFE_MIN(static_cast<size_t>(tail_count), v.size());
-    }
-    if (tail_count > 0 && actual_head_count == v.size()) {
-      actual_tail_count = 0;
-    }
-  }
-  size_t tail_start_index = v.size() - actual_tail_count;
-
-  ss << name << ": size=" << v.size();
-
-  if (actual_head_count > 0) {
-    ss << ", first " << actual_head_count << ": [";
-    for (size_t i = 0; i < actual_head_count; ++i) {
-      ss << (i > 0 ? " " : "") << std::fixed << std::setprecision(4) << v[i];
-    }
-    ss << "]";
-  }
-
-  if (actual_tail_count > 0 && tail_start_index >= actual_head_count) {
-    ss << ", last " << actual_tail_count << ": [";
-    for (size_t i = 0; i < actual_tail_count; ++i) {
-      ss << (i > 0 ? " " : "") << std::fixed << std::setprecision(4)
-         << v[tail_start_index + i];
-    }
-    ss << "]";
-  } else if (overlap && tail_count > 0 && actual_head_count < v.size()) {
-    ss << " (... tail overlaps head ...)";
-  }
-
-  float minv = *std::min_element(v.begin(), v.end());
-  float maxv = *std::max_element(v.begin(), v.end());
-  double sum = std::accumulate(v.begin(), v.end(), 0.0);
-  float mean = sum / v.size();
-  bool all_finite =
-      std::all_of(v.begin(), v.end(), [](float x) { return std::isfinite(x); });
-  ss << ", min=" << minv << ", max=" << maxv << ", mean=" << mean
-     << ", finite=" << (all_finite ? "yes" : "NO");
-  Logger::info(ss.str());
-}
-
-/**
- * @brief Converts a bfloat16 value to float32.
- * @param bf16 The bfloat16 value.
- * @return The float32 representation.
- */
-float bfloat16_to_float32(uint16_t bf16) {
-  if (bf16 == bfloat16::ZERO) return 0.0f;
-  if (bf16 == bfloat16::NEG_ZERO) return -0.0f;
-
-  bool is_nan = ((bf16 & bfloat16::EXPONENT_MASK) == bfloat16::EXPONENT_MASK) && 
-                ((bf16 & bfloat16::MANTISSA_MASK) != 0);
-  if (is_nan) return std::numeric_limits<float>::quiet_NaN();
-
-  if ((bf16 & bfloat16::EXPONENT_MASK) == bfloat16::EXPONENT_MASK && 
-      (bf16 & bfloat16::MANTISSA_MASK) == 0) {
-    return (bf16 & bfloat16::SIGN_BIT) ? -std::numeric_limits<float>::infinity()
-                                      : std::numeric_limits<float>::infinity();
-  }
-
-  uint32_t bits = static_cast<uint32_t>(bf16) << bfloat16::SHIFT_BITS;
-  float result;
-  std::memcpy(&result, &bits, sizeof(float));
-
-  return result;
-}
-
-/**
- * @brief Converts a vector of bfloat16 values to float32.
- * @param bf16_vec The input vector of bfloat16 values.
- * @return The output vector of float32 values.
- */
-std::vector<float> bfloat16_vector_to_float32(
-    const std::vector<uint16_t>& bf16_vec) {
-  std::vector<float> f32_vec(bf16_vec.size());
-
-#pragma omp parallel for
-  for (int64_t i = 0; i < static_cast<int64_t>(bf16_vec.size()); ++i) {
-    f32_vec[i] = bfloat16_to_float32(bf16_vec[i]);
-  }
-
-  return f32_vec;
-}
-
-/**
- * @brief Converts a vector of uint8_t bytes to a vector of uint16_t values.
- * @param bytes The input byte vector.
- * @param numel The number of uint16_t elements expected.
- * @return The output vector of uint16_t values.
- * @throws std::runtime_error if the byte vector size does not match numel * 2.
- */
-std::vector<uint16_t> uint8_vector_to_uint16_vector(
-    const std::vector<uint8_t>& bytes, size_t numel) {
-  if (bytes.size() != numel * 2) {
-    throw std::runtime_error(
-        "Byte vector size mismatch for uint16_t conversion");
-  }
-  std::vector<uint16_t> out(numel);
-
-  std::memcpy(out.data(), bytes.data(), bytes.size());
-  return out;
-}
-
-/**
- * @brief Returns the index of the maximum value in a float vector.
- * @param v The input vector.
- * @return The index of the maximum value, or -1 if the vector is empty.
- */
-int argmax(const std::vector<float>& v) {
-  if (v.empty()) {
-    Logger::error("Cannot perform argmax on empty vector");
-    return -1;
-  }
-  auto max_it = std::max_element(v.begin(), v.end());
-  float max_val = *max_it;
-  int max_idx = std::distance(v.begin(), max_it);
-  Logger::debug("[ARGMAX HELPER] Max value found: " + std::to_string(max_val) +
-                " at index: " + std::to_string(max_idx));
-  return max_idx;
-}
-
-static void rmsnorm_vector_cpu(const std::vector<float>& x,
-                               const std::vector<float>& weight,
-                               std::vector<float>& out, float eps = numeric::DEFAULT_EPS) {
-  if (x.empty() || x.size() != weight.size()) {
-    Logger::error("RMSNorm vector size mismatch or empty input.");
-    out.assign(x.size(), 0.0f);
-    return;
-  }
-  out.resize(x.size());
-  size_t n = x.size();
-
-  double ssq = 0.0;
-#pragma omp parallel for reduction(+ : ssq)
-  for (int64_t i = 0; i < static_cast<int64_t>(n); ++i) {
-    ssq += static_cast<double>(x[i]) * static_cast<double>(x[i]);
-  }
-  ssq /= n;
-
-  float norm_factor = 1.0f / SAFE_SQRT(static_cast<float>(ssq) + 
-                   SAFE_MAX(eps, numeric::MIN_NORM_EPS));
-
-#pragma omp parallel for
-  for (int64_t i = 0; i < static_cast<int64_t>(n); ++i) {
-    out[i] = x[i] * norm_factor * weight[i];
-  }
-}
-static void softmax_vector_cpu(const std::vector<float>& x,
-                               std::vector<float>& out) {
-  if (x.empty()) return;
-  out.resize(x.size());
-  size_t n = x.size();
-
-  // Find max element for numerical stability (serial)
-  float max_val = x[0];
-  for (size_t i = 1; i < n; ++i) {
-    if (x[i] > max_val) max_val = x[i];
-  }
-
-  // Compute exponentials and sum (serial)
-  float exp_sum = 0.0f;
-  for (size_t i = 0; i < n; ++i) {
-    out[i] = std::exp(x[i] - max_val);
-    exp_sum += out[i];
-  }
-
-  // Normalize
-  float inv_sum = 1.0f / (exp_sum + 1e-9f); // Add epsilon for stability
-
-#pragma omp parallel for // Final normalization can be parallel
-  for (int64_t i = 0; i < static_cast<int64_t>(n); ++i) {
-    out[i] *= inv_sum;
-  }
-}
-static void silu_cpu(const std::vector<float>& x, std::vector<float>& out) {
-  if (x.size() != out.size()) out.resize(x.size());
-#pragma omp parallel for
-  for (int64_t i = 0; i < static_cast<int64_t>(x.size()); ++i) {
-    float sigmoid_x = 1.0f / (1.0f + std::exp(-x[i]));
-    out[i] = x[i] * sigmoid_x;
-  }
-}
-
-static void log_vec_stats(const std::string& name,
-                          const std::vector<float>& v) {
-  if (v.empty()) {
-    Logger::info(name + ": EMPTY VECTOR");
-    return;
-  }
-  float minv = *std::min_element(v.begin(), v.end());
-  float maxv = *std::max_element(v.begin(), v.end());
-  float mean = std::accumulate(v.begin(), v.end(), 0.0f) / v.size();
-  bool all_finite =
-      std::all_of(v.begin(), v.end(), [](float x) { return std::isfinite(x); });
-  Logger::info(name + ": min=" + std::to_string(minv) + ", max=" +
-               std::to_string(maxv) + ", mean=" + std::to_string(mean) +
-               ", all_finite=" + (all_finite ? "yes" : "no"));
-}
-
-static bool write_vector_to_file(const std::string& filename,
-                                 const std::vector<float>& vec) {
-  std::string vec_writer_vals;
-  int N_log_writer = (std::min)(10, (int)vec.size());
-  for (int i = 0; i < N_log_writer; ++i)
-    vec_writer_vals += (i ? " " : "") + std::to_string(vec[i]);
-  Logger::info("write_vector_to_file Enter: Address of vec.data() on entry: " +
-               std::to_string(reinterpret_cast<uintptr_t>(vec.data())));
-
-  std::ofstream outfile(filename, std::ios::binary);
-  if (!outfile) {
-    Logger::error("Failed to open file for writing: " + filename);
-    return false;
-  }
-  outfile.write(reinterpret_cast<const char*>(vec.data()),
-                vec.size() * sizeof(float));
-  if (!outfile) {
-    Logger::error("Failed to write data to file: " + filename);
-    return false;
-  }
-  Logger::info("Successfully wrote vector to " + filename);
-  return true;
-}
-
-static std::vector<std::vector<float>> load_rmsnorm_bin(
-    const std::string& filename, int num_tokens, int hidden_size) {
-  std::ifstream infile(filename, std::ios::binary);
-  if (!infile) throw std::runtime_error("Failed to open " + filename);
-  std::vector<float> flat(num_tokens * hidden_size);
-  infile.read(reinterpret_cast<char*>(flat.data()),
-              flat.size() * sizeof(float));
-  if (!infile)
-    throw std::runtime_error("Failed to read all data from " + filename);
-  std::vector<std::vector<float>> result(num_tokens,
-                                         std::vector<float>(hidden_size));
-  for (int t = 0; t < num_tokens; ++t) {
-    for (int h = 0; h < hidden_size; ++h) {
-      result[t][h] = flat[t * hidden_size + h];
-    }
-  }
-  return result;
-}
 
 ModelConfig parse_model_config(const nlohmann::json& json) {
   ModelConfig cfg;
@@ -667,33 +92,26 @@ ModelConfig parse_model_config(const nlohmann::json& json) {
   return cfg;
 }
 
-static void log_raw_float_pointer(const std::string& name, const float* ptr,
-                                  size_t count = 5) {
-  if (!ptr) {
-    Logger::info(name + ": NULL Pointer");
-    return;
-  }
-  std::stringstream ss;
-  ss << name << " first " << count << ": [";
-  for (size_t i = 0; i < count; ++i) {
-    ss << (i > 0 ? " " : "") << std::fixed << std::setprecision(6) << ptr[i];
-  }
-  ss << "]";
-  Logger::info(ss.str());
-}
 
-void KVCache::initialize(int total_num_model_layers, int num_gpu_layers_to_allocate, 
-                         int max_seq_len, int num_kv_heads,
-                         int head_dim) {
+
+void KVCache::initialize(const ModelConfig& config, 
+                         int total_num_model_layers, int num_gpu_layers_to_allocate, 
+                         int max_seq_len_arg, int num_kv_heads,
+                         int head_dim, int max_batch_size_arg) {
   this->total_model_layers_ = total_num_model_layers; // Store for use in other KVCache methods if needed
+  this->max_seq_len_config_ = max_seq_len_arg; // Store the passed max_seq_len
+  this->max_batch_size = max_batch_size_arg; // Store the max batch size
+  this->current_batch_size = 0; // Initialize current batch size
+  this->batch_seq_lens.clear(); // Clear batch sequence lengths
+  this->batch_seq_lens.resize(max_batch_size_arg, 0); // Initialize with zeros
   layers.resize(total_num_model_layers); // CPU KVCacheLayer vector sized for all layers
   seq_len = 0;
   Logger::info("Allocating KVCache host vectors...");
-  size_t cache_size_per_layer = static_cast<size_t>(max_seq_len) *
+  size_t cache_size_per_layer = static_cast<size_t>(max_seq_len_arg) *
+                                static_cast<size_t>(max_batch_size_arg) *
                                 static_cast<size_t>(num_kv_heads) *
                                 static_cast<size_t>(head_dim);
-
-  if (cache_size_per_layer == 0 && max_seq_len > 0 && total_num_model_layers > 0) { // Check total_num_model_layers too
+  if (cache_size_per_layer == 0 && max_seq_len_arg > 0 && total_num_model_layers > 0) { // Check total_num_model_layers too
     throw std::runtime_error(
         "KVCache (CPU): Calculated cache size is zero for non-empty model. Check parameters.");
   }
@@ -714,7 +132,7 @@ void KVCache::initialize(int total_num_model_layers, int num_gpu_layers_to_alloc
 #ifdef HAS_CUDA
   // Store the actual number of layers for which GPU memory will be allocated.
   this->allocated_num_layers = num_gpu_layers_to_allocate; 
-  this->allocated_max_seq_len = max_seq_len;
+  this->allocated_max_seq_len = max_seq_len_arg; // Use max_seq_len_arg
   this->allocated_num_kv_heads = num_kv_heads;
   this->allocated_head_dim = head_dim;
 
@@ -727,20 +145,37 @@ void KVCache::initialize(int total_num_model_layers, int num_gpu_layers_to_alloc
           num_gpu_layers_to_allocate = total_num_model_layers; // Use clamped value for local logic
       }
 
-      size_t cache_elems_per_layer_gpu = static_cast<size_t>(max_seq_len) *
+      size_t cache_elems_per_layer_gpu = static_cast<size_t>(max_seq_len_arg) * // Use max_seq_len_arg
                                  static_cast<size_t>(num_kv_heads) *
                                  static_cast<size_t>(head_dim);
-      size_t cache_bytes_per_layer_gpu = cache_elems_per_layer_gpu * sizeof(float);
+      
+      // Sizes for different KVCache types
+      size_t fp32_cache_bytes_per_layer_gpu = cache_elems_per_layer_gpu * sizeof(float);
+      size_t int8_cache_bytes_per_layer_gpu = cache_elems_per_layer_gpu * sizeof(int8_t);
+      // For scales: one scale per head per token position
+      size_t num_scales_per_layer_gpu = static_cast<size_t>(max_seq_len_arg) * static_cast<size_t>(num_kv_heads); // Use max_seq_len_arg
+      size_t scales_bytes_per_layer_gpu = num_scales_per_layer_gpu * sizeof(float);
 
-      if (cache_elems_per_layer_gpu == 0) {
-    throw std::runtime_error(
-            "KVCache (CUDA): Calculated cache size per layer is zero for GPU layers. Check parameters.");
-  }
+      if (cache_elems_per_layer_gpu == 0 && config.use_kvcache_quantization) {
+        throw std::runtime_error(
+            "KVCache (CUDA INT8): Calculated cache elements per layer is zero. Check parameters.");
+      } else if (cache_elems_per_layer_gpu == 0) {
+        throw std::runtime_error(
+            "KVCache (CUDA FP32): Calculated cache elements per layer is zero. Check parameters.");
+      }
 
-      Logger::info("Allocating KVCache on GPU for " + std::to_string(num_gpu_layers_to_allocate) +
-               " layers, size per layer: " +
-                   std::to_string(cache_bytes_per_layer_gpu / (1024.0 * 1024.0)) +
-               " MB");
+      if (config.use_kvcache_quantization) {
+        Logger::info("Allocating INT8 KVCache + FP32 Scales on GPU for " + std::to_string(num_gpu_layers_to_allocate) +
+                 " layers. Data size per layer: " +
+                     std::to_string(int8_cache_bytes_per_layer_gpu / (1024.0 * 1024.0)) +
+                 " MB. Scales size per layer: " + 
+                     std::to_string(scales_bytes_per_layer_gpu / (1024.0 * 1024.0)) + " MB");
+      } else {
+        Logger::info("Allocating FP32 KVCache on GPU for " + std::to_string(num_gpu_layers_to_allocate) +
+                 " layers, size per layer: " +
+                     std::to_string(fp32_cache_bytes_per_layer_gpu / (1024.0 * 1024.0)) +
+                 " MB");
+      }
 
       int gpu_layer_start_model_idx = this->total_model_layers_ - num_gpu_layers_to_allocate;
       Logger::info("KVCache GPU allocation will target model layers from index " + std::to_string(gpu_layer_start_model_idx) +
@@ -754,22 +189,59 @@ void KVCache::initialize(int total_num_model_layers, int num_gpu_layers_to_alloc
             continue;
         }
 
-        if (layers[current_model_idx_for_gpu].k_dev) {
+        if (layers[current_model_idx_for_gpu].k_dev_fp32) {
           Logger::warning(
-              "KVCache::initialize: Re-initializing KVCache layer " + std::to_string(current_model_idx_for_gpu) + " K dev pointer without proper destruction?");
-          gpuErrchk(cudaFree(layers[current_model_idx_for_gpu].k_dev));
-    }
-        if (layers[current_model_idx_for_gpu].v_dev) {
+              "KVCache::initialize: Re-initializing KVCache layer " + std::to_string(current_model_idx_for_gpu) + " K dev fp32 pointer without proper destruction?");
+          gpuErrchk(cudaFree(layers[current_model_idx_for_gpu].k_dev_fp32));
+          layers[current_model_idx_for_gpu].k_dev_fp32 = nullptr;
+        }
+        if (layers[current_model_idx_for_gpu].v_dev_fp32) {
           Logger::warning(
-              "KVCache::initialize: Re-initializing KVCache layer " + std::to_string(current_model_idx_for_gpu) + " V dev pointer without proper destruction?");
-          gpuErrchk(cudaFree(layers[current_model_idx_for_gpu].v_dev));
-    }
+              "KVCache::initialize: Re-initializing KVCache layer " + std::to_string(current_model_idx_for_gpu) + " V dev fp32 pointer without proper destruction?");
+          gpuErrchk(cudaFree(layers[current_model_idx_for_gpu].v_dev_fp32));
+          layers[current_model_idx_for_gpu].v_dev_fp32 = nullptr;
+        }
+        if (layers[current_model_idx_for_gpu].k_dev_quantized) {
+          Logger::warning(
+              "KVCache::initialize: Re-initializing KVCache layer " + std::to_string(current_model_idx_for_gpu) + " K dev quantized pointer without proper destruction?");
+          gpuErrchk(cudaFree(layers[current_model_idx_for_gpu].k_dev_quantized));
+          layers[current_model_idx_for_gpu].k_dev_quantized = nullptr;
+        }
+        if (layers[current_model_idx_for_gpu].v_dev_quantized) {
+          Logger::warning(
+              "KVCache::initialize: Re-initializing KVCache layer " + std::to_string(current_model_idx_for_gpu) + " V dev quantized pointer without proper destruction?");
+          gpuErrchk(cudaFree(layers[current_model_idx_for_gpu].v_dev_quantized));
+          layers[current_model_idx_for_gpu].v_dev_quantized = nullptr;
+        }
+        if (layers[current_model_idx_for_gpu].k_dev_scales) {
+          Logger::warning(
+              "KVCache::initialize: Re-initializing KVCache layer " + std::to_string(current_model_idx_for_gpu) + " K dev scales pointer without proper destruction?");
+          gpuErrchk(cudaFree(layers[current_model_idx_for_gpu].k_dev_scales));
+          layers[current_model_idx_for_gpu].k_dev_scales = nullptr;
+        }
+        if (layers[current_model_idx_for_gpu].v_dev_scales) {
+          Logger::warning(
+              "KVCache::initialize: Re-initializing KVCache layer " + std::to_string(current_model_idx_for_gpu) + " V dev scales pointer without proper destruction?");
+          gpuErrchk(cudaFree(layers[current_model_idx_for_gpu].v_dev_scales));
+          layers[current_model_idx_for_gpu].v_dev_scales = nullptr;
+        }
+        
+        if (config.use_kvcache_quantization) {
+            gpuErrchk(cudaMalloc(&layers[current_model_idx_for_gpu].k_dev_quantized, int8_cache_bytes_per_layer_gpu));
+            gpuErrchk(cudaMalloc(&layers[current_model_idx_for_gpu].v_dev_quantized, int8_cache_bytes_per_layer_gpu));
+            gpuErrchk(cudaMalloc(&layers[current_model_idx_for_gpu].k_dev_scales, scales_bytes_per_layer_gpu));
+            gpuErrchk(cudaMalloc(&layers[current_model_idx_for_gpu].v_dev_scales, scales_bytes_per_layer_gpu));
 
-        gpuErrchk(cudaMalloc(&layers[current_model_idx_for_gpu].k_dev, cache_bytes_per_layer_gpu));
-        gpuErrchk(cudaMalloc(&layers[current_model_idx_for_gpu].v_dev, cache_bytes_per_layer_gpu));
-
-        gpuErrchk(cudaMemset(layers[current_model_idx_for_gpu].k_dev, 0, cache_bytes_per_layer_gpu));
-        gpuErrchk(cudaMemset(layers[current_model_idx_for_gpu].v_dev, 0, cache_bytes_per_layer_gpu));
+            gpuErrchk(cudaMemset(layers[current_model_idx_for_gpu].k_dev_quantized, 0, int8_cache_bytes_per_layer_gpu));
+            gpuErrchk(cudaMemset(layers[current_model_idx_for_gpu].v_dev_quantized, 0, int8_cache_bytes_per_layer_gpu));
+            gpuErrchk(cudaMemset(layers[current_model_idx_for_gpu].k_dev_scales, 0, scales_bytes_per_layer_gpu));
+            gpuErrchk(cudaMemset(layers[current_model_idx_for_gpu].v_dev_scales, 0, scales_bytes_per_layer_gpu));
+        } else {
+            gpuErrchk(cudaMalloc(&layers[current_model_idx_for_gpu].k_dev_fp32, fp32_cache_bytes_per_layer_gpu));
+            gpuErrchk(cudaMalloc(&layers[current_model_idx_for_gpu].v_dev_fp32, fp32_cache_bytes_per_layer_gpu));
+            gpuErrchk(cudaMemset(layers[current_model_idx_for_gpu].k_dev_fp32, 0, fp32_cache_bytes_per_layer_gpu));
+            gpuErrchk(cudaMemset(layers[current_model_idx_for_gpu].v_dev_fp32, 0, fp32_cache_bytes_per_layer_gpu));
+        }
   }
       Logger::info("KVCache GPU allocation and zeroing complete for " + std::to_string(num_gpu_layers_to_allocate) + " layers.");
   } else {
@@ -780,184 +252,32 @@ void KVCache::initialize(int total_num_model_layers, int num_gpu_layers_to_alloc
 #else
   Logger::info("KVCache (CPU-only build) initialized with dimensions for " +
                std::to_string(total_num_model_layers) + " layers, " +
-               std::to_string(max_seq_len) + " seq len, " +
+               std::to_string(max_seq_len_arg) + " seq len, " + // Use max_seq_len_arg
                std::to_string(num_kv_heads) + " KV heads, " +
                std::to_string(head_dim) + " head dim");
 #endif
 }
 
-static std::vector<float> bf16vec_to_float_vec(
-    const std::vector<uint16_t>& v_bf16) {
-  std::vector<float> v_f32(v_bf16.size());
-#pragma omp parallel for
-  for (int64_t i = 0; i < static_cast<int64_t>(v_bf16.size()); ++i) {
-    v_f32[i] = bfloat16_to_float32(v_bf16[i]);
-  }
-  return v_f32;
-}
 
-static void matvec_bf16_f32_vector_cpu(const std::vector<uint16_t>& mat_bf16,
-                                       const std::vector<float>& vec_f32,
-                                       std::vector<float>& out_f32, int rows,
-                                       int cols) {
-  if (mat_bf16.size() != (size_t)rows * cols ||
-      vec_f32.size() != (size_t)cols) {
-    Logger::error("matvec_bf16_f32_vector_cpu: Size mismatch. Mat: " +
-                  std::to_string(mat_bf16.size()) + " (Expected " +
-                  std::to_string(rows * cols) +
-                  "), Vec: " + std::to_string(vec_f32.size()) + " (Expected " +
-                  std::to_string(cols) + ")");
-    out_f32.assign(rows, 0.0f);
-    return;
-  }
-  out_f32.resize(rows);
 
-#pragma omp parallel for
-  for (int64_t r = 0; r < static_cast<int64_t>(rows); ++r) {
-    double sum = 0.0;
-    double c = 0.0;
-    size_t row_offset = r * cols;
 
-    for (int c_idx = 0; c_idx < cols; ++c_idx) {
-      float weight = bfloat16_to_float32(mat_bf16[row_offset + c_idx]);
-      double term =
-          static_cast<double>(weight) * static_cast<double>(vec_f32[c_idx]);
 
-      double y = term - c;
-      double t = sum + y;
-      c = (t - sum) - y;
-      sum = t;
-    }
-    out_f32[r] = static_cast<float>(sum);
-  }
-}
-
-static void weighted_sum_probs_v(const std::vector<float>& probs,
-                                 const std::vector<float>& V,
-                                 std::vector<float>& out, int seq_len,
-                                 int head_dim) {
-  if (probs.size() != seq_len || V.size() != (size_t)seq_len * head_dim) {
-    Logger::error("weighted_sum_probs_v: Size mismatch. Probs: " +
-                  std::to_string(probs.size()) + " (Expected " +
-                  std::to_string(seq_len) +
-                  "), V: " + std::to_string(V.size()) + " (Expected " +
-                  std::to_string(seq_len * head_dim) + ")");
-    out.assign(head_dim, 0.0f);
-    return;
-  }
-  out.resize(head_dim);
-
-#pragma omp parallel for
-  for (int64_t j = 0; j < static_cast<int64_t>(head_dim); ++j) {
-    double sum = 0.0;
-    double c_kahan = 0.0;
-    for (int i = 0; i < seq_len; ++i) {
-      double term = static_cast<double>(probs[i]) *
-                    static_cast<double>(V[i * head_dim + j]);
-
-      double y = term - c_kahan;
-      double t = sum + y;
-      c_kahan = (t - sum) - y;
-      sum = t;
-    }
-    out[j] = static_cast<float>(sum);
-  }
-}
-
-static void calculate_attention_scores(const std::vector<float>& Q,
-                                       const std::vector<float>& K,
-                                       std::vector<float>& scores, int seq_len,
-                                       int head_dim, float scale) {
-  if (Q.empty() || K.empty()) return;
-  scores.resize(seq_len);
-
-  scale = std::clamp(scale, attention::MIN_SCALE, attention::MAX_SCALE);
-  float effective_scale = scale * attention::ATTENTION_SCALE_BASE;
-
-#pragma omp parallel for collapse(1)
-  for (int64_t i = 0; i < static_cast<int64_t>(seq_len); ++i) {
-    double dot_product = 0.0; // Use double for accumulation
-    double c_kahan = 0.0;     // Kahan summation compensation
-    size_t k_offset = static_cast<size_t>(i) * head_dim;
-
-    for (int j = 0; j < head_dim; ++j) {
-      // Kahan Summation for dot product
-      double term = static_cast<double>(Q[j]) * static_cast<double>(K[k_offset + j]);
-      double y = term - c_kahan;
-      double t_sum = dot_product + y;
-      c_kahan = (t_sum - dot_product) - y;
-      dot_product = t_sum;
-    }
+void TinyLlamaModel::ensure_embed_tokens_dequantized() {
+    if (!this->embed_tokens_f32.empty()) return;
     
-    scores[i] = static_cast<float>(dot_product * effective_scale); // Apply effective_scale
-  }
-}
-
-static void apply_rope_vector(
-    std::vector<float>& x, // The Q or K vector for all heads, concatenated
-    int num_heads,
-    int head_dim,
-    int current_token_pos,
-    const std::vector<std::pair<float, float>>& all_freqs_cis,
-    int max_pos_embeddings,
-    bool use_adjacent_pairing
-) {
-  if (current_token_pos < 0 || current_token_pos >= max_pos_embeddings) {
-    return;
-  }
-  if (head_dim % 2 != 0) { 
-    Logger::error("RoPE apply_rope_vector: head_dim must be even. head_dim: " + std::to_string(head_dim));
-    return;
-  }
-
-  const int dim_half = head_dim / 2;
-  size_t pos_offset = static_cast<size_t>(current_token_pos) * static_cast<size_t>(dim_half);
-
-  for (int h = 0; h < num_heads; ++h) {
-    size_t head_offset = static_cast<size_t>(h) * head_dim;
-
-    for (int i = 0; i < dim_half; ++i) { // i iterates 0 to (head_dim/2 - 1)
-      size_t freq_idx = pos_offset + static_cast<size_t>(i);
-      
-      if (freq_idx >= all_freqs_cis.size()) {
-            Logger::warning("RoPE apply_rope_vector: freq_idx out of bounds. pos: " + 
-                            std::to_string(current_token_pos) + ", head_dim/2: " + std::to_string(dim_half) +
-                            ", i: " + std::to_string(i) + ", calculated freq_idx: " + std::to_string(freq_idx) +
-                            ", all_freqs_cis.size(): " + std::to_string(all_freqs_cis.size()));
-            continue;
-          }
-
-      float cos_theta = all_freqs_cis[freq_idx].first;
-      float sin_theta = all_freqs_cis[freq_idx].second;
-      
-      float x0_val, x1_val;
-      size_t x0_idx, x1_idx;
-
-      if (use_adjacent_pairing) {
-        // Adjacent pairing: (x_{2i}, x_{2i+1})
-        x0_idx = head_offset + (2 * i);
-        x1_idx = head_offset + (2 * i + 1);
-      } else {
-        // Split-half pairing: (x_i, x_{i + dim_half})
-        x0_idx = head_offset + i;
-        x1_idx = head_offset + i + dim_half;
-      }
-
-      if (x0_idx >= x.size() || x1_idx >= x.size()) {
-          Logger::warning("RoPE apply_rope_vector: x index out of bounds. x.size(): " + std::to_string(x.size()) +
-                          ", x0_idx: " + std::to_string(x0_idx) + ", x1_idx: " + std::to_string(x1_idx));
-          continue;
-      }
-
-      x0_val = x[x0_idx];
-      x1_val = x[x1_idx];
-      
-      x[x0_idx] = x0_val * cos_theta - x1_val * sin_theta;
-      x[x1_idx] = x0_val * sin_theta + x1_val * cos_theta;
+    size_t total_elements_embed = static_cast<size_t>(config_.vocab_size) * config_.hidden_size;
+    if (!this->embed_tokens_q6k.empty()) {
+        dequantize_vector_q6k_to_f32(this->embed_tokens_q6k, this->embed_tokens_f32, total_elements_embed, 1);
+    } else if (!this->embed_tokens_q4k.empty()) {
+        dequantize_vector_q4k_to_f32(this->embed_tokens_q4k, this->embed_tokens_f32, total_elements_embed, 1);
+    } else if (!this->embed_tokens_q8k.empty()) {
+        dequantize_q8_k(this->embed_tokens_q8k, this->embed_tokens_f32, total_elements_embed, true);
+    } else if (!this->embed_tokens_q8_0.empty()) {
+        dequantize_vector_q8_0_to_f32(this->embed_tokens_q8_0, this->embed_tokens_f32, total_elements_embed, 1);
+    } else if (!this->embed_tokens.empty()) { 
+        this->embed_tokens_f32 = bf16vec_to_float_vec(this->embed_tokens);
     }
-  }
 }
-
 void TinyLlamaModel::initialize_weights(const SafeTensorsLoader* loader,
                                         const GGUFData* gguf) {
   Logger::info("Initializing model weights...");
@@ -968,11 +288,85 @@ void TinyLlamaModel::initialize_weights(const SafeTensorsLoader* loader,
   layers.resize(nhl);
 
   if (gguf) {
-    Logger::info("Mapping weights from GGUF data...");
-    map_gguf_weights(*gguf, *this);
+    Logger::info("Processing weights from GGUF data source...");
+
+    if (gguf && (gguf->mapped_tensor_data || !gguf->tensor_data.empty())) {
+      map_gguf_weights(*gguf, *this);
+      Logger::info("[INIT_WEIGHTS_GGUF] map_gguf_weights(*gguf, *this) CALLED (using function parameter).");
+    } else if (gguf_data_ && (gguf_data_->mapped_tensor_data || !gguf_data_->tensor_data.empty())) {
+      map_gguf_weights(*gguf_data_, *this);
+      Logger::info("[INIT_WEIGHTS_GGUF] map_gguf_weights(*gguf_data_, *this) CALLED (using member gguf_data_).");
+    } else {
+      Logger::error("[INIT_WEIGHTS_GGUF] map_gguf_weights failed - tensor data not available. No GGUF weights mapped.");
+    }
+
+    // LAZY DEQUANTIZATION: Only dequantize what's immediately needed
+    Logger::info("[INIT_WEIGHTS_GGUF] Using lazy dequantization to prevent OOM");
+
+    // Only dequantize embed_tokens and final_norm immediately (small and always needed)
+    if (this->embed_tokens_f32.empty()) {
+      size_t total_elements_embed = static_cast<size_t>(config_.vocab_size) * config_.hidden_size;
+      if (!this->embed_tokens_q6k.empty()) {
+        dequantize_vector_q6k_to_f32(this->embed_tokens_q6k, this->embed_tokens_f32, total_elements_embed, 1);
+      } else if (!this->embed_tokens_q4k.empty()) {
+        dequantize_vector_q4k_to_f32(this->embed_tokens_q4k, this->embed_tokens_f32, total_elements_embed, 1);
+      } else if (!this->embed_tokens_q8k.empty()) {
+        dequantize_q8_k(this->embed_tokens_q8k, this->embed_tokens_f32, total_elements_embed, true);
+      } else if (!this->embed_tokens_q8_0.empty()) {
+        dequantize_vector_q8_0_to_f32(this->embed_tokens_q8_0, this->embed_tokens_f32, total_elements_embed, 1);
+      } else if (!this->embed_tokens.empty()) { 
+        this->embed_tokens_f32 = bf16vec_to_float_vec(this->embed_tokens);
+      }
+      if (!this->embed_tokens_f32.empty()) {
+        Logger::info("[INIT_WEIGHTS_GGUF_DEQUANT] embed_tokens_f32 populated. Size: " + std::to_string(this->embed_tokens_f32.size()));
+      }
+    }
+
+    if (this->final_norm_f32.empty()) {
+        if (!this->final_norm.empty()) { 
+            this->final_norm_f32 = bf16vec_to_float_vec(this->final_norm);
+            if (!this->final_norm_f32.empty()) {
+                Logger::info("[INIT_WEIGHTS_GGUF_DEQUANT] Successfully converted final_norm (BF16) to final_norm_f32. Size: " + std::to_string(this->final_norm_f32.size()));
+            }
+        }
+    }
+
+    // DEFER lm_head dequantization until actually needed (it's huge)
+    Logger::info("[INIT_WEIGHTS_GGUF] Deferring lm_head dequantization until needed to save memory");
+
+    // DEFER all layer weight dequantization until the layer is actually used
+    Logger::info("[INIT_WEIGHTS_GGUF] Deferring all layer weight dequantization until layers are used");
+
+    // Only populate layer norms immediately (small and needed for validation)
+    for (int l = 0; l < nhl; ++l) {
+        auto& lw = layers[l];
+        
+        if (lw.input_layernorm_f32.empty() && !lw.input_layernorm.empty()) {
+            lw.input_layernorm_f32 = bf16vec_to_float_vec(lw.input_layernorm);
+            if (!lw.input_layernorm_f32.empty()) Logger::info("  L" + std::to_string(l) + " input_layernorm_f32 populated from BF16. Size: " + std::to_string(lw.input_layernorm_f32.size()));
+        }
+        if (lw.post_attention_layernorm_f32.empty() && !lw.post_attention_layernorm.empty()) {
+            lw.post_attention_layernorm_f32 = bf16vec_to_float_vec(lw.post_attention_layernorm);
+            if (!lw.post_attention_layernorm_f32.empty()) Logger::info("  L" + std::to_string(l) + " post_attention_layernorm_f32 populated from BF16. Size: " + std::to_string(lw.post_attention_layernorm_f32.size()));
+        }
+    }
+
+    // Validation checks for layer norms
+    for (int l = 0; l < nhl; ++l) {
+        const auto& lw = layers[l]; 
+        if (lw.input_layernorm_f32.empty()) {
+            Logger::error("[INIT_WEIGHTS_GGUF_CHECK] Layer " + std::to_string(l) + 
+                          ": input_layernorm_f32 is EMPTY post-GGUF. This WILL cause GPU init errors if this layer is on GPU.");
+        }
+        if (lw.post_attention_layernorm_f32.empty()) {
+            Logger::error("[INIT_WEIGHTS_GGUF_CHECK] Layer " + std::to_string(l) + 
+                          ": post_attention_layernorm_f32 is EMPTY post-GGUF. This WILL cause GPU init errors if this layer is on GPU.");
+        }
+    }
+    Logger::info("[INIT_WEIGHTS_GGUF] Finished per-layer NORM F32 vector checks post-GGUF.");
+
   } else if (loader) {
     Logger::info("Loading weights from SafeTensors data using parallel loader...");
-
     std::map<std::string, std::vector<uint8_t>> all_tensors_bytes_map;
     try {
       all_tensors_bytes_map = loader->load_all_tensors_parallel();
@@ -984,82 +378,206 @@ void TinyLlamaModel::initialize_weights(const SafeTensorsLoader* loader,
       throw;
     }
 
-    auto process_safetensor = [&](const std::string& name, std::vector<float>& target_f32_vector, const std::vector<size_t>& expected_shape_elements) {
+    auto process_safetensor = 
+        [&](const std::string& name, 
+            std::vector<float>& target_f32_vector, 
+            const std::vector<size_t>& expected_shape_elements,
+            bool is_essential = true) { 
+      
       auto it_bytes = all_tensors_bytes_map.find(name);
+      
+      size_t total_expected_elements_from_config = 1;
+      for(size_t dim : expected_shape_elements) total_expected_elements_from_config *= dim;
+
       if (it_bytes == all_tensors_bytes_map.end()) {
-        bool is_norm_weight = (name.find("input_layernorm.weight") != std::string::npos) ||
-                              (name.find("post_attention_layernorm.weight") != std::string::npos) ||
-                              (name == "model.norm.weight");
-        if (is_norm_weight) {
-          throw std::runtime_error("Essential normalization weight tensor \'" + name + "\' not found in SafeTensors model. This layer cannot be correctly processed.");
+        if (is_essential) {
+            Logger::error("Essential tensor '" + name + "' not found in SafeTensors model's preloaded map.");
+             throw std::runtime_error("Essential tensor '" + name + "' not found in SafeTensors model's preloaded map.");
+        } else {
+            Logger::warning("Non-essential tensor '" + name + "' not found in SafeTensors map. Filling with zeros based on config shape.");
+            target_f32_vector.assign(total_expected_elements_from_config, 0.0f); 
         }
-        Logger::error("Tensor '" + name + "' not found in preloaded map.");
-        size_t total_expected_elements = 1;
-        for(size_t dim : expected_shape_elements) total_expected_elements *= dim;
-        target_f32_vector.assign(total_expected_elements, 0.0f); // Fill with zeros for non-essential missing tensors
         return;
       }
+
       const std::vector<uint8_t>& tensor_data_bytes = it_bytes->second;
-      const SafeTensorsLoader::TensorInfo& tensor_info = loader->get_tensor_info(name);
+      const SafeTensorsLoader::TensorInfo tensor_info = loader->get_tensor_info(name); 
+      
+      size_t metadata_num_elements = 1;
+      for(size_t dim : tensor_info.shape) metadata_num_elements *= dim;
 
-      size_t expected_num_elements = 1;
-      for(size_t dim : tensor_info.shape) expected_num_elements *= dim; // Use shape from metadata
+      bool shapes_meaningfully_comparable = expected_shape_elements.size() > 1 || 
+                                           (expected_shape_elements.size() == 1 && expected_shape_elements[0] != 0 && expected_shape_elements[0] != 1) ||
+                                           metadata_num_elements != total_expected_elements_from_config;
 
-      // The loader now converts both BF16 and F16 to FP32 bytes before this point.
-      // So, tensor_data_bytes for these types will contain FP32 data.
+      if (shapes_meaningfully_comparable && metadata_num_elements != total_expected_elements_from_config) {
+          std::string expected_shape_str = "[";
+          for(size_t i=0; i<expected_shape_elements.size(); ++i) expected_shape_str += std::to_string(expected_shape_elements[i]) + (i == expected_shape_elements.size()-1 ? "" : ", ");
+          expected_shape_str += "]";
+          
+          std::string metadata_shape_str = "[";
+          for(size_t i=0; i<tensor_info.shape.size(); ++i) metadata_shape_str += std::to_string(tensor_info.shape[i]) + (i == tensor_info.shape.size()-1 ? "" : ", ");
+          metadata_shape_str += "]";
+
+          Logger::warning("Shape mismatch for tensor '" + name + 
+                        "'. Config expected shape: " + expected_shape_str + " (total_elements: " + std::to_string(total_expected_elements_from_config) + ")" +
+                        ", but metadata reports shape: " + metadata_shape_str + " (total_elements: " + std::to_string(metadata_num_elements) + 
+                        "). Using actual metadata shape for loading.");
+      }
+      
       if (tensor_info.dtype == "BF16" || tensor_info.dtype == "F16" || tensor_info.dtype == "F32") {
-        if (tensor_data_bytes.size() != expected_num_elements * sizeof(float)) {
-          Logger::error("Size mismatch for tensor '" + name + "' (original dtype " + tensor_info.dtype + ", expected FP32 bytes). Expected " +
-                        std::to_string(expected_num_elements * sizeof(float)) + " bytes, got " +
-                        std::to_string(tensor_data_bytes.size()) + " bytes.");
-          target_f32_vector.assign(expected_num_elements, 0.0f); // Fill with zeros
+        if (tensor_data_bytes.size() != metadata_num_elements * sizeof(float)) {
+          Logger::error("CRITICAL SIZE MISMATCH for tensor '" + name + "' (original dtype " + tensor_info.dtype + 
+                        ", expecting FP32 bytes from loader). Expected " +
+                        std::to_string(metadata_num_elements * sizeof(float)) + " FP32-equivalent bytes, but received " +
+                        std::to_string(tensor_data_bytes.size()) + " bytes from loader's map." +
+                        " This indicates an issue with SafeTensorsLoader or the loaded .safetensors data itself.");
+          if(is_essential) throw std::runtime_error("Data size mismatch for essential tensor " + name + 
+                                                    " (expected FP32 bytes from loader, got different size).");
+          target_f32_vector.assign(metadata_num_elements, 0.0f);
           return;
         }
-        target_f32_vector.resize(expected_num_elements);
+        target_f32_vector.resize(metadata_num_elements);
         memcpy(target_f32_vector.data(), tensor_data_bytes.data(), tensor_data_bytes.size());
-        Logger::info("Loaded tensor '" + name + "' (original dtype: " + tensor_info.dtype + ") as FP32 into target vector.");
       } else {
-        Logger::error("Unsupported dtype '" + tensor_info.dtype + "' for tensor '" + name + "' in SafeTensors CPU path after loader conversion attempts.");
-        target_f32_vector.assign(expected_num_elements, 0.0f); // Fill with zeros
+        Logger::error("Unsupported original dtype '" + tensor_info.dtype + "' for tensor '" + name + 
+                      "' in SafeTensors CPU path. Loader should have converted supported types (F32, F16, BF16) to FP32 bytes.");
+        if(is_essential) throw std::runtime_error("Unsupported original dtype for essential tensor " + name + 
+                                                    " after loader stage (expected F32, F16, or BF16).");
+        target_f32_vector.assign(metadata_num_elements, 0.0f);
       }
     };
 
-    // Load weights using the new process_safetensor helper
-    process_safetensor("model.embed_tokens.weight", embed_tokens_f32, {(size_t)vs, (size_t)hs});
-    process_safetensor("lm_head.weight", lm_head_f32, {(size_t)vs, (size_t)hs});
-    process_safetensor("model.norm.weight", final_norm_f32, {(size_t)hs});
+    process_safetensor("model.embed_tokens.weight", this->embed_tokens_f32, {(size_t)vs, (size_t)hs}, true);
+    process_safetensor("lm_head.weight", this->lm_head_f32, {(size_t)vs, (size_t)hs}, true); 
+    process_safetensor("model.norm.weight", this->final_norm_f32, {(size_t)hs}, true);
 
     for (int i = 0; i < nhl; ++i) {
       std::string prefix = "model.layers." + std::to_string(i) + ".";
       auto& lw = layers[i];
 
-      process_safetensor(prefix + "self_attn.q_proj.weight", lw.q_proj_f32, {(size_t)hs, (size_t)hs});
-      process_safetensor(prefix + "self_attn.k_proj.weight", lw.k_proj_f32, {(size_t)config_.num_key_value_heads * (hs / config_.num_attention_heads), (size_t)hs});
-      process_safetensor(prefix + "self_attn.v_proj.weight", lw.v_proj_f32, {(size_t)config_.num_key_value_heads * (hs / config_.num_attention_heads), (size_t)hs});
-      process_safetensor(prefix + "self_attn.o_proj.weight", lw.o_proj_f32, {(size_t)hs, (size_t)hs});
+      process_safetensor(prefix + "self_attn.q_proj.weight", lw.q_proj_f32, {(size_t)hs, (size_t)hs}, true);
+      process_safetensor(prefix + "self_attn.k_proj.weight", lw.k_proj_f32, {(size_t)config_.num_key_value_heads * (hs / config_.num_attention_heads), (size_t)hs}, true);
+      process_safetensor(prefix + "self_attn.v_proj.weight", lw.v_proj_f32, {(size_t)config_.num_key_value_heads * (hs / config_.num_attention_heads), (size_t)hs}, true);
+      process_safetensor(prefix + "self_attn.o_proj.weight", lw.o_proj_f32, {(size_t)hs, (size_t)hs}, true);
       
-      process_safetensor(prefix + "mlp.gate_proj.weight", lw.gate_proj_f32, {(size_t)is, (size_t)hs});
-      process_safetensor(prefix + "mlp.up_proj.weight", lw.up_proj_f32, {(size_t)is, (size_t)hs});
-      process_safetensor(prefix + "mlp.down_proj.weight", lw.down_proj_f32, {(size_t)hs, (size_t)is});
+      process_safetensor(prefix + "mlp.gate_proj.weight", lw.gate_proj_f32, {(size_t)is, (size_t)hs}, true);
+      process_safetensor(prefix + "mlp.up_proj.weight", lw.up_proj_f32, {(size_t)is, (size_t)hs}, true);
+      process_safetensor(prefix + "mlp.down_proj.weight", lw.down_proj_f32, {(size_t)hs, (size_t)is}, true);
 
-      process_safetensor(prefix + "input_layernorm.weight", lw.input_layernorm_f32, {(size_t)hs});
-      process_safetensor(prefix + "post_attention_layernorm.weight", lw.post_attention_layernorm_f32, {(size_t)hs});
-      
+      process_safetensor(prefix + "input_layernorm.weight", lw.input_layernorm_f32, {(size_t)hs}, true);
+      process_safetensor(prefix + "post_attention_layernorm.weight", lw.post_attention_layernorm_f32, {(size_t)hs}, true);
     }
     
-    if (!embed_tokens_f32.empty() && config_.hidden_size > 0) {
-        Logger::info("[DIAGNOSTIC] Inspecting embed_tokens_f32 (SafeTensors Path, New Logic)");
+    if (!this->embed_tokens_f32.empty() && config_.hidden_size > 0) {
+        Logger::info("[DIAGNOSTIC_SAFETENSORS] Inspecting embed_tokens_f32 (SafeTensors Path). Size: " + std::to_string(this->embed_tokens_f32.size()));
     }
 
   } else {
-    throw std::runtime_error(
-        "TinyLlamaModel::initialize_weights called with neither GGUF nor "
-        "SafeTensors loader.");
+    Logger::fatal("TinyLlamaModel::initialize_weights called with neither GGUF nor SafeTensors loader. Cannot initialize weights.");
+    throw std::runtime_error("Model weights source (GGUF or SafeTensors) not provided to initialize_weights.");
   }
-  Logger::info("Finished initializing model weights.");
+
+  Logger::info("Finished initializing model weights logic block.");
+
+  if (this->final_norm_f32.empty()) {
+      Logger::error("[INIT_WEIGHTS_FINAL_CHECK] final_norm_f32 is EMPTY. This WILL cause errors if final normalization is needed in F32.");
+  } else {
+      Logger::info("[INIT_WEIGHTS_FINAL_CHECK] final_norm_f32 is POPULATED. Size: " + std::to_string(this->final_norm_f32.size()));
+  }
+
+  if (this->embed_tokens_f32.empty()) {
+    Logger::error("[INIT_WEIGHTS_FINAL_CHECK] embed_tokens_f32 is EMPTY. This WILL cause errors if token embeddings are needed in F32.");
+  } else {
+    Logger::info("[INIT_WEIGHTS_FINAL_CHECK] embed_tokens_f32 is POPULATED. Size: " + std::to_string(this->embed_tokens_f32.size()));
+  }
+}
+void TinyLlamaModel::ensure_layer_weights_dequantized(int layer_idx) {
+    if (layer_idx < 0 || layer_idx >= layers.size()) return;
+    
+    auto& lw = layers[layer_idx];
+    int hs = config_.hidden_size;
+    int is = config_.intermediate_size;
+    
+    size_t q_o_proj_elements = static_cast<size_t>(hs) * hs; 
+    size_t k_v_proj_elements_specific = static_cast<size_t>(config_.num_key_value_heads * (hs / config_.num_attention_heads)) * hs;
+    size_t mlp_gate_up_elements = static_cast<size_t>(is) * hs;
+    size_t mlp_down_elements = static_cast<size_t>(hs) * is;
+
+    if (lw.q_proj_f32.empty()) {
+        if (!lw.q_proj_q6k.empty()) dequantize_vector_q6k_to_f32(lw.q_proj_q6k, lw.q_proj_f32, q_o_proj_elements, 0);
+        else if (!lw.q_proj_q4k.empty()) dequantize_vector_q4k_to_f32(lw.q_proj_q4k, lw.q_proj_f32, q_o_proj_elements, 0);
+        else if (!lw.q_proj_q8k.empty()) {
+            dequantize_q8_k(lw.q_proj_q8k, lw.q_proj_f32, q_o_proj_elements, true);
+        }
+        else if (!lw.q_proj_q8_0.empty()) {
+            dequantize_vector_q8_0_to_f32(lw.q_proj_q8_0, lw.q_proj_f32, q_o_proj_elements, 3);
+        }
+        else if (!lw.q_proj.empty()) lw.q_proj_f32 = bf16vec_to_float_vec(lw.q_proj);
+    }
+    if (lw.k_proj_f32.empty()) {
+        if (!lw.k_proj_q6k.empty()) dequantize_vector_q6k_to_f32(lw.k_proj_q6k, lw.k_proj_f32, k_v_proj_elements_specific, 0);
+        else if (!lw.k_proj_q4k.empty()) dequantize_vector_q4k_to_f32(lw.k_proj_q4k, lw.k_proj_f32, k_v_proj_elements_specific, 0);
+        else if (!lw.k_proj_q8k.empty()) dequantize_q8_k(lw.k_proj_q8k, lw.k_proj_f32, k_v_proj_elements_specific, false);
+        else if (!lw.k_proj_q8_0.empty()) dequantize_vector_q8_0_to_f32(lw.k_proj_q8_0, lw.k_proj_f32, k_v_proj_elements_specific, 0);
+        else if (!lw.k_proj.empty()) lw.k_proj_f32 = bf16vec_to_float_vec(lw.k_proj);
+    }
+    if (lw.v_proj_f32.empty()) {
+        if (!lw.v_proj_q6k.empty()) dequantize_vector_q6k_to_f32(lw.v_proj_q6k, lw.v_proj_f32, k_v_proj_elements_specific, 0);
+        else if (!lw.v_proj_q4k.empty()) dequantize_vector_q4k_to_f32(lw.v_proj_q4k, lw.v_proj_f32, k_v_proj_elements_specific, 0);
+        else if (!lw.v_proj_q8k.empty()) dequantize_q8_k(lw.v_proj_q8k, lw.v_proj_f32, k_v_proj_elements_specific, false);
+        else if (!lw.v_proj_q8_0.empty()) dequantize_vector_q8_0_to_f32(lw.v_proj_q8_0, lw.v_proj_f32, k_v_proj_elements_specific, 0);
+        else if (!lw.v_proj.empty()) lw.v_proj_f32 = bf16vec_to_float_vec(lw.v_proj);
+    }
+    if (lw.o_proj_f32.empty()) {
+        if (!lw.o_proj_q6k.empty()) dequantize_vector_q6k_to_f32(lw.o_proj_q6k, lw.o_proj_f32, q_o_proj_elements, 0);
+        else if (!lw.o_proj_q4k.empty()) dequantize_vector_q4k_to_f32(lw.o_proj_q4k, lw.o_proj_f32, q_o_proj_elements, 0);
+        else if (!lw.o_proj_q8k.empty()) dequantize_q8_k(lw.o_proj_q8k, lw.o_proj_f32, q_o_proj_elements, false);
+        else if (!lw.o_proj_q8_0.empty()) dequantize_vector_q8_0_to_f32(lw.o_proj_q8_0, lw.o_proj_f32, q_o_proj_elements, 0);
+        else if (!lw.o_proj.empty()) lw.o_proj_f32 = bf16vec_to_float_vec(lw.o_proj);
+    }
+    if (lw.gate_proj_f32.empty()) {
+        if (!lw.gate_proj_q6k.empty()) dequantize_vector_q6k_to_f32(lw.gate_proj_q6k, lw.gate_proj_f32, mlp_gate_up_elements, 0);
+        else if (!lw.gate_proj_q4k.empty()) dequantize_vector_q4k_to_f32(lw.gate_proj_q4k, lw.gate_proj_f32, mlp_gate_up_elements, 0);
+        else if (!lw.gate_proj_q8k.empty()) dequantize_q8_k(lw.gate_proj_q8k, lw.gate_proj_f32, mlp_gate_up_elements, false);
+        else if (!lw.gate_proj_q8_0.empty()) dequantize_vector_q8_0_to_f32(lw.gate_proj_q8_0, lw.gate_proj_f32, mlp_gate_up_elements, 0);
+        else if (!lw.gate_proj.empty()) lw.gate_proj_f32 = bf16vec_to_float_vec(lw.gate_proj);
+    }
+    if (lw.up_proj_f32.empty()) {
+        if (!lw.up_proj_q6k.empty()) dequantize_vector_q6k_to_f32(lw.up_proj_q6k, lw.up_proj_f32, mlp_gate_up_elements, 0);
+        else if (!lw.up_proj_q4k.empty()) dequantize_vector_q4k_to_f32(lw.up_proj_q4k, lw.up_proj_f32, mlp_gate_up_elements, 0);
+        else if (!lw.up_proj_q8k.empty()) dequantize_q8_k(lw.up_proj_q8k, lw.up_proj_f32, mlp_gate_up_elements, false);
+        else if (!lw.up_proj_q8_0.empty()) dequantize_vector_q8_0_to_f32(lw.up_proj_q8_0, lw.up_proj_f32, mlp_gate_up_elements, 0);
+        else if (!lw.up_proj.empty()) lw.up_proj_f32 = bf16vec_to_float_vec(lw.up_proj);
+    }
+    if (lw.down_proj_f32.empty()) {
+        if (!lw.down_proj_q6k.empty()) dequantize_vector_q6k_to_f32(lw.down_proj_q6k, lw.down_proj_f32, mlp_down_elements, 0);
+        else if (!lw.down_proj_q4k.empty()) dequantize_vector_q4k_to_f32(lw.down_proj_q4k, lw.down_proj_f32, mlp_down_elements, 0);
+        else if (!lw.down_proj_q8k.empty()) dequantize_q8_k(lw.down_proj_q8k, lw.down_proj_f32, mlp_down_elements, false);
+        else if (!lw.down_proj_q8_0.empty()) dequantize_vector_q8_0_to_f32(lw.down_proj_q8_0, lw.down_proj_f32, mlp_down_elements, 0);
+        else if (!lw.down_proj.empty()) lw.down_proj_f32 = bf16vec_to_float_vec(lw.down_proj);
+    }
 }
 
+void TinyLlamaModel::ensure_lm_head_dequantized() {
+    if (!this->lm_head_f32.empty()) return;
+    
+    size_t total_elements_lm_head = static_cast<size_t>(config_.vocab_size) * config_.hidden_size;
+    if (!this->lm_head_q6k.empty()) {
+        dequantize_vector_q6k_to_f32(this->lm_head_q6k, this->lm_head_f32, total_elements_lm_head, 1);
+    } else if (!this->lm_head_q4k.empty()) {
+        dequantize_vector_q4k_to_f32(this->lm_head_q4k, this->lm_head_f32, total_elements_lm_head, 1);
+    } else if (!this->lm_head_q8k.empty()) {
+        dequantize_q8_k(this->lm_head_q8k, this->lm_head_f32, total_elements_lm_head, true);
+    } else if (!this->lm_head_q8_0.empty()) {
+        dequantize_vector_q8_0_to_f32(this->lm_head_q8_0, this->lm_head_f32, total_elements_lm_head, 1);
+    } else if (!this->lm_head.empty()) { 
+        this->lm_head_f32 = bf16vec_to_float_vec(this->lm_head);
+    }
+}
 void TinyLlamaModel::initialize_gpu_and_rope() {
+  Logger::info("[INIT_GPU_ROPE_DEBUG_L1113] Absolute Start of initialize_gpu_and_rope: config_.num_cpu_offload_layers = " + std::to_string(config_.num_cpu_offload_layers) + 
+              ", config_.num_hidden_layers = " + std::to_string(config_.num_hidden_layers));
   Logger::info("[GPU_ROPE_INIT_ENTRY] Entered initialize_gpu_and_rope. Requested CPU Offload Layers: " + std::to_string(config_.num_cpu_offload_layers) + ", Total Hidden Layers: " + std::to_string(config_.num_hidden_layers));
   int hs = config_.hidden_size;
   int is = config_.intermediate_size;
@@ -1140,17 +658,6 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
   }
   Logger::info("cuBLAS handle created successfully.");
   
-  if (config_.is_gguf_file_loaded) {
-    cublas_status = cublasSetMathMode(cublas_handle_, CUBLAS_PEDANTIC_MATH);
-    if (cublas_status != CUBLAS_STATUS_SUCCESS) {
-        Logger::warning("Failed to set cuBLAS math mode to PEDANTIC: " + std::to_string(cublas_status) + ". Performance/precision may vary.");
-    } else {
-        Logger::info("cuBLAS math mode set to CUBLAS_PEDANTIC_MATH for GGUF model to enhance precision.");
-    }
-  } else {
-    Logger::info("Skipping explicit cuBLAS math mode setting for non-GGUF model (using cuBLAS default).");
-  }
-  }
 
   // Final Norm (always on GPU if any GPU layers are active)
   if (final_norm_f32.empty() && !final_norm.empty()) {
@@ -1175,6 +682,11 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
       }
   }
   Logger::info("Copying layer norm weights (FP32) to GPU for layers " + std::to_string(active_num_cpu_layers) + " to " + std::to_string(nhl - 1));
+  Logger::info("[INIT_DEBUG_PRE_LOOP] Active CPU layers: " + std::to_string(active_num_cpu_layers));
+  if (nhl > 0 && layers.size() > 0) { // Check if layers exist to prevent out of bounds
+    Logger::info("[INIT_DEBUG_PRE_LOOP] layers[0].input_layernorm_f32.empty(): " + std::string(layers[0].input_layernorm_f32.empty() ? "YES" : "NO") + 
+                 ", Size: " + std::to_string(layers[0].input_layernorm_f32.size()));
+  }
   for (int i = active_num_cpu_layers; i < nhl; ++i) { // Iterate ONLY over GPU layers
     if (static_cast<size_t>(i) >= layers.size()) { // Boundary check
         Logger::error("Layer index " + std::to_string(i) + " out of bounds for layers vector (size: " + std::to_string(layers.size()) + ")");
@@ -1194,6 +706,11 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
     if (!layers[i].input_layernorm_f32.empty()) {
       gpuErrchk(cudaMalloc(&layers[i].input_layernorm_dev, layers[i].input_layernorm_f32.size() * sizeof(float)));
       gpuErrchk(cudaMemcpy(layers[i].input_layernorm_dev, layers[i].input_layernorm_f32.data(), layers[i].input_layernorm_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
+      if (i == active_num_cpu_layers) { // Log only for the first GPU layer processed
+          Logger::info("[INIT_DEBUG] layers[" + std::to_string(i) + "].input_layernorm_dev allocated. Pointer: " + Logger::ptrToString(layers[i].input_layernorm_dev) + 
+                       ", Size used for malloc: " + std::to_string(layers[i].input_layernorm_f32.size() * sizeof(float)) + " bytes (" +
+                       std::to_string(layers[i].input_layernorm_f32.size()) + " elements). Host vector empty: " + (layers[i].input_layernorm_f32.empty() ? "YES" : "NO"));
+      }
     } else {
       // This layer is designated for GPU. It MUST have its norm weights.
       throw std::runtime_error("GPU Layer " + std::to_string(i) + ": input_layernorm_f32 weights are empty. Cannot offload to GPU without them.");
@@ -1209,13 +726,11 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
   }
   Logger::info("Finished processing layer norm weights for GPU layers.");
 
-  // Embeddings and LM head (BF16 and FP32 versions to GPU if active_num_gpu_layers > 0)
-  // These are global, so they are needed if any layers are on GPU.
 
   // --- TOKEN EMBEDDING TABLE to GPU (as BF16) ---
   SAFE_CUDA_FREE(token_embedding_table_dev_);    // Target for BF16
   SAFE_CUDA_FREE(token_embedding_table_f32_dev_); // Ensure this is cleared and not used by new embedding logic
-
+  ensure_embed_tokens_dequantized();
   bool token_embeddings_processed_to_gpu_bf16 = false;
 
   if (active_num_gpu_layers > 0) { // Only process if GPU layers are active
@@ -1290,7 +805,12 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
       token_embeddings_processed_to_gpu_bf16 = true;
     }
 
-    if (!token_embeddings_processed_to_gpu_bf16) {
+    if (token_embeddings_processed_to_gpu_bf16) {
+        Logger::info("[INIT_DEBUG] token_embedding_table_dev_ (BF16 on GPU) processed. Pointer: " + Logger::ptrToString(token_embedding_table_dev_) + 
+                     ". Flag token_embeddings_processed_to_gpu_bf16: YES");
+    } // This closing brace was for the "if (active_num_gpu_layers > 0)" for token embeddings.
+    // The next line is the warning check.
+    if (!token_embeddings_processed_to_gpu_bf16 && active_num_gpu_layers > 0) { // Added active_num_gpu_layers check here too
         Logger::warning("Token embeddings were not processed to GPU as BF16, despite GPU layers being active. This might indicate missing source embedding data in the model structure or an unhandled GGUF type for embeddings.");
     }
   } else {
@@ -1300,7 +820,7 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
   // --- LM HEAD to GPU (as BF16) ---
   SAFE_CUDA_FREE(lm_head_dev_);    // Target for BF16
   SAFE_CUDA_FREE(lm_head_f32_dev_); // Ensure this is cleared and not used by new LM head logic
-
+  ensure_lm_head_dequantized();
   bool lm_head_processed_to_gpu_bf16 = false;
 
   if (active_num_gpu_layers > 0) { // Only process if GPU layers are active
@@ -1382,48 +902,101 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
     Logger::info("No GPU layers active, skipping LM head processing for GPU.");
   }
   // --- END LM HEAD ---
+
+    SAFE_CUDA_FREE(lm_head_f32_dev_); // Ensure it's clear before attempting to populate
+
+  if (active_num_gpu_layers > 0) {
+    if (!lm_head_f32.empty()) { // Check if host lm_head_f32 has data
+      gpuErrchk(cudaMalloc(&lm_head_f32_dev_, lm_head_f32.size() * sizeof(float)));
+      gpuErrchk(cudaMemcpy(lm_head_f32_dev_, lm_head_f32.data(), lm_head_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
+      Logger::info("[INIT_GPU_ROPE] Copied lm_head_f32 (host FP32) to GPU for lm_head_f32_dev_. Pointer: " + Logger::ptrToString(lm_head_f32_dev_));
+    } else {
+      // This is a critical issue if lm_head_f32 is empty, as the matvec will fail.
+      Logger::error("[INIT_GPU_ROPE] Host lm_head_f32 is EMPTY. Cannot populate lm_head_f32_dev_. This WILL CAUSE a cublasSgemm error in the final matvec. Check model loading and initialize_weights logic for lm_head_f32 population.");
+      lm_head_f32_dev_ = nullptr; // Explicitly ensure it's null if source is empty
+    }
+  } else {
+    // Ensure it's null if no GPU layers are active (though SAFE_CUDA_FREE above would handle this)
+    lm_head_f32_dev_ = nullptr; 
+  }
+
   
   Logger::info("Finished processing embedding and LM head tables for GPU.");
 
-  // RoPE GPU Buffer
+  // RoPE GPU Buffer - Only allocate if GPU layers are active
   SAFE_CUDA_FREE(all_freqs_cis_dev);
-  if (!precomputed_freqs_cis_.empty()) { // RoPE freqs are always precomputed on CPU
-    size_t total_freq_elements = precomputed_freqs_cis_.size() * 2;
-    gpuErrchk(cudaMalloc(&all_freqs_cis_dev, total_freq_elements * sizeof(float)));
-    std::vector<float> flat_host_freqs; flat_host_freqs.reserve(total_freq_elements);
-    for (const auto& p : precomputed_freqs_cis_) { flat_host_freqs.push_back(p.first); flat_host_freqs.push_back(p.second); }
-    gpuErrchk(cudaMemcpy(all_freqs_cis_dev, flat_host_freqs.data(), total_freq_elements * sizeof(float), cudaMemcpyHostToDevice));
-    Logger::info("Copied all precomputed RoPE frequencies to persistent GPU buffer.");
+  if (active_num_gpu_layers > 0) {
+    if (!precomputed_freqs_cis_.empty()) { // RoPE freqs are always precomputed on CPU
+      size_t total_freq_elements = precomputed_freqs_cis_.size() * 2;
+      gpuErrchk(cudaMalloc(&all_freqs_cis_dev, total_freq_elements * sizeof(float)));
+      std::vector<float> flat_host_freqs; flat_host_freqs.reserve(total_freq_elements);
+      for (const auto& p : precomputed_freqs_cis_) { flat_host_freqs.push_back(p.first); flat_host_freqs.push_back(p.second); }
+      gpuErrchk(cudaMemcpy(all_freqs_cis_dev, flat_host_freqs.data(), total_freq_elements * sizeof(float), cudaMemcpyHostToDevice));
+      Logger::info("Copied all precomputed RoPE frequencies to persistent GPU buffer.");
+    } else {
+      Logger::warning("Host precomputed_freqs_cis_ is empty. Skipping GPU RoPE buffer allocation. This WILL cause issues if GPU layers use RoPE.");
+    }
+    Logger::info("Finished processing RoPE frequencies for GPU.");
   } else {
-    Logger::warning("Host precomputed_freqs_cis_ is empty. Skipping GPU RoPE buffer allocation. This WILL cause issues if GPU layers use RoPE.");
+    Logger::info("No GPU layers active, skipping RoPE GPU buffer allocation.");
   }
-  Logger::info("Finished processing RoPE frequencies for GPU.");
 
-  // Workspace GPU Buffers
-  Logger::info("Allocating/Reallocating persistent GPU workspace buffers.");
-  size_t hs_bytes = (size_t)hs * sizeof(float);
-  size_t is_bytes = (size_t)is * sizeof(float);
-  size_t vs_bytes = (size_t)vs * sizeof(float);
-  size_t k_dev_size_bytes = (size_t)n_kv_heads * head_dim * sizeof(float);
-  size_t v_dev_size_bytes = (size_t)n_kv_heads * head_dim * sizeof(float);
+  // Workspace GPU Buffers - Only allocate if GPU layers are active
+  if (active_num_gpu_layers > 0) {
+    Logger::info("Allocating/Reallocating persistent GPU workspace buffers for " + std::to_string(active_num_gpu_layers) + " GPU layers.");
+    size_t hs_bytes = (size_t)hs * sizeof(float);
+    size_t is_bytes = (size_t)is * sizeof(float);
+    size_t vs_bytes = (size_t)vs * sizeof(float);
+    size_t k_dev_size_bytes = (size_t)n_kv_heads * head_dim * sizeof(float);
+    size_t v_dev_size_bytes = (size_t)n_kv_heads * head_dim * sizeof(float);
 
 #define REALLOC_GPU_WORKSPACE(ptr, sz) SAFE_CUDA_FREE(ptr); gpuErrchk(cudaMalloc(&ptr, sz));
-  REALLOC_GPU_WORKSPACE(x_dev_, hs_bytes);
-  REALLOC_GPU_WORKSPACE(x_norm_dev_, hs_bytes);
-  REALLOC_GPU_WORKSPACE(x_resid1_dev_, hs_bytes);
-  REALLOC_GPU_WORKSPACE(x_resid2_dev_, hs_bytes);
-  REALLOC_GPU_WORKSPACE(q_dev_, hs_bytes); // q_dev for Q projection output is full hidden size
-  REALLOC_GPU_WORKSPACE(k_dev_, k_dev_size_bytes); // k_dev for K projection output
-  REALLOC_GPU_WORKSPACE(v_dev_, v_dev_size_bytes); // v_dev for V projection output
-  REALLOC_GPU_WORKSPACE(attn_out_dev_, hs_bytes);
-  REALLOC_GPU_WORKSPACE(attn_proj_dev_, hs_bytes); 
-  REALLOC_GPU_WORKSPACE(gate_vec_dev_, is_bytes);
-  REALLOC_GPU_WORKSPACE(up_vec_dev_, is_bytes);
-  REALLOC_GPU_WORKSPACE(swiglu_vec_dev_, is_bytes);
-  REALLOC_GPU_WORKSPACE(mlp_down_dev_, hs_bytes); 
-  REALLOC_GPU_WORKSPACE(logits_dev_, vs_bytes); // For final logits calculation on GPU
-#undef REALLOC_GPU_WORKSPACE
-  Logger::info("Finished allocating/reallocating GPU workspace buffers.");
+    REALLOC_GPU_WORKSPACE(x_dev_, hs_bytes);
+    REALLOC_GPU_WORKSPACE(x_norm_dev_, hs_bytes);
+    REALLOC_GPU_WORKSPACE(x_resid1_dev_, hs_bytes);
+    REALLOC_GPU_WORKSPACE(x_resid2_dev_, hs_bytes);
+    REALLOC_GPU_WORKSPACE(q_dev_, hs_bytes); // q_dev for Q projection output is full hidden size
+    REALLOC_GPU_WORKSPACE(k_dev_, k_dev_size_bytes); // k_dev for K projection output
+    REALLOC_GPU_WORKSPACE(v_dev_, v_dev_size_bytes); // v_dev for V projection output
+    REALLOC_GPU_WORKSPACE(attn_out_dev_, hs_bytes);
+    REALLOC_GPU_WORKSPACE(attn_proj_dev_, hs_bytes); 
+    REALLOC_GPU_WORKSPACE(gate_vec_dev_, is_bytes);
+    REALLOC_GPU_WORKSPACE(up_vec_dev_, is_bytes);
+    REALLOC_GPU_WORKSPACE(swiglu_vec_dev_, is_bytes);
+    REALLOC_GPU_WORKSPACE(mlp_down_dev_, hs_bytes); 
+    REALLOC_GPU_WORKSPACE(logits_dev_, vs_bytes); // For final logits calculation on GPU
+    Logger::info("Finished allocating/reallocating GPU workspace buffers.");
+  } else {
+    Logger::info("No GPU layers active, skipping GPU workspace buffer allocation.");
+    // Ensure all GPU workspace buffers are freed/null for CPU-only mode
+    SAFE_CUDA_FREE(x_dev_); SAFE_CUDA_FREE(x_norm_dev_); SAFE_CUDA_FREE(x_resid1_dev_); SAFE_CUDA_FREE(x_resid2_dev_);
+    SAFE_CUDA_FREE(q_dev_); SAFE_CUDA_FREE(k_dev_); SAFE_CUDA_FREE(v_dev_); SAFE_CUDA_FREE(attn_out_dev_); SAFE_CUDA_FREE(attn_proj_dev_);
+    SAFE_CUDA_FREE(gate_vec_dev_); SAFE_CUDA_FREE(up_vec_dev_); SAFE_CUDA_FREE(swiglu_vec_dev_); SAFE_CUDA_FREE(mlp_down_dev_); SAFE_CUDA_FREE(logits_dev_);
+  }
+
+  // Allocate KVCache dequantization buffers if GPU layers are active
+  if (active_num_gpu_layers > 0) {
+    size_t kv_cache_dequant_buffer_elems = static_cast<size_t>(config_.max_position_embeddings) * n_kv_heads * head_dim;
+    size_t kv_cache_dequant_buffer_bytes = kv_cache_dequant_buffer_elems * sizeof(float);
+    if (kv_cache_dequant_buffer_elems > 0) {
+        SAFE_CUDA_FREE(dequant_k_cache_buffer_dev_); 
+        gpuErrchk(cudaMalloc(&dequant_k_cache_buffer_dev_, kv_cache_dequant_buffer_bytes));
+        SAFE_CUDA_FREE(dequant_v_cache_buffer_dev_);
+        gpuErrchk(cudaMalloc(&dequant_v_cache_buffer_dev_, kv_cache_dequant_buffer_bytes));
+        Logger::info("Allocated KVCache dequantization buffers (K and V) on GPU. Size per buffer: " + 
+                     std::to_string(kv_cache_dequant_buffer_bytes / (1024.0 * 1024.0)) + " MB.");
+    } else {
+        Logger::warning("KVCache dequantization buffer size is 0. Skipping allocation. max_pos_emb=" + std::to_string(config_.max_position_embeddings) +
+                        ", n_kv_heads=" + std::to_string(n_kv_heads) + ", head_dim=" + std::to_string(head_dim));
+        SAFE_CUDA_FREE(dequant_k_cache_buffer_dev_); // Ensure they are null if size is 0
+        SAFE_CUDA_FREE(dequant_v_cache_buffer_dev_);
+    }
+  } else { // No active GPU layers
+    SAFE_CUDA_FREE(dequant_k_cache_buffer_dev_);
+    SAFE_CUDA_FREE(dequant_v_cache_buffer_dev_);
+  }
+
+// #undef REALLOC_GPU_WORKSPACE // Not needed if we expanded it or it was already defined
 
   // Concatenated BF16 layer weights for GPU layers (w_..._dev_ pointers)
   // Check if the first active GPU layer has BF16 q_proj weights to decide if this path should be taken.
@@ -1691,6 +1264,7 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
   }
 #endif // HAS_CUDA
 }
+}
 
 TinyLlamaModel::TinyLlamaModel(const ModelConfig& config,
                                const SafeTensorsLoader& loader)
@@ -1713,8 +1287,6 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& initial_config,
   int cli_gpu_layer_request = initial_config.num_cpu_offload_layers; 
   bool cli_mmap_preference = initial_config.use_mmap_for_gguf;
 
-  Logger::info("TinyLlamaModel constructor (from string): initial_config CLI hint for num_gpu_layers_requested = " + std::to_string(cli_gpu_layer_request));
-  Logger::info("TinyLlamaModel constructor (from string): initial_config CLI hint for use_mmap = " + std::string(cli_mmap_preference ? "true" : "false"));
 
   this->config_ = initial_config; // Start with initial_config, then overwrite with GGUF specifics
 
@@ -1728,27 +1300,17 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& initial_config,
       this->model_path_.substr(this->model_path_.size() - 5) == ".gguf") {
     Logger::info("GGUF file detected by path in Model Constructor: " + this->model_path_);
     try {
-      bool force_mmap_for_gguf_load = true; 
-      Logger::info("TinyLlamaModel GGUF path: Forcing mmap to " + std::string(force_mmap_for_gguf_load ? "true" : "false") + 
-                   " for gguf_meta/weight loading. Initial CLI mmap preference was: " + 
+      bool force_mmap_for_gguf_load = cli_mmap_preference; 
+      Logger::info("TinyLlamaModel GGUF path: Using mmap setting " + std::string(force_mmap_for_gguf_load ? "true" : "false") + 
+                   " for gguf_meta/weight loading based on CLI mmap preference: " + 
                    std::string(cli_mmap_preference ? "true" : "false"));
 
       this->gguf_data_ = std::make_unique<GGUFData>(load_gguf_meta(this->model_path_, force_mmap_for_gguf_load));
-      
+
       ModelConfig config_from_gguf = parse_model_config_from_gguf(*(this->gguf_data_));
-      
       this->config_ = config_from_gguf; 
       this->config_.use_mmap_for_gguf = cli_mmap_preference; // Honor CLI mmap preference for session's use of mmap later
       this->config_.is_gguf_file_loaded = true;
-
-      Logger::info("Successfully parsed GGUF metadata. Model name: " + this->config_.model_name);
-      Logger::info("TinyLlamaModel GGUF Ctor: After GGUF parse: config_.num_hidden_layers = " + 
-                   std::to_string(this->config_.num_hidden_layers) + 
-                   ", cli_gpu_layer_request (from initial_config) = " + std::to_string(cli_gpu_layer_request));
-
-      Logger::info("TinyLlamaModel GGUF Ctor: PRE-CALC this->config_.num_cpu_offload_layers (before GGUF specific logic) = " + std::to_string(this->config_.num_cpu_offload_layers) + 
-                   " (This value is from GGUF metadata or default, about to be overridden by CLI hint)");
-      
       if (cli_gpu_layer_request < 0) {
         this->config_.num_cpu_offload_layers = 0;
         Logger::info("TinyLlamaModel GGUF Ctor CALC: CLI hint < 0 (all GPU). num_cpu_offload_layers set to 0.");
@@ -1770,7 +1332,8 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& initial_config,
         }
       }
       Logger::info("TinyLlamaModel GGUF Ctor: POST-CALC (within GGUF block) final num_cpu_offload_layers = " + std::to_string(this->config_.num_cpu_offload_layers));
-
+      Logger::info("[CTOR_GGUF_DEBUG_L1860] After CLI hint logic: this->config_.num_cpu_offload_layers = " + std::to_string(this->config_.num_cpu_offload_layers) +
+                    ", this->config_.num_hidden_layers = " + std::to_string(this->config_.num_hidden_layers));
     } catch (const std::exception& e) {
       Logger::error("Failed to load or parse GGUF file: " + std::string(e.what()));
       throw; 
@@ -1837,7 +1400,8 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& initial_config,
       this->config_.num_cpu_offload_layers = this->config_.num_hidden_layers;
   }
   Logger::info("TinyLlamaModel constructor: Final clamped num_cpu_offload_layers = " + std::to_string(this->config_.num_cpu_offload_layers));
-
+  Logger::info("[CTOR_DEBUG_L1921] End of Model Ctor (before initialize_weights/rope call): this->config_.num_cpu_offload_layers = " + std::to_string(this->config_.num_cpu_offload_layers) +
+              ", this->config_.num_hidden_layers = " + std::to_string(this->config_.num_hidden_layers));
   Logger::info("Final ModelConfig (before initialize_weights/rope):");
   Logger::info("  hidden_size: " + std::to_string(config_.hidden_size));
   Logger::info("  intermediate_size: " + std::to_string(config_.intermediate_size));
@@ -1849,7 +1413,17 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& initial_config,
   Logger::info("  architecture: " + config_.architecture);
   Logger::info("  is_gguf_file_loaded: " + std::string(config_.is_gguf_file_loaded ? "true" : "false"));
   Logger::info("  use_mmap_for_gguf: " + std::string(config_.use_mmap_for_gguf ? "true" : "false"));
-
+    // --- BEGIN GGUFData Integrity Check ---
+  if (this->config_.is_gguf_file_loaded && this->gguf_data_) {
+    if (this->gguf_data_->tensor_infos_map.empty()) {
+        Logger::error("[CTOR_GGUF_PRE_INIT_W] CRITICAL: gguf_data_->tensor_infos_map is EMPTY. Weights will not be loaded by map_gguf_weights.");
+    }
+  } else if (this->config_.is_gguf_file_loaded && !this->gguf_data_) {
+    Logger::error("[CTOR_GGUF_PRE_INIT_W] CRITICAL: config_.is_gguf_file_loaded is TRUE, but gguf_data_ pointer IS NULL. Weights cannot be loaded.");
+  } else if (!this->config_.is_gguf_file_loaded) {
+    Logger::info("[CTOR_GGUF_PRE_INIT_W] Not a GGUF file load context (e.g., SafeTensors). Skipping gguf_data_ check here.");
+  }
+  // --- END GGUFData Integrity Check ---
   initialize_weights(loader.get(), this->gguf_data_.get()); 
   initialize_gpu_and_rope(); 
 
@@ -1886,32 +1460,48 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& config_from_session,
 
 TinyLlamaModel::~TinyLlamaModel() {
 #ifdef HAS_CUDA
-  Logger::info("Freeing TinyLlamaModel CUDA resources...");
-  if (cublas_handle_) {
-    cublasStatus_t cublas_status = cublasDestroy(cublas_handle_);
-    if (cublas_status != CUBLAS_STATUS_SUCCESS) {
-      Logger::error("cuBLAS handle destruction failed with error code: " +
-                    std::to_string(cublas_status));
+  // Only perform GPU cleanup if GPU layers were actually used
+  int active_num_gpu_layers = config_.num_hidden_layers - config_.num_cpu_offload_layers;
+  if (active_num_gpu_layers > 0) {
+    Logger::info("Freeing TinyLlamaModel CUDA resources...");
+    if (cublas_handle_) {
+      cublasStatus_t cublas_status = cublasDestroy(cublas_handle_);
+      if (cublas_status != CUBLAS_STATUS_SUCCESS) {
+        Logger::error("cuBLAS handle destruction failed with error code: " +
+                      std::to_string(cublas_status));
+      }
+      cublas_handle_ = nullptr;
+      Logger::info("cuBLAS handle destroyed.");
     }
-    cublas_handle_ = nullptr;
-    Logger::info("cuBLAS handle destroyed.");
+  } else {
+    // CPU-only mode: just clean up cuBLAS handle if it exists
+    if (cublas_handle_) {
+      cublasStatus_t cublas_status = cublasDestroy(cublas_handle_);
+      if (cublas_status != CUBLAS_STATUS_SUCCESS) {
+        Logger::error("cuBLAS handle destruction failed with error code: " +
+                      std::to_string(cublas_status));
+      }
+      cublas_handle_ = nullptr;
+    }
   }
 
-  if (final_norm_dev) {
-    gpuErrchk(cudaFree(final_norm_dev));
-    final_norm_dev = nullptr;
-  }
+  // Continue GPU cleanup only if GPU layers were active
+  if (active_num_gpu_layers > 0) {
+    if (final_norm_dev) {
+      gpuErrchk(cudaFree(final_norm_dev));
+      final_norm_dev = nullptr;
+    }
 
-  for (auto& layer : layers) {
-    if (layer.input_layernorm_dev) {
-      gpuErrchk(cudaFree(layer.input_layernorm_dev));
-      layer.input_layernorm_dev = nullptr;
+    for (auto& layer : layers) {
+      if (layer.input_layernorm_dev) {
+        gpuErrchk(cudaFree(layer.input_layernorm_dev));
+        layer.input_layernorm_dev = nullptr;
+      }
+      if (layer.post_attention_layernorm_dev) {
+        gpuErrchk(cudaFree(layer.post_attention_layernorm_dev));
+        layer.post_attention_layernorm_dev = nullptr;
+      }
     }
-    if (layer.post_attention_layernorm_dev) {
-      gpuErrchk(cudaFree(layer.post_attention_layernorm_dev));
-      layer.post_attention_layernorm_dev = nullptr;
-    }
-  }
 
   if (all_freqs_cis_dev) {
     gpuErrchk(cudaFree(all_freqs_cis_dev));
@@ -2046,21 +1636,27 @@ TinyLlamaModel::~TinyLlamaModel() {
     gpuErrchk(cudaFree(logits_dev_));
     logits_dev_ = nullptr;
   }
-  Logger::info("Freed persistent GPU workspace buffers.");
+  // Free KVCache dequantization buffers
+  if (dequant_k_cache_buffer_dev_) {
+    gpuErrchk(cudaFree(dequant_k_cache_buffer_dev_));
+    dequant_k_cache_buffer_dev_ = nullptr;
+  }
+  if (dequant_v_cache_buffer_dev_) {
+    gpuErrchk(cudaFree(dequant_v_cache_buffer_dev_));
+    dequant_v_cache_buffer_dev_ = nullptr;
+  }
 
-  Logger::info("Finished freeing TinyLlamaModel CUDA weight memory.");
+    Logger::info("Freed persistent GPU workspace buffers.");
+    Logger::info("Finished freeing TinyLlamaModel CUDA weight memory.");
+  } else {
+    Logger::info("CPU-only mode: No GPU resources to free.");
+  }
 #endif
 }
 
 std::vector<float> TinyLlamaModel::lookup_embedding(int token_id) {
   int hs = config_.hidden_size;
   int vs = config_.vocab_size;
-
-  bool log_this_token_lookup = (token_id == 660 || token_id == 29901 || token_id == 1724 || token_id == 310 || token_id == 278);
-
-  if (log_this_token_lookup) {
-    Logger::info("[CPU_EMBED_DETAIL] Lookup for token_id: " + std::to_string(token_id));
-  }
 
   if (token_id < 0 || token_id >= vs) {
     Logger::error("Token ID out of bounds in lookup_embedding: " +
@@ -2104,11 +1700,6 @@ std::vector<float> TinyLlamaModel::lookup_embedding(int token_id) {
       std::memcpy(&embedding_vec[dest_offset], dequantized_block,
                   elements_to_copy * sizeof(float));
     }
-    if (log_this_token_lookup) {
-      log_vector_summary("[CPU_EMBED_DETAIL Q4_K] Output Embedding (Token " +
-                             std::to_string(token_id) + ")",
-                         embedding_vec);
-    }
     return embedding_vec;
   }
 
@@ -2136,6 +1727,7 @@ std::vector<float> TinyLlamaModel::lookup_embedding(int token_id) {
     }
 
     float dequantized_block[GGML_QK8_0];
+    
     for (size_t block_n = 0; block_n < blocks_per_row; ++block_n) {
       dequantize_q8_0_block(&embed_tokens_q8_0[start_block_idx + block_n],
                             dequantized_block);
@@ -2143,11 +1735,26 @@ std::vector<float> TinyLlamaModel::lookup_embedding(int token_id) {
       size_t elements_to_copy = SAFE_MIN(static_cast<size_t>(GGML_QK8_0), static_cast<size_t>(hs - dest_offset));
       std::memcpy(&embedding_vec[dest_offset], dequantized_block,
                   elements_to_copy * sizeof(float));
+      
     }
-    if (log_this_token_lookup) {
-      log_vector_summary("[CPU_EMBED_DETAIL Q8_0] Output Embedding (Token " +
-                             std::to_string(token_id) + ")",
-                         embedding_vec);
+    
+    // Log final embedding vector stats for first few tokens
+    if (token_id < 2) {
+      float sum = 0.0f, min_val = embedding_vec[0], max_val = embedding_vec[0];
+      for (int i = 0; i < hs; ++i) {
+        sum += embedding_vec[i];
+        min_val = std::min(min_val, embedding_vec[i]);
+        max_val = std::max(max_val, embedding_vec[i]);
+      }
+      Logger::info("[Q8_0_EMBED_FINAL] Token " + std::to_string(token_id) + 
+                   " embedding stats: sum=" + std::to_string(sum) + 
+                   ", mean=" + std::to_string(sum / hs) + 
+                   ", min=" + std::to_string(min_val) + 
+                   ", max=" + std::to_string(max_val) + 
+                   ", first_4=[" + std::to_string(embedding_vec[0]) + 
+                   ", " + std::to_string(embedding_vec[1]) + 
+                   ", " + std::to_string(embedding_vec[2]) + 
+                   ", " + std::to_string(embedding_vec[3]) + "]");
     }
     return embedding_vec;
   }
@@ -2183,11 +1790,6 @@ std::vector<float> TinyLlamaModel::lookup_embedding(int token_id) {
       std::memcpy(&embedding_vec[dest_offset], dequantized_block,
                   elements_to_copy * sizeof(float));
     }
-    if (log_this_token_lookup) {
-      log_vector_summary("[CPU_EMBED_DETAIL Q6_K] Output Embedding (Token " +
-                             std::to_string(token_id) + ")",
-                         embedding_vec);
-    }
     return embedding_vec;
   }
 
@@ -2201,11 +1803,6 @@ std::vector<float> TinyLlamaModel::lookup_embedding(int token_id) {
 
     std::copy(embed_tokens_f32.begin() + offset,
               embed_tokens_f32.begin() + offset + hs, embedding_vec.begin());
-    if (log_this_token_lookup) {
-      log_vector_summary("[CPU_EMBED_DETAIL F32] Output Embedding (Token " +
-                             std::to_string(token_id) + ")",
-                         embedding_vec);
-    }
     return embedding_vec;
 
   } else if (!embed_tokens.empty()) {
@@ -2220,16 +1817,11 @@ std::vector<float> TinyLlamaModel::lookup_embedding(int token_id) {
         embed_tokens.begin() + offset, embed_tokens.begin() + offset + hs);
 
     embedding_vec = bf16vec_to_float_vec(token_embedding_bf16);
-    if (log_this_token_lookup) {
-      log_vector_summary("[CPU_EMBED_DETAIL BF16] Output Embedding (Token " +
-                             std::to_string(token_id) + ")",
-                         embedding_vec);
-    }
     return embedding_vec;
 
   } else {
     Logger::error(
-        "No valid embedding table found (Q4_K, F32, BF16) for token: " +
+        "No valid embedding table found (Q4_K, Q8_0, Q6_K, F32, BF16) for token: " +
         std::to_string(token_id));
 
     return embedding_vec;
@@ -2273,27 +1865,31 @@ std::vector<float> TinyLlamaModel::forward(
     
     std::vector<float> q_vec(hs), k_vec(n_kv_heads * head_dim), v_vec(n_kv_heads * head_dim);
     // Example: Q-projection (adapt for other projections and quantization types)
+    bool enable_debug_logging = (l == 0); // Only log for first layer
     if (!lw.q_proj_f32.empty()) matvec_f32_f32_vector_cpu(lw.q_proj_f32, x_norm_vec1, q_vec, hs, hs);
-    else if (!lw.q_proj_q8_0.empty() && config_.is_gguf_file_loaded) matvec_q8_0_f32_vector_cpu(lw.q_proj_q8_0, x_norm_vec1, q_vec, hs, hs);
-    else if (!lw.q_proj_q4k.empty() && config_.is_gguf_file_loaded) matvec_q4k_f32_vector_cpu(lw.q_proj_q4k, x_norm_vec1, q_vec, hs, hs);
-    else if (!lw.q_proj_q6k.empty() && config_.is_gguf_file_loaded) matvec_q6k_f32_vector_cpu(lw.q_proj_q6k, x_norm_vec1, q_vec, hs, hs);
+    else if (!lw.q_proj_q8k.empty() && config_.is_gguf_file_loaded) matvec_q8k_f32_vector_cpu(lw.q_proj_q8k, x_norm_vec1, q_vec, hs, hs, enable_debug_logging);
+    else if (!lw.q_proj_q8_0.empty() && config_.is_gguf_file_loaded) matvec_q8_0_f32_vector_cpu(lw.q_proj_q8_0, x_norm_vec1, q_vec, hs, hs, enable_debug_logging);
+    else if (!lw.q_proj_q4k.empty() && config_.is_gguf_file_loaded) matvec_q4k_f32_vector_cpu(lw.q_proj_q4k, x_norm_vec1, q_vec, hs, hs, enable_debug_logging);
+    else if (!lw.q_proj_q6k.empty() && config_.is_gguf_file_loaded) matvec_q6k_f32_vector_cpu(lw.q_proj_q6k, x_norm_vec1, q_vec, hs, hs, enable_debug_logging);
     else if (!lw.q_proj.empty()) matvec_bf16_f32_vector_cpu(lw.q_proj, x_norm_vec1, q_vec, hs, hs); // BF16 from SafeTensors
-    else throw std::runtime_error("Layer " + std::to_string(l) + ": No Q proj weights (f32, q8, q4k, q6k, bf16) for CPU");
+    else throw std::runtime_error("Layer " + std::to_string(l) + ": No Q proj weights (f32, q8k, q8, q4k, q6k, bf16) for CPU");
     
     // ... K, V projections ...
     if (!lw.k_proj_f32.empty()) matvec_f32_f32_vector_cpu(lw.k_proj_f32, x_norm_vec1, k_vec, n_kv_heads * head_dim, hs);
-    else if (!lw.k_proj_q8_0.empty() && config_.is_gguf_file_loaded) matvec_q8_0_f32_vector_cpu(lw.k_proj_q8_0, x_norm_vec1, k_vec, n_kv_heads * head_dim, hs);
-    else if (!lw.k_proj_q4k.empty() && config_.is_gguf_file_loaded) matvec_q4k_f32_vector_cpu(lw.k_proj_q4k, x_norm_vec1, k_vec, n_kv_heads * head_dim, hs);
-    else if (!lw.k_proj_q6k.empty() && config_.is_gguf_file_loaded) matvec_q6k_f32_vector_cpu(lw.k_proj_q6k, x_norm_vec1, k_vec, n_kv_heads * head_dim, hs);
+    else if (!lw.k_proj_q8k.empty() && config_.is_gguf_file_loaded) matvec_q8k_f32_vector_cpu(lw.k_proj_q8k, x_norm_vec1, k_vec, n_kv_heads * head_dim, hs, enable_debug_logging);
+    else if (!lw.k_proj_q8_0.empty() && config_.is_gguf_file_loaded) matvec_q8_0_f32_vector_cpu(lw.k_proj_q8_0, x_norm_vec1, k_vec, n_kv_heads * head_dim, hs, enable_debug_logging);
+    else if (!lw.k_proj_q4k.empty() && config_.is_gguf_file_loaded) matvec_q4k_f32_vector_cpu(lw.k_proj_q4k, x_norm_vec1, k_vec, n_kv_heads * head_dim, hs, enable_debug_logging);
+    else if (!lw.k_proj_q6k.empty() && config_.is_gguf_file_loaded) matvec_q6k_f32_vector_cpu(lw.k_proj_q6k, x_norm_vec1, k_vec, n_kv_heads * head_dim, hs, enable_debug_logging);
     else if (!lw.k_proj.empty()) matvec_bf16_f32_vector_cpu(lw.k_proj, x_norm_vec1, k_vec, n_kv_heads * head_dim, hs);
-    else throw std::runtime_error("Layer " + std::to_string(l) + ": No K proj weights (f32, q8, q4k, q6k, bf16) for CPU");
+    else throw std::runtime_error("Layer " + std::to_string(l) + ": No K proj weights (f32, q8k, q8, q4k, q6k, bf16) for CPU");
 
     if (!lw.v_proj_f32.empty()) matvec_f32_f32_vector_cpu(lw.v_proj_f32, x_norm_vec1, v_vec, n_kv_heads * head_dim, hs);
-    else if (!lw.v_proj_q8_0.empty() && config_.is_gguf_file_loaded) matvec_q8_0_f32_vector_cpu(lw.v_proj_q8_0, x_norm_vec1, v_vec, n_kv_heads * head_dim, hs);
-    else if (!lw.v_proj_q4k.empty() && config_.is_gguf_file_loaded) matvec_q4k_f32_vector_cpu(lw.v_proj_q4k, x_norm_vec1, v_vec, n_kv_heads * head_dim, hs);
-    else if (!lw.v_proj_q6k.empty() && config_.is_gguf_file_loaded) matvec_q6k_f32_vector_cpu(lw.v_proj_q6k, x_norm_vec1, v_vec, n_kv_heads * head_dim, hs);
+    else if (!lw.v_proj_q8k.empty() && config_.is_gguf_file_loaded) matvec_q8k_f32_vector_cpu(lw.v_proj_q8k, x_norm_vec1, v_vec, n_kv_heads * head_dim, hs, enable_debug_logging);
+    else if (!lw.v_proj_q8_0.empty() && config_.is_gguf_file_loaded) matvec_q8_0_f32_vector_cpu(lw.v_proj_q8_0, x_norm_vec1, v_vec, n_kv_heads * head_dim, hs, enable_debug_logging);
+    else if (!lw.v_proj_q4k.empty() && config_.is_gguf_file_loaded) matvec_q4k_f32_vector_cpu(lw.v_proj_q4k, x_norm_vec1, v_vec, n_kv_heads * head_dim, hs, enable_debug_logging);
+    else if (!lw.v_proj_q6k.empty() && config_.is_gguf_file_loaded) matvec_q6k_f32_vector_cpu(lw.v_proj_q6k, x_norm_vec1, v_vec, n_kv_heads * head_dim, hs, enable_debug_logging);
     else if (!lw.v_proj.empty()) matvec_bf16_f32_vector_cpu(lw.v_proj, x_norm_vec1, v_vec, n_kv_heads * head_dim, hs);
-    else throw std::runtime_error("Layer " + std::to_string(l) + ": No V proj weights (f32, q8, q4k, q6k, bf16) for CPU");
+    else throw std::runtime_error("Layer " + std::to_string(l) + ": No V proj weights (f32, q8k, q8, q4k, q6k, bf16) for CPU");
 
     apply_rope_vector(q_vec, n_heads, head_dim, n_tokens, precomputed_freqs_cis_, max_pos_embeddings, config_.is_gguf_file_loaded);
     apply_rope_vector(k_vec, n_kv_heads, head_dim, n_tokens, precomputed_freqs_cis_, max_pos_embeddings, config_.is_gguf_file_loaded);
@@ -2302,15 +1898,11 @@ std::vector<float> TinyLlamaModel::forward(
     if (kv_cache) {
         if (static_cast<size_t>(l) < kv_cache->layers.size()) {
             KVCacheLayer& kv_layer = kv_cache->layers[l];
-            size_t layer_max_seq_len = 0;
-            if (n_kv_heads > 0 && head_dim > 0) { // Prevent division by zero if params are bad
-                layer_max_seq_len = kv_layer.k.size() / (n_kv_heads * head_dim);
-            }
-            
+            size_t layer_max_seq_len = static_cast<size_t>(kv_cache->max_seq_len_config_);            
             if (static_cast<size_t>(n_tokens) >= layer_max_seq_len && layer_max_seq_len > 0) {
                 Logger::error("KV Cache access out of bounds in CPU forward. Layer " + std::to_string(l) + 
                               ", n_tokens: " + std::to_string(n_tokens) + 
-                              ", calculated layer_max_seq_len: " + std::to_string(layer_max_seq_len) + ". Skipping KV update.");
+                              ", configured layer_max_seq_len: " + std::to_string(layer_max_seq_len) + ". Skipping KV update.");
             } else if (layer_max_seq_len == 0 && n_tokens > 0) {
                  Logger::error("KV Cache layer_max_seq_len is 0, but n_tokens > 0. Layer " + std::to_string(l) + ". Skipping KV update.");
             } else {
@@ -2360,11 +1952,12 @@ std::vector<float> TinyLlamaModel::forward(
 
     std::vector<float> attn_proj_vec(hs);
     if(!lw.o_proj_f32.empty()) matvec_f32_f32_vector_cpu(lw.o_proj_f32, attn_out_vec, attn_proj_vec, hs, hs);
-    else if (!lw.o_proj_q8_0.empty() && config_.is_gguf_file_loaded) matvec_q8_0_f32_vector_cpu(lw.o_proj_q8_0, attn_out_vec, attn_proj_vec, hs, hs);
-    else if (!lw.o_proj_q4k.empty() && config_.is_gguf_file_loaded) matvec_q4k_f32_vector_cpu(lw.o_proj_q4k, attn_out_vec, attn_proj_vec, hs, hs);
-    else if (!lw.o_proj_q6k.empty() && config_.is_gguf_file_loaded) matvec_q6k_f32_vector_cpu(lw.o_proj_q6k, attn_out_vec, attn_proj_vec, hs, hs);
+    else if (!lw.o_proj_q8k.empty() && config_.is_gguf_file_loaded) matvec_q8k_f32_vector_cpu(lw.o_proj_q8k, attn_out_vec, attn_proj_vec, hs, hs, enable_debug_logging);
+    else if (!lw.o_proj_q8_0.empty() && config_.is_gguf_file_loaded) matvec_q8_0_f32_vector_cpu(lw.o_proj_q8_0, attn_out_vec, attn_proj_vec, hs, hs, enable_debug_logging);
+    else if (!lw.o_proj_q4k.empty() && config_.is_gguf_file_loaded) matvec_q4k_f32_vector_cpu(lw.o_proj_q4k, attn_out_vec, attn_proj_vec, hs, hs, enable_debug_logging);
+    else if (!lw.o_proj_q6k.empty() && config_.is_gguf_file_loaded) matvec_q6k_f32_vector_cpu(lw.o_proj_q6k, attn_out_vec, attn_proj_vec, hs, hs, enable_debug_logging);
     else if(!lw.o_proj.empty()) matvec_bf16_f32_vector_cpu(lw.o_proj, attn_out_vec, attn_proj_vec, hs, hs);
-    else throw std::runtime_error("Layer " + std::to_string(l) + ": No O proj weights (f32, q8, q4k, q6k, bf16) for CPU");
+    else throw std::runtime_error("Layer " + std::to_string(l) + ": No O proj weights (f32, q8k, q8, q4k, q6k, bf16) for CPU");
 
     for(size_t i=0; i<input.size(); ++i) input[i] = x_resid1_vec[i] + attn_proj_vec[i]; // Update input by reference
 
@@ -2380,19 +1973,21 @@ std::vector<float> TinyLlamaModel::forward(
     std::vector<float> gate_vec(is), up_vec(is);
     // Gate-projection
     if(!lw.gate_proj_f32.empty()) matvec_f32_f32_vector_cpu(lw.gate_proj_f32, x_norm_vec2, gate_vec, is, hs);
-    else if (!lw.gate_proj_q8_0.empty() && config_.is_gguf_file_loaded) matvec_q8_0_f32_vector_cpu(lw.gate_proj_q8_0, x_norm_vec2, gate_vec, is, hs);
-    else if (!lw.gate_proj_q4k.empty() && config_.is_gguf_file_loaded) matvec_q4k_f32_vector_cpu(lw.gate_proj_q4k, x_norm_vec2, gate_vec, is, hs);
-    else if (!lw.gate_proj_q6k.empty() && config_.is_gguf_file_loaded) matvec_q6k_f32_vector_cpu(lw.gate_proj_q6k, x_norm_vec2, gate_vec, is, hs);
+    else if (!lw.gate_proj_q8k.empty() && config_.is_gguf_file_loaded) matvec_q8k_f32_vector_cpu(lw.gate_proj_q8k, x_norm_vec2, gate_vec, is, hs, enable_debug_logging);
+    else if (!lw.gate_proj_q8_0.empty() && config_.is_gguf_file_loaded) matvec_q8_0_f32_vector_cpu(lw.gate_proj_q8_0, x_norm_vec2, gate_vec, is, hs, enable_debug_logging);
+    else if (!lw.gate_proj_q4k.empty() && config_.is_gguf_file_loaded) matvec_q4k_f32_vector_cpu(lw.gate_proj_q4k, x_norm_vec2, gate_vec, is, hs, enable_debug_logging);
+    else if (!lw.gate_proj_q6k.empty() && config_.is_gguf_file_loaded) matvec_q6k_f32_vector_cpu(lw.gate_proj_q6k, x_norm_vec2, gate_vec, is, hs, enable_debug_logging);
     else if(!lw.gate_proj.empty()) matvec_bf16_f32_vector_cpu(lw.gate_proj, x_norm_vec2, gate_vec, is, hs);
-    else throw std::runtime_error("Layer " + std::to_string(l) + ": No Gate proj weights (f32, q8, q4k, q6k, bf16) for CPU");
+    else throw std::runtime_error("Layer " + std::to_string(l) + ": No Gate proj weights (f32, q8k, q8, q4k, q6k, bf16) for CPU");
 
     // Up-projection
     if(!lw.up_proj_f32.empty()) matvec_f32_f32_vector_cpu(lw.up_proj_f32, x_norm_vec2, up_vec, is, hs);
-    else if (!lw.up_proj_q8_0.empty() && config_.is_gguf_file_loaded) matvec_q8_0_f32_vector_cpu(lw.up_proj_q8_0, x_norm_vec2, up_vec, is, hs);
-    else if (!lw.up_proj_q4k.empty() && config_.is_gguf_file_loaded) matvec_q4k_f32_vector_cpu(lw.up_proj_q4k, x_norm_vec2, up_vec, is, hs);
-    else if (!lw.up_proj_q6k.empty() && config_.is_gguf_file_loaded) matvec_q6k_f32_vector_cpu(lw.up_proj_q6k, x_norm_vec2, up_vec, is, hs);
+    else if (!lw.up_proj_q8k.empty() && config_.is_gguf_file_loaded) matvec_q8k_f32_vector_cpu(lw.up_proj_q8k, x_norm_vec2, up_vec, is, hs, enable_debug_logging);
+    else if (!lw.up_proj_q8_0.empty() && config_.is_gguf_file_loaded) matvec_q8_0_f32_vector_cpu(lw.up_proj_q8_0, x_norm_vec2, up_vec, is, hs, enable_debug_logging);
+    else if (!lw.up_proj_q4k.empty() && config_.is_gguf_file_loaded) matvec_q4k_f32_vector_cpu(lw.up_proj_q4k, x_norm_vec2, up_vec, is, hs, enable_debug_logging);
+    else if (!lw.up_proj_q6k.empty() && config_.is_gguf_file_loaded) matvec_q6k_f32_vector_cpu(lw.up_proj_q6k, x_norm_vec2, up_vec, is, hs, enable_debug_logging);
     else if(!lw.up_proj.empty()) matvec_bf16_f32_vector_cpu(lw.up_proj, x_norm_vec2, up_vec, is, hs);
-    else throw std::runtime_error("Layer " + std::to_string(l) + ": No Up proj weights (f32, q8, q4k, q6k, bf16) for CPU");
+    else throw std::runtime_error("Layer " + std::to_string(l) + ": No Up proj weights (f32, q8k, q8, q4k, q6k, bf16) for CPU");
 
     std::vector<float> silu_out_vec(is);
     silu_cpu(gate_vec, silu_out_vec);
@@ -2403,11 +1998,12 @@ std::vector<float> TinyLlamaModel::forward(
     std::vector<float> mlp_out_vec(hs);
     // Down-projection
     if(!lw.down_proj_f32.empty()) matvec_f32_f32_vector_cpu(lw.down_proj_f32, swiglu_result_vec, mlp_out_vec, hs, is);
-    else if (!lw.down_proj_q8_0.empty() && config_.is_gguf_file_loaded) matvec_q8_0_f32_vector_cpu(lw.down_proj_q8_0, swiglu_result_vec, mlp_out_vec, hs, is);
-    else if (!lw.down_proj_q4k.empty() && config_.is_gguf_file_loaded) matvec_q4k_f32_vector_cpu(lw.down_proj_q4k, swiglu_result_vec, mlp_out_vec, hs, is);
-    else if (!lw.down_proj_q6k.empty() && config_.is_gguf_file_loaded) matvec_q6k_f32_vector_cpu(lw.down_proj_q6k, swiglu_result_vec, mlp_out_vec, hs, is);
+    else if (!lw.down_proj_q8k.empty() && config_.is_gguf_file_loaded) matvec_q8k_f32_vector_cpu(lw.down_proj_q8k, swiglu_result_vec, mlp_out_vec, hs, is, enable_debug_logging);
+    else if (!lw.down_proj_q8_0.empty() && config_.is_gguf_file_loaded) matvec_q8_0_f32_vector_cpu(lw.down_proj_q8_0, swiglu_result_vec, mlp_out_vec, hs, is, enable_debug_logging);
+    else if (!lw.down_proj_q4k.empty() && config_.is_gguf_file_loaded) matvec_q4k_f32_vector_cpu(lw.down_proj_q4k, swiglu_result_vec, mlp_out_vec, hs, is, enable_debug_logging);
+    else if (!lw.down_proj_q6k.empty() && config_.is_gguf_file_loaded) matvec_q6k_f32_vector_cpu(lw.down_proj_q6k, swiglu_result_vec, mlp_out_vec, hs, is, enable_debug_logging);
     else if(!lw.down_proj.empty()) matvec_bf16_f32_vector_cpu(lw.down_proj, swiglu_result_vec, mlp_out_vec, hs, is);
-    else throw std::runtime_error("Layer " + std::to_string(l) + ": No Down proj weights (f32, q8, q4k, q6k, bf16) for CPU");
+    else throw std::runtime_error("Layer " + std::to_string(l) + ": No Down proj weights (f32, q8k, q8, q4k, q6k, bf16) for CPU");
 
     for(size_t i=0; i<input.size(); ++i) input[i] = x_resid2_vec[i] + mlp_out_vec[i]; // Update input by reference
     
@@ -2416,11 +2012,8 @@ std::vector<float> TinyLlamaModel::forward(
       Logger::info("[CPU_FWD] ------ END Layer " + std::to_string(l) +
                    " (pos=" + std::to_string(n_tokens) + ") ------");
     }
-  } // End of CPU layer loop
+  }
 
-  // If all layers were processed on CPU, then do final norm and logits.
-  // Otherwise, `input` (which is x_vec from the caller) now holds the output of the last CPU layer,
-  // and will be passed to the GPU stage. The GPU stage will handle final norm and logits if it processes the last layer.
   if (config_.num_cpu_offload_layers == config_.num_hidden_layers) {
     Logger::info("[CPU_FWD] All layers processed on CPU. Performing final RMSNorm and Logits.");
   const std::vector<float>& w_final_norm_vec =
@@ -2430,12 +2023,15 @@ std::vector<float> TinyLlamaModel::forward(
   rmsnorm_vector_cpu(input, w_final_norm_vec, x_final_norm_vec, eps);
 
   std::vector<float> logits(vs);
+  ensure_lm_head_dequantized();
+    bool enable_lm_head_debug_logging = true; // Always log LM head for debugging
     if (!lm_head_f32.empty()) matvec_f32_f32_vector_cpu(lm_head_f32, x_final_norm_vec, logits, vs, hs);
-    else if (!lm_head_q8_0.empty() && config_.is_gguf_file_loaded) matvec_q8_0_f32_vector_cpu(lm_head_q8_0, x_final_norm_vec, logits, vs, hs);
-    else if (!lm_head_q4k.empty() && config_.is_gguf_file_loaded) matvec_q4k_f32_vector_cpu(lm_head_q4k, x_final_norm_vec, logits, vs, hs);
-    else if (!lm_head_q6k.empty() && config_.is_gguf_file_loaded) matvec_q6k_f32_vector_cpu(lm_head_q6k, x_final_norm_vec, logits, vs, hs);
+    else if (!lm_head_q8k.empty() && config_.is_gguf_file_loaded) matvec_q8k_f32_vector_cpu(lm_head_q8k, x_final_norm_vec, logits, vs, hs, enable_lm_head_debug_logging);
+    else if (!lm_head_q8_0.empty() && config_.is_gguf_file_loaded) matvec_q8_0_f32_vector_cpu(lm_head_q8_0, x_final_norm_vec, logits, vs, hs, enable_lm_head_debug_logging);
+    else if (!lm_head_q4k.empty() && config_.is_gguf_file_loaded) matvec_q4k_f32_vector_cpu(lm_head_q4k, x_final_norm_vec, logits, vs, hs, enable_lm_head_debug_logging);
+    else if (!lm_head_q6k.empty() && config_.is_gguf_file_loaded) matvec_q6k_f32_vector_cpu(lm_head_q6k, x_final_norm_vec, logits, vs, hs, enable_lm_head_debug_logging);
     else if (!lm_head.empty()) matvec_bf16_f32_vector_cpu(lm_head, x_final_norm_vec, logits, vs, hs); // Fallback for BF16 SafeTensors
-    else throw std::runtime_error("No valid LM Head weights (f32, q8, q4k, q6k, bf16) found for CPU final stage.");
+    else throw std::runtime_error("No valid LM Head weights (f32, q8k, q8, q4k, q6k, bf16) found for CPU final stage.");
 
   if (log_this_step || log_first_gen_step) {
         log_vector_summary("[CPU_FWD] Final Logits (all CPU, pos=" + std::to_string(n_tokens) + ")", logits, 15);
@@ -2476,18 +2072,19 @@ std::vector<float> TinyLlamaModel::forward_device(
       Logger::error("forward_device called with null x_input_dev. This should be model_->x_dev_.");
       return {};
   }
+  if (!kv_cache) {
+      Logger::error("forward_device called with null KVCache.");
+      return {};
+  }
 
   int is = config_.intermediate_size;
   float eps = config_.rms_norm_eps;
-  bool log_this_pos = (pos == 0 || pos == 1 || pos == 13);
-
-  if (log_this_pos) {
-    Logger::info("[TM::fw_dev pos=" + std::to_string(pos) +
-                 "] Entered. Processing " + std::to_string(num_gpu_layers) + " GPU layers, starting from model layer " + 
-                 std::to_string(num_cpu_layers) + ". Input is x_input_dev (model_->x_dev_).");
-  }
+  std::vector<float> h_x_input_dev(config_.hidden_size);
 
   cublasStatus_t stream_status = cublasSetStream(cublas_handle_, stream);
+    gpuErrchk(cudaMemcpyAsync(h_x_input_dev.data(), x_input_dev, config_.hidden_size * sizeof(float), cudaMemcpyDeviceToHost, stream));
+    gpuErrchk(cudaStreamSynchronize(stream)); // Ensure copy is done before logging
+    
   if (stream_status != CUBLAS_STATUS_SUCCESS) {
     Logger::error("cublasSetStream failed in forward_device");
     return {};
@@ -2498,11 +2095,7 @@ std::vector<float> TinyLlamaModel::forward_device(
   for (int l_gpu_idx = 0; l_gpu_idx < num_gpu_layers; ++l_gpu_idx) {
     int l_model_idx = num_cpu_layers + l_gpu_idx; // Actual layer index in the model
 
-    if (log_this_pos) {
-      Logger::info("[TM::fw_dev pos=" + std::to_string(pos) + "] GPU Layer Loop: gpu_idx=" + std::to_string(l_gpu_idx) +
-                   ", model_idx=" + std::to_string(l_model_idx) + ". Operating on model_->x_dev_.");
-    }
-
+    ensure_layer_weights_dequantized(l_model_idx);
     // Get layer sizes (kv_dim calculation was in initialize_gpu_and_rope, ensure it's accessible or recalculated)
     int kv_dim = (config_.hidden_size / config_.num_attention_heads) * config_.num_key_value_heads;
     size_t layer_q_size = (size_t)hs * hs;
@@ -2540,6 +2133,10 @@ std::vector<float> TinyLlamaModel::forward_device(
     if (!lw_in_norm_dev) { 
         throw std::runtime_error("[TM::fw_dev pos=" + std::to_string(pos) + " L" + std::to_string(l_model_idx) + "] Error: input_layernorm_dev is nullptr. GPU layer cannot proceed.");
     }
+
+    float* current_x_ptr_for_rmsnorm = x_input_dev ;
+    
+
     rmsnorm_vector_cuda(x_dev_, lw_in_norm_dev, x_norm_dev_, hs,
                         eps, stream);
 
@@ -2562,58 +2159,105 @@ std::vector<float> TinyLlamaModel::forward_device(
       Logger::error("GPU L" + std::to_string(l_model_idx) + " (gpu_idx " + std::to_string(l_gpu_idx) + "): No valid QKV proj weights (FP32/BF16)."); return {};
     }
 
-    if (log_this_pos) {
-      std::vector<float> temp_q_host(hs);
-      gpuErrchk(cudaMemcpy(temp_q_host.data(), q_dev_, hs * sizeof(float),
-                           cudaMemcpyDeviceToHost));
-      log_vector_summary_detailed("[TM::fw_dev pos=" + std::to_string(pos) +
-                                      " L" + std::to_string(l_model_idx) +
-                                      "] q_dev_ after QKV Proj",
-                                  temp_q_host, pos, l_model_idx, 8);
-    }
-    if (log_this_pos) {
-      std::vector<float> temp_q_host_rope(hs);
-      gpuErrchk(cudaMemcpy(temp_q_host_rope.data(), q_dev_, hs * sizeof(float),
-                           cudaMemcpyDeviceToHost));
-      log_vector_summary_detailed("[TM::fw_dev pos=" + std::to_string(pos) +
-                                      " L" + std::to_string(l_model_idx) +
-                                      "] q_dev_ after RoPE",
-                                  temp_q_host_rope, pos, l_model_idx, 8);
-    }
-
+    
     // RoPE Application:
     rope_cuda(q_dev_, n_heads, head_dim, all_freqs_cis_dev, pos, config_.is_gguf_file_loaded, stream);
     rope_cuda(k_dev_, n_kv_heads, head_dim, all_freqs_cis_dev, pos, config_.is_gguf_file_loaded, stream);
 
-    for (int kvh = 0; kvh < n_kv_heads; ++kvh) {
-      const float* current_k_head_ptr = k_dev_ + kvh * head_dim;
-      const float* current_v_head_ptr = v_dev_ + kvh * head_dim;
 
-      update_kv_cache_cuda(kv_cache->layers[l_model_idx].k_dev, current_k_head_ptr, pos,
-                           kvh, kv_cache->allocated_max_seq_len,
-                           kv_cache->allocated_num_kv_heads,
-                           kv_cache->allocated_head_dim, stream);
+    // K/V Cache Update Logic
+    if (static_cast<size_t>(l_model_idx) < kv_cache->layers.size()) {
+        KVCacheLayer& current_kv_layer = kv_cache->layers[l_model_idx];
+        if (config_.use_kvcache_quantization) {
+            // Quantize and store K, V for each head
+            for (int kvh = 0; kvh < n_kv_heads; ++kvh) {
+                const float* current_k_head_ptr_fp32 = k_dev_ + kvh * head_dim;
+                const float* current_v_head_ptr_fp32 = v_dev_ + kvh * head_dim;
 
-      update_kv_cache_cuda(kv_cache->layers[l_model_idx].v_dev, current_v_head_ptr, pos,
-                           kvh, kv_cache->allocated_max_seq_len,
-                           kv_cache->allocated_num_kv_heads,
-                           kv_cache->allocated_head_dim, stream);
+                size_t token_head_offset_quant = (static_cast<size_t>(pos) * n_kv_heads + kvh) * head_dim;
+                int8_t* k_quant_target_ptr = current_kv_layer.k_dev_quantized + token_head_offset_quant;
+                int8_t* v_quant_target_ptr = current_kv_layer.v_dev_quantized + token_head_offset_quant;
+
+                size_t scale_offset = static_cast<size_t>(pos) * n_kv_heads + kvh;
+                float* k_scale_target_ptr = current_kv_layer.k_dev_scales + scale_offset;
+                float* v_scale_target_ptr = current_kv_layer.v_dev_scales + scale_offset;
+
+                quantize_fp32_to_int8_symmetric_per_tensor_cuda(
+                    current_k_head_ptr_fp32, k_quant_target_ptr, k_scale_target_ptr, head_dim, stream);
+                quantize_fp32_to_int8_symmetric_per_tensor_cuda(
+                    current_v_head_ptr_fp32, v_quant_target_ptr, v_scale_target_ptr, head_dim, stream);
+            }
+        } else {
+            // Store FP32 K, V directly (original path, now using k_dev_fp32, v_dev_fp32)
+            for (int kvh = 0; kvh < n_kv_heads; ++kvh) {
+                const float* current_k_head_ptr = k_dev_ + kvh * head_dim;
+                const float* current_v_head_ptr = v_dev_ + kvh * head_dim;
+
+                update_kv_cache_cuda(current_kv_layer.k_dev_fp32, current_k_head_ptr, pos,
+                                   kvh, kv_cache->allocated_max_seq_len,
+                                   kv_cache->allocated_num_kv_heads, 
+                                   kv_cache->allocated_head_dim, stream); 
+
+                update_kv_cache_cuda(current_kv_layer.v_dev_fp32, current_v_head_ptr, pos,
+                                   kvh, kv_cache->allocated_max_seq_len,
+                                   kv_cache->allocated_num_kv_heads,
+                                   kv_cache->allocated_head_dim, stream);
+            }
+        }
+
+    } else {
+        Logger::error("KVCache layer index " + std::to_string(l_model_idx) + " out of bounds for kv_cache->layers access in forward_device.");
+        return {}; // Or throw
     }
 
     float scale = 1.0f / SAFE_SQRT(static_cast<float>(head_dim));
-    attention_cuda(q_dev_, kv_cache->layers[l_model_idx].k_dev, kv_cache->layers[l_model_idx].v_dev,
-                   attn_out_dev_, n_heads, pos + 1, head_dim, scale,
-                   kv_cache->allocated_max_seq_len,
-                   kv_cache->allocated_num_kv_heads, stream);
-    if (log_this_pos) {
-      std::vector<float> temp_attn_out_host(hs);
-      gpuErrchk(cudaMemcpy(temp_attn_out_host.data(), attn_out_dev_,
-                           hs * sizeof(float), cudaMemcpyDeviceToHost));
-      log_vector_summary_detailed("[TM::fw_dev pos=" + std::to_string(pos) +
-                                      " L" + std::to_string(l_model_idx) +
-                                      "] attn_out_dev_ after Attention",
-                                  temp_attn_out_host, pos, l_model_idx, 8);
+    
+    const float* attention_k_cache_ptr_dev = nullptr;
+    const float* attention_v_cache_ptr_dev = nullptr;
+    KVCacheLayer& attention_kv_layer = kv_cache->layers[l_model_idx]; 
+
+    if (config_.use_kvcache_quantization) {
+        for (int t = 0; t <= pos; ++t) { 
+            for (int kvh = 0; kvh < n_kv_heads; ++kvh) { 
+                size_t token_head_offset_quant = (static_cast<size_t>(t) * n_kv_heads + kvh) * head_dim;
+                const int8_t* k_quant_source_ptr = attention_kv_layer.k_dev_quantized + token_head_offset_quant;
+                const int8_t* v_quant_source_ptr = attention_kv_layer.v_dev_quantized + token_head_offset_quant;
+
+                size_t scale_offset = static_cast<size_t>(t) * n_kv_heads + kvh;
+                const float* k_scale_source_ptr = attention_kv_layer.k_dev_scales + scale_offset;
+                const float* v_scale_source_ptr = attention_kv_layer.v_dev_scales + scale_offset;
+
+                float* k_dequant_target_ptr = dequant_k_cache_buffer_dev_ + token_head_offset_quant;
+                float* v_dequant_target_ptr = dequant_v_cache_buffer_dev_ + token_head_offset_quant;
+
+                dequantize_int8_to_fp32_symmetric_per_tensor_cuda(
+                    k_quant_source_ptr, k_scale_source_ptr, k_dequant_target_ptr, head_dim, stream);
+                dequantize_int8_to_fp32_symmetric_per_tensor_cuda(
+                    v_quant_source_ptr, v_scale_source_ptr, v_dequant_target_ptr, head_dim, stream);
+            }
+        }
+        attention_k_cache_ptr_dev = dequant_k_cache_buffer_dev_;
+        attention_v_cache_ptr_dev = dequant_v_cache_buffer_dev_;
+    } else {
+        attention_k_cache_ptr_dev = attention_kv_layer.k_dev_fp32;
+        attention_v_cache_ptr_dev = attention_kv_layer.v_dev_fp32;
     }
+
+    float current_attention_scale = 1.0f / sqrtf((float)head_dim);
+    attention_cuda(
+        q_dev_,                            
+        attention_k_cache_ptr_dev,       
+        attention_v_cache_ptr_dev,       
+        attn_out_dev_,                    
+        config_.num_attention_heads,     
+        pos + 1,                         
+        head_dim,                        
+        current_attention_scale,         
+        kv_cache->allocated_max_seq_len, 
+        config_.num_key_value_heads,     
+        stream                           
+    );
+
 
     if (lw_o_proj_f32_dev) {
       matvec_f32_f32_cuda(cublas_handle_, lw_o_proj_f32_dev, attn_out_dev_, attn_proj_dev_, hs, hs, stream);
@@ -2623,31 +2267,13 @@ std::vector<float> TinyLlamaModel::forward_device(
     } else {
       Logger::error("GPU L" + std::to_string(l_model_idx) + " (gpu_idx " + std::to_string(l_gpu_idx) + "): No valid O proj weights (FP32/BF16)."); return {};
     }
-    if (log_this_pos) {
-      std::vector<float> temp_attn_proj_host(hs);
-      gpuErrchk(cudaMemcpy(temp_attn_proj_host.data(), attn_proj_dev_,
-                           hs * sizeof(float), cudaMemcpyDeviceToHost));
-      log_vector_summary_detailed("[TM::fw_dev pos=" + std::to_string(pos) +
-                                      " L" + std::to_string(l_model_idx) +
-                                      "] attn_proj_dev_ after O-Proj",
-                                  temp_attn_proj_host, pos, l_model_idx, 8);
-    }
 
-    add_residual_cuda(attn_proj_dev_, x_resid1_dev_, current_x_dev, hs, stream); // Output to current_x_dev (model_->x_dev_)
+    add_residual_cuda(attn_proj_dev_, x_resid1_dev_, current_x_dev, hs, stream); 
 
-    gpuErrchk(cudaMemcpyAsync(x_resid2_dev_, current_x_dev, hs * sizeof(float), cudaMemcpyDeviceToDevice, stream)); // Save input to MLP
+    gpuErrchk(cudaMemcpyAsync(x_resid2_dev_, current_x_dev, hs * sizeof(float), cudaMemcpyDeviceToDevice, stream)); 
 
     if (!lw_post_norm_dev) { Logger::error("Missing post_attention_layernorm_dev for GPU layer model_idx=" + std::to_string(l_model_idx)); return {}; }
-    rmsnorm_vector_cuda(current_x_dev, lw_post_norm_dev, x_norm_dev_, hs, eps, stream); // Input current_x_dev, output to x_norm_dev_
-    if (log_this_pos) {
-      std::vector<float> temp_x_host(hs);
-      gpuErrchk(cudaMemcpy(temp_x_host.data(), x_norm_dev_, hs * sizeof(float),
-                           cudaMemcpyDeviceToHost));
-      log_vector_summary_detailed("[TM::fw_dev pos=" + std::to_string(pos) +
-                                      " L" + std::to_string(l_model_idx) +
-                                      "] x_norm_dev_ after Input RMSNorm",
-                                  temp_x_host, pos, l_model_idx, 8);
-    }
+    rmsnorm_vector_cuda(current_x_dev, lw_post_norm_dev, x_norm_dev_, hs, eps, stream); 
 
     if (lw_gate_proj_f32_dev && lw_up_proj_f32_dev) {
       matvec_f32_f32_cuda(cublas_handle_, lw_gate_proj_f32_dev, x_norm_dev_,
@@ -2664,26 +2290,8 @@ std::vector<float> TinyLlamaModel::forward_device(
       Logger::error("GPU L" + std::to_string(l_model_idx) + " (gpu_idx " + std::to_string(l_gpu_idx) + "): No valid Gate/Up projection weights found on GPU (FP32 or BF16).");
       return {};
     }
-    if (log_this_pos) {
-      std::vector<float> temp_gate_host(is);
-      gpuErrchk(cudaMemcpy(temp_gate_host.data(), gate_vec_dev_,
-                           is * sizeof(float), cudaMemcpyDeviceToHost));
-      log_vector_summary_detailed("[TM::fw_dev pos=" + std::to_string(pos) +
-                                      " L" + std::to_string(l_model_idx) +
-                                      "] gate_vec_dev_ after Proj",
-                                  temp_gate_host, pos, l_model_idx, 8);
-    }
 
     swiglu_cuda(gate_vec_dev_, up_vec_dev_, swiglu_vec_dev_, is, stream);
-    if (log_this_pos) {
-      std::vector<float> temp_swiglu_host(is);
-      gpuErrchk(cudaMemcpy(temp_swiglu_host.data(), swiglu_vec_dev_,
-                           is * sizeof(float), cudaMemcpyDeviceToHost));
-      log_vector_summary_detailed("[TM::fw_dev pos=" + std::to_string(pos) +
-                                      " L" + std::to_string(l_model_idx) +
-                                      "] swiglu_vec_dev_ after SwiGLU",
-                                  temp_swiglu_host, pos, l_model_idx, 8);
-    }
 
     if (lw_down_proj_f32_dev) {
       matvec_f32_f32_cuda(cublas_handle_, lw_down_proj_f32_dev, swiglu_vec_dev_,
@@ -2697,487 +2305,345 @@ std::vector<float> TinyLlamaModel::forward_device(
       return {};
     }
 
-    if (log_this_pos) {
-      std::vector<float> temp_mlp_down_host(hs);
-      gpuErrchk(cudaMemcpy(temp_mlp_down_host.data(), mlp_down_dev_,
-                           hs * sizeof(float), cudaMemcpyDeviceToHost));
-      log_vector_summary_detailed("[TM::fw_dev pos=" + std::to_string(pos) +
-                                      " L" + std::to_string(l_model_idx) + // Corrected from l to l_model_idx
-                                      "] mlp_down_dev_ after Down Proj",
-                                  temp_mlp_down_host, pos, l_model_idx, 8); // Corrected from l to l_model_idx
-    }
 
-    add_residual_cuda(mlp_down_dev_, x_resid2_dev_, current_x_dev, hs, stream); // Output to current_x_dev (model_->x_dev_)
+    add_residual_cuda(mlp_down_dev_, x_resid2_dev_, current_x_dev, hs, stream); 
 
-    // Corrected logging conditions to use l_model_idx and num_cpu_layers/total_model_layers
-    // Log if it's the first GPU layer OR the absolute last layer of the model AND log_this_pos is true.
-    if (log_this_pos && (l_model_idx == num_cpu_layers || l_model_idx == (total_model_layers - 1))) { 
-      std::vector<float> x_host_output(hs);
-      gpuErrchk(cudaMemcpy(x_host_output.data(), current_x_dev, hs * sizeof(float), cudaMemcpyDeviceToHost));
-      log_vector_summary_detailed("[CUDA] Output of Model Layer " + std::to_string(l_model_idx) + " (GPU_idx " + std::to_string(l_gpu_idx) + ", pos=" + std::to_string(pos) + ")", x_host_output, pos, l_model_idx, 8); // Corrected from l to l_model_idx
-    }
-  } // End of GPU layer loop
-
-  if (log_this_pos)
-    Logger::info("[TM::fw_dev pos=" + std::to_string(pos) +
-                 "] Processing final RMSNorm.");
+  } // End of layer loop
 
   rmsnorm_vector_cuda(x_dev_, final_norm_dev, x_norm_dev_, hs, eps, stream);
-  if (log_this_pos)
-    Logger::info("[TM::fw_dev pos=" + std::to_string(pos) +
-                 "] Processing LM Head.");
+  
 
-  if (lm_head_dev_) { // This is now the primary path, expecting BF16 weights
-    // x_norm_dev_ is FP32, lm_head_dev_ is BF16. Output logits_dev_ should be FP32.
+  ensure_lm_head_dequantized();
+  if (lm_head_dev_) { 
     matvec_bf16_f32_cuda(cublas_handle_, lm_head_dev_, x_norm_dev_, logits_dev_,
                          vs, hs, stream);
   } else {
     Logger::error("LM head (lm_head_dev_ for BF16) is null. Cannot calculate logits on GPU.");
-    // Returning an empty vector or throwing an exception might be appropriate here
-    // For now, to match previous structure if no weights, return empty.
     return {};
   }
 
-  gpuErrchk(cudaStreamSynchronize(stream));
+  gpuErrchk(cudaStreamSynchronize(stream)); // Ensure all ops including LM head are done before memcpy DtoH
+
+
+
 
   std::vector<float> logits(vs);
   gpuErrchk(cudaMemcpy(logits.data(), logits_dev_, vs * sizeof(float),
                        cudaMemcpyDeviceToHost));
-  if (log_this_pos)
-    Logger::info("[TM::fw_dev pos=" + std::to_string(pos) + "] Exiting.");
   return logits;
 }
-#endif
+
+#endif // HAS_CUDA
 
 void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
   Logger::info("Mapping GGUF weights to model fields...");
-  if (gguf.mapped_tensor_data == nullptr || gguf.mapped_tensor_data_size == 0) {
-    Logger::warning("GGUF mapped_tensor_data is null or size is 0. Cannot map weights.");
-    return;
-  }
-  // This is the start of the mmapped region in memory.
-  const uint8_t* mmap_buffer_start = static_cast<const uint8_t*>(gguf.mapped_tensor_data);
-  // This is the start of the *actual* GGUF tensor data within that mmapped region,
-  // accounting for any alignment padding mmap had to do.
-  const uint8_t* actual_data_block_start = mmap_buffer_start + gguf.offset_diff_for_mmap;
-  // The end of the valid *actual* data block within the mmap.
-  const uint8_t* actual_data_block_end = actual_data_block_start + (gguf.mapped_tensor_data_size - gguf.offset_diff_for_mmap);
-
-  Logger::info("map_gguf_weights: Total mmapped region size: " +
+    
+  const uint8_t* actual_data_block_start = nullptr;
+  bool use_mmap_mode = false;
+  
+  // Determine which data source to use
+  if (gguf.mapped_tensor_data != nullptr && gguf.mapped_tensor_data_size > 0) {
+    // Use memory-mapped data
+    use_mmap_mode = true;
+    const uint8_t* mmap_buffer_start = static_cast<const uint8_t*>(gguf.mapped_tensor_data);
+    actual_data_block_start = mmap_buffer_start + gguf.offset_diff_for_mmap;
+    Logger::info("map_gguf_weights: Using mmap mode. Total mmapped region size: " +
                std::to_string(gguf.mapped_tensor_data_size) + " bytes. " +
                "Offset diff for mmap: " + std::to_string(gguf.offset_diff_for_mmap));
+  } else if (!gguf.tensor_data.empty()) {
+    // Use non-mmap data
+    use_mmap_mode = false;
+    actual_data_block_start = gguf.tensor_data.data();
+    Logger::info("map_gguf_weights: Using non-mmap mode. Total tensor data size: " +
+                 std::to_string(gguf.tensor_data.size()) + " bytes.");
+  } else {
+    Logger::error("map_gguf_weights DEBUG: Neither mmap nor tensor_data available!");
+    Logger::error("GGUF tensor data is not available in either mmap or non-mmap mode. Cannot map weights.");
+    return;
+  }
 
   for (const auto& pair : gguf.tensor_infos_map) {
-    std::stringstream ss_map;
-    const std::string& target_field = pair.first;
-    const GGUFTensorInfo& info = pair.second;
-    // info.offset is relative to the start of the *actual* GGUF tensor data block.
+    const std::string& target_field_key = pair.first; // This is the key from tensor_infos_map
+    const GGUFTensorInfo& info = pair.second;         // This contains info.name (actual GGUF tensor name)
     const uint8_t* tensor_data_ptr = actual_data_block_start + info.offset;
-    const uint8_t* tensor_data_end = tensor_data_ptr + info.size_in_bytes;
 
-    ss_map << "Attempting to map tensor: '" << info.name
-           << "', Type: " << info.type << ", GGUFOffset: " << info.offset
-           << ", NumElem: " << info.num_elements
-           << ", SizeBytes: " << info.size_in_bytes
-           << ", SrcAddrInMmap: " << static_cast<const void*>(tensor_data_ptr)
-           << ", ReadEndAddrInMmap: " << static_cast<const void*>(tensor_data_end)
-           << ", MmapRegion: [" << static_cast<const void*>(mmap_buffer_start)
-           << " - " << static_cast<const void*>(mmap_buffer_start + gguf.mapped_tensor_data_size) << "]"
-           << ", ActualDataBlock: [" << static_cast<const void*>(actual_data_block_start)
-           << " - " << static_cast<const void*>(actual_data_block_end) << "]";
-
-    if (tensor_data_ptr < actual_data_block_start || 
-        tensor_data_end > actual_data_block_end) {
-      ss_map << ", InBounds: NO";
-      Logger::error(ss_map.str());
-      Logger::error("Tensor data out of mmapped actual data block bounds for: " + info.name);
-      continue;
-    } else {
-      ss_map << ", InBounds: YES";
-      Logger::info(ss_map.str());
+    // Global tensors
+    if (target_field_key == "output.weight") { // Or use info.name == "output.weight" if preferred
+      if (info.type == GGMLType::GGML_TYPE_Q6_K) {
+        size_t num_blocks = info.size_in_bytes / sizeof(block_q6_K);
+        std::vector<block_q6_K> dest_q6k(num_blocks);
+        memcpy(dest_q6k.data(), tensor_data_ptr, info.size_in_bytes);
+        model.lm_head_q6k.swap(dest_q6k);
+        Logger::info("[MAP_GGUF_GLOBAL] Mapped 'output.weight' (Q6_K) to model.lm_head_q6k. Size: " + std::to_string(model.lm_head_q6k.size()) + " blocks.");
+      } else if (info.type == GGMLType::GGML_TYPE_Q4_K) {
+        size_t num_blocks = info.size_in_bytes / sizeof(block_q4_K);
+        std::vector<block_q4_K> dest_q4k(num_blocks);
+        memcpy(dest_q4k.data(), tensor_data_ptr, info.size_in_bytes);
+        model.lm_head_q4k.swap(dest_q4k);
+        Logger::info("[MAP_GGUF_GLOBAL] Mapped 'output.weight' (Q4_K) to model.lm_head_q4k. Size: " + std::to_string(model.lm_head_q4k.size()) + " blocks.");
+      } else if (info.type == GGMLType::GGML_TYPE_Q8_0) {
+        size_t num_blocks = info.size_in_bytes / sizeof(block_q8_0);
+        std::vector<block_q8_0> dest_q8_0(num_blocks);
+        memcpy(dest_q8_0.data(), tensor_data_ptr, info.size_in_bytes);
+        model.lm_head_q8_0.swap(dest_q8_0);
+        Logger::info("[MAP_GGUF_GLOBAL] Mapped 'output.weight' (Q8_0) to model.lm_head_q8_0. Size: " + std::to_string(model.lm_head_q8_0.size()) + " blocks.");
+      } else if (info.type == GGMLType::GGML_TYPE_Q8_K) {
+        size_t num_blocks = info.size_in_bytes / sizeof(block_q8_K);
+        std::vector<block_q8_K> dest_q8k(num_blocks);
+        memcpy(dest_q8k.data(), tensor_data_ptr, info.size_in_bytes);
+        model.lm_head_q8k.swap(dest_q8k);
+        Logger::info("[MAP_GGUF_GLOBAL] Mapped 'output.weight' (Q8_K) to model.lm_head_q8k. Size: " + std::to_string(model.lm_head_q8k.size()) + " blocks.");
+      } else if (info.type == GGMLType::GGML_TYPE_F32) {
+      size_t num_elements = info.size_in_bytes / sizeof(float);
+      std::vector<float> dest_f32(num_elements);
+        memcpy(dest_f32.data(), tensor_data_ptr, info.size_in_bytes);
+        model.lm_head_f32.swap(dest_f32);
+        Logger::info("[MAP_GGUF_GLOBAL] Mapped 'output.weight' (F32) to model.lm_head_f32. Size: " + std::to_string(model.lm_head_f32.size()));
+        } else {
+        Logger::warning(std::string("[MAP_GGUF_GLOBAL] 'output.weight' is of unexpected type: ") + ggml_type_name(info.type));
+      }
+          continue;
+    } else if (info.name == "token_embd.weight") { // Using info.name for more direct GGUF name matching
+      if (info.type == GGMLType::GGML_TYPE_Q4_K) {
+        size_t num_blocks = info.size_in_bytes / sizeof(block_q4_K);
+        std::vector<block_q4_K> dest_q4k(num_blocks);
+        memcpy(dest_q4k.data(), tensor_data_ptr, info.size_in_bytes);
+        model.embed_tokens_q4k.swap(dest_q4k);
+        Logger::info("[MAP_GGUF_GLOBAL] Mapped 'token_embd.weight' (Q4_K) to model.embed_tokens_q4k. Size: " + std::to_string(model.embed_tokens_q4k.size()) + " blocks.");
+      } else if (info.type == GGMLType::GGML_TYPE_Q8_0) {
+        size_t num_blocks = info.size_in_bytes / sizeof(block_q8_0);
+        std::vector<block_q8_0> dest_q8_0(num_blocks);
+        memcpy(dest_q8_0.data(), tensor_data_ptr, info.size_in_bytes);
+        model.embed_tokens_q8_0.swap(dest_q8_0);
+        Logger::info("[MAP_GGUF_GLOBAL] Mapped 'token_embd.weight' (Q8_0) to model.embed_tokens_q8_0. Size: " + std::to_string(model.embed_tokens_q8_0.size()) + " blocks.");
+      } else if (info.type == GGMLType::GGML_TYPE_Q8_K) {
+        size_t num_blocks = info.size_in_bytes / sizeof(block_q8_K);
+        std::vector<block_q8_K> dest_q8k(num_blocks);
+        memcpy(dest_q8k.data(), tensor_data_ptr, info.size_in_bytes);
+        model.embed_tokens_q8k.swap(dest_q8k);
+        Logger::info("[MAP_GGUF_GLOBAL] Mapped 'token_embd.weight' (Q8_K) to model.embed_tokens_q8k. Size: " + std::to_string(model.embed_tokens_q8k.size()) + " blocks.");
+      } else if (info.type == GGMLType::GGML_TYPE_Q6_K) {
+        size_t num_blocks = info.size_in_bytes / sizeof(block_q6_K);
+        std::vector<block_q6_K> dest_q6k(num_blocks);
+        memcpy(dest_q6k.data(), tensor_data_ptr, info.size_in_bytes);
+        model.embed_tokens_q6k.swap(dest_q6k);
+        Logger::info("[MAP_GGUF_GLOBAL] Mapped 'token_embd.weight' (Q6_K) to model.embed_tokens_q6k. Size: " + std::to_string(model.embed_tokens_q6k.size()) + " blocks.");
+      } else if (info.type == GGMLType::GGML_TYPE_F32) {
+        size_t num_elements = info.size_in_bytes / sizeof(float);
+        std::vector<float> dest_f32(num_elements);
+        memcpy(dest_f32.data(), tensor_data_ptr, info.size_in_bytes);
+        model.embed_tokens_f32.swap(dest_f32);
+        Logger::info("[MAP_GGUF_GLOBAL] Mapped 'token_embd.weight' (F32) to model.embed_tokens_f32. Size: " + std::to_string(model.embed_tokens_f32.size()));
+      } else {
+        Logger::warning(std::string("[MAP_GGUF_GLOBAL] 'token_embd.weight' (name in GGUF: ") + info.name + ") is of unexpected type: " + ggml_type_name(info.type));
     }
+      continue;
+    } else if (target_field_key == "output_norm.weight") { // Or use info.name
     if (info.type == GGMLType::GGML_TYPE_F32) {
       size_t num_elements = info.size_in_bytes / sizeof(float);
       std::vector<float> dest_f32(num_elements);
-      std::memcpy(dest_f32.data(), tensor_data_ptr, info.size_in_bytes);
-
-      if (target_field == "token_embd.weight")
-        model.embed_tokens_f32 = std::move(dest_f32);
-      else if (target_field == "output.weight")
-        model.lm_head_f32 = std::move(dest_f32);
-      else if (target_field == "output_norm.weight")
-        model.final_norm_f32 = std::move(dest_f32);
-      else if (target_field.find("blk.") == 0) {
-        size_t start = 4;
-        size_t end = target_field.find('.', start);
-        int layer_idx = std::stoi(target_field.substr(start, end - start));
-        std::string sub_field = target_field.substr(end + 1);
-        if (layer_idx >= 0 && layer_idx < model.layers.size()) {
-          if (sub_field == "attn_q.weight")
-            model.layers[layer_idx].q_proj_f32 = std::move(dest_f32);
-          else if (sub_field == "attn_k.weight")
-            model.layers[layer_idx].k_proj_f32 = std::move(dest_f32);
-          else if (sub_field == "attn_v.weight")
-            model.layers[layer_idx].v_proj_f32 = std::move(dest_f32);
-          else if (sub_field == "attn_output.weight")
-            model.layers[layer_idx].o_proj_f32 = std::move(dest_f32);
-          else if (sub_field == "ffn_gate.weight")
-            model.layers[layer_idx].gate_proj_f32 = std::move(dest_f32);
-          else if (sub_field == "ffn_up.weight")
-            model.layers[layer_idx].up_proj_f32 = std::move(dest_f32);
-          else if (sub_field == "ffn_down.weight")
-            model.layers[layer_idx].down_proj_f32 = std::move(dest_f32);
-          else if (sub_field == "attn_norm.weight")
-            model.layers[layer_idx].input_layernorm_f32 = std::move(dest_f32);
-          else if (sub_field == "ffn_norm.weight")
-            model.layers[layer_idx].post_attention_layernorm_f32 =
-                std::move(dest_f32);
-          else {
-            Logger::warning("Unsupported layer sub-field (FP32): " + sub_field);
-            continue;
-          }
-          Logger::info("Mapped GGUF tensor '" + info.name +
-                       "' (FP32) to layer " + std::to_string(layer_idx) +
-                       " field " + sub_field);
+        memcpy(dest_f32.data(), tensor_data_ptr, info.size_in_bytes);
+        model.final_norm_f32.swap(dest_f32);
+        Logger::info("[MAP_GGUF_GLOBAL] Mapped 'output_norm.weight' (F32) to model.final_norm_f32. Size: " + std::to_string(model.final_norm_f32.size()));
         } else {
-          Logger::warning("Invalid layer index (FP32) " +
-                          std::to_string(layer_idx));
+        Logger::warning(std::string("[MAP_GGUF_GLOBAL] 'output_norm.weight' in GGUF (name: ") + info.name + ") is type " + ggml_type_name(info.type) + " but model.final_norm_f32 is F32.");
+      }
           continue;
-        }
-      } else {
-        Logger::warning("Unhandled target field (FP32): " + target_field);
-      }
-    } else if (info.type == GGMLType::GGML_TYPE_F16) {
-      size_t num_elements = info.size_in_bytes / sizeof(uint16_t);
-      std::vector<float> dest_f32(num_elements);
-      const uint16_t* src_f16 =
-          reinterpret_cast<const uint16_t*>(tensor_data_ptr);
-      for (size_t i = 0; i < num_elements; ++i) {
-        dest_f32[i] = fp16_to_fp32(src_f16[i]);
-      }
-
-      if (target_field == "token_embd.weight")
-        model.embed_tokens_f32 = std::move(dest_f32);
-      else if (target_field == "output.weight")
-        model.lm_head_f32 = std::move(dest_f32);
-      else if (target_field == "output_norm.weight")
-        model.final_norm_f32 = std::move(dest_f32);
-      else if (target_field.find("blk.") == 0) {
-        size_t start = 4;
-        size_t end = target_field.find('.', start);
-        int layer_idx = std::stoi(target_field.substr(start, end - start));
-        std::string sub_field = target_field.substr(end + 1);
-        if (layer_idx >= 0 && layer_idx < model.layers.size()) {
-          if (sub_field == "attn_q.weight")
-            model.layers[layer_idx].q_proj_f32 = std::move(dest_f32);
-          else if (sub_field == "attn_k.weight")
-            model.layers[layer_idx].k_proj_f32 = std::move(dest_f32);
-          else if (sub_field == "attn_v.weight")
-            model.layers[layer_idx].v_proj_f32 = std::move(dest_f32);
-          else if (sub_field == "attn_output.weight")
-            model.layers[layer_idx].o_proj_f32 = std::move(dest_f32);
-          else if (sub_field == "ffn_gate.weight")
-            model.layers[layer_idx].gate_proj_f32 = std::move(dest_f32);
-          else if (sub_field == "ffn_up.weight")
-            model.layers[layer_idx].up_proj_f32 = std::move(dest_f32);
-          else if (sub_field == "ffn_down.weight")
-            model.layers[layer_idx].down_proj_f32 = std::move(dest_f32);
-
-          else if (sub_field == "attn_norm.weight")
-            model.layers[layer_idx].input_layernorm_f32 = std::move(dest_f32);
-          else if (sub_field == "ffn_norm.weight")
-            model.layers[layer_idx].post_attention_layernorm_f32 =
-                std::move(dest_f32);
-          else {
-            Logger::warning("Unsupported layer sub-field (FP16): " + sub_field);
-            continue;
-          }
-          Logger::info("Mapped GGUF tensor '" + info.name +
-                       "' (FP16) to layer " + std::to_string(layer_idx) +
-                       " field " + sub_field);
-        } else {
-          Logger::warning("Invalid layer index (FP16) " +
-                          std::to_string(layer_idx));
-          continue;
-        }
-      } else {
-        Logger::warning("Unhandled target field (FP16): " + target_field);
-      }
-    } else if (info.type == GGMLType::GGML_TYPE_BF16) {
-      size_t num_elements = info.size_in_bytes / sizeof(uint16_t);
-      std::vector<float> dest_f32(num_elements);
-      const uint16_t* src_bf16 =
-          reinterpret_cast<const uint16_t*>(tensor_data_ptr);
-
-#pragma omp parallel for
-      for (int64_t i = 0; i < static_cast<int64_t>(num_elements); ++i) {
-        dest_f32[i] = bfloat16_to_float32(src_bf16[i]);
-      }
-
-      if (target_field == "token_embd.weight") {
-        model.embed_tokens_f32 = std::move(dest_f32);
-        Logger::info("Mapped GGUF tensor '" + info.name +
-                     "' (BF16) to model.embed_tokens_f32");
-      } else if (target_field == "output.weight") {
-        model.lm_head_f32 = std::move(dest_f32);
-        Logger::info("Mapped GGUF tensor '" + info.name +
-                     "' (BF16) to model.lm_head_f32");
-      } else if (target_field == "output_norm.weight") {
-        model.final_norm_f32 = std::move(dest_f32);
-        Logger::info("Mapped GGUF tensor '" + info.name +
-                     "' (BF16) to model.final_norm_f32");
-      } else if (target_field.find("blk.") == 0) {
-        size_t start = 4;
-        size_t end = target_field.find('.', start);
-        int layer_idx = std::stoi(target_field.substr(start, end - start));
-        std::string sub_field = target_field.substr(end + 1);
-
-        if (layer_idx >= 0 && layer_idx < model.layers.size()) {
-          if (sub_field == "attn_q.weight")
-            model.layers[layer_idx].q_proj_f32 = std::move(dest_f32);
-          else if (sub_field == "attn_k.weight")
-            model.layers[layer_idx].k_proj_f32 = std::move(dest_f32);
-          else if (sub_field == "attn_v.weight")
-            model.layers[layer_idx].v_proj_f32 = std::move(dest_f32);
-          else if (sub_field == "attn_output.weight")
-            model.layers[layer_idx].o_proj_f32 = std::move(dest_f32);
-          else if (sub_field == "ffn_gate.weight")
-            model.layers[layer_idx].gate_proj_f32 = std::move(dest_f32);
-          else if (sub_field == "ffn_up.weight")
-            model.layers[layer_idx].up_proj_f32 = std::move(dest_f32);
-          else if (sub_field == "ffn_down.weight")
-            model.layers[layer_idx].down_proj_f32 = std::move(dest_f32);
-          else if (sub_field == "attn_norm.weight")
-            model.layers[layer_idx].input_layernorm_f32 = std::move(dest_f32);
-          else if (sub_field == "ffn_norm.weight")
-            model.layers[layer_idx].post_attention_layernorm_f32 =
-                std::move(dest_f32);
-          else {
-            Logger::warning("Unsupported layer sub-field (BF16): " + sub_field +
-                            " for tensor '" + info.name + "'");
-            continue;
-          }
-          Logger::info("Mapped GGUF tensor '" + info.name +
-                       "' (BF16) to layer " + std::to_string(layer_idx) +
-                       " field " + sub_field);
-        } else {
-          Logger::warning("Invalid layer index (BF16) " +
-                          std::to_string(layer_idx) +
-                          " parsed from tensor name '" + info.name + "'");
-          continue;
-        }
-      } else {
-        Logger::warning("Unhandled target field (BF16): " + target_field +
-                        " for tensor '" + info.name + "'");
-      }
-    } else if (info.type == GGMLType::GGML_TYPE_Q4_K) {
-      size_t expected_bytes =
-          ggml_type_size(info.type) *
-          (info.num_elements / ggml_type_block_size(info.type));
-      if (info.size_in_bytes != expected_bytes) {
-        Logger::warning("Size mismatch for Q4_K tensor '" + info.name +
-                        "'. Expected " + std::to_string(expected_bytes) +
-                        ", got " + std::to_string(info.size_in_bytes));
-      }
-
-      size_t num_blocks = info.size_in_bytes / sizeof(block_q4_K);
-      std::vector<block_q4_K> dest_q4k(num_blocks);
-      std::memcpy(dest_q4k.data(), tensor_data_ptr, info.size_in_bytes);
-
-      if (target_field == "token_embd.weight")
-        model.embed_tokens_q4k = std::move(dest_q4k);
-      else if (target_field == "output.weight")
-        model.lm_head_q4k = std::move(dest_q4k);
-      else if (target_field.find("blk.") == 0) {
-        size_t start = 4;
-        size_t end = target_field.find('.', start);
-        int layer_idx = std::stoi(target_field.substr(start, end - start));
-        std::string sub_field = target_field.substr(end + 1);
-        if (layer_idx >= 0 && layer_idx < model.layers.size()) {
-          if (sub_field == "attn_q.weight")
-            model.layers[layer_idx].q_proj_q4k = std::move(dest_q4k);
-          else if (sub_field == "attn_k.weight")
-            model.layers[layer_idx].k_proj_q4k = std::move(dest_q4k);
-          else if (sub_field == "attn_v.weight")
-            model.layers[layer_idx].v_proj_q4k = std::move(dest_q4k);
-          else if (sub_field == "attn_output.weight")
-            model.layers[layer_idx].o_proj_q4k = std::move(dest_q4k);
-          else if (sub_field == "ffn_gate.weight")
-            model.layers[layer_idx].gate_proj_q4k = std::move(dest_q4k);
-          else if (sub_field == "ffn_up.weight")
-            model.layers[layer_idx].up_proj_q4k = std::move(dest_q4k);
-          else if (sub_field == "ffn_down.weight")
-            model.layers[layer_idx].down_proj_q4k = std::move(dest_q4k);
-          else {
-            Logger::warning("Unsupported layer sub-field (Q4_K): " + sub_field);
-            continue;
-          }
-          Logger::info("Mapped GGUF tensor '" + info.name +
-                       "' (Q4_K) to layer " + std::to_string(layer_idx) +
-                       " field " + sub_field);
-        } else {
-          Logger::warning("Invalid layer index (Q4_K) " +
-                          std::to_string(layer_idx));
-          continue;
-        }
-      } else {
-        Logger::warning("Unhandled target field (Q4_K): " + target_field);
-      }
-    } else if (info.type == GGMLType::GGML_TYPE_Q6_K) {
-      size_t expected_bytes =
-          ggml_type_size(info.type) *
-          (info.num_elements / ggml_type_block_size(info.type));
-      if (info.size_in_bytes != expected_bytes) {
-        Logger::warning("Size mismatch for Q6_K tensor '" + info.name +
-                        "'. Expected " + std::to_string(expected_bytes) +
-                        ", got " + std::to_string(info.size_in_bytes));
-      }
-
-      size_t num_blocks = info.size_in_bytes / sizeof(block_q6_K);
-      std::vector<block_q6_K> dest_q6k(num_blocks);
-      std::memcpy(dest_q6k.data(), tensor_data_ptr, info.size_in_bytes);
-
-      if (target_field == "token_embd.weight")
-        model.embed_tokens_q6k = std::move(dest_q6k);
-      else if (target_field == "output.weight")
-        model.lm_head_q6k = std::move(dest_q6k);
-      else if (target_field.find("blk.") == 0) {
-        size_t start = 4;
-        size_t end = target_field.find('.', start);
-        int layer_idx = std::stoi(target_field.substr(start, end - start));
-        std::string sub_field = target_field.substr(end + 1);
-        if (layer_idx >= 0 && layer_idx < model.layers.size()) {
-          if (sub_field == "attn_q.weight")
-            model.layers[layer_idx].q_proj_q6k = std::move(dest_q6k);
-          else if (sub_field == "attn_k.weight")
-            model.layers[layer_idx].k_proj_q6k = std::move(dest_q6k);
-          else if (sub_field == "attn_v.weight")
-            model.layers[layer_idx].v_proj_q6k = std::move(dest_q6k);
-          else if (sub_field == "attn_output.weight")
-            model.layers[layer_idx].o_proj_q6k = std::move(dest_q6k);
-          else if (sub_field == "ffn_gate.weight")
-            model.layers[layer_idx].gate_proj_q6k = std::move(dest_q6k);
-          else if (sub_field == "ffn_up.weight")
-            model.layers[layer_idx].up_proj_q6k = std::move(dest_q6k);
-          else if (sub_field == "ffn_down.weight")
-            model.layers[layer_idx].down_proj_q6k = std::move(dest_q6k);
-          else {
-            Logger::warning("Unsupported layer sub-field (Q6_K): " + sub_field);
-            continue;
-          }
-          Logger::info("Mapped GGUF tensor '" + info.name +
-                       "' (Q6_K) to layer " + std::to_string(layer_idx) +
-                       " field " + sub_field);
-        } else {
-          Logger::warning("Invalid layer index (Q6_K) " +
-                          std::to_string(layer_idx));
-          continue;
-        }
-      } else {
-        Logger::warning("Unhandled target field (Q6_K): " + target_field);
-      }
-    } else if (info.type == GGMLType::GGML_TYPE_Q8_0) {
-      auto assign_vec_q8_0 = [&](std::vector<block_q8_0>& vec,
-                                 const GGUFTensorInfo& info_local) {
-        if (info_local.num_elements == 0) {
-          Logger::warning("Tensor '" + info_local.name +
-                          "' (Q8_0) has 0 elements. Skipping assignment.");
-          return;
-        }
-        if (info_local.num_elements % GGML_QK8_0 != 0) {
-          Logger::error(
-              "Tensor '" + info_local.name + "' (Q8_0) num_elements " +
-              std::to_string(info_local.num_elements) +
-              " is not divisible by GGML_QK8_0 (" + std::to_string(GGML_QK8_0) +
-              "). Cannot map as blocks.");
-          vec.clear();
-          return;
-        }
-        size_t num_blocks = info_local.num_elements / GGML_QK8_0;
-        // info_local.offset is relative to the start of the actual data block within the mmap
-        const block_q8_0* src = reinterpret_cast<const block_q8_0*>(
-            static_cast<const uint8_t*>(gguf.mapped_tensor_data) + gguf.offset_diff_for_mmap + info_local.offset);
-
-        const uint8_t* mmap_start_ptr = static_cast<const uint8_t*>(gguf.mapped_tensor_data);
-        const uint8_t* mmap_end_ptr = mmap_start_ptr + gguf.mapped_tensor_data_size;
-
-        if (reinterpret_cast<const uint8_t*>(src) < mmap_start_ptr ||
-            reinterpret_cast<const uint8_t*>(src + num_blocks) > mmap_end_ptr) {
-          Logger::error(
-              "Tensor '" + info_local.name +
-              "' (Q8_0) data is out of mmapped bounds. Calculated Src: " + std::to_string(reinterpret_cast<uintptr_t>(src)) +
-              ", MmapStart: " + std::to_string(reinterpret_cast<uintptr_t>(mmap_start_ptr)) + 
-              ", CalculatedEnd: " + std::to_string(reinterpret_cast<uintptr_t>(src + num_blocks)) + 
-              ", MmapEnd: " + std::to_string(reinterpret_cast<uintptr_t>(mmap_end_ptr)) +
-              ". GGUF Offset: " + std::to_string(info_local.offset) + ", NumBlocks: " +
-              std::to_string(num_blocks) + ", ExpectedBlockSize: " +
-              std::to_string(num_blocks * sizeof(block_q8_0)) +
-              ", MmapTotalSize: " + std::to_string(gguf.mapped_tensor_data_size) +
-              ", MmapOffsetDiff: " + std::to_string(gguf.offset_diff_for_mmap));
-          vec.clear();
-          return;
-        }
-        vec.assign(src, src + num_blocks);
-      };
-
-      if (target_field == "token_embd.weight") {
-        assign_vec_q8_0(model.embed_tokens_q8_0, info);
-        Logger::info("Mapped GGUF tensor '" + info.name +
-                     "' (Q8_0) to model.embed_tokens_q8_0");
-      } else if (target_field == "output.weight") {
-        assign_vec_q8_0(model.lm_head_q8_0, info);
-        Logger::info("Mapped GGUF tensor '" + info.name +
-                     "' (Q8_0) to model.lm_head_q8_0");
-      } else if (target_field.find("blk.") == 0) {
-        size_t start = 4;
-        size_t end = target_field.find('.', start);
-        int layer_idx = -1;
-        std::string sub_field;
-        if (end != std::string::npos) {
-          layer_idx = std::stoi(target_field.substr(start, end - start));
-          sub_field = target_field.substr(end + 1);
-        }
-        if (layer_idx >= 0 && layer_idx < model.layers.size()) {
-          auto& lw = model.layers[layer_idx];
-          if (sub_field == "attn_q.weight")
-            assign_vec_q8_0(lw.q_proj_q8_0, info);
-          else if (sub_field == "attn_k.weight")
-            assign_vec_q8_0(lw.k_proj_q8_0, info);
-          else if (sub_field == "attn_v.weight")
-            assign_vec_q8_0(lw.v_proj_q8_0, info);
-          else if (sub_field == "attn_output.weight")
-            assign_vec_q8_0(lw.o_proj_q8_0, info);
-          else if (sub_field == "ffn_gate.weight")
-            assign_vec_q8_0(lw.gate_proj_q8_0, info);
-          else if (sub_field == "ffn_up.weight")
-            assign_vec_q8_0(lw.up_proj_q8_0, info);
-          else if (sub_field == "ffn_down.weight")
-            assign_vec_q8_0(lw.down_proj_q8_0, info);
-          else {
-            Logger::warning("Unsupported layer sub-field (Q8_0): '" +
-                            sub_field + "' for tensor '" + info.name + "'");
-            return;
-          }
-          Logger::info("Mapped GGUF tensor '" + info.name +
-                       "' (Q8_0) to layer " + std::to_string(layer_idx) +
-                       " field " + sub_field);
-        } else {
-          Logger::warning("Invalid layer index (Q8_0) " +
-                          std::to_string(layer_idx) +
-                          " parsed from tensor name '" + info.name + "'");
-        }
-      } else {
-        Logger::warning("Unhandled target field (Q8_0): '" + target_field +
-                        "' for tensor '" + info.name + "'");
-      }
-    } else {
-      Logger::warning("Tensor '" + info.name + "' has unhandled GGUF type: " +
-                      ggml_type_name(info.type) + " (" +
-                      std::to_string(static_cast<int>(info.type)) + ")");
     }
+
+    // Layer tensors
+    // Using target_field_key for layer parsing as it's the map key which is structured with "blk."
+    size_t blk_pos = target_field_key.find("blk.");
+    if (blk_pos == 0) {
+      size_t dot_pos = target_field_key.find('.', blk_pos + 4);
+      if (dot_pos != std::string::npos) {
+        std::string layer_idx_str = target_field_key.substr(blk_pos + 4, dot_pos - (blk_pos + 4));
+        int layer_idx = std::stoi(layer_idx_str);
+        std::string sub_field = target_field_key.substr(dot_pos + 1);
+
+        if (layer_idx < 0 || static_cast<size_t>(layer_idx) >= model.layers.size()) {
+            Logger::error("[MAP_GGUF_ERROR] Invalid layer index " + std::to_string(layer_idx) + " for tensor " + target_field_key + " (actual GGUF name: " + info.name + ")");
+            continue;
+          }
+
+        if (info.type == GGMLType::GGML_TYPE_F32) {
+          size_t num_elements = info.size_in_bytes / sizeof(float);
+          if (num_elements == 0 && info.size_in_bytes > 0) {
+              Logger::warning("[MAP_GGUF_F32_TRACE] num_elements is 0 for F32 tensor: '" + info.name + "' but size_in_bytes is " + std::to_string(info.size_in_bytes) + ". Skipping.");
+          continue;
+        }
+      std::vector<float> dest_f32(num_elements);
+          memcpy(dest_f32.data(), tensor_data_ptr, info.size_in_bytes);
+
+          if (sub_field == "attn_norm.weight") {
+            model.layers[layer_idx].input_layernorm_f32.swap(dest_f32);
+          } else if (sub_field == "ffn_norm.weight") {
+            model.layers[layer_idx].post_attention_layernorm_f32.swap(dest_f32);
+      } else {
+            // Logger::warning("[MAP_GGUF_F32_TRACE] Unsupported F32 layer sub-field: '" + sub_field + "' for " + target_field_key + " (GGUF name: " + info.name + ")");
+          }
+        }
+        else if (info.type == GGMLType::GGML_TYPE_Q4_K) {
+      size_t num_blocks = info.size_in_bytes / sizeof(block_q4_K);
+           if (num_blocks == 0 && info.size_in_bytes > 0) {
+              Logger::warning("[MAP_GGUF_Q4K_TRACE] num_blocks is 0 for Q4_K tensor: '" + info.name + "' but size_in_bytes is " + std::to_string(info.size_in_bytes) + ". Skipping.");
+            continue;
+          }
+          std::vector<block_q4_K> dest_q4k(num_blocks);
+          memcpy(dest_q4k.data(), tensor_data_ptr, info.size_in_bytes);
+
+          Logger::info("[MAP_GGUF_Q4K_BLOCK_COUNT] Layer " + std::to_string(layer_idx) + 
+                       " " + sub_field + ": " + std::to_string(num_blocks) + 
+                       " blocks (GGML_QK_K=" + std::to_string(GGML_QK_K) + 
+                       ", size_in_bytes=" + std::to_string(info.size_in_bytes) + ")");
+
+          if (sub_field == "attn_q.weight") {
+            model.layers[layer_idx].q_proj_q4k.swap(dest_q4k);
+          } else if (sub_field == "attn_k.weight") {
+            model.layers[layer_idx].k_proj_q4k.swap(dest_q4k);
+          } else if (sub_field == "attn_v.weight") {
+            model.layers[layer_idx].v_proj_q4k.swap(dest_q4k);
+          } else if (sub_field == "attn_output.weight") {
+            model.layers[layer_idx].o_proj_q4k.swap(dest_q4k);
+          } else if (sub_field == "ffn_gate.weight") {
+            model.layers[layer_idx].gate_proj_q4k.swap(dest_q4k);
+          } else if (sub_field == "ffn_up.weight") {
+            model.layers[layer_idx].up_proj_q4k.swap(dest_q4k);
+          } else if (sub_field == "ffn_down.weight") {
+            model.layers[layer_idx].down_proj_q4k.swap(dest_q4k);
+        } else {
+            Logger::warning(std::string("[MAP_GGUF_Q4K_TRACE] Unsupported Q4_K layer sub-field: '") + sub_field + "' for " + target_field_key + " (GGUF name: " + info.name + ")");
+          }
+        }
+        else if (info.type == GGMLType::GGML_TYPE_Q6_K) {
+      size_t num_blocks = info.size_in_bytes / sizeof(block_q6_K);
+          if (num_blocks == 0 && info.size_in_bytes > 0) {
+              Logger::warning("[MAP_GGUF_Q6K_TRACE] num_blocks is 0 for Q6_K tensor: '" + info.name + "' but size_in_bytes is " + std::to_string(info.size_in_bytes) + ". Skipping.");
+            continue;
+          }
+          std::vector<block_q6_K> dest_q6k(num_blocks);
+          memcpy(dest_q6k.data(), tensor_data_ptr, info.size_in_bytes);
+
+          if (sub_field == "attn_q.weight") {
+            model.layers[layer_idx].q_proj_q6k.swap(dest_q6k);
+          } else if (sub_field == "attn_k.weight") {
+            model.layers[layer_idx].k_proj_q6k.swap(dest_q6k);
+          } else if (sub_field == "attn_v.weight") {
+            model.layers[layer_idx].v_proj_q6k.swap(dest_q6k);
+          } else if (sub_field == "attn_output.weight") {
+            model.layers[layer_idx].o_proj_q6k.swap(dest_q6k);
+          } else if (sub_field == "ffn_gate.weight") {
+            model.layers[layer_idx].gate_proj_q6k.swap(dest_q6k);
+          } else if (sub_field == "ffn_up.weight") {
+            model.layers[layer_idx].up_proj_q6k.swap(dest_q6k);
+          } else if (sub_field == "ffn_down.weight") {
+            model.layers[layer_idx].down_proj_q6k.swap(dest_q6k);
+          } else {
+            Logger::warning(std::string("[MAP_GGUF_Q6K_TRACE] Unsupported Q6_K layer sub-field: '") + sub_field + "' for " + target_field_key + " (GGUF name: " + info.name + ")");
+          }
+        }
+        else if (info.type == GGMLType::GGML_TYPE_Q8_0) {
+          size_t num_blocks = info.size_in_bytes / sizeof(block_q8_0);
+          if (num_blocks == 0 && info.size_in_bytes > 0) {
+              Logger::warning("[MAP_GGUF_Q8_0_TRACE] num_blocks is 0 for Q8_0 tensor: '" + info.name + "' but size_in_bytes is " + std::to_string(info.size_in_bytes) + ". Skipping.");
+            continue;
+          }
+          std::vector<block_q8_0> dest_q8_0(num_blocks);
+          memcpy(dest_q8_0.data(), tensor_data_ptr, info.size_in_bytes);
+
+          if (sub_field == "attn_q.weight") {
+            model.layers[layer_idx].q_proj_q8_0.swap(dest_q8_0);
+          } else if (sub_field == "attn_k.weight") {
+            model.layers[layer_idx].k_proj_q8_0.swap(dest_q8_0);
+          } else if (sub_field == "attn_v.weight") {
+            model.layers[layer_idx].v_proj_q8_0.swap(dest_q8_0);
+          } else if (sub_field == "attn_output.weight") {
+            model.layers[layer_idx].o_proj_q8_0.swap(dest_q8_0);
+          } else if (sub_field == "ffn_gate.weight") {
+            model.layers[layer_idx].gate_proj_q8_0.swap(dest_q8_0);
+          } else if (sub_field == "ffn_up.weight") {
+            model.layers[layer_idx].up_proj_q8_0.swap(dest_q8_0);
+          } else if (sub_field == "ffn_down.weight") {
+            model.layers[layer_idx].down_proj_q8_0.swap(dest_q8_0);
+          } else {
+            Logger::warning(std::string("[MAP_GGUF_Q8_0_TRACE] Unsupported Q8_0 layer sub-field: '") + sub_field + "' for " + target_field_key + " (GGUF name: " + info.name + ")");
+          }
+        }
+        else if (info.type == GGMLType::GGML_TYPE_Q8_K) {
+          size_t num_blocks = info.size_in_bytes / sizeof(block_q8_K);
+          if (num_blocks == 0 && info.size_in_bytes > 0) {
+              Logger::warning("[MAP_GGUF_Q8_K_TRACE] num_blocks is 0 for Q8_K tensor: '" + info.name + "' but size_in_bytes is " + std::to_string(info.size_in_bytes) + ". Skipping.");
+            continue;
+          }
+          std::vector<block_q8_K> dest_q8k(num_blocks);
+          memcpy(dest_q8k.data(), tensor_data_ptr, info.size_in_bytes);
+
+          if (sub_field == "attn_q.weight") {
+            model.layers[layer_idx].q_proj_q8k.swap(dest_q8k);
+          } else if (sub_field == "attn_k.weight") {
+            model.layers[layer_idx].k_proj_q8k.swap(dest_q8k);
+          } else if (sub_field == "attn_v.weight") {
+            model.layers[layer_idx].v_proj_q8k.swap(dest_q8k);
+          } else if (sub_field == "attn_output.weight") {
+            model.layers[layer_idx].o_proj_q8k.swap(dest_q8k);
+          } else if (sub_field == "ffn_gate.weight") {
+            model.layers[layer_idx].gate_proj_q8k.swap(dest_q8k);
+          } else if (sub_field == "ffn_up.weight") {
+            model.layers[layer_idx].up_proj_q8k.swap(dest_q8k);
+          } else if (sub_field == "ffn_down.weight") {
+            model.layers[layer_idx].down_proj_q8k.swap(dest_q8k);
+          } else {
+            Logger::warning(std::string("[MAP_GGUF_Q8_K_TRACE] Unsupported Q8_K layer sub-field: '") + sub_field + "' for " + target_field_key + " (GGUF name: " + info.name + ")");
+          }
+        } else if (info.type == GGMLType::GGML_TYPE_BF16) {
+          size_t num_elements = info.size_in_bytes / sizeof(uint16_t);
+          if (num_elements == 0 && info.size_in_bytes > 0) {
+              Logger::warning("[MAP_GGUF_BF16_TRACE] num_elements is 0 for BF16 tensor: '" + info.name + "' but size_in_bytes is " + std::to_string(info.size_in_bytes) + ". Skipping.");
+            continue;
+          }
+          std::vector<uint16_t> dest_bf16(num_elements);
+          memcpy(dest_bf16.data(), tensor_data_ptr, info.size_in_bytes);
+
+          if (sub_field == "attn_q.weight") {
+            model.layers[layer_idx].q_proj.swap(dest_bf16);
+          } else if (sub_field == "attn_k.weight") {
+            model.layers[layer_idx].k_proj.swap(dest_bf16);
+          } else if (sub_field == "attn_v.weight") {
+            model.layers[layer_idx].v_proj.swap(dest_bf16);
+          } else if (sub_field == "attn_output.weight") {
+            model.layers[layer_idx].o_proj.swap(dest_bf16);
+          } else if (sub_field == "ffn_gate.weight") {
+            model.layers[layer_idx].gate_proj.swap(dest_bf16);
+          } else if (sub_field == "ffn_up.weight") {
+            model.layers[layer_idx].up_proj.swap(dest_bf16);
+          } else if (sub_field == "ffn_down.weight") {
+            model.layers[layer_idx].down_proj.swap(dest_bf16);
+          } else {
+            Logger::warning(std::string("[MAP_GGUF_BF16_TRACE] Unsupported BF16 layer sub-field: '") + sub_field + "' for " + target_field_key + " (GGUF name: " + info.name + ")");
+          }
+        }
+          else {
+           Logger::info(std::string("[MAP_GGUF_LAYER_OTHER_TYPE] Tensor type ") + ggml_type_name(info.type) + " for layer tensor '" + info.name + "' (key: " + target_field_key + ") not handled by F32/Q4K/Q6K blocks.");
+          }
+        } else {
+         Logger::warning("[MAP_GGUF_PARSE_FAIL] Could not parse layer index and sub-field from GGUF tensor name: " + target_field_key + " (actual GGUF name: " + info.name + ")");
+        }
+      } else {
+      // Logger::info("[MAP_GGUF_UNHANDLED_TENSOR] Tensor (key: '" + target_field_key + "', name: '" + info.name + "', Type: " + ggml_type_name(info.type) + ") did not match global or layer patterns.");
+    }
+  } // End loop over tensor_infos_map
+
+
+  for(size_t i = 0; i < model.layers.size(); ++i) {
+      if (model.layers[i].input_layernorm_f32.empty()) {
+          Logger::warning("[MAP_GGUF_EXIT_LAYER_CHECK] Layer " + std::to_string(i) + " input_layernorm_f32 is EMPTY.");
+      }
+      if (model.layers[i].post_attention_layernorm_f32.empty()) {
+          Logger::warning("[MAP_GGUF_EXIT_LAYER_CHECK] Layer " + std::to_string(i) + " post_attention_layernorm_f32 is EMPTY.");
+      }
   }
 
-  Logger::info("Finished mapping GGUF weights.");
+  Logger::info("Finished mapping GGUF weights to model fields.");
 }
 
 ModelConfig parse_model_config_from_gguf(const GGUFData& gguf) {
@@ -3392,38 +2858,7 @@ ModelConfig parse_model_config_from_gguf(const GGUFData& gguf) {
   return config;
 }
 
-static void log_vector_summary_detailed(const std::string& name,
-                                        const std::vector<float>& v,
-                                        int current_pos, int current_layer,
-                                        int N) {
-  if (v.empty()) {
-    Logger::info(name + " (pos=" + std::to_string(current_pos) + ", layer=" +
-                 std::to_string(current_layer) + "): EMPTY VECTOR");
-    return;
-  }
-  std::stringstream ss;
-  ss << name << " (pos=" << std::to_string(current_pos)
-     << ", layer=" << std::to_string(current_layer) << "): size=" << v.size();
-  ss << ", first " << N << ": [";
-  for (int i = 0; i < N && i < v.size(); ++i) {
-    ss << std::fixed << std::setprecision(4) << v[i]
-       << (i == N - 1 || i == v.size() - 1 ? "" : ", ");
-  }
-  ss << "]";
-  float min_val = v[0], max_val = v[0], sum = 0.0f;
-  bool all_finite = true;
-  for (float val : v) {
-    if (val < min_val) min_val = val;
-    if (val > max_val) max_val = val;
-    sum += val;
-    if (!std::isfinite(val)) all_finite = false;
-  }
-  ss << ", min=" << std::fixed << std::setprecision(4) << min_val;
-  ss << ", max=" << std::fixed << std::setprecision(4) << max_val;
-  ss << ", mean=" << std::fixed << std::setprecision(4) << (sum / v.size());
-  ss << ", finite=" << (all_finite ? "yes" : "no");
-  Logger::info(ss.str());
-}
+
 
 void TinyLlamaModel::initialize_rope_freqs() {
   Logger::info("[ROPE_FREQ_ENTRY] Entered initialize_rope_freqs.");
@@ -3451,9 +2886,6 @@ void TinyLlamaModel::initialize_rope_freqs() {
                ", using internal rope::MAX_SEQUENCE_LENGTH=" + std::to_string(rope::MAX_SEQUENCE_LENGTH) +
                ", configured rope_theta=" + std::to_string(config_.rope_theta));
 
-  // This function precomputes RoPE frequencies for all positions and head dimensions.
-  // The precomputed_freqs_cis_ vector stores pairs of (cos(angle), sin(angle)).
-  // It's a flat vector: precomputed_freqs_cis_[(pos * head_dim / 2) + (dim_pair_idx)]
 
   if (precomputed_freqs_cis_.empty()) { 
     int max_seq_len = rope::MAX_SEQUENCE_LENGTH; // Or config_.max_position_embeddings if preferred
@@ -3487,4 +2919,1684 @@ void TinyLlamaModel::initialize_rope_freqs() {
   } else {
       Logger::info("RoPE frequencies already precomputed.");
   }
+}
+
+static void update_kv_cache_batch_cpu(
+    KVCache* kv_cache,
+    int layer_idx, // The absolute model layer index
+    const std::vector<float>& k_batch_for_layer, // [num_tokens, num_kv_heads * head_dim] for this layer
+    const std::vector<float>& v_batch_for_layer, // [num_tokens, num_kv_heads * head_dim] for this layer
+    int num_tokens_in_batch,
+    int start_pos_in_sequence, // Starting position of this batch in the overall sequence
+    int num_kv_heads,
+    int head_dim
+) {
+    if (!kv_cache) {
+        Logger::error("update_kv_cache_batch_cpu: KVCache is null.");
+        return;
+    }
+    if (layer_idx < 0 || static_cast<size_t>(layer_idx) >= kv_cache->layers.size()) {
+        Logger::error("update_kv_cache_batch_cpu: layer_idx " + std::to_string(layer_idx) + " is out of bounds for KVCache layers (size " + std::to_string(kv_cache->layers.size()) + ").");
+        return;
+    }
+    Logger::info("[CPU_KV_UPDATE] Layer=" + std::to_string(layer_idx) + 
+                ", start_pos=" + std::to_string(start_pos_in_sequence) + 
+                ", num_tokens=" + std::to_string(num_tokens_in_batch) +
+                ", k_batch_first_vals=[" + std::to_string(k_batch_for_layer[0]) + 
+                "," + std::to_string(k_batch_for_layer[1]) + "," + std::to_string(k_batch_for_layer[2]) + "]");
+    KVCacheLayer& layer_cache = kv_cache->layers[layer_idx];
+    int kv_dim = num_kv_heads * head_dim;
+
+    if (k_batch_for_layer.size() != static_cast<size_t>(num_tokens_in_batch * kv_dim)) {
+        Logger::error("[KV_BATCH_UPDATE L" + std::to_string(layer_idx) + "] k_batch_for_layer size mismatch. Expected " +
+                      std::to_string(num_tokens_in_batch * kv_dim) + ", got " + std::to_string(k_batch_for_layer.size()));
+        return;
+    }
+    
+    if (v_batch_for_layer.size() != static_cast<size_t>(num_tokens_in_batch * kv_dim)) {
+        Logger::error("[KV_BATCH_UPDATE L" + std::to_string(layer_idx) + "] v_batch_for_layer size mismatch. Expected " +
+                      std::to_string(num_tokens_in_batch * kv_dim) + ", got " + std::to_string(v_batch_for_layer.size()));
+        return;
+    }
+    
+    size_t expected_total_elements_in_layer_cache = static_cast<size_t>(kv_cache->max_seq_len_config_) * static_cast<size_t>(kv_cache->max_batch_size) * kv_dim;
+    if (layer_cache.k.size() != expected_total_elements_in_layer_cache || layer_cache.v.size() != expected_total_elements_in_layer_cache) {
+        Logger::error("[KV_BATCH_UPDATE L" + std::to_string(layer_idx) + 
+                      "] Precondition failed: Layer cache not sized to max_seq_len_config. K size: " + std::to_string(layer_cache.k.size()) +
+                      ", V size: " + std::to_string(layer_cache.v.size()) + 
+                      ", Expected size: " + std::to_string(expected_total_elements_in_layer_cache) +
+                      ". Check KVCache::initialize.");
+        return; // Critical error, cannot safely proceed
+    }
+    for (int token_idx_in_batch = 0; token_idx_in_batch < num_tokens_in_batch; ++token_idx_in_batch) {
+        size_t current_token_batch_offset = static_cast<size_t>(token_idx_in_batch) * kv_dim;
+
+        // Calculate the global sequence position in the cache where this token's KV vector will be written
+        // This matches the GPU implementation: sequential position regardless of sequence boundaries
+        int global_seq_pos = start_pos_in_sequence + token_idx_in_batch;
+
+        if (global_seq_pos >= kv_cache->max_seq_len_config_ * kv_cache->max_batch_size) {
+            Logger::error("[KV_BATCH_UPDATE L" + std::to_string(layer_idx) + 
+                          "] Error: global_seq_pos (" + std::to_string(global_seq_pos) +
+                          ") is out of bounds for total cache size. Skipping update for this token.");
+            continue; 
+        }
+
+        size_t destination_offset_in_layer_cache = static_cast<size_t>(global_seq_pos) * kv_dim;
+        // Log K cache update
+        size_t k_size_before = layer_cache.k.size(); // This should be the full max_seq_len size
+        std::string k_vals_to_log = " vals to copy: ";
+        for(int i = 0; i < std::min(3, kv_dim); ++i) { k_vals_to_log += std::to_string(k_batch_for_layer[current_token_batch_offset + i]) + " "; }
+        if (kv_dim > 3) k_vals_to_log += "...";
+
+        
+        std::copy(k_batch_for_layer.begin() + current_token_batch_offset,
+                  k_batch_for_layer.begin() + current_token_batch_offset + kv_dim,
+                  layer_cache.k.begin() + destination_offset_in_layer_cache);
+        
+
+        // Log V cache update
+        size_t v_size_before = layer_cache.v.size(); // This should be the full max_seq_len size
+        std::string v_vals_to_log = " vals to copy: ";
+        for(int i = 0; i < std::min(3, kv_dim); ++i) { v_vals_to_log += std::to_string(v_batch_for_layer[current_token_batch_offset + i]) + " "; }
+        if (kv_dim > 3) v_vals_to_log += "...";
+
+        std::copy(v_batch_for_layer.begin() + current_token_batch_offset,
+                  v_batch_for_layer.begin() + current_token_batch_offset + kv_dim,
+                  layer_cache.v.begin() + destination_offset_in_layer_cache);
+
+    }
+    
+}
+static void attention_batch_cpu(
+    const std::vector<float>& q_batch_roped, // [num_tokens, num_q_heads * head_dim] (hs dimension)
+    KVCacheLayer& current_layer_kv_cache,    // K and V for the current layer
+    std::vector<float>& batch_attn_output,   // Output: [num_tokens, num_q_heads * head_dim] (hs dimension)
+    int num_tokens_in_batch,
+    int start_pos_in_sequence,               // The sequence position where this batch begins
+    int num_q_heads,
+    int num_kv_heads,
+    int head_dim,
+    float attention_scale
+) {
+    size_t expected_q_size = (size_t)num_tokens_in_batch * num_q_heads * head_dim;
+    if (q_batch_roped.size() != expected_q_size) {
+        Logger::error("[ATTN_BATCH_CPU] q_batch_roped size mismatch. Expected: " + std::to_string(expected_q_size) +
+                      ", Got: " + std::to_string(q_batch_roped.size()));
+        std::fill(batch_attn_output.begin(), batch_attn_output.end(), 0.0f); // Ensure output is zeroed if error
+        return;
+    }
+    Logger::info("[ATTENTION_BATCH_CPU_ENTRY] Called with num_tokens=" + std::to_string(num_tokens_in_batch));
+    size_t expected_output_size = (size_t)num_tokens_in_batch * num_q_heads * head_dim;
+    batch_attn_output.assign(expected_output_size, 0.0f);
+
+
+
+    for (int token_idx = 0; token_idx < num_tokens_in_batch; ++token_idx) {
+        size_t q_token_offset = (size_t)token_idx * num_q_heads * head_dim;
+        size_t attn_out_token_offset = (size_t)token_idx * num_q_heads * head_dim;
+        int current_token_absolute_pos = start_pos_in_sequence + token_idx;
+
+        for (int h_q = 0; h_q < num_q_heads; ++h_q) {
+            const float* q_head_for_token_ptr = q_batch_roped.data() + q_token_offset + (h_q * head_dim);
+            int kv_group_head_idx = h_q / (num_q_heads / num_kv_heads); 
+            
+            bool log_details_for_this_head = (token_idx == 0 && h_q == 0); // Log details only for 1st token, 1st Q-head
+
+
+            int history_len = current_token_absolute_pos + 1;
+            if (history_len <= 0) { // Should not happen if current_token_absolute_pos >= 0
+                 Logger::warning("[ATTN_BATCH_CPU] Token_idx " + std::to_string(token_idx) + ", Q_Head " + std::to_string(h_q) +
+                                 ": history_len is " + std::to_string(history_len) + ". Skipping score calculation for this head.");
+                continue;
+            }
+            std::vector<float> scores(history_len);
+
+            for (int t_hist = 0; t_hist < history_len; ++t_hist) { 
+                size_t k_cache_offset = ((size_t)t_hist * num_kv_heads + kv_group_head_idx) * head_dim;
+                                if (token_idx == 0 && h_q == 0 && t_hist < 3) {
+                  Logger::info("[CPU_ATTN_MEM] T" + std::to_string(token_idx) + "_H" + std::to_string(h_q) + 
+                              " accessing K_cache[pos=" + std::to_string(t_hist) + ",kv_head=" + std::to_string(kv_group_head_idx) + 
+                              "]: offset=" + std::to_string(k_cache_offset) + 
+                              ", k_vals=[" + std::to_string(current_layer_kv_cache.k[k_cache_offset]) + 
+                              "," + std::to_string(current_layer_kv_cache.k[k_cache_offset + 1]) + 
+                              "," + std::to_string(current_layer_kv_cache.k[k_cache_offset + 2]) + "]");
+              }
+                if (k_cache_offset + head_dim > current_layer_kv_cache.k.size()) {
+                     Logger::error("[ATTN_BATCH_CPU] K cache out of bounds. Token_idx " + std::to_string(token_idx) +
+                                   " (abs_pos " + std::to_string(current_token_absolute_pos) + "), Q_Head " + std::to_string(h_q) +
+                                   ", history_pos " + std::to_string(t_hist) +
+                                   ". Required k_cache_offset " + std::to_string(k_cache_offset + head_dim) +
+                                   " > cache_k_size " + std::to_string(current_layer_kv_cache.k.size()));
+                    scores[t_hist] = -std::numeric_limits<float>::infinity(); 
+                    continue;
+                }
+
+                float current_dot_product = 0.0f;
+                for (int d = 0; d < head_dim; ++d) {
+                    current_dot_product += q_head_for_token_ptr[d] * current_layer_kv_cache.k[k_cache_offset + d];
+                }
+                                if (token_idx == 0 && h_q == 0 && t_hist < 2) {
+                Logger::info("[CPU_ATTN_SCORE] T0_H0 pos=" + std::to_string(t_hist) + 
+                            ", q_vals=[" + std::to_string(q_head_for_token_ptr[0]) + 
+                            "," + std::to_string(q_head_for_token_ptr[1]) + "] " +
+                            ", k_vals=[" + std::to_string(current_layer_kv_cache.k[k_cache_offset]) + 
+                            "," + std::to_string(current_layer_kv_cache.k[k_cache_offset + 1]) + "]" +
+                            ", dot=" + std::to_string(current_dot_product) + ", scale=" + std::to_string(attention_scale));
+            }
+                scores[t_hist] = current_dot_product * attention_scale;
+
+            }
+
+            softmax_vector_cpu(scores, scores); 
+            if (token_idx == 0 && h_q == 0) {
+                std::string scores_str = "";
+                for (int i = 0; i < std::min(3, (int)scores.size()); i++) {
+                    scores_str += std::to_string(scores[i]) + " ";
+                }
+                Logger::info("[CPU_SOFTMAX] T0_H0 first_3_probs=[" + scores_str + "]");
+            }
+            float* current_attn_out_head_ptr = batch_attn_output.data() + attn_out_token_offset + (h_q * head_dim);
+
+            for (int t_hist = 0; t_hist < history_len; ++t_hist) {
+                if (scores[t_hist] == -std::numeric_limits<float>::infinity() || scores[t_hist] == 0.0f) continue;
+
+                size_t v_cache_offset = ((size_t)t_hist * num_kv_heads + kv_group_head_idx) * head_dim;
+                if (v_cache_offset + head_dim > current_layer_kv_cache.v.size()) {
+                     Logger::error("[ATTN_BATCH_CPU] V cache out of bounds. Token_idx " + std::to_string(token_idx) +
+                                   " (abs_pos " + std::to_string(current_token_absolute_pos) + "), Q_Head " + std::to_string(h_q) +
+                                   ", history_pos " + std::to_string(t_hist) +
+                                   ". Required v_cache_offset " + std::to_string(v_cache_offset + head_dim) +
+                                   " > cache_v_size " + std::to_string(current_layer_kv_cache.v.size()));
+                    continue; 
+                }
+
+                for (int d = 0; d < head_dim; ++d) {
+                    float val_before = (log_details_for_this_head && t_hist < 2 && d < 2) ? current_attn_out_head_ptr[d] : 0.0f;
+                    current_attn_out_head_ptr[d] += scores[t_hist] * current_layer_kv_cache.v[v_cache_offset + d];
+                }
+            }
+        } 
+    } 
+}
+
+std::vector<float> TinyLlamaModel::forward_cpu_logits_batch(
+    const std::vector<float>& final_batch_activations, // [num_tokens, hidden_size]
+    int num_tokens_in_batch) {
+
+
+    if (final_batch_activations.size() != (size_t)num_tokens_in_batch * config_.hidden_size) {
+        Logger::error("[CPU_LOGITS_BATCH] final_batch_activations size mismatch. Expected: " +
+                      std::to_string((size_t)num_tokens_in_batch * config_.hidden_size) + " Got: " +
+                      std::to_string(final_batch_activations.size()));
+        return {};
+    }
+
+    int hs = config_.hidden_size;
+    int vs = config_.vocab_size;
+    float eps = config_.rms_norm_eps;
+
+    // 1. Final RMSNorm
+    std::vector<float> final_batch_norm_out(num_tokens_in_batch * hs);
+    const std::vector<float>& w_final_norm_vec =
+        final_norm_f32.empty() ? bf16vec_to_float_vec(final_norm)
+                               : final_norm_f32;
+    if (w_final_norm_vec.empty()) {
+         Logger::error("[CPU_LOGITS_BATCH] Final RMSNorm weights are empty (neither f32 nor bf16 available).");
+         return {};
+    }
+
+    rmsnorm_batch_cpu(final_batch_activations, w_final_norm_vec, final_batch_norm_out,
+                      num_tokens_in_batch, hs, eps);
+    
+    // 2. Batched LM Head multiplication
+    std::vector<float> batch_logits_out(num_tokens_in_batch * vs);
+
+    if (!lm_head_f32.empty()) {
+        Logger::info("[CPU_LOGITS_BATCH] Using F32 LM Head weights.");
+        matmul_f32_f32_batch_cpu(lm_head_f32, final_batch_norm_out, batch_logits_out,
+                                 num_tokens_in_batch, vs, hs);
+    } else if (!lm_head_q8_0.empty() && config_.is_gguf_file_loaded) {
+        Logger::info("[CPU_LOGITS_BATCH] Using Q8_0 LM Head weights.");
+        matmul_q8_0_f32_batch_cpu(lm_head_q8_0, final_batch_norm_out, batch_logits_out,
+                                   num_tokens_in_batch, vs, hs);
+    } else if (!lm_head_q6k.empty() && config_.is_gguf_file_loaded) {
+        Logger::info("[CPU_LOGITS_BATCH] Using Q6_K LM Head weights.");
+        matmul_q6k_f32_batch_cpu(lm_head_q6k, final_batch_norm_out, batch_logits_out,
+                                  num_tokens_in_batch, vs, hs);
+    } else if (!lm_head_q4k.empty() && config_.is_gguf_file_loaded) {
+        Logger::info("[CPU_LOGITS_BATCH] Using Q4_K LM Head weights.");
+        matmul_q4k_f32_batch_cpu(lm_head_q4k, final_batch_norm_out, batch_logits_out,
+                                  num_tokens_in_batch, vs, hs);
+    } else if (!lm_head.empty()) { // BF16 SafeTensors weights
+        Logger::info("[CPU_LOGITS_BATCH] Using BF16 LM Head weights (converting to F32 for matmul).");
+        std::vector<float> lm_head_f32_temp = bf16vec_to_float_vec(lm_head);
+        if (lm_head_f32_temp.empty()) {
+            Logger::error("[CPU_LOGITS_BATCH] Failed to convert BF16 LM Head to F32.");
+            return {};
+        }
+        matmul_f32_f32_batch_cpu(lm_head_f32_temp, final_batch_norm_out, batch_logits_out,
+                                 num_tokens_in_batch, vs, hs);
+    } else {
+        Logger::error("[CPU_LOGITS_BATCH] No valid LM Head weights found (F32, Q8_0, Q6_K, Q4_K, BF16).");
+        return {};
+    }
+    
+    return batch_logits_out;
+}
+
+static void update_kv_cache_batch_cpu_sequence_aware(
+    KVCache* kv_cache,
+    int layer_idx,
+    const std::vector<float>& k_batch_for_layer,
+    const std::vector<float>& v_batch_for_layer,
+    int num_tokens_in_batch,
+    const std::vector<int>& sequence_indices,
+    const std::vector<int>& position_in_sequence,
+    int num_kv_heads,
+    int head_dim
+) {
+    if (!kv_cache) {
+        Logger::error("update_kv_cache_batch_cpu_sequence_aware: KVCache is null.");
+        return;
+    }
+    if (layer_idx < 0 || static_cast<size_t>(layer_idx) >= kv_cache->layers.size()) {
+        Logger::error("update_kv_cache_batch_cpu_sequence_aware: layer_idx " + std::to_string(layer_idx) + 
+                      " is out of bounds for KVCache layers (size " + std::to_string(kv_cache->layers.size()) + ").");
+        return;
+    }
+    
+    KVCacheLayer& layer_cache = kv_cache->layers[layer_idx];
+    int kv_dim = num_kv_heads * head_dim;
+
+    for (int token_idx = 0; token_idx < num_tokens_in_batch; ++token_idx) {
+        size_t current_token_batch_offset = static_cast<size_t>(token_idx) * kv_dim;
+        
+        int seq_idx = sequence_indices[token_idx];
+        int pos_in_seq = position_in_sequence[token_idx];
+        
+        // Calculate sequence-specific base offset
+        int sequence_base_offset = seq_idx * kv_cache->max_seq_len_config_;
+        int actual_cache_position = sequence_base_offset + pos_in_seq;
+        if (actual_cache_position >= kv_cache->max_seq_len_config_ * kv_cache->max_batch_size) {
+            Logger::error("[KV_BATCH_UPDATE_SEQ_AWARE L" + std::to_string(layer_idx) + 
+                          "] Error: actual_cache_position (" + std::to_string(actual_cache_position) +
+                          ") is out of bounds for total cache size. Skipping update for this token.");
+            continue;
+        }
+        
+        size_t destination_offset_in_layer_cache = static_cast<size_t>(actual_cache_position) * kv_dim;
+        
+        std::copy(k_batch_for_layer.begin() + current_token_batch_offset,
+                  k_batch_for_layer.begin() + current_token_batch_offset + kv_dim,
+                  layer_cache.k.begin() + destination_offset_in_layer_cache);
+                  
+        std::copy(v_batch_for_layer.begin() + current_token_batch_offset,
+                  v_batch_for_layer.begin() + current_token_batch_offset + kv_dim,
+                  layer_cache.v.begin() + destination_offset_in_layer_cache);
+    }
+}
+
+static void attention_batch_cpu_sequence_aware(
+    const std::vector<float>& q_batch_roped,
+    KVCacheLayer& current_layer_kv_cache,
+    std::vector<float>& batch_attn_output,
+    int num_tokens_in_batch,
+    const std::vector<int>& sequence_indices,
+    const std::vector<int>& position_in_sequence,
+    int num_q_heads,
+    int num_kv_heads,
+    int head_dim,
+    float attention_scale,
+    int max_seq_len_per_sequence
+) {
+    size_t expected_q_size = (size_t)num_tokens_in_batch * num_q_heads * head_dim;
+    if (q_batch_roped.size() != expected_q_size) {
+        Logger::error("[ATTN_BATCH_CPU_SEQ_AWARE] q_batch_roped size mismatch. Expected: " + std::to_string(expected_q_size) +
+                      ", Got: " + std::to_string(q_batch_roped.size()));
+        std::fill(batch_attn_output.begin(), batch_attn_output.end(), 0.0f);
+        return;
+    }
+    
+    batch_attn_output.assign((size_t)num_tokens_in_batch * num_q_heads * head_dim, 0.0f);
+
+    for (int token_idx = 0; token_idx < num_tokens_in_batch; ++token_idx) {
+        size_t q_token_offset = (size_t)token_idx * num_q_heads * head_dim;
+        size_t attn_out_token_offset = (size_t)token_idx * num_q_heads * head_dim;
+        
+        int seq_idx = sequence_indices[token_idx];
+        int pos_in_seq = position_in_sequence[token_idx];
+        int sequence_base_offset = seq_idx * max_seq_len_per_sequence;
+
+        for (int h_q = 0; h_q < num_q_heads; ++h_q) {
+            const float* q_head_for_token_ptr = q_batch_roped.data() + q_token_offset + (h_q * head_dim);
+            int kv_group_head_idx = h_q / (num_q_heads / num_kv_heads);
+            
+            int history_len = pos_in_seq + 1;
+            std::vector<float> scores(history_len);
+
+            for (int t_hist = 0; t_hist < history_len; ++t_hist) {
+                size_t k_cache_offset = ((size_t)(sequence_base_offset + t_hist) * num_kv_heads + kv_group_head_idx) * head_dim;
+                
+                if (k_cache_offset + head_dim > current_layer_kv_cache.k.size()) {
+                    scores[t_hist] = -std::numeric_limits<float>::infinity();
+                    continue;
+                }
+
+                float current_dot_product = 0.0f;
+                for (int d = 0; d < head_dim; ++d) {
+                    current_dot_product += q_head_for_token_ptr[d] * current_layer_kv_cache.k[k_cache_offset + d];
+                }
+                scores[t_hist] = current_dot_product * attention_scale;
+            }
+
+            softmax_vector_cpu(scores, scores);
+            
+            float* current_attn_out_head_ptr = batch_attn_output.data() + attn_out_token_offset + (h_q * head_dim);
+
+            for (int t_hist = 0; t_hist < history_len; ++t_hist) {
+                if (scores[t_hist] == -std::numeric_limits<float>::infinity() || scores[t_hist] == 0.0f) continue;
+
+                size_t v_cache_offset = ((size_t)(sequence_base_offset + t_hist) * num_kv_heads + kv_group_head_idx) * head_dim;
+                if (v_cache_offset + head_dim > current_layer_kv_cache.v.size()) {
+                    continue;
+                }
+
+                for (int d = 0; d < head_dim; ++d) {
+                    current_attn_out_head_ptr[d] += scores[t_hist] * current_layer_kv_cache.v[v_cache_offset + d];
+                }
+            }
+        }
+    }
+}
+
+std::vector<std::vector<float>> TinyLlamaModel::forward_cpu_batch_generation(
+    const std::vector<float>& batch_input_activations, // [num_tokens, hidden_size]
+    const std::vector<int>& token_positions, // Position of each token in its respective sequence
+    const std::vector<int>& original_sequence_indices, // Original sequence index for each token
+    int num_tokens_in_batch,
+    KVCache* kv_cache) {
+
+    Logger::info("[CPU_BATCH_GEN] Entry: num_tokens=" + std::to_string(num_tokens_in_batch));
+    std::string pos_str = "token_positions=[";
+    for (int i = 0; i < std::min(num_tokens_in_batch, 3); ++i) {
+        pos_str += std::to_string(token_positions[i]) + " ";
+    }
+    pos_str += "]";
+    std::string seq_str = "original_sequence_indices=[";
+    for (int i = 0; i < std::min(num_tokens_in_batch, 3); ++i) {
+        seq_str += std::to_string(original_sequence_indices[i]) + " ";
+    }
+    seq_str += "]";
+    Logger::info("[CPU_BATCH_GEN] " + pos_str + ", " + seq_str);   
+    if (batch_input_activations.size() != (size_t)num_tokens_in_batch * config_.hidden_size) {
+        Logger::error("[CPU_BATCH_GENERATION] batch_input_activations size mismatch. Expected: " +
+                      std::to_string((size_t)num_tokens_in_batch * config_.hidden_size) + " Got: " +
+                      std::to_string(batch_input_activations.size()));
+        return {};
+    }
+
+    if (token_positions.size() != static_cast<size_t>(num_tokens_in_batch)) {
+        Logger::error("[CPU_BATCH_GENERATION] token_positions size mismatch. Expected: " + 
+                      std::to_string(num_tokens_in_batch) + " Got: " + std::to_string(token_positions.size()));
+        return {};
+    }
+
+    int hs = config_.hidden_size;
+    int is = config_.intermediate_size;
+    int n_heads = config_.num_attention_heads;
+    int n_kv_heads = config_.num_key_value_heads;
+    if (n_heads == 0) {
+        Logger::error("[CPU_BATCH_GENERATION] Error: num_attention_heads is zero.");
+        return {};
+    }
+    int head_dim = hs / n_heads;
+    float eps = config_.rms_norm_eps;
+    int max_pos_embeddings = config_.max_position_embeddings;
+    bool use_rope_adjacent_pairing = config_.is_gguf_file_loaded;
+    float attention_scale = 1.0f / SAFE_SQRT(static_cast<float>(head_dim));
+    int vs = config_.vocab_size;
+    int kv_group = n_heads / n_kv_heads;  // Pre-calculate GQA grouping
+
+    std::vector<float> current_batch_activations = batch_input_activations;
+
+    // Note: Unlike prefill batch processing, generation uses variable positions for each token
+    // We fall back to individual token processing for position-dependent operations
+    for (int l = 0; l < config_.num_cpu_offload_layers; ++l) {
+        const auto& lw = layers[l];
+        
+        // Batch RMSNorm for attention
+        std::vector<float> batch_x_norm1(current_batch_activations.size());
+        const std::vector<float>& w_input_norm_vec =
+            lw.input_layernorm_f32.empty()
+                ? bf16vec_to_float_vec(lw.input_layernorm)
+                : lw.input_layernorm_f32;
+        rmsnorm_batch_cpu(current_batch_activations, w_input_norm_vec, batch_x_norm1, num_tokens_in_batch, hs, eps);
+
+        std::vector<float> residual_batch_component_attn = current_batch_activations; 
+
+        // Batch Q, K, V projections
+        std::vector<float> q_batch((size_t)num_tokens_in_batch * hs);
+        std::vector<float> k_batch((size_t)num_tokens_in_batch * n_kv_heads * head_dim);
+        std::vector<float> v_batch((size_t)num_tokens_in_batch * n_kv_heads * head_dim);
+
+        // Q Projection (batched)
+        if (!lw.q_proj_f32.empty()) {
+            matmul_f32_f32_batch_cpu(lw.q_proj_f32, batch_x_norm1, q_batch, num_tokens_in_batch, hs, hs);
+        } else if (!lw.q_proj_q8_0.empty()) {
+            matmul_q8_0_f32_batch_cpu(lw.q_proj_q8_0, batch_x_norm1, q_batch, num_tokens_in_batch, hs, hs);
+        } else if (!lw.q_proj_q6k.empty()) {
+            matmul_q6k_f32_batch_cpu(lw.q_proj_q6k, batch_x_norm1, q_batch, num_tokens_in_batch, hs, hs);
+        } else if (!lw.q_proj_q4k.empty()) {
+            matmul_q4k_f32_batch_cpu(lw.q_proj_q4k, batch_x_norm1, q_batch, num_tokens_in_batch, hs, hs);
+        } else {
+            Logger::error("[CPU_BATCH_GENERATION] Layer " + std::to_string(l) + ": No Q proj weights found for CPU (batched)"); 
+            return {};
+        }
+        
+        // K Projection (batched)
+        if (!lw.k_proj_f32.empty()) {
+            matmul_f32_f32_batch_cpu(lw.k_proj_f32, batch_x_norm1, k_batch, num_tokens_in_batch, n_kv_heads * head_dim, hs);
+        } else if (!lw.k_proj_q8_0.empty()) {
+            matmul_q8_0_f32_batch_cpu(lw.k_proj_q8_0, batch_x_norm1, k_batch, num_tokens_in_batch, n_kv_heads * head_dim, hs);
+        } else if (!lw.k_proj_q6k.empty()) {
+            matmul_q6k_f32_batch_cpu(lw.k_proj_q6k, batch_x_norm1, k_batch, num_tokens_in_batch, n_kv_heads * head_dim, hs);
+        } else if (!lw.k_proj_q4k.empty()) {
+            matmul_q4k_f32_batch_cpu(lw.k_proj_q4k, batch_x_norm1, k_batch, num_tokens_in_batch, n_kv_heads * head_dim, hs);
+        } else {
+            Logger::error("[CPU_BATCH_GENERATION] Layer " + std::to_string(l) + ": No K proj weights found for CPU (batched)"); 
+            return {};
+        }
+
+        // V Projection (batched)
+        if (!lw.v_proj_f32.empty()) {
+            matmul_f32_f32_batch_cpu(lw.v_proj_f32, batch_x_norm1, v_batch, num_tokens_in_batch, n_kv_heads * head_dim, hs);
+        } else if (!lw.v_proj_q8_0.empty()) {
+            matmul_q8_0_f32_batch_cpu(lw.v_proj_q8_0, batch_x_norm1, v_batch, num_tokens_in_batch, n_kv_heads * head_dim, hs);
+        } else if (!lw.v_proj_q6k.empty()) {
+            matmul_q6k_f32_batch_cpu(lw.v_proj_q6k, batch_x_norm1, v_batch, num_tokens_in_batch, n_kv_heads * head_dim, hs);
+        } else if (!lw.v_proj_q4k.empty()) {
+            matmul_q4k_f32_batch_cpu(lw.v_proj_q4k, batch_x_norm1, v_batch, num_tokens_in_batch, n_kv_heads * head_dim, hs);
+        } else {
+            Logger::error("[CPU_BATCH_GENERATION] Layer " + std::to_string(l) + ": No V proj weights found for CPU (batched)"); 
+            return {};
+        }
+
+        // Optimized RoPE, KV cache update, and attention with OpenMP and SIMD
+        std::vector<float> batch_attn_output((size_t)num_tokens_in_batch * hs);
+        
+        #pragma omp parallel if(num_tokens_in_batch > 1)
+        {     
+            ensure_layer_weights_dequantized(l);
+            // Thread-local buffers to avoid allocations in loop
+            std::vector<float> q_token(hs);
+            std::vector<float> k_token(n_kv_heads * head_dim);
+            std::vector<float> v_token(n_kv_heads * head_dim);
+            std::vector<float> scores_buffer;
+            
+            #pragma omp for
+            for (int token_idx = 0; token_idx < num_tokens_in_batch; ++token_idx) {
+                int pos = token_positions[token_idx];
+                
+                // Extract Q, K, V for this token (reuse thread-local buffers)
+                std::copy(q_batch.begin() + (size_t)token_idx * hs, 
+                         q_batch.begin() + (size_t)(token_idx + 1) * hs, 
+                         q_token.begin());
+                std::copy(k_batch.begin() + (size_t)token_idx * n_kv_heads * head_dim, 
+                         k_batch.begin() + (size_t)(token_idx + 1) * n_kv_heads * head_dim, 
+                         k_token.begin());
+                std::copy(v_batch.begin() + (size_t)token_idx * n_kv_heads * head_dim, 
+                         v_batch.begin() + (size_t)(token_idx + 1) * n_kv_heads * head_dim, 
+                         v_token.begin());
+                
+                // Apply RoPE individually
+                apply_rope_vector(q_token, n_heads, head_dim, pos, precomputed_freqs_cis_, max_pos_embeddings, use_rope_adjacent_pairing);
+                apply_rope_vector(k_token, n_kv_heads, head_dim, pos, precomputed_freqs_cis_, max_pos_embeddings, use_rope_adjacent_pairing);
+                
+                // Update KV cache at specific position - Sequence-Major Layout
+                if (kv_cache && static_cast<size_t>(l) < kv_cache->layers.size()) {
+                    auto& layer_cache = kv_cache->layers[l];
+                    // Use sequence-major layout to match prefill behavior
+                    int seq_idx = original_sequence_indices[token_idx];
+                    int sequence_base_offset = seq_idx * kv_cache->max_seq_len_config_;
+                    int kv_offset = (sequence_base_offset + pos) * n_kv_heads * head_dim;
+                    #pragma omp critical
+                    {
+                        if (kv_offset + n_kv_heads * head_dim <= static_cast<int>(layer_cache.k.size())) {
+                            std::copy(k_token.begin(), k_token.end(), layer_cache.k.begin() + kv_offset);
+                            std::copy(v_token.begin(), v_token.end(), layer_cache.v.begin() + kv_offset);
+                        }
+                    }
+                }
+                
+                // Copy back RoPE'd Q values to batch
+                std::copy(q_token.begin(), q_token.end(), q_batch.begin() + (size_t)token_idx * hs);
+                
+                // SIMD-optimized attention computation for this token
+                int seq_idx = original_sequence_indices[token_idx];
+                int history_len = (seq_idx < kv_cache->current_batch_size) ? kv_cache->batch_seq_lens[seq_idx] : pos + 1;
+                scores_buffer.resize(history_len);
+                
+                const float* q_token_ptr = q_batch.data() + (size_t)token_idx * hs;
+                float* attn_output_ptr = batch_attn_output.data() + (size_t)token_idx * hs;
+        
+        if (kv_cache && static_cast<size_t>(l) < kv_cache->layers.size()) {
+                    const auto& layer_cache = kv_cache->layers[l];
+                    
+                    // Process all heads for this token efficiently with SIMD
+                    for (int h = 0; h < n_heads; ++h) {
+                        int kv_head_idx = h / kv_group;  // Use pre-calculated kv_group
+                        const float* q_head_ptr = q_token_ptr + h * head_dim;
+                        float* head_output_ptr = attn_output_ptr + h * head_dim;
+                        
+                        // SIMD-optimized attention score computation
+                        for (int t = 0; t < history_len; ++t) {
+                            // sequence-major layout: each sequence has contiguous region                            
+                            int seq_idx = original_sequence_indices[token_idx];
+                            int sequence_base_offset = seq_idx * kv_cache->max_seq_len_config_;
+                            const float* k_ptr = layer_cache.k.data() + (sequence_base_offset + t) * n_kv_heads * head_dim + kv_head_idx * head_dim;
+                            
+                            // Use SIMD dot product for Q·K computation
+#if defined(__AVX2__) || defined(__SSE2__) || defined(__ARM_NEON)
+                            float score = simd_dot_product(q_head_ptr, k_ptr, head_dim);
+#else
+                            float score = 0.0f;
+                            for (int d = 0; d < head_dim; ++d) {
+                                score += q_head_ptr[d] * k_ptr[d];
+                            }
+#endif
+                            scores_buffer[t] = score * attention_scale;
+                        }
+                
+                        // Softmax
+                        softmax_vector_cpu(scores_buffer, scores_buffer);
+                        
+                        // SIMD-optimized weighted sum with V
+                        std::fill(head_output_ptr, head_output_ptr + head_dim, 0.0f);
+                        for (int t = 0; t < history_len; ++t) {
+                            // Sequence-major layout: each sequence has contiguous region
+                            int seq_idx = original_sequence_indices[token_idx];
+                            int sequence_base_offset = seq_idx * kv_cache->max_seq_len_config_;                    
+                            const float* v_ptr = layer_cache.v.data() + (sequence_base_offset + t) * n_kv_heads * head_dim + kv_head_idx * head_dim;
+                            float score = scores_buffer[t];
+                            
+                            // Use SIMD scaled vector addition for score * V accumulation
+#if defined(__AVX2__) || defined(__SSE2__) || defined(__ARM_NEON)
+                            simd_scaled_add(head_output_ptr, v_ptr, score, head_dim);
+#else
+                            for (int d = 0; d < head_dim; ++d) {
+                                head_output_ptr[d] += score * v_ptr[d];
+                            }
+#endif
+                        }
+                    }
+                } else {
+                    std::fill(attn_output_ptr, attn_output_ptr + hs, 0.0f);
+                }
+            }
+        }
+        
+        // O-Projection (batched)
+        std::vector<float> batch_attn_proj_out((size_t)num_tokens_in_batch * hs);
+        if(!lw.o_proj_f32.empty()) {
+              matmul_f32_f32_batch_cpu(lw.o_proj_f32, batch_attn_output, batch_attn_proj_out, num_tokens_in_batch, hs, hs);
+        } else if (!lw.o_proj_q8_0.empty()) {
+            matmul_q8_0_f32_batch_cpu(lw.o_proj_q8_0, batch_attn_output, batch_attn_proj_out, num_tokens_in_batch, hs, hs);
+        } else if (!lw.o_proj_q6k.empty()) {
+            matmul_q6k_f32_batch_cpu(lw.o_proj_q6k, batch_attn_output, batch_attn_proj_out, num_tokens_in_batch, hs, hs);
+        } else if (!lw.o_proj_q4k.empty()) {
+            matmul_q4k_f32_batch_cpu(lw.o_proj_q4k, batch_attn_output, batch_attn_proj_out, num_tokens_in_batch, hs, hs);
+        } else { 
+            Logger::error("[CPU_BATCH_GENERATION] Layer " + std::to_string(l) + ": No O proj weights found for CPU"); 
+            return {};
+        }
+
+        // First Residual Connection (batched)
+        for(size_t i=0; i < current_batch_activations.size(); ++i) {
+            current_batch_activations[i] = residual_batch_component_attn[i] + batch_attn_proj_out[i];
+        }
+
+        // MLP processing (batched where possible)
+        std::vector<float> residual_batch_component_mlp = current_batch_activations;
+        std::vector<float> batch_x_norm2(current_batch_activations.size());
+        
+        const std::vector<float>& w_post_attn_norm_vec =
+            lw.post_attention_layernorm_f32.empty()
+                ? bf16vec_to_float_vec(lw.post_attention_layernorm)
+                : lw.post_attention_layernorm_f32;
+        rmsnorm_batch_cpu(current_batch_activations, w_post_attn_norm_vec, batch_x_norm2, num_tokens_in_batch, hs, eps);
+        
+        std::vector<float> batch_gate_proj_out((size_t)num_tokens_in_batch * is);
+        std::vector<float> batch_up_proj_out((size_t)num_tokens_in_batch * is);
+
+        // Gate and Up projections (batched)
+        if (!lw.gate_proj_f32.empty()) {
+            matmul_f32_f32_batch_cpu(lw.gate_proj_f32, batch_x_norm2, batch_gate_proj_out, num_tokens_in_batch, is, hs);
+        } else if (!lw.gate_proj_q8_0.empty()) {
+            matmul_q8_0_f32_batch_cpu(lw.gate_proj_q8_0, batch_x_norm2, batch_gate_proj_out, num_tokens_in_batch, is, hs);
+        } else if (!lw.gate_proj_q6k.empty()) {
+            matmul_q6k_f32_batch_cpu(lw.gate_proj_q6k, batch_x_norm2, batch_gate_proj_out, num_tokens_in_batch, is, hs);
+        } else if (!lw.gate_proj_q4k.empty()) {
+            matmul_q4k_f32_batch_cpu(lw.gate_proj_q4k, batch_x_norm2, batch_gate_proj_out, num_tokens_in_batch, is, hs);
+        } else { 
+            Logger::error("[CPU_BATCH_GENERATION] Layer " + std::to_string(l) + ": No gate_proj weights found for CPU"); 
+            return {};
+        }
+
+        if (!lw.up_proj_f32.empty()) {
+            matmul_f32_f32_batch_cpu(lw.up_proj_f32, batch_x_norm2, batch_up_proj_out, num_tokens_in_batch, is, hs);
+        } else if (!lw.up_proj_q8_0.empty()) {
+            matmul_q8_0_f32_batch_cpu(lw.up_proj_q8_0, batch_x_norm2, batch_up_proj_out, num_tokens_in_batch, is, hs);
+        } else if (!lw.up_proj_q6k.empty()) {
+            matmul_q6k_f32_batch_cpu(lw.up_proj_q6k, batch_x_norm2, batch_up_proj_out, num_tokens_in_batch, is, hs);
+        } else if (!lw.up_proj_q4k.empty()) {
+            matmul_q4k_f32_batch_cpu(lw.up_proj_q4k, batch_x_norm2, batch_up_proj_out, num_tokens_in_batch, is, hs);
+        } else { 
+            Logger::error("[CPU_BATCH_GENERATION] Layer " + std::to_string(l) + ": No up_proj weights found for CPU"); 
+            return {};
+        }
+
+        // SwiGLU (batched)
+        std::vector<float> batch_swiglu_out((size_t)num_tokens_in_batch * is);
+        for (size_t i = 0; i < batch_gate_proj_out.size(); ++i) {
+            float gate_val = batch_gate_proj_out[i];
+            float silu_gate_val = gate_val / (1.0f + std::exp(-gate_val));
+            batch_swiglu_out[i] = silu_gate_val * batch_up_proj_out[i];
+        }
+        
+        // Down Projection (batched)
+        std::vector<float> batch_mlp_down_proj_out((size_t)num_tokens_in_batch * hs);
+        if (!lw.down_proj_f32.empty()) {
+            matmul_f32_f32_batch_cpu(lw.down_proj_f32, batch_swiglu_out, batch_mlp_down_proj_out, num_tokens_in_batch, hs, is);
+        } else if (!lw.down_proj_q8_0.empty()) {
+            matmul_q8_0_f32_batch_cpu(lw.down_proj_q8_0, batch_swiglu_out, batch_mlp_down_proj_out, num_tokens_in_batch, hs, is);
+        } else if (!lw.down_proj_q6k.empty()) {
+            matmul_q6k_f32_batch_cpu(lw.down_proj_q6k, batch_swiglu_out, batch_mlp_down_proj_out, num_tokens_in_batch, hs, is);
+        } else if (!lw.down_proj_q4k.empty()) {
+            matmul_q4k_f32_batch_cpu(lw.down_proj_q4k, batch_swiglu_out, batch_mlp_down_proj_out, num_tokens_in_batch, hs, is);
+        } else { 
+            Logger::error("[CPU_BATCH_GENERATION] Layer " + std::to_string(l) + ": No down_proj weights found for CPU"); 
+            return {};
+        }
+
+        // Second Residual Connection (batched)
+        for(size_t i = 0; i < current_batch_activations.size(); ++i) {
+            current_batch_activations[i] = residual_batch_component_mlp[i] + batch_mlp_down_proj_out[i];
+        }
+    }
+
+    // Update KV cache sequence length
+    if (kv_cache && num_tokens_in_batch > 0) {
+        // For batch mode, track positions per sequence
+        if (kv_cache->current_batch_size > 0) {
+            // Update batch_seq_lens based on the highest position seen for each sequence
+            std::vector<int> max_positions_per_seq(kv_cache->current_batch_size, -1);
+            
+            for (int i = 0; i < num_tokens_in_batch; ++i) {
+                int seq_idx = original_sequence_indices[i];
+                int pos = token_positions[i];
+                
+                if (seq_idx >= 0 && seq_idx < kv_cache->current_batch_size) {
+                    max_positions_per_seq[seq_idx] = std::max(max_positions_per_seq[seq_idx], pos);
+                }
+            }
+            
+            // Update batch_seq_lens to reflect new positions (pos + 1 since pos is 0-indexed)
+            for (int seq_idx = 0; seq_idx < kv_cache->current_batch_size; ++seq_idx) {
+                if (max_positions_per_seq[seq_idx] >= 0) {
+                    kv_cache->batch_seq_lens[seq_idx] = max_positions_per_seq[seq_idx] + 1;
+                    Logger::info("[CPU_BATCH_GEN] KV Length Max Update: seq_idx=" + std::to_string(seq_idx) + 
+                    ", old_batch_seq_len=" + std::to_string(kv_cache->batch_seq_lens[seq_idx]) + 
+                    ", new_batch_seq_len=" + std::to_string(max_positions_per_seq[seq_idx] + 1));
+                }
+            }
+            // For single-sequence compatibility, update seq_len to the max
+            kv_cache->seq_len = *std::max_element(kv_cache->batch_seq_lens.begin(), 
+                                                  kv_cache->batch_seq_lens.begin() + kv_cache->current_batch_size);
+    } else {
+            // Fallback for single sequence mode
+            int max_pos = *std::max_element(token_positions.begin(), token_positions.end());
+            kv_cache->seq_len = std::max(kv_cache->seq_len, max_pos + 1);
+        }
+    }
+    
+    // Final normalization and logits calculation for ALL tokens
+    std::vector<float> batch_logits = forward_cpu_logits_batch(current_batch_activations, num_tokens_in_batch);
+    
+    // Convert flat logits to per-token vectors
+    std::vector<std::vector<float>> all_logits(num_tokens_in_batch, std::vector<float>(vs));
+    for (int token_idx = 0; token_idx < num_tokens_in_batch; ++token_idx) {
+        std::copy(batch_logits.begin() + (size_t)token_idx * vs,
+                 batch_logits.begin() + (size_t)(token_idx + 1) * vs,
+                 all_logits[token_idx].begin());
+    }
+    return all_logits;
+}
+
+#ifdef HAS_CUDA
+std::vector<float> TinyLlamaModel::forward_device_batch_prefill(
+    float* d_batch_input_embeddings, // This is now assumed to be activations *after* CPU layers if any
+    int num_tokens_in_batch,
+    int current_model_pos, // This should be the starting position *within the KV cache* for the batch
+    KVCache* kv_cache,
+    cudaStream_t stream) {
+
+    Logger::info("[FWD_DEV_BATCH_PREFILL_ENTRY] num_tokens_in_batch: " + std::to_string(num_tokens_in_batch) +
+                 ", current_model_pos: " + std::to_string(current_model_pos) +
+                 ", d_batch_input_embeddings: " + Logger::ptrToString(d_batch_input_embeddings));
+
+    const int hidden_size = config_.hidden_size;
+    const int head_dim = config_.hidden_size / config_.num_attention_heads;
+    const int ffn_intermediate_dim = config_.intermediate_size;
+    const int n_kv_dim = config_.num_key_value_heads * head_dim;
+    const int vocab_size = config_.vocab_size;
+
+    Logger::debug("[FWD_DEV_BATCH_PREFILL_PARAMS] hidden_size: " + std::to_string(hidden_size) +
+                  ", head_dim: " + std::to_string(head_dim) +
+                  ", ffn_intermediate_dim: " + std::to_string(ffn_intermediate_dim) +
+                  ", n_kv_dim: " + std::to_string(n_kv_dim) +
+                  ", vocab_size: " + std::to_string(vocab_size) +
+                  ", num_attention_heads: " + std::to_string(config_.num_attention_heads) +
+                  ", num_key_value_heads: " + std::to_string(config_.num_key_value_heads));
+
+    float* d_batch_x_ptr = d_batch_input_embeddings; // Input to the first GPU layer
+    float* d_batch_x_norm_out_attn;
+    float* d_batch_q_proj_out;
+    float* d_batch_k_proj_out;
+    float* d_batch_v_proj_out;
+    float* d_batch_attn_heads_concat_out;
+    float* d_batch_attn_final_proj_out;
+    float* d_batch_residual_attn_in; 
+    float* d_batch_residual_ffn_in;  
+    float* d_batch_x_norm_out_ffn;
+    float* d_batch_ffn_gate_proj_out;
+    float* d_batch_ffn_up_proj_out;
+    float* d_batch_ffn_swiglu_out;
+    float* d_batch_ffn_down_proj_out;
+    float* d_batch_layer_output = nullptr; 
+
+    size_t batch_hidden_size_elems = (size_t)num_tokens_in_batch * hidden_size;
+    size_t batch_kv_proj_size_elems = (size_t)num_tokens_in_batch * n_kv_dim;
+    size_t batch_ffn_intermediate_elems = (size_t)num_tokens_in_batch * ffn_intermediate_dim;
+
+    size_t batch_hidden_size_bytes = batch_hidden_size_elems * sizeof(float);
+    size_t batch_kv_proj_size_bytes = batch_kv_proj_size_elems * sizeof(float);
+    size_t batch_ffn_intermediate_bytes = batch_ffn_intermediate_elems * sizeof(float);
+
+    gpuErrchk(cudaMalloc(&d_batch_x_norm_out_attn, batch_hidden_size_bytes));
+    gpuErrchk(cudaMalloc(&d_batch_q_proj_out, batch_hidden_size_bytes));
+    gpuErrchk(cudaMalloc(&d_batch_k_proj_out, batch_kv_proj_size_bytes));
+    gpuErrchk(cudaMalloc(&d_batch_v_proj_out, batch_kv_proj_size_bytes));
+    gpuErrchk(cudaMalloc(&d_batch_attn_heads_concat_out, batch_hidden_size_bytes));
+    gpuErrchk(cudaMalloc(&d_batch_attn_final_proj_out, batch_hidden_size_bytes));
+    gpuErrchk(cudaMalloc(&d_batch_residual_attn_in, batch_hidden_size_bytes)); 
+    gpuErrchk(cudaMalloc(&d_batch_residual_ffn_in, batch_hidden_size_bytes)); 
+    gpuErrchk(cudaMalloc(&d_batch_x_norm_out_ffn, batch_hidden_size_bytes));
+    gpuErrchk(cudaMalloc(&d_batch_ffn_gate_proj_out, batch_ffn_intermediate_bytes));
+    gpuErrchk(cudaMalloc(&d_batch_ffn_up_proj_out, batch_ffn_intermediate_bytes));
+    gpuErrchk(cudaMalloc(&d_batch_ffn_swiglu_out, batch_ffn_intermediate_bytes));
+    gpuErrchk(cudaMalloc(&d_batch_ffn_down_proj_out, batch_hidden_size_bytes));
+
+    if (config_.num_cpu_offload_layers < config_.num_hidden_layers) {
+         gpuErrchk(cudaMalloc(&d_batch_layer_output, batch_hidden_size_bytes));
+    }
+
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+
+    cublasStatus_t stream_status = cublasSetStream(cublas_handle_, stream);
+    if (stream_status != CUBLAS_STATUS_SUCCESS) {
+        Logger::fatal("cublasSetStream failed in forward_device_batch_prefill");
+        throw std::runtime_error("cublasSetStream failed");
+    }
+
+    Logger::info("[FWD_DEV_BATCH_PREFILL_MAIN_LOOP_ENTRY] num_cpu_offload_layers: " + std::to_string(config_.num_cpu_offload_layers) + 
+                 ", total_hidden_layers: " + std::to_string(config_.num_hidden_layers));
+
+    for (int l_model_idx = config_.num_cpu_offload_layers; l_model_idx < config_.num_hidden_layers; ++l_model_idx) {
+        int l_gpu_idx = l_model_idx - config_.num_cpu_offload_layers;
+        Logger::info("[FWD_DEV_BATCH_PREFILL_LAYER_START] Processing Layer: model_idx=" + std::to_string(l_model_idx) + ", gpu_idx=" + std::to_string(l_gpu_idx) + 
+                     ". Current d_batch_x_ptr: " + Logger::ptrToString(d_batch_x_ptr));
+        ensure_layer_weights_dequantized(l_model_idx);
+        gpuErrchk(cudaMemcpyAsync(d_batch_residual_attn_in, d_batch_x_ptr, batch_hidden_size_bytes, cudaMemcpyDeviceToDevice, stream));
+
+        rmsnorm_batch_cuda(d_batch_x_norm_out_attn, d_batch_x_ptr, 
+                           layers[l_model_idx].input_layernorm_dev,
+                           num_tokens_in_batch, hidden_size, config_.rms_norm_eps, stream);
+
+        const float* w_q_layer_ptr = w_q_f32_dev_ + (size_t)l_gpu_idx * hidden_size * hidden_size;
+        gemm_f32_f32_cuda(cublas_handle_, false, true, num_tokens_in_batch, hidden_size, hidden_size, &alpha,
+                          d_batch_x_norm_out_attn, hidden_size, w_q_layer_ptr, hidden_size, &beta,
+                          d_batch_q_proj_out, hidden_size, stream);
+        Logger::info("[GPU_Q_PROJ] Layer=" + std::to_string(l_model_idx) + 
+            ", input_ptr=" + Logger::ptrToString(d_batch_x_norm_out_attn) +
+            ", weight_ptr=" + Logger::ptrToString(w_q_layer_ptr) +
+            ", output_ptr=" + Logger::ptrToString(d_batch_q_proj_out));
+        // Q_PROJ_OUT LOGGING (Unchanged)
+        if (l_model_idx == config_.num_cpu_offload_layers && num_tokens_in_batch > 0 && hidden_size > 0) { // Existing logging condition
+            int log_elements_common = std::min(static_cast<int>(head_dim), 3);
+            if (log_elements_common <= 0 && hidden_size > 0) log_elements_common = std::min(static_cast<int>(hidden_size), 3);
+            if (log_elements_common > 0) {
+                std::vector<float> h_sample_t0(log_elements_common);
+                gpuErrchk(cudaMemcpyAsync(h_sample_t0.data(), d_batch_q_proj_out, log_elements_common * sizeof(float), cudaMemcpyDeviceToHost, stream));
+                if (num_tokens_in_batch <= 1) gpuErrchk(cudaStreamSynchronize(stream)); 
+                std::string str_t0 = ""; for(float val : h_sample_t0) { str_t0 += std::to_string(val) + " "; }
+                Logger::debug("[FWD_DEV_BATCH_PREFILL_LAYER_L" + std::to_string(l_model_idx) + "] Q_PROJ_OUT (T0, H0, first " + std::to_string(log_elements_common) + "): " + str_t0);
+                if (num_tokens_in_batch > 1) {
+                    std::vector<float> h_sample_t1(log_elements_common);
+                    gpuErrchk(cudaMemcpyAsync(h_sample_t1.data(), d_batch_q_proj_out + hidden_size, log_elements_common * sizeof(float), cudaMemcpyDeviceToHost, stream));
+                    gpuErrchk(cudaStreamSynchronize(stream));
+                    std::string str_t1 = ""; for(float val : h_sample_t1) { str_t1 += std::to_string(val) + " "; }
+                    Logger::debug("[FWD_DEV_BATCH_PREFILL_LAYER_L" + std::to_string(l_model_idx) + "] Q_PROJ_OUT (T1, H0, first " + std::to_string(log_elements_common) + "): " + str_t1);
+                }
+            }
+        }
+
+        const float* w_k_layer_ptr = w_k_f32_dev_ + (size_t)l_gpu_idx * n_kv_dim * hidden_size;
+        gemm_f32_f32_cuda(cublas_handle_, false, true, num_tokens_in_batch, n_kv_dim, hidden_size, &alpha,
+                          d_batch_x_norm_out_attn, hidden_size, w_k_layer_ptr, n_kv_dim, &beta,
+                          d_batch_k_proj_out, n_kv_dim, stream);
+
+        const float* w_v_layer_ptr = w_v_f32_dev_ + (size_t)l_gpu_idx * n_kv_dim * hidden_size;
+        gemm_f32_f32_cuda(cublas_handle_, false, true, num_tokens_in_batch, n_kv_dim, hidden_size, &alpha,
+                          d_batch_x_norm_out_attn, hidden_size, w_v_layer_ptr, n_kv_dim, &beta,
+                          d_batch_v_proj_out, n_kv_dim, stream);
+
+        // PRE-ROPE LOGGING (Unchanged)
+        if (l_model_idx == config_.num_cpu_offload_layers && num_tokens_in_batch > 0 && head_dim > 0) { // Existing logging condition
+            int log_elements_rope = std::min(3, head_dim);
+            for (int token_to_log_idx_rope = 0; token_to_log_idx_rope < std::min(num_tokens_in_batch, 2); ++token_to_log_idx_rope) {
+                if (d_batch_q_proj_out && config_.num_attention_heads > 0) {
+                    std::vector<float> h_q_pre_rope(log_elements_rope);
+                    size_t q_log_offset = (size_t)token_to_log_idx_rope * config_.num_attention_heads * head_dim;
+                    gpuErrchk(cudaMemcpyAsync(h_q_pre_rope.data(), d_batch_q_proj_out + q_log_offset, log_elements_rope * sizeof(float), cudaMemcpyDeviceToHost, stream));
+                    gpuErrchk(cudaStreamSynchronize(stream)); 
+                    std::string str_q_pre_rope = ""; for(float val : h_q_pre_rope) { str_q_pre_rope += std::to_string(val) + " "; }
+                }
+                if (d_batch_k_proj_out && config_.num_key_value_heads > 0) {
+                    std::vector<float> h_k_pre_rope(log_elements_rope);
+                    size_t k_log_offset = (size_t)token_to_log_idx_rope * config_.num_key_value_heads * head_dim;
+                    gpuErrchk(cudaMemcpyAsync(h_k_pre_rope.data(), d_batch_k_proj_out + k_log_offset, log_elements_rope * sizeof(float), cudaMemcpyDeviceToHost, stream));
+                    gpuErrchk(cudaStreamSynchronize(stream)); 
+                    std::string str_k_pre_rope = ""; for(float val : h_k_pre_rope) { str_k_pre_rope += std::to_string(val) + " "; }
+                }
+            }
+        }
+        
+        rope_batch_cuda(d_batch_q_proj_out, d_batch_k_proj_out, all_freqs_cis_dev, num_tokens_in_batch,
+                        config_.num_attention_heads, config_.num_key_value_heads, head_dim,
+                        current_model_pos, config_.is_gguf_file_loaded, stream);
+        gpuErrchk(cudaStreamSynchronize(stream));
+
+        if (l_model_idx == config_.num_cpu_offload_layers && num_tokens_in_batch > 0 && head_dim > 0) { // Existing logging condition
+            int log_elements_rope = std::min(3, head_dim);
+            for (int token_to_log_idx_rope = 0; token_to_log_idx_rope < std::min(num_tokens_in_batch, 2); ++token_to_log_idx_rope) {
+                if (d_batch_q_proj_out && config_.num_attention_heads > 0) {
+                    std::vector<float> h_q_post_rope(log_elements_rope);
+                    size_t q_log_offset = (size_t)token_to_log_idx_rope * config_.num_attention_heads * head_dim;
+                    gpuErrchk(cudaMemcpy(h_q_post_rope.data(), d_batch_q_proj_out + q_log_offset, log_elements_rope * sizeof(float), cudaMemcpyDeviceToHost));
+                    std::string str_q_post_rope = ""; for(float val : h_q_post_rope) { str_q_post_rope += std::to_string(val) + " "; }
+                }
+                if (d_batch_k_proj_out && config_.num_key_value_heads > 0) {
+                    std::vector<float> h_k_post_rope(log_elements_rope);
+                    size_t k_log_offset = (size_t)token_to_log_idx_rope * config_.num_key_value_heads * head_dim;
+                    gpuErrchk(cudaMemcpy(h_k_post_rope.data(), d_batch_k_proj_out + k_log_offset, log_elements_rope * sizeof(float), cudaMemcpyDeviceToHost));
+                    std::string str_k_post_rope = ""; for(float val : h_k_post_rope) { str_k_post_rope += std::to_string(val) + " "; }
+                }
+            }
+        }
+
+        if (l_model_idx == config_.num_cpu_offload_layers && num_tokens_in_batch > 0 && head_dim > 0 && config_.num_key_value_heads > 0) { // Existing logging
+            int log_elements = std::min(3, head_dim);
+            if (d_batch_k_proj_out) {
+                std::vector<float> h_k_log_token0(log_elements);
+                gpuErrchk(cudaMemcpyAsync(h_k_log_token0.data(), d_batch_k_proj_out, log_elements * sizeof(float), cudaMemcpyDeviceToHost, stream));
+                std::vector<float> h_k_log_token1(log_elements);
+                if (num_tokens_in_batch > 1) { gpuErrchk(cudaMemcpyAsync(h_k_log_token1.data(), d_batch_k_proj_out + n_kv_dim, log_elements * sizeof(float), cudaMemcpyDeviceToHost, stream));}
+                gpuErrchk(cudaStreamSynchronize(stream));
+            }
+            if (d_batch_v_proj_out) {
+                std::vector<float> h_v_log_token0(log_elements);
+                gpuErrchk(cudaMemcpyAsync(h_v_log_token0.data(), d_batch_v_proj_out, log_elements * sizeof(float), cudaMemcpyDeviceToHost, stream));
+                std::vector<float> h_v_log_token1(log_elements);
+                if (num_tokens_in_batch > 1) { gpuErrchk(cudaMemcpyAsync(h_v_log_token1.data(), d_batch_v_proj_out + n_kv_dim, log_elements * sizeof(float), cudaMemcpyDeviceToHost, stream));}
+                gpuErrchk(cudaStreamSynchronize(stream));
+            }
+        }
+
+        float* d_layer_k_cache_ptr = kv_cache->layers[l_model_idx].k_dev_fp32; 
+        float* d_layer_v_cache_ptr = kv_cache->layers[l_model_idx].v_dev_fp32;
+        update_kv_cache_batch_cuda(d_layer_k_cache_ptr, d_batch_k_proj_out, current_model_pos, num_tokens_in_batch,
+                                   config_.num_key_value_heads, head_dim, kv_cache->max_seq_len_config_, stream);
+        update_kv_cache_batch_cuda(d_layer_v_cache_ptr, d_batch_v_proj_out, current_model_pos, num_tokens_in_batch,
+                                   config_.num_key_value_heads, head_dim, kv_cache->max_seq_len_config_, stream);
+        gpuErrchk(cudaStreamSynchronize(stream)); 
+        
+        float current_attention_scale = 1.0f / sqrtf((float)head_dim);
+        attention_batch_prefill_cuda(d_batch_q_proj_out, nullptr, nullptr, 
+                                     d_layer_k_cache_ptr, d_layer_v_cache_ptr, 
+                                     d_batch_attn_heads_concat_out, num_tokens_in_batch, current_model_pos, 
+                                     kv_cache->max_seq_len_config_, config_.num_attention_heads, 
+                                     config_.num_key_value_heads, head_dim, current_attention_scale, stream, nullptr);        
+        const float* w_o_layer_ptr = w_o_f32_dev_ + (size_t)l_gpu_idx * hidden_size * hidden_size;
+        gemm_f32_f32_cuda(cublas_handle_, false, true, num_tokens_in_batch, hidden_size, hidden_size, &alpha,
+                          d_batch_attn_heads_concat_out, hidden_size, w_o_layer_ptr, hidden_size, &beta,
+                          d_batch_attn_final_proj_out, hidden_size, stream);
+
+        // O_PROJ_OUT LOGGING (Unchanged) - Logging Point 1
+        if (l_model_idx == config_.num_cpu_offload_layers && num_tokens_in_batch > 1 && hidden_size > 0) { /* ... */ }
+
+
+        add_residual_batch_cuda(d_batch_residual_ffn_in, d_batch_attn_final_proj_out, d_batch_residual_attn_in,
+                                num_tokens_in_batch, hidden_size, stream);
+        // POST_RESIDUAL_ATTN LOGGING (Unchanged) - Logging Point 2
+        if (l_model_idx == config_.num_cpu_offload_layers && num_tokens_in_batch > 1 && hidden_size > 0) { /* ... */ }
+
+
+        rmsnorm_batch_cuda(d_batch_x_norm_out_ffn, d_batch_residual_ffn_in, 
+                           layers[l_model_idx].post_attention_layernorm_dev,
+                           num_tokens_in_batch, hidden_size, config_.rms_norm_eps, stream);
+        // RMSNORM_FFN_OUT LOGGING (Unchanged) - Logging Point 3
+        if (l_model_idx == config_.num_cpu_offload_layers && num_tokens_in_batch > 1 && hidden_size > 0) { /* ... */ }
+
+
+        const float* w1_layer_ptr = w_gate_f32_dev_ + (size_t)l_gpu_idx * hidden_size * ffn_intermediate_dim;
+        gemm_f32_f32_cuda(cublas_handle_, false, true, num_tokens_in_batch, ffn_intermediate_dim, hidden_size, &alpha,
+                          d_batch_x_norm_out_ffn, hidden_size, w1_layer_ptr, ffn_intermediate_dim, &beta,
+                          d_batch_ffn_gate_proj_out, ffn_intermediate_dim, stream);
+        // FFN_GATE_PROJ_OUT LOGGING (Unchanged) - Logging Point 4
+        if (l_model_idx == config_.num_cpu_offload_layers && num_tokens_in_batch > 1 && ffn_intermediate_dim > 0) { /* ... */ }
+
+
+        const float* w3_layer_ptr = w_up_f32_dev_ + (size_t)l_gpu_idx * hidden_size * ffn_intermediate_dim;
+        gemm_f32_f32_cuda(cublas_handle_, false, true, num_tokens_in_batch, ffn_intermediate_dim, hidden_size, &alpha,
+                          d_batch_x_norm_out_ffn, hidden_size, w3_layer_ptr, ffn_intermediate_dim, &beta,
+                          d_batch_ffn_up_proj_out, ffn_intermediate_dim, stream);
+        // FFN_UP_PROJ_OUT LOGGING (Unchanged) - Logging Point 5
+        if (l_model_idx == config_.num_cpu_offload_layers && num_tokens_in_batch > 1 && ffn_intermediate_dim > 0) { /* ... */ }
+
+
+        swiglu_batch_cuda(d_batch_ffn_swiglu_out, d_batch_ffn_gate_proj_out, d_batch_ffn_up_proj_out,
+                          num_tokens_in_batch, ffn_intermediate_dim, stream);
+        // FFN_SWIGLU_OUT LOGGING (Unchanged) - Logging Point 6
+         if (l_model_idx == config_.num_cpu_offload_layers && num_tokens_in_batch > 1 && ffn_intermediate_dim > 0) { /* ... */ }
+
+
+        const float* w2_layer_ptr = w_down_f32_dev_ + (size_t)l_gpu_idx * ffn_intermediate_dim * hidden_size;
+        gemm_f32_f32_cuda(cublas_handle_, false, true, num_tokens_in_batch, hidden_size, ffn_intermediate_dim, &alpha,
+                          d_batch_ffn_swiglu_out, ffn_intermediate_dim, w2_layer_ptr, hidden_size, &beta,
+                          d_batch_ffn_down_proj_out, hidden_size, stream);
+        // FFN_DOWN_PROJ_OUT LOGGING (Unchanged) - Logging Point 7
+        if (l_model_idx == config_.num_cpu_offload_layers && num_tokens_in_batch > 1 && hidden_size > 0) { /* ... */ }
+        
+
+        add_residual_batch_cuda(d_batch_layer_output, d_batch_ffn_down_proj_out, d_batch_residual_ffn_in,
+                                num_tokens_in_batch, hidden_size, stream);
+        // POST_RESIDUAL_FFN LOGGING (Unchanged) - Logging Point 8
+        if (l_model_idx == config_.num_cpu_offload_layers && num_tokens_in_batch > 1 && hidden_size > 0) { /* ... */ }
+
+        
+        d_batch_x_ptr = d_batch_layer_output; 
+        Logger::info("[FWD_DEV_BATCH_PREFILL_LAYER_END] Layer " + std::to_string(l_model_idx) + " finished. Next d_batch_x_ptr: " + Logger::ptrToString(d_batch_x_ptr));
+    }
+
+  // =============== BEGIN DEBUG LOG: Hidden state of LAST TOKEN before final RMSNorm ===============
+  if (num_tokens_in_batch > 0) {
+      std::vector<float> h_last_token_hidden_state(config_.hidden_size);
+      // current_d_batch_x_ptr should hold the final hidden states for all tokens in the batch after all layers.
+      // The layout is [token0_hs, token1_hs, ..., tokenN-1_hs].
+      // Offset for the last token (num_tokens_in_batch - 1) is (num_tokens_in_batch - 1) * hidden_size.
+      size_t offset_last_token_hidden_state = (size_t)(num_tokens_in_batch - 1) * config_.hidden_size;
+      
+      gpuErrchk(cudaMemcpyAsync(h_last_token_hidden_state.data(),
+                                d_batch_x_ptr + offset_last_token_hidden_state,
+                                config_.hidden_size * sizeof(float),
+                                cudaMemcpyDeviceToHost, stream));
+      gpuErrchk(cudaStreamSynchronize(stream)); 
+      Logger::log_vector_stats("[FWD_DEV_BATCH_PREFILL_LAST_TOKEN_HIDDEN_STATE_PRE_FINAL_RMSNORM]", h_last_token_hidden_state, 20);
+  }
+  // =============== END DEBUG LOG ===============
+
+
+    rmsnorm_batch_cuda(d_batch_x_norm_out_attn, d_batch_x_ptr, 
+                       final_norm_dev,
+                       num_tokens_in_batch, hidden_size, config_.rms_norm_eps, stream);
+    
+    // FINAL_NORM_OUT LOGGING (Unchanged)
+    if (config_.num_cpu_offload_layers < config_.num_hidden_layers && num_tokens_in_batch > 0 && hidden_size > 0) { /* ... */ }
+
+
+    float* d_logits_last_token;
+    gpuErrchk(cudaMalloc(&d_logits_last_token, (size_t)vocab_size * sizeof(float)));
+    
+    // Only calculate logits for the last token in the batch for prefill output
+    float* d_last_token_activations_for_logits = d_batch_x_norm_out_attn + (size_t)(num_tokens_in_batch - 1) * hidden_size;
+
+    matvec_f32_f32_cuda(cublas_handle_, lm_head_f32_dev_, d_last_token_activations_for_logits,
+                        d_logits_last_token, vocab_size, hidden_size, stream);
+
+    std::vector<float> h_logits(vocab_size);
+    gpuErrchk(cudaMemcpyAsync(h_logits.data(), d_logits_last_token, (size_t)vocab_size * sizeof(float),
+                           cudaMemcpyDeviceToHost, stream));
+    gpuErrchk(cudaStreamSynchronize(stream)); 
+
+    Logger::log_vector_stats("[FWD_DEV_BATCH_PREFILL_FINAL_LOGITS]", h_logits, 20);
+
+    // =============== BEGIN KVCache DUMP AFTER BATCH PREFILL ===============
+    if (config_.num_hidden_layers > config_.num_cpu_offload_layers && kv_cache != nullptr && num_tokens_in_batch > 0) {
+        int first_gpu_layer_model_idx = config_.num_cpu_offload_layers;
+        if (static_cast<size_t>(first_gpu_layer_model_idx) < kv_cache->layers.size()) {
+            const KVCacheLayer& cache_layer_to_log = kv_cache->layers[first_gpu_layer_model_idx];
+            const float* d_k_cache_ptr = cache_layer_to_log.k_dev_fp32;
+            const float* d_v_cache_ptr = cache_layer_to_log.v_dev_fp32;
+            const int num_kv_h = config_.num_key_value_heads;
+            // head_dim is already defined in this function's scope
+            const int local_n_kv_dim_for_log = num_kv_h * head_dim; 
+            const int log_elems_kv = std::min(3, head_dim);
+
+            if (d_k_cache_ptr && d_v_cache_ptr && log_elems_kv > 0 && local_n_kv_dim_for_log > 0) {
+                for (int tk_idx = 0; tk_idx < num_tokens_in_batch; ++tk_idx) {
+                    int cache_pos_for_token = current_model_pos + tk_idx; 
+                    if (cache_pos_for_token >= kv_cache->max_seq_len_config_) {
+                        Logger::warning("[KVDUMP_POST_BATCH_PREFILL] L" + std::to_string(first_gpu_layer_model_idx) + 
+                                        " Token " + std::to_string(tk_idx) + " (CachePos " + std::to_string(cache_pos_for_token) + 
+                                        ") would be out of bounds (" + std::to_string(kv_cache->max_seq_len_config_) + "). Skipping.");
+                        continue;
+                    }
+                    for (int kvh_idx = 0; kvh_idx < num_kv_h; ++kvh_idx) {
+                        size_t offset_in_cache = (size_t)cache_pos_for_token * local_n_kv_dim_for_log + (size_t)kvh_idx * head_dim;
+                        
+                        std::vector<float> h_k_dump(log_elems_kv);
+                        gpuErrchk(cudaMemcpy(h_k_dump.data(), d_k_cache_ptr + offset_in_cache, log_elems_kv * sizeof(float), cudaMemcpyDeviceToHost));
+                        std::string str_k_dump = ""; for(float val : h_k_dump) { str_k_dump += std::to_string(val) + " "; }
+                        std::vector<float> h_v_dump(log_elems_kv);
+                        gpuErrchk(cudaMemcpy(h_v_dump.data(), d_v_cache_ptr + offset_in_cache, log_elems_kv * sizeof(float), cudaMemcpyDeviceToHost));
+                        std::string str_v_dump = ""; for(float val : h_v_dump) { str_v_dump += std::to_string(val) + " "; }
+                    }
+                }
+            } else {
+                Logger::warning("[KVDUMP_POST_BATCH_PREFILL] L" + std::to_string(first_gpu_layer_model_idx) + 
+                                " cannot log K/V cache: null pointers, log_elems_kv <= 0, or local_n_kv_dim_for_log <=0.");
+            }
+        } else {
+            Logger::warning("[KVDUMP_POST_BATCH_PREFILL] First GPU layer index " + std::to_string(first_gpu_layer_model_idx) + 
+                             " out of bounds for kv_cache->layers (size " + std::to_string(kv_cache->layers.size()) + ")");
+        }
+    }
+    // =============== END KVCache DUMP AFTER BATCH PREFILL ===============
+
+    gpuErrchk(cudaFree(d_batch_x_norm_out_attn));
+    gpuErrchk(cudaFree(d_batch_q_proj_out));
+    gpuErrchk(cudaFree(d_batch_k_proj_out));
+    gpuErrchk(cudaFree(d_batch_v_proj_out));
+    gpuErrchk(cudaFree(d_batch_attn_heads_concat_out));
+    gpuErrchk(cudaFree(d_batch_attn_final_proj_out));
+    gpuErrchk(cudaFree(d_batch_residual_attn_in));
+    gpuErrchk(cudaFree(d_batch_residual_ffn_in));
+    gpuErrchk(cudaFree(d_batch_x_norm_out_ffn));
+    gpuErrchk(cudaFree(d_batch_ffn_gate_proj_out));
+    gpuErrchk(cudaFree(d_batch_ffn_up_proj_out));
+    gpuErrchk(cudaFree(d_batch_ffn_swiglu_out));
+    gpuErrchk(cudaFree(d_batch_ffn_down_proj_out));
+    if (d_batch_layer_output) { 
+        gpuErrchk(cudaFree(d_batch_layer_output));
+    }
+    gpuErrchk(cudaFree(d_logits_last_token));
+    Logger::info("[FWD_DEV_BATCH_PREFILL_EXIT] Function finished.");
+    return h_logits;
+}
+
+std::vector<std::vector<float>> TinyLlamaModel::forward_device_batch_generation(
+    float* d_batch_input_embeddings,    // Device pointer to [num_tokens_in_batch, config_.hidden_size]
+    const std::vector<int>& token_positions, // Position of each token in its respective sequence
+    const std::vector<int>& original_sequence_indices, // Original sequence index for each token
+    int num_tokens_in_batch,
+    KVCache* kv_cache,
+    cudaStream_t stream) {
+    Logger::info("[FWD_DEV_BATCH_GENERATION_ENTRY] num_tokens_in_batch: " + std::to_string(num_tokens_in_batch) +
+                 ", d_batch_input_embeddings: " + Logger::ptrToString(d_batch_input_embeddings));
+
+    if (token_positions.size() != static_cast<size_t>(num_tokens_in_batch)) {
+        Logger::error("[FWD_DEV_BATCH_GENERATION] token_positions size mismatch. Expected: " + 
+                      std::to_string(num_tokens_in_batch) + " Got: " + std::to_string(token_positions.size()));
+        return {};
+    }
+    if (original_sequence_indices.size() != static_cast<size_t>(num_tokens_in_batch)) {
+        Logger::error("[CPU_BATCH_GENERATION] original_sequence_indices size mismatch. Expected: " + 
+                      std::to_string(num_tokens_in_batch) + " Got: " + std::to_string(original_sequence_indices.size()));
+        return {};
+    }
+    const int hidden_size = config_.hidden_size;
+    const int head_dim = config_.hidden_size / config_.num_attention_heads;
+    const int ffn_intermediate_dim = config_.intermediate_size;
+    const int n_kv_dim = config_.num_key_value_heads * head_dim;
+    const int vocab_size = config_.vocab_size;
+    
+    const size_t batch_hidden_size_bytes = (size_t)num_tokens_in_batch * hidden_size * sizeof(float);
+    const size_t batch_intermediate_size_bytes = (size_t)num_tokens_in_batch * ffn_intermediate_dim * sizeof(float);
+    const size_t batch_q_size_bytes = (size_t)num_tokens_in_batch * hidden_size * sizeof(float);
+    const size_t batch_kv_size_bytes = (size_t)num_tokens_in_batch * n_kv_dim * sizeof(float);
+
+    // Allocate GPU memory for batch processing
+    float* d_batch_x_norm_out_attn;
+    float* d_batch_q_proj_out;
+    float* d_batch_k_proj_out;
+    float* d_batch_v_proj_out;
+    float* d_batch_attn_heads_concat_out;
+    float* d_batch_attn_final_proj_out;
+    float* d_batch_residual_attn_in; 
+    float* d_batch_residual_ffn_in;  
+    float* d_batch_x_norm_out_ffn;
+    float* d_batch_ffn_gate_proj_out;
+    float* d_batch_ffn_up_proj_out;
+    float* d_batch_ffn_swiglu_out;
+    float* d_batch_ffn_down_proj_out;
+    float* d_batch_layer_output = nullptr;
+
+    gpuErrchk(cudaMalloc(&d_batch_x_norm_out_attn, batch_hidden_size_bytes));
+    gpuErrchk(cudaMalloc(&d_batch_q_proj_out, batch_q_size_bytes));
+    gpuErrchk(cudaMalloc(&d_batch_k_proj_out, batch_kv_size_bytes));
+    gpuErrchk(cudaMalloc(&d_batch_v_proj_out, batch_kv_size_bytes));
+    gpuErrchk(cudaMalloc(&d_batch_attn_heads_concat_out, batch_hidden_size_bytes));
+    gpuErrchk(cudaMalloc(&d_batch_attn_final_proj_out, batch_hidden_size_bytes));
+    gpuErrchk(cudaMalloc(&d_batch_residual_attn_in, batch_hidden_size_bytes));
+    gpuErrchk(cudaMalloc(&d_batch_residual_ffn_in, batch_hidden_size_bytes));
+    gpuErrchk(cudaMalloc(&d_batch_x_norm_out_ffn, batch_hidden_size_bytes));
+    gpuErrchk(cudaMalloc(&d_batch_ffn_gate_proj_out, batch_intermediate_size_bytes));
+    gpuErrchk(cudaMalloc(&d_batch_ffn_up_proj_out, batch_intermediate_size_bytes));
+    gpuErrchk(cudaMalloc(&d_batch_ffn_swiglu_out, batch_intermediate_size_bytes));
+    gpuErrchk(cudaMalloc(&d_batch_ffn_down_proj_out, batch_hidden_size_bytes));
+    gpuErrchk(cudaMalloc(&d_batch_layer_output, batch_hidden_size_bytes));
+
+    const float alpha = 1.0f, beta = 0.0f;
+
+    cublasStatus_t stream_status = cublasSetStream(cublas_handle_, stream);
+    if (stream_status != CUBLAS_STATUS_SUCCESS) {
+        Logger::fatal("cublasSetStream failed in forward_device_batch_generation");
+        // Free allocated memory before returning
+        gpuErrchk(cudaFree(d_batch_x_norm_out_attn));
+        gpuErrchk(cudaFree(d_batch_q_proj_out));
+        gpuErrchk(cudaFree(d_batch_k_proj_out));
+        gpuErrchk(cudaFree(d_batch_v_proj_out));
+        gpuErrchk(cudaFree(d_batch_attn_heads_concat_out));
+        gpuErrchk(cudaFree(d_batch_attn_final_proj_out));
+        gpuErrchk(cudaFree(d_batch_residual_attn_in));
+        gpuErrchk(cudaFree(d_batch_residual_ffn_in));
+        gpuErrchk(cudaFree(d_batch_x_norm_out_ffn));
+        gpuErrchk(cudaFree(d_batch_ffn_gate_proj_out));
+        gpuErrchk(cudaFree(d_batch_ffn_up_proj_out));
+        gpuErrchk(cudaFree(d_batch_ffn_swiglu_out));
+        gpuErrchk(cudaFree(d_batch_ffn_down_proj_out));
+        gpuErrchk(cudaFree(d_batch_layer_output));
+        throw std::runtime_error("cublasSetStream failed");
+    }
+
+    float* d_batch_x_ptr = d_batch_input_embeddings; // Input to the first GPU layer
+
+    Logger::info("[FWD_DEV_BATCH_GENERATION_MAIN_LOOP_ENTRY] num_cpu_offload_layers: " + std::to_string(config_.num_cpu_offload_layers) + 
+                 ", total_hidden_layers: " + std::to_string(config_.num_hidden_layers));
+
+    for (int l_model_idx = config_.num_cpu_offload_layers; l_model_idx < config_.num_hidden_layers; ++l_model_idx) {
+        int l_gpu_idx = l_model_idx - config_.num_cpu_offload_layers;
+        Logger::info("[FWD_DEV_BATCH_GENERATION_LAYER_START] Processing Layer: model_idx=" + std::to_string(l_model_idx) + ", gpu_idx=" + std::to_string(l_gpu_idx) + 
+                     ". Current d_batch_x_ptr: " + Logger::ptrToString(d_batch_x_ptr));
+        
+        gpuErrchk(cudaMemcpyAsync(d_batch_residual_attn_in, d_batch_x_ptr, batch_hidden_size_bytes, cudaMemcpyDeviceToDevice, stream));
+
+        rmsnorm_batch_cuda(d_batch_x_norm_out_attn, d_batch_x_ptr, 
+                           layers[l_model_idx].input_layernorm_dev,
+                           num_tokens_in_batch, hidden_size, config_.rms_norm_eps, stream);
+        ensure_layer_weights_dequantized(l_model_idx);
+        const float* w_q_layer_ptr = w_q_f32_dev_ + (size_t)l_gpu_idx * hidden_size * hidden_size;
+        gemm_f32_f32_cuda(cublas_handle_, false, true, num_tokens_in_batch, hidden_size, hidden_size, &alpha,
+                          d_batch_x_norm_out_attn, hidden_size, w_q_layer_ptr, hidden_size, &beta,
+                          d_batch_q_proj_out, hidden_size, stream);
+
+        const float* w_k_layer_ptr = w_k_f32_dev_ + (size_t)l_gpu_idx * n_kv_dim * hidden_size;
+        gemm_f32_f32_cuda(cublas_handle_, false, true, num_tokens_in_batch, n_kv_dim, hidden_size, &alpha,
+                          d_batch_x_norm_out_attn, hidden_size, w_k_layer_ptr, n_kv_dim, &beta,
+                          d_batch_k_proj_out, n_kv_dim, stream);
+
+        const float* w_v_layer_ptr = w_v_f32_dev_ + (size_t)l_gpu_idx * n_kv_dim * hidden_size;
+        gemm_f32_f32_cuda(cublas_handle_, false, true, num_tokens_in_batch, n_kv_dim, hidden_size, &alpha,
+                          d_batch_x_norm_out_attn, hidden_size, w_v_layer_ptr, n_kv_dim, &beta,
+                          d_batch_v_proj_out, n_kv_dim, stream);
+
+        // For generation mode, we need to apply RoPE with individual positions for each token
+        // We'll use the single-token RoPE function in a loop for now
+        // TODO: Create a batch RoPE function that handles variable positions
+        for (int token_idx = 0; token_idx < num_tokens_in_batch; ++token_idx) {
+            int current_pos = token_positions[token_idx];
+            
+            float* q_token_ptr = d_batch_q_proj_out + (size_t)token_idx * config_.num_attention_heads * head_dim;
+            float* k_token_ptr = d_batch_k_proj_out + (size_t)token_idx * config_.num_key_value_heads * head_dim;
+            
+            rope_cuda(q_token_ptr, config_.num_attention_heads, head_dim, all_freqs_cis_dev, 
+                     current_pos, config_.is_gguf_file_loaded, stream);
+            rope_cuda(k_token_ptr, config_.num_key_value_heads, head_dim, all_freqs_cis_dev, 
+                     current_pos, config_.is_gguf_file_loaded, stream);
+        }
+// Update KV cache for each token at its specific position with sequence-aware offsets
+float* d_layer_k_cache_ptr = kv_cache->layers[l_model_idx].k_dev_fp32; 
+float* d_layer_v_cache_ptr = kv_cache->layers[l_model_idx].v_dev_fp32;
+
+for (int token_idx = 0; token_idx < num_tokens_in_batch; ++token_idx) {
+    int current_pos = token_positions[token_idx];
+    int sequence_idx = original_sequence_indices[token_idx];
+    
+    // Calculate sequence-specific offset in the cache
+    int sequence_cache_offset = sequence_idx * kv_cache->max_seq_len_config_;
+    int actual_cache_pos = sequence_cache_offset + current_pos;
+    
+    const float* k_token_ptr = d_batch_k_proj_out + (size_t)token_idx * config_.num_key_value_heads * head_dim;
+    const float* v_token_ptr = d_batch_v_proj_out + (size_t)token_idx * config_.num_key_value_heads * head_dim;
+    
+    // Update individual positions in the KV cache with sequence-specific offsets
+    for (int kvh = 0; kvh < config_.num_key_value_heads; ++kvh) {
+        const float* current_k_head_ptr = k_token_ptr + kvh * head_dim;
+        const float* current_v_head_ptr = v_token_ptr + kvh * head_dim;
+
+        update_kv_cache_cuda(d_layer_k_cache_ptr, current_k_head_ptr, actual_cache_pos,
+                             kvh, kv_cache->allocated_max_seq_len * kv_cache->max_batch_size,
+                             kv_cache->allocated_num_kv_heads, 
+                             kv_cache->allocated_head_dim, stream); 
+
+        update_kv_cache_cuda(d_layer_v_cache_ptr, current_v_head_ptr, actual_cache_pos,
+                             kvh, kv_cache->allocated_max_seq_len * kv_cache->max_batch_size,
+                             kv_cache->allocated_num_kv_heads,
+                             kv_cache->allocated_head_dim, stream);
+    }
+}
+        // For attention, we need a generation-specific function that handles variable positions
+        // For now, we'll use the single-token attention function in a loop
+        // TODO: Create a batch attention function for generation
+        for (int token_idx = 0; token_idx < num_tokens_in_batch; ++token_idx) {
+            int current_pos = token_positions[token_idx];
+            
+            float* q_token_ptr = d_batch_q_proj_out + (size_t)token_idx * config_.num_attention_heads * head_dim;
+            float* attn_output_token_ptr = d_batch_attn_heads_concat_out + (size_t)token_idx * config_.num_attention_heads * head_dim;
+            
+            float scale = 1.0f / SAFE_SQRT(static_cast<float>(head_dim));
+            
+            attention_cuda(q_token_ptr, d_layer_k_cache_ptr, d_layer_v_cache_ptr,
+                          attn_output_token_ptr, config_.num_attention_heads, current_pos + 1, head_dim,
+                          scale, kv_cache->allocated_max_seq_len, kv_cache->allocated_num_kv_heads, stream);
+        }
+
+        const float* w_o_layer_ptr = w_o_f32_dev_ + (size_t)l_gpu_idx * hidden_size * hidden_size;
+        gemm_f32_f32_cuda(cublas_handle_, false, true, num_tokens_in_batch, hidden_size, hidden_size, &alpha,
+                          d_batch_attn_heads_concat_out, hidden_size, w_o_layer_ptr, hidden_size, &beta,
+                          d_batch_attn_final_proj_out, hidden_size, stream);
+
+        add_residual_batch_cuda(d_batch_residual_ffn_in, d_batch_attn_final_proj_out, d_batch_residual_attn_in,
+                                num_tokens_in_batch, hidden_size, stream);
+
+        rmsnorm_batch_cuda(d_batch_x_norm_out_ffn, d_batch_residual_ffn_in, 
+                           layers[l_model_idx].post_attention_layernorm_dev,
+                           num_tokens_in_batch, hidden_size, config_.rms_norm_eps, stream);
+
+        const float* w1_layer_ptr = w_gate_f32_dev_ + (size_t)l_gpu_idx * hidden_size * ffn_intermediate_dim;
+        gemm_f32_f32_cuda(cublas_handle_, false, true, num_tokens_in_batch, ffn_intermediate_dim, hidden_size, &alpha,
+                          d_batch_x_norm_out_ffn, hidden_size, w1_layer_ptr, ffn_intermediate_dim, &beta,
+                          d_batch_ffn_gate_proj_out, ffn_intermediate_dim, stream);
+
+        const float* w3_layer_ptr = w_up_f32_dev_ + (size_t)l_gpu_idx * hidden_size * ffn_intermediate_dim;
+        gemm_f32_f32_cuda(cublas_handle_, false, true, num_tokens_in_batch, ffn_intermediate_dim, hidden_size, &alpha,
+                          d_batch_x_norm_out_ffn, hidden_size, w3_layer_ptr, ffn_intermediate_dim, &beta,
+                          d_batch_ffn_up_proj_out, ffn_intermediate_dim, stream);
+
+        swiglu_batch_cuda(d_batch_ffn_swiglu_out, d_batch_ffn_gate_proj_out, d_batch_ffn_up_proj_out,
+                          num_tokens_in_batch, ffn_intermediate_dim, stream);
+
+        const float* w2_layer_ptr = w_down_f32_dev_ + (size_t)l_gpu_idx * ffn_intermediate_dim * hidden_size;
+        gemm_f32_f32_cuda(cublas_handle_, false, true, num_tokens_in_batch, hidden_size, ffn_intermediate_dim, &alpha,
+                          d_batch_ffn_swiglu_out, ffn_intermediate_dim, w2_layer_ptr, hidden_size, &beta,
+                          d_batch_ffn_down_proj_out, hidden_size, stream);
+
+        add_residual_batch_cuda(d_batch_layer_output, d_batch_ffn_down_proj_out, d_batch_residual_ffn_in,
+                                num_tokens_in_batch, hidden_size, stream);
+        
+        d_batch_x_ptr = d_batch_layer_output; 
+        Logger::info("[FWD_DEV_BATCH_GENERATION_LAYER_END] Layer " + std::to_string(l_model_idx) + " finished. Next d_batch_x_ptr: " + Logger::ptrToString(d_batch_x_ptr));
+    }
+
+    rmsnorm_batch_cuda(d_batch_x_norm_out_attn, d_batch_x_ptr, 
+                       final_norm_dev,
+                       num_tokens_in_batch, hidden_size, config_.rms_norm_eps, stream);
+    
+    // Calculate logits for ALL tokens in the batch (not just the last one)
+    float* d_logits_batch;
+    gpuErrchk(cudaMalloc(&d_logits_batch, (size_t)num_tokens_in_batch * vocab_size * sizeof(float)));
+    
+    // Use GEMM instead of individual MatVec calls for efficiency
+    gemm_f32_f32_cuda(cublas_handle_, false, true, num_tokens_in_batch, vocab_size, hidden_size, &alpha,
+                      d_batch_x_norm_out_attn, hidden_size, lm_head_f32_dev_, vocab_size, &beta,
+                      d_logits_batch, vocab_size, stream);
+
+    // Copy logits back to host for all tokens
+    std::vector<std::vector<float>> all_logits(num_tokens_in_batch, std::vector<float>(vocab_size));
+    for (int token_idx = 0; token_idx < num_tokens_in_batch; ++token_idx) {
+        gpuErrchk(cudaMemcpyAsync(all_logits[token_idx].data(), 
+                                  d_logits_batch + (size_t)token_idx * vocab_size, 
+                                  vocab_size * sizeof(float),
+                                  cudaMemcpyDeviceToHost, stream));
+    }
+    gpuErrchk(cudaStreamSynchronize(stream)); 
+
+    Logger::info("[FWD_DEV_BATCH_GENERATION_FINAL_LOGITS] Calculated logits for " + std::to_string(num_tokens_in_batch) + " tokens");
+
+    // Free allocated memory
+    gpuErrchk(cudaFree(d_batch_x_norm_out_attn));
+    gpuErrchk(cudaFree(d_batch_q_proj_out));
+    gpuErrchk(cudaFree(d_batch_k_proj_out));
+    gpuErrchk(cudaFree(d_batch_v_proj_out));
+    gpuErrchk(cudaFree(d_batch_attn_heads_concat_out));
+    gpuErrchk(cudaFree(d_batch_attn_final_proj_out));
+    gpuErrchk(cudaFree(d_batch_residual_attn_in));
+    gpuErrchk(cudaFree(d_batch_residual_ffn_in));
+    gpuErrchk(cudaFree(d_batch_x_norm_out_ffn));
+    gpuErrchk(cudaFree(d_batch_ffn_gate_proj_out));
+    gpuErrchk(cudaFree(d_batch_ffn_up_proj_out));
+    gpuErrchk(cudaFree(d_batch_ffn_swiglu_out));
+    gpuErrchk(cudaFree(d_batch_ffn_down_proj_out));
+    if (d_batch_layer_output) { 
+        gpuErrchk(cudaFree(d_batch_layer_output));
+    }
+    gpuErrchk(cudaFree(d_logits_batch));
+    
+    Logger::info("[FWD_DEV_BATCH_GENERATION_EXIT] Function finished.");
+    return all_logits;
+}
+#endif // HAS_CUDA
+
+std::vector<float> TinyLlamaModel::forward_cpu_batch(
+    const std::vector<float>& batch_input_activations, // [num_tokens, hidden_size]
+    int num_tokens_in_batch,
+    int num_cpu_layers_to_process,
+    int start_pos_in_sequence, // Starting position of this batch in the overall sequence (for KVCache)
+    KVCache* kv_cache,
+    const std::vector<int>& prompt_lengths) {
+
+    if (batch_input_activations.size() != (size_t)num_tokens_in_batch * config_.hidden_size) {
+        Logger::error("[CPU_BATCH_FWD] Input size mismatch. Expected: " +
+                      std::to_string((size_t)num_tokens_in_batch * config_.hidden_size) + " Got: " +
+                      std::to_string(batch_input_activations.size()));
+        return {};
+    }
+
+    int hs = config_.hidden_size;
+    int is = config_.intermediate_size;
+    int n_heads = config_.num_attention_heads;
+    int n_kv_heads = config_.num_key_value_heads;
+    if (n_heads == 0) {
+        Logger::error("[CPU_BATCH_FWD] Error: num_attention_heads is zero.");
+        return {};
+    }
+    int head_dim = hs / n_heads;
+    float eps = config_.rms_norm_eps;
+    int max_pos_embeddings = config_.max_position_embeddings;
+    bool use_rope_adjacent_pairing = config_.is_gguf_file_loaded;
+    float attention_scale = 1.0f / SAFE_SQRT(static_cast<float>(head_dim));
+
+    std::vector<float> current_batch_activations = batch_input_activations;
+
+    // Calculate sequence boundaries and positions
+    std::vector<int> sequence_indices(num_tokens_in_batch);
+    std::vector<int> position_in_sequence(num_tokens_in_batch);
+    
+    if (!prompt_lengths.empty()) {
+        // Multi-sequence batch mode
+        int token_offset = 0;
+        for (size_t seq_idx = 0; seq_idx < prompt_lengths.size(); ++seq_idx) {
+            for (int pos = 0; pos < prompt_lengths[seq_idx]; ++pos) {
+                if (token_offset >= num_tokens_in_batch) {
+                    Logger::error("[CPU_BATCH_FWD] Token offset exceeded num_tokens_in_batch");
+                    return {};
+                }
+                sequence_indices[token_offset] = seq_idx;
+                position_in_sequence[token_offset] = pos;
+                token_offset++;
+            }
+        }
+    } else {
+        // Single sequence mode (backward compatibility)
+        for (int token_idx = 0; token_idx < num_tokens_in_batch; ++token_idx) {
+            sequence_indices[token_idx] = 0;
+            position_in_sequence[token_idx] = start_pos_in_sequence + token_idx;
+        }
+    }
+
+    for (int l = 0; l < num_cpu_layers_to_process; ++l) {
+        const auto& lw = layers[l];
+        
+        std::vector<float> batch_x_norm1(current_batch_activations.size());
+        const std::vector<float>& w_input_norm_vec =
+            lw.input_layernorm_f32.empty()
+                ? bf16vec_to_float_vec(lw.input_layernorm)
+                : lw.input_layernorm_f32;
+        rmsnorm_batch_cpu(current_batch_activations, w_input_norm_vec, batch_x_norm1, num_tokens_in_batch, hs, eps);
+
+        std::vector<float> residual_batch_component_attn = current_batch_activations;
+
+        // Batch Q, K, V projections
+        std::vector<float> q_batch((size_t)num_tokens_in_batch * hs);
+        std::vector<float> k_batch((size_t)num_tokens_in_batch * n_kv_heads * head_dim);
+        std::vector<float> v_batch((size_t)num_tokens_in_batch * n_kv_heads * head_dim);
+
+        // Q Projection
+        if (!lw.q_proj_f32.empty()) {
+            matmul_f32_f32_batch_cpu(lw.q_proj_f32, batch_x_norm1, q_batch, num_tokens_in_batch, hs, hs);
+        } else if (!lw.q_proj_q8_0.empty()) {
+            matmul_q8_0_f32_batch_cpu(lw.q_proj_q8_0, batch_x_norm1, q_batch, num_tokens_in_batch, hs, hs);
+        } else if (!lw.q_proj_q6k.empty()) {
+            matmul_q6k_f32_batch_cpu(lw.q_proj_q6k, batch_x_norm1, q_batch, num_tokens_in_batch, hs, hs);
+        } else if (!lw.q_proj_q4k.empty()) {
+            matmul_q4k_f32_batch_cpu(lw.q_proj_q4k, batch_x_norm1, q_batch, num_tokens_in_batch, hs, hs);
+        } else {
+            Logger::error("[CPU_BATCH_FWD] Layer " + std::to_string(l) + ": No Q proj weights found for CPU");
+            return {};
+        }
+
+        // K Projection
+        if (!lw.k_proj_f32.empty()) {
+            matmul_f32_f32_batch_cpu(lw.k_proj_f32, batch_x_norm1, k_batch, num_tokens_in_batch, n_kv_heads * head_dim, hs);
+        } else if (!lw.k_proj_q8_0.empty()) {
+            matmul_q8_0_f32_batch_cpu(lw.k_proj_q8_0, batch_x_norm1, k_batch, num_tokens_in_batch, n_kv_heads * head_dim, hs);
+        } else if (!lw.k_proj_q6k.empty()) {
+            matmul_q6k_f32_batch_cpu(lw.k_proj_q6k, batch_x_norm1, k_batch, num_tokens_in_batch, n_kv_heads * head_dim, hs);
+        } else if (!lw.k_proj_q4k.empty()) {
+            matmul_q4k_f32_batch_cpu(lw.k_proj_q4k, batch_x_norm1, k_batch, num_tokens_in_batch, n_kv_heads * head_dim, hs);
+        } else {
+            Logger::error("[CPU_BATCH_FWD] Layer " + std::to_string(l) + ": No K proj weights found for CPU");
+            return {};
+        }
+
+        // V Projection
+        if (!lw.v_proj_f32.empty()) {
+            matmul_f32_f32_batch_cpu(lw.v_proj_f32, batch_x_norm1, v_batch, num_tokens_in_batch, n_kv_heads * head_dim, hs);
+        } else if (!lw.v_proj_q8_0.empty()) {
+            matmul_q8_0_f32_batch_cpu(lw.v_proj_q8_0, batch_x_norm1, v_batch, num_tokens_in_batch, n_kv_heads * head_dim, hs);
+        } else if (!lw.v_proj_q6k.empty()) {
+            matmul_q6k_f32_batch_cpu(lw.v_proj_q6k, batch_x_norm1, v_batch, num_tokens_in_batch, n_kv_heads * head_dim, hs);
+        } else if (!lw.v_proj_q4k.empty()) {
+            matmul_q4k_f32_batch_cpu(lw.v_proj_q4k, batch_x_norm1, v_batch, num_tokens_in_batch, n_kv_heads * head_dim, hs);
+        } else {
+            Logger::error("[CPU_BATCH_FWD] Layer " + std::to_string(l) + ": No V proj weights found for CPU");
+            return {};
+        }
+
+        // FIXED: Sequence-aware RoPE Application
+        if (!prompt_lengths.empty()) {
+            // Multi-sequence mode: use sequence-aware RoPE
+            for (int t = 0; t < num_tokens_in_batch; ++t) {
+                int current_token_pos = position_in_sequence[t];
+                int seq_idx = sequence_indices[t];
+
+                if (current_token_pos < 0 || current_token_pos >= max_pos_embeddings) {
+                    Logger::warning("[CPU_BATCH_FWD] Token " + std::to_string(t) + " (seq=" + std::to_string(seq_idx) + 
+                                    ", pos=" + std::to_string(current_token_pos) + ") is out of range. Skipping RoPE.");
+                    continue;
+                }
+
+                // Extract Q and K for this token
+                std::vector<float> q_token(hs);
+                std::vector<float> k_token(n_kv_heads * head_dim);
+                
+                std::copy(q_batch.begin() + (size_t)t * hs, 
+                         q_batch.begin() + (size_t)(t + 1) * hs, 
+                         q_token.begin());
+                std::copy(k_batch.begin() + (size_t)t * n_kv_heads * head_dim, 
+                         k_batch.begin() + (size_t)(t + 1) * n_kv_heads * head_dim, 
+                         k_token.begin());
+
+                // Apply RoPE with correct position
+                apply_rope_vector(q_token, n_heads, head_dim, current_token_pos, precomputed_freqs_cis_, max_pos_embeddings, use_rope_adjacent_pairing);
+                apply_rope_vector(k_token, n_kv_heads, head_dim, current_token_pos, precomputed_freqs_cis_, max_pos_embeddings, use_rope_adjacent_pairing);
+
+                // Copy back to batch
+                std::copy(q_token.begin(), q_token.end(), q_batch.begin() + (size_t)t * hs);
+                std::copy(k_token.begin(), k_token.end(), k_batch.begin() + (size_t)t * n_kv_heads * head_dim);
+            }
+        } else {
+            // Single sequence mode: use original batch RoPE
+            apply_rope_batch_cpu(q_batch, k_batch, num_tokens_in_batch, n_heads, n_kv_heads, head_dim, 
+                                  start_pos_in_sequence, precomputed_freqs_cis_, max_pos_embeddings, use_rope_adjacent_pairing);
+        }
+
+        // Batched KV Cache Update
+        if (kv_cache) {
+            if (!prompt_lengths.empty()) {
+                // Multi-sequence mode: use sequence-aware update
+                update_kv_cache_batch_cpu_sequence_aware(kv_cache, l, k_batch, v_batch, num_tokens_in_batch,
+                                                         sequence_indices, position_in_sequence, n_kv_heads, head_dim);
+            } else {
+                // Single sequence mode: use original update
+            update_kv_cache_batch_cpu(kv_cache, l, k_batch, v_batch, num_tokens_in_batch, 
+                                      start_pos_in_sequence, n_kv_heads, head_dim);        
+            }
+        }
+        
+        // Batched Attention
+        std::vector<float> batch_attn_output((size_t)num_tokens_in_batch * hs);
+        
+        if (kv_cache && static_cast<size_t>(l) < kv_cache->layers.size()) {
+            if (!prompt_lengths.empty()) {
+                // Multi-sequence mode: use sequence-aware attention
+                attention_batch_cpu_sequence_aware(q_batch, kv_cache->layers[l], batch_attn_output,
+                                                  num_tokens_in_batch, sequence_indices, position_in_sequence,
+                                                  n_heads, n_kv_heads, head_dim, attention_scale,
+                                                  kv_cache->max_seq_len_config_);
+            } else {
+                // Single sequence mode: use original attention
+                attention_batch_cpu(q_batch, kv_cache->layers[l], batch_attn_output,
+                                   num_tokens_in_batch, start_pos_in_sequence,
+                                   n_heads, n_kv_heads, head_dim, attention_scale);
+            }
+        } else if (kv_cache) { 
+            Logger::error("[CPU_BATCH_FWD] Layer " + std::to_string(l) + 
+                          " is out of bounds for KV Cache access during attention. KVCache layers size: " + 
+                          std::to_string(kv_cache->layers.size()) + 
+                          ". Filling attention output with zeros.");
+            std::fill(batch_attn_output.begin(), batch_attn_output.end(), 0.0f); 
+        } else {
+            Logger::error("[CPU_BATCH_FWD] KV Cache is null, cannot perform attention for layer " + std::to_string(l) +
+                          ". Filling attention output with zeros.");
+            std::fill(batch_attn_output.begin(), batch_attn_output.end(), 0.0f); 
+        }
+
+        // O-Projection (Batched)
+        std::vector<float> batch_attn_proj_out((size_t)num_tokens_in_batch * hs);
+        if(!lw.o_proj_f32.empty()) {
+              matmul_f32_f32_batch_cpu(lw.o_proj_f32, batch_attn_output, batch_attn_proj_out, num_tokens_in_batch, hs, hs);
+        } else if (!lw.o_proj_q8_0.empty()) {
+            matmul_q8_0_f32_batch_cpu(lw.o_proj_q8_0, batch_attn_output, batch_attn_proj_out, num_tokens_in_batch, hs, hs);
+        } else if (!lw.o_proj_q6k.empty()) {
+            matmul_q6k_f32_batch_cpu(lw.o_proj_q6k, batch_attn_output, batch_attn_proj_out, num_tokens_in_batch, hs, hs);
+        } else if (!lw.o_proj_q4k.empty()) {
+            matmul_q4k_f32_batch_cpu(lw.o_proj_q4k, batch_attn_output, batch_attn_proj_out, num_tokens_in_batch, hs, hs);
+        } else { 
+            Logger::error("[CPU_BATCH_FWD] Layer " + std::to_string(l) + ": No O proj weights found for CPU"); 
+            return {};
+        }
+
+        // First Residual Connection (Batched)
+        for(size_t i=0; i < current_batch_activations.size(); ++i) {
+            current_batch_activations[i] = residual_batch_component_attn[i] + batch_attn_proj_out[i];
+        }
+
+        // --- Batched MLP Part ---
+        std::vector<float> residual_batch_component_mlp = current_batch_activations;
+        std::vector<float> batch_x_norm2(current_batch_activations.size());
+        
+        const std::vector<float>& w_post_attn_norm_vec =
+            lw.post_attention_layernorm_f32.empty()
+                ? bf16vec_to_float_vec(lw.post_attention_layernorm)
+                : lw.post_attention_layernorm_f32;
+        // Batched RMSNorm for MLP
+        rmsnorm_batch_cpu(current_batch_activations, w_post_attn_norm_vec, batch_x_norm2, num_tokens_in_batch, hs, eps);
+        
+        // Batched Gate and Up Projections
+        std::vector<float> batch_gate_proj_out((size_t)num_tokens_in_batch * is);
+        std::vector<float> batch_up_proj_out((size_t)num_tokens_in_batch * is);
+
+        // Gate Projection
+        if (!lw.gate_proj_f32.empty()) {
+            matmul_f32_f32_batch_cpu(lw.gate_proj_f32, batch_x_norm2, batch_gate_proj_out, num_tokens_in_batch, is, hs);
+        } else if (!lw.gate_proj_q8_0.empty()) {
+            matmul_q8_0_f32_batch_cpu(lw.gate_proj_q8_0, batch_x_norm2, batch_gate_proj_out, num_tokens_in_batch, is, hs);
+        } else if (!lw.gate_proj_q6k.empty()) {
+            matmul_q6k_f32_batch_cpu(lw.gate_proj_q6k, batch_x_norm2, batch_gate_proj_out, num_tokens_in_batch, is, hs);
+        } else if (!lw.gate_proj_q4k.empty()) {
+            matmul_q4k_f32_batch_cpu(lw.gate_proj_q4k, batch_x_norm2, batch_gate_proj_out, num_tokens_in_batch, is, hs);
+        } else { 
+            Logger::error("[CPU_BATCH_FWD] Layer " + std::to_string(l) + ": No gate_proj weights found for CPU"); 
+            return {};
+        }
+
+        // Up Projection
+        if (!lw.up_proj_f32.empty()) {
+            matmul_f32_f32_batch_cpu(lw.up_proj_f32, batch_x_norm2, batch_up_proj_out, num_tokens_in_batch, is, hs);
+        } else if (!lw.up_proj_q8_0.empty()) {
+            matmul_q8_0_f32_batch_cpu(lw.up_proj_q8_0, batch_x_norm2, batch_up_proj_out, num_tokens_in_batch, is, hs);
+        } else if (!lw.up_proj_q6k.empty()) {
+            matmul_q6k_f32_batch_cpu(lw.up_proj_q6k, batch_x_norm2, batch_up_proj_out, num_tokens_in_batch, is, hs);
+        } else if (!lw.up_proj_q4k.empty()) {
+            matmul_q4k_f32_batch_cpu(lw.up_proj_q4k, batch_x_norm2, batch_up_proj_out, num_tokens_in_batch, is, hs);
+        } else { 
+            Logger::error("[CPU_BATCH_FWD] Layer " + std::to_string(l) + ": No up_proj weights found for CPU"); 
+            return {};
+        }
+        // Batched SwiGLU: SiLU(gate_proj_out) * up_proj_out
+        std::vector<float> batch_swiglu_out((size_t)num_tokens_in_batch * is);
+        for (size_t i = 0; i < batch_gate_proj_out.size(); ++i) {
+            float gate_val = batch_gate_proj_out[i];
+            float silu_gate_val = gate_val / (1.0f + std::exp(-gate_val));
+            batch_swiglu_out[i] = silu_gate_val * batch_up_proj_out[i];
+        }
+        
+        // Down Projection
+        std::vector<float> batch_mlp_down_proj_out((size_t)num_tokens_in_batch * hs);
+        if (!lw.down_proj_f32.empty()) {
+            matmul_f32_f32_batch_cpu(lw.down_proj_f32, batch_swiglu_out, batch_mlp_down_proj_out, num_tokens_in_batch, hs, is);
+        } else if (!lw.down_proj_q8_0.empty()) {
+            matmul_q8_0_f32_batch_cpu(lw.down_proj_q8_0, batch_swiglu_out, batch_mlp_down_proj_out, num_tokens_in_batch, hs, is);
+        } else if (!lw.down_proj_q6k.empty()) {
+            matmul_q6k_f32_batch_cpu(lw.down_proj_q6k, batch_swiglu_out, batch_mlp_down_proj_out, num_tokens_in_batch, hs, is);
+        } else if (!lw.down_proj_q4k.empty()) {
+            matmul_q4k_f32_batch_cpu(lw.down_proj_q4k, batch_swiglu_out, batch_mlp_down_proj_out, num_tokens_in_batch, hs, is);
+        } else { 
+            Logger::error("[CPU_BATCH_FWD] Layer " + std::to_string(l) + ": No down_proj weights found for CPU"); 
+            return {};
+        }
+        // Second Residual Connection (Batched)
+        for(size_t i = 0; i < current_batch_activations.size(); ++i) {
+            current_batch_activations[i] = residual_batch_component_mlp[i] + batch_mlp_down_proj_out[i];
+        }
+    } // End layer loop
+
+    if (kv_cache && num_tokens_in_batch > 0) {
+        kv_cache->seq_len = start_pos_in_sequence + num_tokens_in_batch;
+    }
+
+    return current_batch_activations;
 }

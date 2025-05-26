@@ -1,9 +1,76 @@
 [build-system]
 requires = [
-    "setuptools>=42",
+    "setuptools>=64",
     "wheel",
-    "scikit-build>=0.17.6",
+    "scikit-build-core>=0.8.0",
     "cmake>=3.18",
-    "pybind11>=2.12.0"
+    "pybind11>=2.12.0",
+    "ninja; platform_system!='Windows'"
 ]
-build-backend = "setuptools.build_meta"
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "tinyllama-cpp"
+dynamic = ["version"]
+description = "Python bindings for the tinyllama.cpp inference engine"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "Jonathan Reich", email = "jonathanreich100@gmail.com"}
+]
+maintainers = [
+    {name = "Jonathan Reich", email = "jonathanreich100@gmail.com"}
+]
+keywords = ["llm", "inference", "cpp", "tinyllama", "language-model"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: C++",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Operating System :: OS Independent",
+]
+requires-python = ">=3.8"
+dependencies = [
+    "numpy>=1.19.0",
+]
+
+[project.optional-dependencies]
+torch = [
+    "torch>=1.9.0",
+    "transformers>=4.20.0",
+    "numpy>=1.21.0",
+    "safetensors>=0.3.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/JohnnyTeutonic/tinyllama.cpp"
+Repository = "https://github.com/JohnnyTeutonic/tinyllama.cpp"
+Documentation = "https://github.com/JohnnyTeutonic/tinyllama.cpp#readme"
+"Bug Tracker" = "https://github.com/JohnnyTeutonic/tinyllama.cpp/issues"
+Changelog = "https://github.com/JohnnyTeutonic/tinyllama.cpp/releases"
+
+[tool.scikit-build]
+cmake.build-type = "Release"
+cmake.verbose = true
+wheel.expand-macos-universal-tags = true
+wheel.install-dir = "tinyllama_cpp"
+wheel.packages = ["tinyllama_cpp"]
+
+[tool.scikit-build.cmake.define]
+# Default to CPU-only build
+HAS_CUDA = {env="TINYLLAMA_CPP_BUILD_CUDA", default="OFF"}
+CMAKE_CUDA_ARCHITECTURES = {env="CMAKE_CUDA_ARCHITECTURES", default="75;80;86;89;90"}
+
+[tool.setuptools_scm]
+write_to = "tinyllama_cpp/_version.py"
+version_scheme = "post-release"
+local_scheme = "no-local-version"

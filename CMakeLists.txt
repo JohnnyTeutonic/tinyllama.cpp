@@ -107,6 +107,7 @@ endif()
 # --- Core Library Definition ---
 add_library(tinyllama_core STATIC
     model.cpp 
+    utils.cpp
     safetensors_loader.cpp 
     tokenizer.cpp 
     logger.cpp 
@@ -184,6 +185,7 @@ install(TARGETS tinyllama_bindings
     LIBRARY DESTINATION .
     ARCHIVE DESTINATION .
 )
+
 
 if(OpenMP_FOUND)
     message(STATUS "Found OpenMP, enabling parallel execution.")

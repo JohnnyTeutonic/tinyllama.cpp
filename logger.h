@@ -1,8 +1,10 @@
-#ifndef LOGGER_H
-#define LOGGER_H
+#pragma once
 
 #include <string>
 #include <vector>
+#include <fstream>
+#include <sstream>
+#include <iomanip>
 
 /**
  * @file logger.h
@@ -21,47 +23,44 @@
  * All methods are static and can be called from anywhere in the application.
  */
 class Logger {
+
  public:
-  /**
-   * @brief Logs an informational message
-   * @param message The message to log
-   */
-  static void info(const std::string& message);
+  enum class Level { DEBUG, INFO, WARNING, ERROR, CRITICAL, OFF };
 
-  /**
-   * @brief Logs an error message
-   * @param message The error message to log
-   */
-  static void error(const std::string& message);
+  static void set_level(Level new_level);
+  static Level get_level();
+  static void set_logfile(const std::string& filename);
+  static void enable_console(bool enabled);
 
-  /**
-   * @brief Logs a warning message
-   * @param message The warning message to log
-   */
-  static void warning(const std::string& message);
-
-  /**
-   * @brief Logs a debug message
-   * @param message The debug message to log
-   */
   static void debug(const std::string& message);
-
-  /**
-   * @brief Logs a fatal error message
-   * @param message The fatal error message to log
-   * @note This method may terminate the application depending on configuration
-   */
+  static void info(const std::string& message);
+  static void warning(const std::string& message);
+  static void error(const std::string& message);
+  static void critical(const std::string& message);
   static void fatal(const std::string& message);
 
-  /**
-   * @brief Logs statistics about a float vector
-   * @param name Name of the vector for identification
-   * @param v Vector to analyze
-   * @param n_show Number of elements to show in the log (default: 10)
-   * @note Logs min, max, mean, and first n_show elements of the vector
-   */
-  static void log_vector_stats(const std::string& name,
-                               const std::vector<float>& v, int n_show = 10);
-};
+  // Helper to convert pointer to string for logging
+  static std::string ptrToString(const void* ptr);
 
-#endif
+  // Helper to convert uint16_t to hex string for logging
+  static std::string uint16ToHex(uint16_t val);
+
+  // Templated helper to convert unsigned integral types to hex string
+  template <typename T>
+  static std::string to_hex(T val);
+
+  // Helper for vector stats (if it's part of public API, otherwise private)
+  static void log_vector_stats(const std::string& name, const std::vector<float>& v, int n_show = 5);
+  static void log_vector_stats_int8(const std::string& name, const std::vector<int8_t>& v, int n_show = 5);
+
+ private:
+  static Level current_level_;
+  static std::ofstream log_file_stream_;
+  static std::string log_file_path_;
+  static bool console_enabled_;
+  static bool log_file_truncated_;
+
+  static void log_internal(Level level, const std::string& message);
+  static std::string level_to_string(Level level);
+  static void ensure_logfile_open_and_truncated();
+};

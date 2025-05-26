@@ -178,6 +178,18 @@ void dequantize_q6_k(const block_q6_K* qblock, float* RESTRICT output_f32,
                      int num_elements, bool log_this_block = false);
 
 /**
+ * @brief Dequantizes a vector of Q6_K blocks to a vector of float32
+ * @param q_weights Input vector of Q6_K blocks
+ * @param f32_weights Output vector of float32 values (will be resized)
+ * @param total_num_elements Total number of float elements expected after dequantization
+ * @param log_first_n_blocks Number of initial blocks to log dequantization details for (0 for no logging)
+ */
+void dequantize_vector_q6k_to_f32(const std::vector<block_q6_K>& q_weights,
+                                  std::vector<float>& f32_weights,
+                                  size_t total_num_elements,
+                                  int log_first_n_blocks = 0);
+
+/**
  * @brief Dequantizes a Q3_K quantized block to float32
  * @param q_data Pointer to quantized data
  * @param f_data Output float array
@@ -275,3 +287,27 @@ void matvec_q4k_q8k_cpu(const std::vector<block_q4_K>& mat_q4k,
  * @param output Output float array
  */
 void dequantize_q8_0_block(const block_q8_0* qblock, float* output);
+
+/**
+ * @brief Dequantizes a vector of Q4_K blocks to a vector of float32
+ * @param q_weights Input vector of Q4_K blocks
+ * @param f32_weights Output vector of float32 values (will be resized)
+ * @param total_num_elements Total number of float elements expected after dequantization
+ * @param log_first_n_blocks Number of initial blocks to log dequantization details for (0 for no logging)
+ */
+void dequantize_vector_q4k_to_f32(const std::vector<block_q4_K>& q_weights,
+                                  std::vector<float>& f32_weights,
+                                  size_t total_num_elements,
+                                  int log_first_n_blocks = 0);
+
+/**
+ * @brief Dequantizes a vector of Q8_0 blocks to a vector of float32
+ * @param q_weights Input vector of Q8_0 blocks
+ * @param f32_weights Output vector of float32 values (will be resized)
+ * @param total_num_elements Total number of float elements expected after dequantization
+ * @param log_first_n_blocks Number of initial blocks to log dequantization details for (0 for no logging)
+ */
+void dequantize_vector_q8_0_to_f32(const std::vector<block_q8_0>& q_weights,
+                                   std::vector<float>& f32_weights,
+                                   size_t total_num_elements,
+                                   int log_first_n_blocks = 0);

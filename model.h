@@ -92,6 +92,7 @@ struct ModelConfig {
     std::string chat_template_string; /**< Template string for chat formatting */
     bool is_gguf_file_loaded;   /**< Flag indicating if model was loaded from GGUF format */
     bool use_mmap_for_gguf = true; // Whether to use mmap for GGUF files, defaults to true
+    bool use_kvcache_quantization = false; /**< Whether to use INT8 quantization for KVCache on GPU */
     int num_cpu_offload_layers = 0; /**< Number of layers to offload to CPU */
 
     enum class TokenizerFamily {
@@ -113,12 +114,16 @@ ModelConfig parse_model_config_from_gguf(const GGUFData& gguf);
  * CUDA support for GPU acceleration.
  */
 struct KVCacheLayer {
-    std::vector<float> k;     /**< Key cache */
-    std::vector<float> v;     /**< Value cache */
-
+    std::vector<float> k;     // Key cache (CPU)
+    std::vector<float> v;     // Value cache (CPU)
 #ifdef HAS_CUDA
-    float* k_dev = nullptr;  /**< Device pointer for key cache */
-    float* v_dev = nullptr;  /**< Device pointer for value cache */
+    float* k_dev_fp32 = nullptr;      // Original FP32 Key cache (GPU device pointer)
+    float* v_dev_fp32 = nullptr;      // Original FP32 Value cache (GPU device pointer)
+
+    int8_t* k_dev_quantized = nullptr; // Quantized INT8 Key cache (GPU device pointer)
+    int8_t* v_dev_quantized = nullptr; // Quantized INT8 Value cache (GPU device pointer)
+    float* k_dev_scales = nullptr;    // Scales for K cache (GPU device pointer)
+    float* v_dev_scales = nullptr;    // Scales for V cache (GPU device pointer)
 #endif
 };
 
@@ -127,22 +132,68 @@ struct KVCacheLayer {
  * 
  * Manages the KV cache across all layers of the transformer model,
  * including memory management for both CPU and GPU implementations.
+ * Supports both single-sequence and multi-sequence batch processing.
  */
 struct KVCache {
     std::vector<KVCacheLayer> layers; /**< KV cache for each layer */
-    int seq_len = 0;                  /**< Current sequence length */
+    
+    // Single-sequence mode (legacy compatibility)
+    int seq_len = 0;                  /**< Current sequence length (single-sequence mode) */
+    
+    // Multi-sequence mode (new batch functionality)
+    std::vector<int> batch_seq_lens;  /**< Sequence lengths for each sequence in batch */
+    int max_batch_size = 1;           /**< Maximum number of sequences that can be cached */
+    int current_batch_size = 0;       /**< Current number of active sequences */
+    
     int total_model_layers_ = 0;       /**< Total number of layers in the model */
+    int max_seq_len_config_ = 0;       /**< Store the original max_seq_len */
 
     /**
      * @brief Initializes the KV cache with given dimensions
+     * @param config The model configuration, used to determine if KVCache quantization is enabled.
      * @param total_num_model_layers Total number of layers in the model (for sizing CPU cache vectors)
      * @param num_gpu_layers_to_allocate Number of layers for which to allocate GPU device memory. Can be 0.
      * @param max_seq_len Maximum sequence length to cache
      * @param num_kv_heads Number of key/value heads
      * @param head_dim Dimension of each attention head
+     * @param max_batch_size_arg Maximum number of sequences for batch processing (default: 1 for single-sequence)
      */
-    void initialize(int total_num_model_layers, int num_gpu_layers_to_allocate, 
-                    int max_seq_len, int num_kv_heads, int head_dim);
+    void initialize(const ModelConfig& config,
+                    int total_num_model_layers, int num_gpu_layers_to_allocate,
+                    int max_seq_len_arg, int num_kv_heads, int head_dim,
+                    int max_batch_size_arg = 1);
+
+    void clear_data() {
+        // Single-sequence mode (legacy compatibility)
+        seq_len = 0;
+        
+        // Multi-sequence mode 
+        current_batch_size = 0;
+        batch_seq_lens.clear();
+        
+        // For batch processing, we MUST clear the actual KV data to prevent cross-sequence contamination
+        for (auto& layer : layers) {
+            std::fill(layer.k.begin(), layer.k.end(), 0.0f);
+            std::fill(layer.v.begin(), layer.v.end(), 0.0f);
+        }
+        
+        // Logger::debug("[KVCache] clear_data() called. seq_len reset to 0. K/V vectors cleared for batch processing.");
+    }
+    
+    /**
+     * @brief Initialize batch mode with specified number of sequences
+     * @param batch_size Number of sequences to process in batch
+     */
+    void initialize_batch(int batch_size) {
+        if (batch_size > max_batch_size) {
+            Logger::warning("Requested batch size " + std::to_string(batch_size) + 
+                           " exceeds max batch size " + std::to_string(max_batch_size) + 
+                           ". Using max batch size.");
+            batch_size = max_batch_size;
+        }
+        current_batch_size = batch_size;
+        batch_seq_lens.resize(batch_size, 0);
+    }
 
 #ifdef HAS_CUDA
     int allocated_num_layers = 0;     /**< Number of GPU layers for which device memory was actually allocated */
@@ -151,8 +202,10 @@ struct KVCache {
     int allocated_head_dim = 0;       /**< Dimension of each head allocated */
 
     void destroy_gpu_resources() {
-        Logger::info("KVCache::destroy_gpu_resources: Freeing KVCache CUDA memory for " + 
-                     std::to_string(allocated_num_layers) + " allocated layers.");
+        if (allocated_num_layers > 0) {
+            Logger::info("KVCache::destroy_gpu_resources: Freeing KVCache CUDA memory for " + 
+                         std::to_string(allocated_num_layers) + " allocated layers.");
+        }
         if (allocated_num_layers > 0 && total_model_layers_ > 0) {
             int gpu_layer_start_model_idx = total_model_layers_ - allocated_num_layers;
             if (gpu_layer_start_model_idx < 0) {
@@ -164,13 +217,21 @@ struct KVCache {
             for (int i = 0; i < allocated_num_layers; ++i) {
                 int current_model_idx_for_gpu = gpu_layer_start_model_idx + i;
                 if (static_cast<size_t>(current_model_idx_for_gpu) < layers.size()) {
-                    if (layers[current_model_idx_for_gpu].k_dev) {
-                        gpuErrchk(cudaFree(layers[current_model_idx_for_gpu].k_dev));
-                        layers[current_model_idx_for_gpu].k_dev = nullptr;
+                    if (layers[current_model_idx_for_gpu].k_dev_quantized) {
+                        gpuErrchk(cudaFree(layers[current_model_idx_for_gpu].k_dev_quantized));
+                        layers[current_model_idx_for_gpu].k_dev_quantized = nullptr;
                     }
-                    if (layers[current_model_idx_for_gpu].v_dev) {
-                        gpuErrchk(cudaFree(layers[current_model_idx_for_gpu].v_dev));
-                        layers[current_model_idx_for_gpu].v_dev = nullptr;
+                    if (layers[current_model_idx_for_gpu].v_dev_quantized) {
+                        gpuErrchk(cudaFree(layers[current_model_idx_for_gpu].v_dev_quantized));
+                        layers[current_model_idx_for_gpu].v_dev_quantized = nullptr;
+                    }
+                    if (layers[current_model_idx_for_gpu].k_dev_scales) {
+                        gpuErrchk(cudaFree(layers[current_model_idx_for_gpu].k_dev_scales));
+                        layers[current_model_idx_for_gpu].k_dev_scales = nullptr;
+                    }
+                    if (layers[current_model_idx_for_gpu].v_dev_scales) {
+                        gpuErrchk(cudaFree(layers[current_model_idx_for_gpu].v_dev_scales));
+                        layers[current_model_idx_for_gpu].v_dev_scales = nullptr;
                     }
                 } else {
                      Logger::warning("KVCache::destroy_gpu_resources: current_model_idx_for_gpu (" + 
@@ -224,6 +285,8 @@ struct LayerWeights {
   std::vector<block_q6_K> gate_proj_q6k, up_proj_q6k, down_proj_q6k;
   std::vector<block_q8_0> q_proj_q8_0, k_proj_q8_0, v_proj_q8_0, o_proj_q8_0;
   std::vector<block_q8_0> gate_proj_q8_0, up_proj_q8_0, down_proj_q8_0;
+  std::vector<block_q8_K> q_proj_q8k, k_proj_q8k, v_proj_q8k, o_proj_q8k;
+  std::vector<block_q8_K> gate_proj_q8k, up_proj_q8k, down_proj_q8k;
 
 #ifdef HAS_CUDA
 
@@ -278,6 +341,10 @@ class TinyLlamaModel {
       int n_tokens, KVCache* kv_cache,
       const std::vector<int>* attention_mask);
 
+
+void ensure_layer_weights_dequantized(int layer_idx);
+void ensure_lm_head_dequantized();
+void ensure_embed_tokens_dequantized();
 #ifdef HAS_CUDA
   /**
    * @brief Performs forward pass on GPU for the layers designated to run on GPU.
@@ -296,7 +363,56 @@ class TinyLlamaModel {
     cudaStream_t stream = 0);
   
   float* get_x_dev() { return x_dev_; }
-#endif
+
+  void forward_device(int token_id, int pos, KVCache* kv_cache,
+                      cudaStream_t stream = 0);
+  void forward_device_token(int token_id, int pos, KVCache* kv_cache, cudaStream_t stream = 0);
+
+  std::vector<float> forward_device_batch_prefill(
+      float* d_batch_input_hidden_states, // Device pointer to [num_tokens_in_batch, config_.hidden_size]
+      int num_tokens_in_batch,
+      int start_pos_in_kv_cache,         // Typically 0 for prefill
+      KVCache* kv_cache,
+      cudaStream_t stream
+  );
+
+  std::vector<std::vector<float>> forward_device_batch_generation(
+      float* d_batch_input_hidden_states, // Device pointer to [num_tokens_in_batch, config_.hidden_size]
+      const std::vector<int>& token_positions, // Position of each token in its respective sequence
+      const std::vector<int>& original_sequence_indices, // Original sequence index for each token
+      int num_tokens_in_batch,
+      KVCache* kv_cache,
+      cudaStream_t stream
+  );
+
+  void initialize_gpu_and_rope();
+  
+
+  // Processes a batch of activations through a specified number of CPU layers.
+  // Updates the KVCache for these layers.
+  // Returns the batch of activations after processing by the last CPU layer.
+  std::vector<float> forward_cpu_batch(
+      const std::vector<float>& batch_input_activations, // Batched: [num_tokens, hidden_size]
+      int num_tokens_in_batch,
+      int num_cpu_layers_to_process,
+      int start_pos_in_sequence, // Starting position of this batch in the overall sequence (for KVCache)
+      KVCache* kv_cache,
+      const std::vector<int>& prompt_lengths = {} // Length of each sequence in the batch (empty = single sequence mode)
+  );
+  std::vector<float> forward_cpu_logits_batch(
+      const std::vector<float>& final_batch_activations, // [num_tokens, hidden_size]
+      int num_tokens_in_batch
+  );
+
+  std::vector<std::vector<float>> forward_cpu_batch_generation(
+      const std::vector<float>& batch_input_activations, // [num_tokens, hidden_size]
+      const std::vector<int>& token_positions, // Position of each token in its respective sequence
+      const std::vector<int>& original_sequence_indices, // Original sequence index for each token
+      int num_tokens_in_batch,
+      KVCache* kv_cache
+  );
+
+#endif // HAS_CUDA
 
   const ModelConfig& get_config() const { return config_; }
 
@@ -323,9 +439,11 @@ class TinyLlamaModel {
     return gguf_data_ ? gguf_data_.get() : nullptr;
   }
 
-  friend void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model);
+  GGUFData* get_gguf_data_ptr() { return gguf_data_.get(); }
 
   void initialize_rope_freqs();
+
+  friend void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model);
 
  private:
   ModelConfig config_;
@@ -337,6 +455,7 @@ class TinyLlamaModel {
   std::vector<block_q4_K> embed_tokens_q4k, lm_head_q4k, final_norm_q4k;
   std::vector<block_q6_K> embed_tokens_q6k, lm_head_q6k, final_norm_q6k;
   std::vector<block_q8_0> embed_tokens_q8_0, lm_head_q8_0;
+  std::vector<block_q8_K> embed_tokens_q8k, lm_head_q8k;
   std::vector<LayerWeights> layers;
 
 #ifdef HAS_CUDA
@@ -376,6 +495,10 @@ class TinyLlamaModel {
   float* swiglu_vec_dev_ = nullptr;
   float* mlp_down_dev_ = nullptr;
   float* logits_dev_ = nullptr;
+
+  // Temporary buffers for KVCache dequantization
+  float* dequant_k_cache_buffer_dev_ = nullptr; // Holds full K cache dequantized from INT8 to FP32
+  float* dequant_v_cache_buffer_dev_ = nullptr; // Holds full V cache dequantized from INT8 to FP32
 #endif
 
   std::vector<std::pair<float, float>> precomputed_freqs_cis_;
@@ -385,7 +508,6 @@ class TinyLlamaModel {
 
   void initialize_weights(const SafeTensorsLoader* loader,
                           const GGUFData* gguf);
-  void initialize_gpu_and_rope();
 
 };
 
@@ -412,5 +534,9 @@ std::vector<uint16_t> uint8_vector_to_uint16_vector(
 
 void log_vector_summary(const std::string& name, const std::vector<float>& v,
                         int head_count = 5);
+
+void log_vector_summary_batch(const std::string& name, const std::vector<float>& batch_vector,
+                              int num_tokens_in_batch, int single_token_vector_size,
+                              int head_count = 5);
 
 #endif
