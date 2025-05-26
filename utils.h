@@ -75,13 +75,61 @@ void apply_rope_vector(std::vector<float>& x, int num_heads, int head_dim,
                        const std::vector<std::pair<float, float>>& all_freqs_cis,
                        int max_pos_embeddings, bool use_adjacent_pairing);
 
-// Other functions like apply_rope_batch_cpu, weighted_sum_probs_v, etc. are static in model.cpp
+void apply_rope_batch_cpu(std::vector<float>& q_batch, std::vector<float>& k_batch,
+                          int num_tokens, int num_q_heads, int num_kv_heads,
+                          int head_dim, int start_pos_in_sequence,
+                          const std::vector<std::pair<float, float>>& all_freqs_cis,
+                          int max_pos_embeddings, bool use_adjacent_pairing);
+
+// Neural network operations
+void rmsnorm_batch_cpu(const std::vector<float>& x_batch,
+                       const std::vector<float>& weight,
+                       std::vector<float>& out_batch,
+                       int num_tokens, int hidden_size,
+                       float eps = numeric::DEFAULT_EPS);
+
+void rmsnorm_vector_cpu(const std::vector<float>& x,
+                        const std::vector<float>& weight,
+                        std::vector<float>& out,
+                        float eps = numeric::DEFAULT_EPS);
+
+void softmax_vector_cpu(const std::vector<float>& x, std::vector<float>& out);
+void silu_cpu(const std::vector<float>& x, std::vector<float>& out);
+
+// Batch matrix multiplication
+void matmul_f32_f32_batch_cpu(const std::vector<float>& mat_weights,
+                               const std::vector<float>& batch_input_activations,
+                               std::vector<float>& batch_output_activations,
+                               int num_tokens, int output_dim, int input_dim);
+
+// BFloat16 matrix-vector operations
+void matvec_bf16_f32_vector_cpu(const std::vector<uint16_t>& mat_bf16,
+                                const std::vector<float>& vec_f32,
+                                std::vector<float>& out_f32, int rows, int cols);
+
+// Attention computation functions
+void weighted_sum_probs_v(const std::vector<float>& probs,
+                          const std::vector<float>& V,
+                          std::vector<float>& out, int seq_len, int head_dim);
+
+void calculate_attention_scores(const std::vector<float>& Q,
+                                const std::vector<float>& K,
+                                std::vector<float>& scores, int seq_len,
+                                int head_dim, float scale);
 
 // Logging and debugging functions
 void log_vector_summary(const std::string& name, const std::vector<float>& v, int head_count);
 void log_vector_summary_with_tail(const std::string& name, const std::vector<float>& v,
                                    int head_count, int tail_count);
+void log_vector_summary_detailed(const std::string& name, const std::vector<float>& v,
+                                  int current_pos, int current_layer, int N = 5);
+void log_vec_stats(const std::string& name, const std::vector<float>& v);
+void log_raw_float_pointer(const std::string& name, const float* ptr, size_t count = 5);
 
+// File I/O utility functions
+bool write_vector_to_file(const std::string& filename, const std::vector<float>& vec);
+std::vector<std::vector<float>> load_rmsnorm_bin(const std::string& filename,
+                                                  int num_tokens, int hidden_size);
 
 // Helper conversion functions
 std::vector<float> bf16vec_to_float_vec(const std::vector<uint16_t>& v_bf16);

@@ -416,9 +416,9 @@ void matvec_f32_f32_vector_cpu(const std::vector<float>& mat_f32,
     for (int c = 0; c < cols; ++c) {
       double term = static_cast<double>(mat_row_ptr[c]) * static_cast<double>(vec_ptr[c]);
       double y = term - k_c;
-      double t = k_sum + y;
-      k_c = (t - k_sum) - y;
-      k_sum = t;
+      double t_sum = k_sum + y;
+      k_c = (t_sum - k_sum) - y;
+      k_sum = t_sum;
     }
     out_f32[r] = static_cast<float>(k_sum);
   }
@@ -516,160 +516,276 @@ void apply_rope_vector(
   }
 }
 
-void matmul_q4k_f32_batch_cpu(
-    const std::vector<block_q4_K>& mat_q4k,
-    const std::vector<float>& batch_input_activations,
-    std::vector<float>& batch_output_activations,
+void apply_rope_batch_cpu(
+    std::vector<float>& q_batch,
+    std::vector<float>& k_batch,
     int num_tokens,
-    int output_dim,
-    int input_dim
+    int num_q_heads,
+    int num_kv_heads,
+    int head_dim,
+    int start_pos_in_sequence,
+    const std::vector<std::pair<float, float>>& all_freqs_cis,
+    int max_pos_embeddings,
+    bool use_adjacent_pairing
 ) {
-    if (mat_q4k.empty() || batch_input_activations.empty()) {
-        Logger::error("[MATMUL_Q4K_BATCH_CPU] Input matrix or batch_input_activations is empty.");
-        batch_output_activations.assign((size_t)num_tokens * output_dim, 0.0f);
+    if (q_batch.size() != (size_t)num_tokens * num_q_heads * head_dim) {
+        Logger::error("apply_rope_batch_cpu: q_batch size mismatch. Expected " +
+                      std::to_string((size_t)num_tokens * num_q_heads * head_dim) + ", got " + std::to_string(q_batch.size()));
         return;
     }
-    if (batch_input_activations.size() != (size_t)num_tokens * input_dim) {
-        Logger::error("[MATMUL_Q4K_BATCH_CPU] batch_input_activations size mismatch. Expected " +
-                      std::to_string((size_t)num_tokens * input_dim) + ", got " +
-                      std::to_string(batch_input_activations.size()));
-        batch_output_activations.assign((size_t)num_tokens * output_dim, 0.0f);
+    if (k_batch.size() != (size_t)num_tokens * num_kv_heads * head_dim) {
+        Logger::error("apply_rope_batch_cpu: k_batch size mismatch. Expected " +
+                      std::to_string((size_t)num_tokens * num_kv_heads * head_dim) + ", got " + std::to_string(k_batch.size()));
         return;
     }
-
-    batch_output_activations.resize((size_t)num_tokens * output_dim);
-
-#pragma omp parallel for
-    for (int token_idx = 0; token_idx < num_tokens; ++token_idx) {
-        std::vector<float> current_token_input(input_dim);
-        const float* input_slice_start = batch_input_activations.data() + (size_t)token_idx * input_dim;
-        std::copy(input_slice_start, input_slice_start + input_dim, current_token_input.begin());
-
-        std::vector<float> current_token_output(output_dim);
-        matvec_q4k_f32_vector_cpu(mat_q4k, current_token_input, current_token_output, output_dim, input_dim, false); 
-        
-        float* output_slice_start = batch_output_activations.data() + (size_t)token_idx * output_dim;
-        std::copy(current_token_output.begin(), current_token_output.end(), output_slice_start);
-    }
-}
-
-void matmul_q6k_f32_batch_cpu(
-    const std::vector<block_q6_K>& mat_q6k,
-    const std::vector<float>& batch_input_activations,
-    std::vector<float>& batch_output_activations,
-    int num_tokens,
-    int output_dim,
-    int input_dim
-) {
-    if (mat_q6k.empty() || batch_input_activations.empty()) {
-        Logger::error("[MATMUL_Q6K_BATCH_CPU] Input matrix or batch_input_activations is empty.");
-        batch_output_activations.assign((size_t)num_tokens * output_dim, 0.0f);
-        return;
+    if (head_dim % 2 != 0) {
+        Logger::error("apply_rope_batch_cpu: head_dim must be even for RoPE.");
+        return; 
     }
 
-    if (batch_input_activations.size() != (size_t)num_tokens * input_dim) {
-        Logger::error("[MATMUL_Q6K_BATCH_CPU] batch_input_activations size mismatch. Expected " +
-                      std::to_string((size_t)num_tokens * input_dim) + ", got " +
-                      std::to_string(batch_input_activations.size()));
-        batch_output_activations.assign((size_t)num_tokens * output_dim, 0.0f);
-        return;
-    }
-
-    batch_output_activations.resize((size_t)num_tokens * output_dim);
-
-#pragma omp parallel for
-    for (int token_idx = 0; token_idx < num_tokens; ++token_idx) {
-        std::vector<float> current_token_input(input_dim);
-        const float* input_slice_start = batch_input_activations.data() + (size_t)token_idx * input_dim;
-        std::copy(input_slice_start, input_slice_start + input_dim, current_token_input.begin());
-
-        std::vector<float> current_token_output(output_dim);
-        matvec_q6k_f32_vector_cpu(mat_q6k, current_token_input, current_token_output, output_dim, input_dim, false); 
-        
-        float* output_slice_start = batch_output_activations.data() + (size_t)token_idx * output_dim;
-        std::copy(current_token_output.begin(), current_token_output.end(), output_slice_start);
-    }
-}
-
-void matmul_q8_0_f32_batch_cpu(
-    const std::vector<block_q8_0>& mat_q8_0,
-    const std::vector<float>& batch_input_activations,
-    std::vector<float>& batch_output_activations,
-    int num_tokens,
-    int output_dim,
-    int input_dim
-) {
-    if (mat_q8_0.empty() || batch_input_activations.empty()) {
-        Logger::error("[MATMUL_Q8_0_BATCH_CPU] Input matrix or batch_input_activations is empty.");
-        batch_output_activations.assign((size_t)num_tokens * output_dim, 0.0f);
-        return;
-    }
-
-    if (batch_input_activations.size() != (size_t)num_tokens * input_dim) {
-        Logger::error("[MATMUL_Q8_0_BATCH_CPU] batch_input_activations size mismatch. Expected " +
-                      std::to_string((size_t)num_tokens * input_dim) + ", got " +
-                      std::to_string(batch_input_activations.size()));
-        batch_output_activations.assign((size_t)num_tokens * output_dim, 0.0f);
-        return;
-    }
-
-    batch_output_activations.resize((size_t)num_tokens * output_dim);
-
-#pragma omp parallel for
-    for (int token_idx = 0; token_idx < num_tokens; ++token_idx) {
-        std::vector<float> current_token_input(input_dim);
-        const float* input_slice_start = batch_input_activations.data() + (size_t)token_idx * input_dim;
-        std::copy(input_slice_start, input_slice_start + input_dim, current_token_input.begin());
-
-        std::vector<float> current_token_output(output_dim);
-        matvec_q8_0_f32_vector_cpu(mat_q8_0, current_token_input, current_token_output, output_dim, input_dim, false);
-        
-        float* output_slice_start = batch_output_activations.data() + (size_t)token_idx * output_dim;
-        std::copy(current_token_output.begin(), current_token_output.end(), output_slice_start);
-    }
-}
-
-void matmul_q8k_f32_batch_cpu(
-    const std::vector<block_q8_K>& mat_q8k,
-    const std::vector<float>& batch_input_activations,
-    std::vector<float>& batch_output_activations,
-    int num_tokens,
-    int output_dim,
-    int input_dim
-) {
-    if (input_dim % GGML_QK_K != 0) {
-        throw std::runtime_error("matmul_q8k_f32_batch_cpu: input_dim (" + std::to_string(input_dim) + 
-                                 ") must be divisible by GGML_QK_K (" + std::to_string(GGML_QK_K) + ")");
-    }
-    
-    size_t expected_input_size = (size_t)num_tokens * input_dim;
-    if (batch_input_activations.size() != expected_input_size) {
-        throw std::runtime_error("matmul_q8k_f32_batch_cpu: batch_input_activations size mismatch. Expected " +
-                                 std::to_string(expected_input_size) + ", got " + std::to_string(batch_input_activations.size()));
-    }
-    
-    size_t num_blocks_per_row = input_dim / GGML_QK_K;
-    size_t total_blocks_expected = (size_t)output_dim * num_blocks_per_row;
-    if (mat_q8k.size() != total_blocks_expected) {
-        throw std::runtime_error("matmul_q8k_f32_batch_cpu: mat_q8k size mismatch. Expected " +
-                                 std::to_string(total_blocks_expected) + " blocks, got " + std::to_string(mat_q8k.size()));
-    }
-    
-    batch_output_activations.resize((size_t)num_tokens * output_dim);
-    
     for (int t = 0; t < num_tokens; ++t) {
-        std::vector<float> current_token_input(input_dim);
-        for (int i = 0; i < input_dim; ++i) {
-            current_token_input[i] = batch_input_activations[t * input_dim + i];
+        int current_token_pos = start_pos_in_sequence + t;
+
+        if (current_token_pos < 0 || current_token_pos >= max_pos_embeddings) {
+            Logger::warning("[ROPE_BATCH_CPU] Token " + std::to_string(t) + " (actual_pos: " + std::to_string(current_token_pos) +
+                            ") is out of range [0, " + std::to_string(max_pos_embeddings -1) + "]. Skipping RoPE for this token.");
+            continue;
         }
-        
-        std::vector<float> current_token_output(output_dim);
-        matvec_q8k_f32_vector_cpu(mat_q8k, current_token_input, current_token_output, output_dim, input_dim, false);
-        
-        for (int i = 0; i < output_dim; ++i) {
-            batch_output_activations[t * output_dim + i] = current_token_output[i];
+
+        for (int h = 0; h < num_q_heads; ++h) {
+            size_t head_start_offset_in_batch = ((size_t)t * num_q_heads + h) * head_dim;
+
+            for (int i = 0; i < head_dim / 2; ++i) { 
+                size_t freq_idx = (size_t)current_token_pos * (head_dim / 2) + i;
+                
+                if (freq_idx >= all_freqs_cis.size()) {
+                    Logger::warning("[ROPE_BATCH_CPU] Q - Token " + std::to_string(t) + ", Head " + std::to_string(h) +
+                                    ", DimPair " + std::to_string(i) + ": freq_idx (" + std::to_string(freq_idx) +
+                                    ") out of bounds for all_freqs_cis.size (" + std::to_string(all_freqs_cis.size()) + "). Skipping pair.");
+                    continue; 
+                }
+
+                float freq_cis_real = all_freqs_cis[freq_idx].first;
+                float freq_cis_imag = all_freqs_cis[freq_idx].second;
+                
+                float val0, val1;
+                size_t idx0, idx1;
+
+                if (use_adjacent_pairing) {
+                    idx0 = head_start_offset_in_batch + 2 * i;
+                    idx1 = head_start_offset_in_batch + 2 * i + 1;
+                } else {
+                    idx0 = head_start_offset_in_batch + i;
+                    idx1 = head_start_offset_in_batch + i + head_dim / 2;
+                }
+                
+                if (idx0 >= q_batch.size() || idx1 >= q_batch.size()) {
+                    Logger::warning("[ROPE_BATCH_CPU] Q - Token " + std::to_string(t) + ", Head " + std::to_string(h) +
+                                    ", DimPair " + std::to_string(i) + ": q_batch index out of bounds. q_batch.size(): " + std::to_string(q_batch.size()) +
+                                    ", idx0: " + std::to_string(idx0) + ", idx1: " + std::to_string(idx1) + ". Skipping pair.");
+                    continue;
+                }
+                
+                val0 = q_batch[idx0];
+                val1 = q_batch[idx1];
+                
+                q_batch[idx0] = val0 * freq_cis_real - val1 * freq_cis_imag;
+                q_batch[idx1] = val0 * freq_cis_imag + val1 * freq_cis_real;
+            }
+        }
+
+        for (int h = 0; h < num_kv_heads; ++h) {
+            size_t head_start_offset_in_batch = ((size_t)t * num_kv_heads + h) * head_dim;
+
+            for (int i = 0; i < head_dim / 2; ++i) { 
+                size_t freq_idx = (size_t)current_token_pos * (head_dim / 2) + i;
+
+                if (freq_idx >= all_freqs_cis.size()) {
+                     Logger::warning("[ROPE_BATCH_CPU] K - Token " + std::to_string(t) + ", Head " + std::to_string(h) +
+                                    ", DimPair " + std::to_string(i) + ": freq_idx (" + std::to_string(freq_idx) +
+                                    ") out of bounds for all_freqs_cis.size (" + std::to_string(all_freqs_cis.size()) + "). Skipping pair.");
+                    continue;
+                }
+
+                float freq_cis_real = all_freqs_cis[freq_idx].first;
+                float freq_cis_imag = all_freqs_cis[freq_idx].second;
+
+                float val0, val1;
+                size_t idx0, idx1;
+
+                if (use_adjacent_pairing) {
+                    idx0 = head_start_offset_in_batch + 2 * i;
+                    idx1 = head_start_offset_in_batch + 2 * i + 1;
+                } else {
+                    idx0 = head_start_offset_in_batch + i;
+                    idx1 = head_start_offset_in_batch + i + head_dim / 2;
+                }
+
+                if (idx0 >= k_batch.size() || idx1 >= k_batch.size()) {
+                     Logger::warning("[ROPE_BATCH_CPU] K - Token " + std::to_string(t) + ", Head " + std::to_string(h) +
+                                    ", DimPair " + std::to_string(i) + ": k_batch index out of bounds. k_batch.size(): " + std::to_string(k_batch.size()) +
+                                    ", idx0: " + std::to_string(idx0) + ", idx1: " + std::to_string(idx1) + ". Skipping pair.");
+                    continue;
+                }
+
+                val0 = k_batch[idx0];
+                val1 = k_batch[idx1];
+
+                k_batch[idx0] = val0 * freq_cis_real - val1 * freq_cis_imag;
+                k_batch[idx1] = val0 * freq_cis_imag + val1 * freq_cis_real;
+            }
         }
     }
+}
+
+void rmsnorm_batch_cpu(const std::vector<float>& x_batch,
+                       const std::vector<float>& weight,
+                       std::vector<float>& out_batch,
+                       int num_tokens,
+                       int hidden_size,
+                       float eps) {
+  if (x_batch.empty() || x_batch.size() != (size_t)num_tokens * hidden_size || weight.size() != (size_t)hidden_size) {
+    Logger::error("[RMSNORM_BATCH_CPU] RMSNorm batch size mismatch or empty input. x_batch.size(): " + std::to_string(x_batch.size()) +
+                  ", expected x_batch: " + std::to_string((size_t)num_tokens * hidden_size) +
+                  ", weight.size(): " + std::to_string(weight.size()) +
+                  ", expected weight: " + std::to_string((size_t)hidden_size));
+    out_batch.assign((size_t)num_tokens * hidden_size, 0.0f);
+    return;
+  }
+  out_batch.resize((size_t)num_tokens * hidden_size);
+
+#pragma omp parallel for
+  for (int t = 0; t < num_tokens; ++t) {
+    double ssq = 0.0;
+    size_t token_offset = (size_t)t * hidden_size;
+
+    for (int i = 0; i < hidden_size; ++i) {
+      ssq += static_cast<double>(x_batch[token_offset + i]) * static_cast<double>(x_batch[token_offset + i]);
+    }
+    
+    double ssq_mean = ssq / hidden_size;
+    float norm_factor_input_sqrt = static_cast<float>(ssq_mean);
+    float norm_factor = 1.0f / SAFE_SQRT(norm_factor_input_sqrt + eps); 
+
+    for (int i = 0; i < hidden_size; ++i) {
+      out_batch[token_offset + i] = x_batch[token_offset + i] * norm_factor * weight[i];
+    }
+  }
+}
+
+void rmsnorm_vector_cpu(const std::vector<float>& x,
+                        const std::vector<float>& weight,
+                        std::vector<float>& out, float eps) {
+  if (x.empty() || x.size() != weight.size()) {
+    Logger::error("RMSNorm vector size mismatch or empty input.");
+    out.assign(x.size(), 0.0f);
+    return;
+  }
+  out.resize(x.size());
+  size_t n = x.size();
+
+  double ssq = 0.0;
+#pragma omp parallel for reduction(+ : ssq)
+  for (int64_t i = 0; i < static_cast<int64_t>(n); ++i) {
+    ssq += static_cast<double>(x[i]) * static_cast<double>(x[i]);
+  }
+  ssq /= n;
+
+  float norm_factor = 1.0f / SAFE_SQRT(static_cast<float>(ssq) + 
+                   SAFE_MAX(eps, numeric::MIN_NORM_EPS));
+
+#pragma omp parallel for
+  for (int64_t i = 0; i < static_cast<int64_t>(n); ++i) {
+    out[i] = x[i] * norm_factor * weight[i];
+  }
+}
+
+void softmax_vector_cpu(const std::vector<float>& x,
+                        std::vector<float>& out) {
+  if (x.empty()) return;
+  out.resize(x.size());
+  size_t n = x.size();
+
+  float max_val = x[0];
+  for (size_t i = 1; i < n; ++i) {
+    if (x[i] > max_val) max_val = x[i];
+  }
+
+  float exp_sum = 0.0f;
+  for (size_t i = 0; i < n; ++i) {
+    out[i] = std::exp(x[i] - max_val);
+    exp_sum += out[i];
+  }
+
+  float inv_sum = 1.0f / (exp_sum + 1e-9f);
+
+#pragma omp parallel for
+  for (int64_t i = 0; i < static_cast<int64_t>(n); ++i) {
+    out[i] *= inv_sum;
+  }
+}
+
+void silu_cpu(const std::vector<float>& x, std::vector<float>& out) {
+  if (x.size() != out.size()) out.resize(x.size());
+#pragma omp parallel for
+  for (int64_t i = 0; i < static_cast<int64_t>(x.size()); ++i) {
+    float sigmoid_x = 1.0f / (1.0f + std::exp(-x[i]));
+    out[i] = x[i] * sigmoid_x;
+  }
+}
+
+void matmul_f32_f32_batch_cpu(
+    const std::vector<float>& mat_weights,
+    const std::vector<float>& batch_input_activations,
+    std::vector<float>& batch_output_activations,
+    int num_tokens,
+    int output_dim,
+    int input_dim
+) {
+  if (mat_weights.empty() || batch_input_activations.empty()) {
+    Logger::error("[MATMUL_F32_BATCH_CPU] Input matrix or batch_input_activations is empty.");
+    batch_output_activations.assign((size_t)num_tokens * output_dim, 0.0f);
+    return;
+  }
+  if (mat_weights.size() != (size_t)output_dim * input_dim) {
+    Logger::error("[MATMUL_F32_BATCH_CPU] Matrix dimensions mismatch. Expected " +
+                  std::to_string((size_t)output_dim * input_dim) + ", got " +
+                  std::to_string(mat_weights.size()));
+    batch_output_activations.assign((size_t)num_tokens * output_dim, 0.0f);
+    return;
+  }
+  if (batch_input_activations.size() != (size_t)num_tokens * input_dim) {
+    Logger::error(
+        "[MATMUL_F32_BATCH_CPU] Batch input activations dimension mismatch. Expected " +
+        std::to_string((size_t)num_tokens * input_dim) + ", got " +
+        std::to_string(batch_input_activations.size()));
+    batch_output_activations.assign((size_t)num_tokens * output_dim, 0.0f);
+    return;
+  }
+
+  batch_output_activations.resize((size_t)num_tokens * output_dim);
+
+#pragma omp parallel for schedule(static)
+  for (int t = 0; t < num_tokens; ++t) {
+    size_t input_token_offset = (size_t)t * input_dim;
+    size_t output_token_offset = (size_t)t * output_dim;
+
+    for (int o = 0; o < output_dim; ++o) {
+      double k_sum = 0.0;
+      double k_c = 0.0;
+      size_t weight_row_offset = (size_t)o * input_dim;
+
+      for (int i = 0; i < input_dim; ++i) {
+        double term = static_cast<double>(mat_weights[weight_row_offset + i]) *
+                      static_cast<double>(batch_input_activations[input_token_offset + i]);
+        double y = term - k_c;
+        double t_sum = k_sum + y;
+        k_c = (t_sum - k_sum) - y;
+        k_sum = t_sum;
+      }
+      batch_output_activations[output_token_offset + o] = static_cast<float>(k_sum);
+    }
+  }
 }
 
 void matvec_q6k_f32_vector_cpu(const std::vector<block_q6_K>& mat_q6k,
@@ -776,6 +892,359 @@ void matvec_q4k_f32_vector_cpu(const std::vector<block_q4_K>& mat_q4k,
     }
     out_f32[r] = static_cast<float>(row_sum);
   }
+}
+
+void matmul_q8_0_f32_batch_cpu(
+    const std::vector<block_q8_0>& mat_q8_0,
+    const std::vector<float>& batch_input_activations,
+    std::vector<float>& batch_output_activations,
+    int num_tokens,
+    int output_dim,
+    int input_dim
+) {
+    if (mat_q8_0.empty() || batch_input_activations.empty()) {
+        Logger::error("[MATMUL_Q8_0_BATCH_CPU] Input matrix or batch_input_activations is empty.");
+        batch_output_activations.assign((size_t)num_tokens * output_dim, 0.0f);
+        return;
+    }
+
+    if (batch_input_activations.size() != (size_t)num_tokens * input_dim) {
+        Logger::error("[MATMUL_Q8_0_BATCH_CPU] batch_input_activations size mismatch. Expected " +
+                      std::to_string((size_t)num_tokens * input_dim) + ", got " +
+                      std::to_string(batch_input_activations.size()));
+        batch_output_activations.assign((size_t)num_tokens * output_dim, 0.0f);
+        return;
+    }
+
+    batch_output_activations.resize((size_t)num_tokens * output_dim);
+
+#pragma omp parallel for
+    for (int token_idx = 0; token_idx < num_tokens; ++token_idx) {
+        std::vector<float> current_token_input(input_dim);
+        const float* input_slice_start = batch_input_activations.data() + (size_t)token_idx * input_dim;
+        std::copy(input_slice_start, input_slice_start + input_dim, current_token_input.begin());
+
+        std::vector<float> current_token_output(output_dim);
+        matvec_q8_0_f32_vector_cpu(mat_q8_0, current_token_input, current_token_output, output_dim, input_dim, false);
+        
+        float* output_slice_start = batch_output_activations.data() + (size_t)token_idx * output_dim;
+        std::copy(current_token_output.begin(), current_token_output.end(), output_slice_start);
+    }
+}
+
+void matmul_q8k_f32_batch_cpu(
+    const std::vector<block_q8_K>& mat_q8k,
+    const std::vector<float>& batch_input_activations,
+    std::vector<float>& batch_output_activations,
+    int num_tokens,
+    int output_dim,
+    int input_dim
+) {
+    if (input_dim % GGML_QK_K != 0) {
+        throw std::runtime_error("matmul_q8k_f32_batch_cpu: input_dim (" + std::to_string(input_dim) + 
+                                 ") must be divisible by GGML_QK_K (" + std::to_string(GGML_QK_K) + ")");
+    }
+    
+    size_t expected_input_size = (size_t)num_tokens * input_dim;
+    if (batch_input_activations.size() != expected_input_size) {
+        throw std::runtime_error("matmul_q8k_f32_batch_cpu: batch_input_activations size mismatch. Expected " +
+                                 std::to_string(expected_input_size) + ", got " + std::to_string(batch_input_activations.size()));
+    }
+    
+    size_t num_blocks_per_row = input_dim / GGML_QK_K;
+    size_t total_blocks_expected = (size_t)output_dim * num_blocks_per_row;
+    if (mat_q8k.size() != total_blocks_expected) {
+        throw std::runtime_error("matmul_q8k_f32_batch_cpu: mat_q8k size mismatch. Expected " +
+                                 std::to_string(total_blocks_expected) + " blocks, got " + std::to_string(mat_q8k.size()));
+    }
+    
+    batch_output_activations.resize((size_t)num_tokens * output_dim);
+    
+    for (int t = 0; t < num_tokens; ++t) {
+        std::vector<float> current_token_input(input_dim);
+        for (int i = 0; i < input_dim; ++i) {
+            current_token_input[i] = batch_input_activations[t * input_dim + i];
+        }
+        
+        std::vector<float> current_token_output(output_dim);
+        matvec_q8k_f32_vector_cpu(mat_q8k, current_token_input, current_token_output, output_dim, input_dim, false);
+        
+        for (int i = 0; i < output_dim; ++i) {
+            batch_output_activations[t * output_dim + i] = current_token_output[i];
+        }
+    }
+}
+
+void matmul_q6k_f32_batch_cpu(
+    const std::vector<block_q6_K>& mat_q6k,
+    const std::vector<float>& batch_input_activations,
+    std::vector<float>& batch_output_activations,
+    int num_tokens,
+    int output_dim,
+    int input_dim
+) {
+    if (mat_q6k.empty() || batch_input_activations.empty()) {
+        Logger::error("[MATMUL_Q6K_BATCH_CPU] Input matrix or batch_input_activations is empty.");
+        batch_output_activations.assign((size_t)num_tokens * output_dim, 0.0f);
+        return;
+    }
+
+    if (batch_input_activations.size() != (size_t)num_tokens * input_dim) {
+        Logger::error("[MATMUL_Q6K_BATCH_CPU] batch_input_activations size mismatch. Expected " +
+                      std::to_string((size_t)num_tokens * input_dim) + ", got " +
+                      std::to_string(batch_input_activations.size()));
+        batch_output_activations.assign((size_t)num_tokens * output_dim, 0.0f);
+        return;
+    }
+
+    batch_output_activations.resize((size_t)num_tokens * output_dim);
+
+#pragma omp parallel for
+    for (int token_idx = 0; token_idx < num_tokens; ++token_idx) {
+        std::vector<float> current_token_input(input_dim);
+        const float* input_slice_start = batch_input_activations.data() + (size_t)token_idx * input_dim;
+        std::copy(input_slice_start, input_slice_start + input_dim, current_token_input.begin());
+
+        std::vector<float> current_token_output(output_dim);
+        matvec_q6k_f32_vector_cpu(mat_q6k, current_token_input, current_token_output, output_dim, input_dim, false); 
+        
+        float* output_slice_start = batch_output_activations.data() + (size_t)token_idx * output_dim;
+        std::copy(current_token_output.begin(), current_token_output.end(), output_slice_start);
+    }
+}
+
+void matmul_q4k_f32_batch_cpu(
+    const std::vector<block_q4_K>& mat_q4k,
+    const std::vector<float>& batch_input_activations,
+    std::vector<float>& batch_output_activations,
+    int num_tokens,
+    int output_dim,
+    int input_dim
+) {
+    if (mat_q4k.empty() || batch_input_activations.empty()) {
+        Logger::error("[MATMUL_Q4K_BATCH_CPU] Input matrix or batch_input_activations is empty.");
+        batch_output_activations.assign((size_t)num_tokens * output_dim, 0.0f);
+        return;
+    }
+    if (batch_input_activations.size() != (size_t)num_tokens * input_dim) {
+        Logger::error("[MATMUL_Q4K_BATCH_CPU] batch_input_activations size mismatch. Expected " +
+                      std::to_string((size_t)num_tokens * input_dim) + ", got " +
+                      std::to_string(batch_input_activations.size()));
+        batch_output_activations.assign((size_t)num_tokens * output_dim, 0.0f);
+        return;
+    }
+
+    batch_output_activations.resize((size_t)num_tokens * output_dim);
+
+#pragma omp parallel for
+    for (int token_idx = 0; token_idx < num_tokens; ++token_idx) {
+        std::vector<float> current_token_input(input_dim);
+        const float* input_slice_start = batch_input_activations.data() + (size_t)token_idx * input_dim;
+        std::copy(input_slice_start, input_slice_start + input_dim, current_token_input.begin());
+
+        std::vector<float> current_token_output(output_dim);
+        matvec_q4k_f32_vector_cpu(mat_q4k, current_token_input, current_token_output, output_dim, input_dim, false); 
+        
+        float* output_slice_start = batch_output_activations.data() + (size_t)token_idx * output_dim;
+        std::copy(current_token_output.begin(), current_token_output.end(), output_slice_start);
+    }
+}
+
+void matvec_bf16_f32_vector_cpu(const std::vector<uint16_t>& mat_bf16,
+                                const std::vector<float>& vec_f32,
+                                std::vector<float>& out_f32, int rows, int cols) {
+  if (mat_bf16.size() != (size_t)rows * cols ||
+      vec_f32.size() != (size_t)cols) {
+    Logger::error("matvec_bf16_f32_vector_cpu: Size mismatch. Mat: " +
+                  std::to_string(mat_bf16.size()) + " (Expected " +
+                  std::to_string(rows * cols) +
+                  "), Vec: " + std::to_string(vec_f32.size()) + " (Expected " +
+                  std::to_string(cols) + ")");
+    out_f32.assign(rows, 0.0f);
+    return;
+  }
+  out_f32.resize(rows);
+
+#pragma omp parallel for
+  for (int64_t r = 0; r < static_cast<int64_t>(rows); ++r) {
+    double sum = 0.0;
+    double c = 0.0;
+    size_t row_offset = r * cols;
+
+    for (int c_idx = 0; c_idx < cols; ++c_idx) {
+      float weight = bfloat16_to_float32(mat_bf16[row_offset + c_idx]);
+      double term =
+          static_cast<double>(weight) * static_cast<double>(vec_f32[c_idx]);
+
+      double y = term - c;
+      double t = sum + y;
+      c = (t - sum) - y;
+      sum = t;
+    }
+    out_f32[r] = static_cast<float>(sum);
+  }
+}
+
+void weighted_sum_probs_v(const std::vector<float>& probs,
+                          const std::vector<float>& V,
+                          std::vector<float>& out, int seq_len, int head_dim) {
+  if (probs.size() != seq_len || V.size() != (size_t)seq_len * head_dim) {
+    Logger::error("weighted_sum_probs_v: Size mismatch. Probs: " +
+                  std::to_string(probs.size()) + " (Expected " +
+                  std::to_string(seq_len) +
+                  "), V: " + std::to_string(V.size()) + " (Expected " +
+                  std::to_string(seq_len * head_dim) + ")");
+    out.assign(head_dim, 0.0f);
+    return;
+  }
+  out.resize(head_dim);
+
+#pragma omp parallel for
+  for (int64_t j = 0; j < static_cast<int64_t>(head_dim); ++j) {
+    double sum = 0.0;
+    double c_kahan = 0.0;
+    for (int i = 0; i < seq_len; ++i) {
+      double term = static_cast<double>(probs[i]) *
+                    static_cast<double>(V[i * head_dim + j]);
+
+      double y = term - c_kahan;
+      double t = sum + y;
+      c_kahan = (t - sum) - y;
+      sum = t;
+    }
+    out[j] = static_cast<float>(sum);
+  }
+}
+
+void calculate_attention_scores(const std::vector<float>& Q,
+                                const std::vector<float>& K,
+                                std::vector<float>& scores, int seq_len,
+                                int head_dim, float scale) {
+  if (Q.empty() || K.empty()) return;
+  scores.resize(seq_len);
+
+  scale = std::clamp(scale, attention::MIN_SCALE, attention::MAX_SCALE);
+  float effective_scale = scale * attention::ATTENTION_SCALE_BASE;
+
+#pragma omp parallel for collapse(1)
+  for (int64_t i = 0; i < static_cast<int64_t>(seq_len); ++i) {
+    double dot_product = 0.0;
+    double c_kahan = 0.0;
+    size_t k_offset = static_cast<size_t>(i) * head_dim;
+
+    for (int j = 0; j < head_dim; ++j) {
+      double term = static_cast<double>(Q[j]) * static_cast<double>(K[k_offset + j]);
+      double y = term - c_kahan;
+      double t_sum = dot_product + y;
+      c_kahan = (t_sum - dot_product) - y;
+      dot_product = t_sum;
+    }
+    
+    scores[i] = static_cast<float>(dot_product * effective_scale);
+  }
+}
+
+void log_vec_stats(const std::string& name, const std::vector<float>& v) {
+  if (v.empty()) {
+    Logger::info(name + ": EMPTY VECTOR");
+    return;
+  }
+  float minv = *std::min_element(v.begin(), v.end());
+  float maxv = *std::max_element(v.begin(), v.end());
+  float mean = std::accumulate(v.begin(), v.end(), 0.0f) / v.size();
+  bool all_finite =
+      std::all_of(v.begin(), v.end(), [](float x) { return std::isfinite(x); });
+  Logger::info(name + ": min=" + std::to_string(minv) + ", max=" +
+               std::to_string(maxv) + ", mean=" + std::to_string(mean) +
+               ", all_finite=" + (all_finite ? "yes" : "no"));
+}
+
+bool write_vector_to_file(const std::string& filename, const std::vector<float>& vec) {
+  std::string vec_writer_vals;
+  int N_log_writer = (std::min)(10, (int)vec.size());
+  for (int i = 0; i < N_log_writer; ++i)
+    vec_writer_vals += (i ? " " : "") + std::to_string(vec[i]);
+  Logger::info("write_vector_to_file Enter: Address of vec.data() on entry: " +
+               std::to_string(reinterpret_cast<uintptr_t>(vec.data())));
+
+  std::ofstream outfile(filename, std::ios::binary);
+  if (!outfile) {
+    Logger::error("Failed to open file for writing: " + filename);
+    return false;
+  }
+  outfile.write(reinterpret_cast<const char*>(vec.data()),
+                vec.size() * sizeof(float));
+  if (!outfile) {
+    Logger::error("Failed to write data to file: " + filename);
+    return false;
+  }
+  Logger::info("Successfully wrote vector to " + filename);
+  return true;
+}
+
+std::vector<std::vector<float>> load_rmsnorm_bin(const std::string& filename, int num_tokens, int hidden_size) {
+  std::ifstream infile(filename, std::ios::binary);
+  if (!infile) throw std::runtime_error("Failed to open " + filename);
+  std::vector<float> flat(num_tokens * hidden_size);
+  infile.read(reinterpret_cast<char*>(flat.data()),
+              flat.size() * sizeof(float));
+  if (!infile)
+    throw std::runtime_error("Failed to read all data from " + filename);
+  std::vector<std::vector<float>> result(num_tokens,
+                                         std::vector<float>(hidden_size));
+  for (int t = 0; t < num_tokens; ++t) {
+    for (int h = 0; h < hidden_size; ++h) {
+      result[t][h] = flat[t * hidden_size + h];
+    }
+  }
+  return result;
+}
+
+void log_raw_float_pointer(const std::string& name, const float* ptr, size_t count) {
+  if (!ptr) {
+    Logger::info(name + ": NULL POINTER");
+    return;
+  }
+  std::stringstream ss;
+  ss << name << ": [";
+  for (size_t i = 0; i < count; ++i) {
+    if (i > 0) ss << ", ";
+    ss << std::fixed << std::setprecision(6) << ptr[i];
+  }
+  ss << "]";
+  Logger::info(ss.str());
+}
+
+void log_vector_summary_detailed(const std::string& name,
+                                  const std::vector<float>& v,
+                                  int current_pos, int current_layer, int N) {
+  if (v.empty()) {
+    Logger::info(name + ": EMPTY");
+    return;
+  }
+  
+  std::stringstream ss;
+  ss << "[POS=" << current_pos << " LAYER=" << current_layer << "] " << name;
+  ss << ": size=" << v.size();
+  
+  size_t actual_N = SAFE_MIN(static_cast<size_t>(N), v.size());
+  if (actual_N > 0) {
+    ss << ", first " << actual_N << ": [";
+    for (size_t i = 0; i < actual_N; ++i) {
+      ss << (i > 0 ? " " : "") << std::fixed << std::setprecision(6) << v[i];
+    }
+    ss << "]";
+  }
+  
+  float minv = *std::min_element(v.begin(), v.end());
+  float maxv = *std::max_element(v.begin(), v.end());
+  double sum = std::accumulate(v.begin(), v.end(), 0.0);
+  float mean = sum / v.size();
+  bool all_finite = std::all_of(v.begin(), v.end(), [](float x) { return std::isfinite(x); });
+  
+  ss << ", min=" << minv << ", max=" << maxv << ", mean=" << mean
+     << ", finite=" << (all_finite ? "yes" : "NO");
+  Logger::info(ss.str());
 }
 
  
