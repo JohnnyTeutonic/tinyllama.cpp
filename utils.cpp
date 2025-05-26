@@ -316,12 +316,6 @@ void matvec_q8_0_f32_vector_cpu(const std::vector<block_q8_0>& mat_q8_0,
   out_f32.resize(rows);
   float dequantized_block[GGML_QK8_0];
   
-  if (log_first_block) {
-    Logger::info("[MATVEC_Q8_0_DEBUG] Matrix shape: " + std::to_string(rows) + "x" + std::to_string(cols) + 
-                 ", blocks_per_row=" + std::to_string(num_blocks_per_row) + 
-                 ", total_blocks=" + std::to_string(mat_q8_0.size()) +
-                 ", input_vec_size=" + std::to_string(vec_f32.size()));
-  }
 
 #pragma omp parallel for private(dequantized_block)
   for (int64_t r = 0; r < static_cast<int64_t>(rows); ++r) {
@@ -336,23 +330,6 @@ void matvec_q8_0_f32_vector_cpu(const std::vector<block_q8_0>& mat_q8_0,
 
       size_t vec_offset = block_col_idx * GGML_QK8_0;
       
-      if (log_first_block && r < 2 && block_col_idx < 2) {
-        Logger::info("[MATVEC_Q8_0_INNER] Row " + std::to_string(r) + 
-                     " Block " + std::to_string(block_col_idx) + 
-                     " scale=" + std::to_string(fp16_to_fp32(qblock->d, true)) +
-                     " first_4_quant=[" + std::to_string(qblock->qs[0]) + 
-                     ", " + std::to_string(qblock->qs[1]) + 
-                     ", " + std::to_string(qblock->qs[2]) + 
-                     ", " + std::to_string(qblock->qs[3]) + "]" +
-                     " first_4_dequant=[" + std::to_string(dequantized_block[0]) + 
-                     ", " + std::to_string(dequantized_block[1]) + 
-                     ", " + std::to_string(dequantized_block[2]) + 
-                     ", " + std::to_string(dequantized_block[3]) + "]" +
-                     " first_4_input=[" + std::to_string(vec_f32[vec_offset]) + 
-                     ", " + std::to_string(vec_f32[vec_offset + 1]) + 
-                     ", " + std::to_string(vec_f32[vec_offset + 2]) + 
-                     ", " + std::to_string(vec_f32[vec_offset + 3]) + "]");
-      }
       
       for (int i = 0; i < GGML_QK8_0; ++i) {
         double term = static_cast<double>(dequantized_block[i]) *
@@ -366,11 +343,6 @@ void matvec_q8_0_f32_vector_cpu(const std::vector<block_q8_0>& mat_q8_0,
     }
     out_f32[r] = static_cast<float>(row_sum);
     
-    if (log_first_block && r < 3) {
-      Logger::info("[MATVEC_Q8_0_OUTPUT] Row " + std::to_string(r) + 
-                   " final_sum=" + std::to_string(row_sum) + 
-                   " output=" + std::to_string(out_f32[r]));
-    }
   }
 }
 

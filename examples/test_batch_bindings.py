@@ -7,7 +7,6 @@ This script demonstrates the new generate_batch() functionality.
 import sys
 import time
 import os
-import pathlib
 import argparse
 
 current_dir = os.path.dirname(os.path.abspath(__file__))

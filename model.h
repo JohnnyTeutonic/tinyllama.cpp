@@ -202,8 +202,10 @@ struct KVCache {
     int allocated_head_dim = 0;       /**< Dimension of each head allocated */
 
     void destroy_gpu_resources() {
-        Logger::info("KVCache::destroy_gpu_resources: Freeing KVCache CUDA memory for " + 
-                     std::to_string(allocated_num_layers) + " allocated layers.");
+        if (allocated_num_layers > 0) {
+            Logger::info("KVCache::destroy_gpu_resources: Freeing KVCache CUDA memory for " + 
+                         std::to_string(allocated_num_layers) + " allocated layers.");
+        }
         if (allocated_num_layers > 0 && total_model_layers_ > 0) {
             int gpu_layer_start_model_idx = total_model_layers_ - allocated_num_layers;
             if (gpu_layer_start_model_idx < 0) {

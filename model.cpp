@@ -923,43 +923,56 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
   
   Logger::info("Finished processing embedding and LM head tables for GPU.");
 
-  // RoPE GPU Buffer
+  // RoPE GPU Buffer - Only allocate if GPU layers are active
   SAFE_CUDA_FREE(all_freqs_cis_dev);
-  if (!precomputed_freqs_cis_.empty()) { // RoPE freqs are always precomputed on CPU
-    size_t total_freq_elements = precomputed_freqs_cis_.size() * 2;
-    gpuErrchk(cudaMalloc(&all_freqs_cis_dev, total_freq_elements * sizeof(float)));
-    std::vector<float> flat_host_freqs; flat_host_freqs.reserve(total_freq_elements);
-    for (const auto& p : precomputed_freqs_cis_) { flat_host_freqs.push_back(p.first); flat_host_freqs.push_back(p.second); }
-    gpuErrchk(cudaMemcpy(all_freqs_cis_dev, flat_host_freqs.data(), total_freq_elements * sizeof(float), cudaMemcpyHostToDevice));
-    Logger::info("Copied all precomputed RoPE frequencies to persistent GPU buffer.");
+  if (active_num_gpu_layers > 0) {
+    if (!precomputed_freqs_cis_.empty()) { // RoPE freqs are always precomputed on CPU
+      size_t total_freq_elements = precomputed_freqs_cis_.size() * 2;
+      gpuErrchk(cudaMalloc(&all_freqs_cis_dev, total_freq_elements * sizeof(float)));
+      std::vector<float> flat_host_freqs; flat_host_freqs.reserve(total_freq_elements);
+      for (const auto& p : precomputed_freqs_cis_) { flat_host_freqs.push_back(p.first); flat_host_freqs.push_back(p.second); }
+      gpuErrchk(cudaMemcpy(all_freqs_cis_dev, flat_host_freqs.data(), total_freq_elements * sizeof(float), cudaMemcpyHostToDevice));
+      Logger::info("Copied all precomputed RoPE frequencies to persistent GPU buffer.");
+    } else {
+      Logger::warning("Host precomputed_freqs_cis_ is empty. Skipping GPU RoPE buffer allocation. This WILL cause issues if GPU layers use RoPE.");
+    }
+    Logger::info("Finished processing RoPE frequencies for GPU.");
   } else {
-    Logger::warning("Host precomputed_freqs_cis_ is empty. Skipping GPU RoPE buffer allocation. This WILL cause issues if GPU layers use RoPE.");
+    Logger::info("No GPU layers active, skipping RoPE GPU buffer allocation.");
   }
-  Logger::info("Finished processing RoPE frequencies for GPU.");
 
-  // Workspace GPU Buffers
-  Logger::info("Allocating/Reallocating persistent GPU workspace buffers.");
-  size_t hs_bytes = (size_t)hs * sizeof(float);
-  size_t is_bytes = (size_t)is * sizeof(float);
-  size_t vs_bytes = (size_t)vs * sizeof(float);
-  size_t k_dev_size_bytes = (size_t)n_kv_heads * head_dim * sizeof(float);
-  size_t v_dev_size_bytes = (size_t)n_kv_heads * head_dim * sizeof(float);
+  // Workspace GPU Buffers - Only allocate if GPU layers are active
+  if (active_num_gpu_layers > 0) {
+    Logger::info("Allocating/Reallocating persistent GPU workspace buffers for " + std::to_string(active_num_gpu_layers) + " GPU layers.");
+    size_t hs_bytes = (size_t)hs * sizeof(float);
+    size_t is_bytes = (size_t)is * sizeof(float);
+    size_t vs_bytes = (size_t)vs * sizeof(float);
+    size_t k_dev_size_bytes = (size_t)n_kv_heads * head_dim * sizeof(float);
+    size_t v_dev_size_bytes = (size_t)n_kv_heads * head_dim * sizeof(float);
 
 #define REALLOC_GPU_WORKSPACE(ptr, sz) SAFE_CUDA_FREE(ptr); gpuErrchk(cudaMalloc(&ptr, sz));
-  REALLOC_GPU_WORKSPACE(x_dev_, hs_bytes);
-  REALLOC_GPU_WORKSPACE(x_norm_dev_, hs_bytes);
-  REALLOC_GPU_WORKSPACE(x_resid1_dev_, hs_bytes);
-  REALLOC_GPU_WORKSPACE(x_resid2_dev_, hs_bytes);
-  REALLOC_GPU_WORKSPACE(q_dev_, hs_bytes); // q_dev for Q projection output is full hidden size
-  REALLOC_GPU_WORKSPACE(k_dev_, k_dev_size_bytes); // k_dev for K projection output
-  REALLOC_GPU_WORKSPACE(v_dev_, v_dev_size_bytes); // v_dev for V projection output
-  REALLOC_GPU_WORKSPACE(attn_out_dev_, hs_bytes);
-  REALLOC_GPU_WORKSPACE(attn_proj_dev_, hs_bytes); 
-  REALLOC_GPU_WORKSPACE(gate_vec_dev_, is_bytes);
-  REALLOC_GPU_WORKSPACE(up_vec_dev_, is_bytes);
-  REALLOC_GPU_WORKSPACE(swiglu_vec_dev_, is_bytes);
-  REALLOC_GPU_WORKSPACE(mlp_down_dev_, hs_bytes); 
-  REALLOC_GPU_WORKSPACE(logits_dev_, vs_bytes); // For final logits calculation on GPU
+    REALLOC_GPU_WORKSPACE(x_dev_, hs_bytes);
+    REALLOC_GPU_WORKSPACE(x_norm_dev_, hs_bytes);
+    REALLOC_GPU_WORKSPACE(x_resid1_dev_, hs_bytes);
+    REALLOC_GPU_WORKSPACE(x_resid2_dev_, hs_bytes);
+    REALLOC_GPU_WORKSPACE(q_dev_, hs_bytes); // q_dev for Q projection output is full hidden size
+    REALLOC_GPU_WORKSPACE(k_dev_, k_dev_size_bytes); // k_dev for K projection output
+    REALLOC_GPU_WORKSPACE(v_dev_, v_dev_size_bytes); // v_dev for V projection output
+    REALLOC_GPU_WORKSPACE(attn_out_dev_, hs_bytes);
+    REALLOC_GPU_WORKSPACE(attn_proj_dev_, hs_bytes); 
+    REALLOC_GPU_WORKSPACE(gate_vec_dev_, is_bytes);
+    REALLOC_GPU_WORKSPACE(up_vec_dev_, is_bytes);
+    REALLOC_GPU_WORKSPACE(swiglu_vec_dev_, is_bytes);
+    REALLOC_GPU_WORKSPACE(mlp_down_dev_, hs_bytes); 
+    REALLOC_GPU_WORKSPACE(logits_dev_, vs_bytes); // For final logits calculation on GPU
+    Logger::info("Finished allocating/reallocating GPU workspace buffers.");
+  } else {
+    Logger::info("No GPU layers active, skipping GPU workspace buffer allocation.");
+    // Ensure all GPU workspace buffers are freed/null for CPU-only mode
+    SAFE_CUDA_FREE(x_dev_); SAFE_CUDA_FREE(x_norm_dev_); SAFE_CUDA_FREE(x_resid1_dev_); SAFE_CUDA_FREE(x_resid2_dev_);
+    SAFE_CUDA_FREE(q_dev_); SAFE_CUDA_FREE(k_dev_); SAFE_CUDA_FREE(v_dev_); SAFE_CUDA_FREE(attn_out_dev_); SAFE_CUDA_FREE(attn_proj_dev_);
+    SAFE_CUDA_FREE(gate_vec_dev_); SAFE_CUDA_FREE(up_vec_dev_); SAFE_CUDA_FREE(swiglu_vec_dev_); SAFE_CUDA_FREE(mlp_down_dev_); SAFE_CUDA_FREE(logits_dev_);
+  }
 
   // Allocate KVCache dequantization buffers if GPU layers are active
   if (active_num_gpu_layers > 0) {
@@ -984,7 +997,6 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
   }
 
 // #undef REALLOC_GPU_WORKSPACE // Not needed if we expanded it or it was already defined
-  Logger::info("Finished allocating/reallocating GPU workspace buffers.");
 
   // Concatenated BF16 layer weights for GPU layers (w_..._dev_ pointers)
   // Check if the first active GPU layer has BF16 q_proj weights to decide if this path should be taken.
@@ -1466,32 +1478,48 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& config_from_session,
 
 TinyLlamaModel::~TinyLlamaModel() {
 #ifdef HAS_CUDA
-  Logger::info("Freeing TinyLlamaModel CUDA resources...");
-  if (cublas_handle_) {
-    cublasStatus_t cublas_status = cublasDestroy(cublas_handle_);
-    if (cublas_status != CUBLAS_STATUS_SUCCESS) {
-      Logger::error("cuBLAS handle destruction failed with error code: " +
-                    std::to_string(cublas_status));
+  // Only perform GPU cleanup if GPU layers were actually used
+  int active_num_gpu_layers = config_.num_hidden_layers - config_.num_cpu_offload_layers;
+  if (active_num_gpu_layers > 0) {
+    Logger::info("Freeing TinyLlamaModel CUDA resources...");
+    if (cublas_handle_) {
+      cublasStatus_t cublas_status = cublasDestroy(cublas_handle_);
+      if (cublas_status != CUBLAS_STATUS_SUCCESS) {
+        Logger::error("cuBLAS handle destruction failed with error code: " +
+                      std::to_string(cublas_status));
+      }
+      cublas_handle_ = nullptr;
+      Logger::info("cuBLAS handle destroyed.");
     }
-    cublas_handle_ = nullptr;
-    Logger::info("cuBLAS handle destroyed.");
+  } else {
+    // CPU-only mode: just clean up cuBLAS handle if it exists
+    if (cublas_handle_) {
+      cublasStatus_t cublas_status = cublasDestroy(cublas_handle_);
+      if (cublas_status != CUBLAS_STATUS_SUCCESS) {
+        Logger::error("cuBLAS handle destruction failed with error code: " +
+                      std::to_string(cublas_status));
+      }
+      cublas_handle_ = nullptr;
+    }
   }
 
-  if (final_norm_dev) {
-    gpuErrchk(cudaFree(final_norm_dev));
-    final_norm_dev = nullptr;
-  }
+  // Continue GPU cleanup only if GPU layers were active
+  if (active_num_gpu_layers > 0) {
+    if (final_norm_dev) {
+      gpuErrchk(cudaFree(final_norm_dev));
+      final_norm_dev = nullptr;
+    }
 
-  for (auto& layer : layers) {
-    if (layer.input_layernorm_dev) {
-      gpuErrchk(cudaFree(layer.input_layernorm_dev));
-      layer.input_layernorm_dev = nullptr;
+    for (auto& layer : layers) {
+      if (layer.input_layernorm_dev) {
+        gpuErrchk(cudaFree(layer.input_layernorm_dev));
+        layer.input_layernorm_dev = nullptr;
+      }
+      if (layer.post_attention_layernorm_dev) {
+        gpuErrchk(cudaFree(layer.post_attention_layernorm_dev));
+        layer.post_attention_layernorm_dev = nullptr;
+      }
     }
-    if (layer.post_attention_layernorm_dev) {
-      gpuErrchk(cudaFree(layer.post_attention_layernorm_dev));
-      layer.post_attention_layernorm_dev = nullptr;
-    }
-  }
 
   if (all_freqs_cis_dev) {
     gpuErrchk(cudaFree(all_freqs_cis_dev));
@@ -1635,9 +1663,12 @@ TinyLlamaModel::~TinyLlamaModel() {
     gpuErrchk(cudaFree(dequant_v_cache_buffer_dev_));
     dequant_v_cache_buffer_dev_ = nullptr;
   }
-  Logger::info("Freed persistent GPU workspace buffers.");
 
-  Logger::info("Finished freeing TinyLlamaModel CUDA weight memory.");
+    Logger::info("Freed persistent GPU workspace buffers.");
+    Logger::info("Finished freeing TinyLlamaModel CUDA weight memory.");
+  } else {
+    Logger::info("CPU-only mode: No GPU resources to free.");
+  }
 #endif
 }
 
