@@ -1,0 +1,235 @@
+name: Build Wheels
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build_wheels:
+    name: Build wheels on ${{ matrix.os }} ${{ matrix.cuda_version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # CPU-only builds
+          - os: ubuntu-latest
+            cuda_version: "cpu"
+            cuda_toolkit: ""
+            wheel_suffix: ""
+          - os: windows-latest
+            cuda_version: "cpu"
+            cuda_toolkit: ""
+            wheel_suffix: ""
+          - os: macos-latest
+            cuda_version: "cpu"
+            cuda_toolkit: ""
+            wheel_suffix: ""
+          
+          # GPU builds (Linux only for now - most common for GPU workloads)
+          - os: ubuntu-latest
+            cuda_version: "11.8"
+            cuda_toolkit: "cuda-toolkit-11-8"
+            wheel_suffix: "+cu118"
+          - os: ubuntu-latest
+            cuda_version: "12.1"
+            cuda_toolkit: "cuda-toolkit-12-1"
+            wheel_suffix: "+cu121"
+          - os: ubuntu-latest
+            cuda_version: "12.4"
+            cuda_toolkit: "cuda-toolkit-12-4"
+            wheel_suffix: "+cu124"
+          
+          # Windows GPU builds
+          - os: windows-latest
+            cuda_version: "11.8"
+            cuda_toolkit: "11.8.0"
+            wheel_suffix: "+cu118"
+          - os: windows-latest
+            cuda_version: "12.1"
+            cuda_toolkit: "12.1.1"
+            wheel_suffix: "+cu121"
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install build wheel cibuildwheel
+
+    # Linux CUDA setup
+    - name: Install CUDA Toolkit (Linux)
+      if: matrix.os == 'ubuntu-latest' && matrix.cuda_version != 'cpu'
+      run: |
+        wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.0-1_all.deb
+        sudo dpkg -i cuda-keyring_1.0-1_all.deb
+        sudo apt-get update
+        sudo apt-get -y install ${{ matrix.cuda_toolkit }} cuda-nvcc-${{ matrix.cuda_version }}
+        echo "/usr/local/cuda-${{ matrix.cuda_version }}/bin" >> $GITHUB_PATH
+        echo "CUDA_HOME=/usr/local/cuda-${{ matrix.cuda_version }}" >> $GITHUB_ENV
+        echo "LD_LIBRARY_PATH=/usr/local/cuda-${{ matrix.cuda_version }}/lib64:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+
+    # Windows CUDA setup
+    - name: Install CUDA Toolkit (Windows)
+      if: matrix.os == 'windows-latest' && matrix.cuda_version != 'cpu'
+      uses: Jimver/cuda-toolkit@v0.2.11
+      with:
+        cuda: ${{ matrix.cuda_toolkit }}
+        method: 'network'
+        sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "curand", "curand_dev"]'
+
+    # Set build environment variables
+    - name: Set build environment
+      shell: bash
+      run: |
+        if [ "${{ matrix.cuda_version }}" != "cpu" ]; then
+          echo "TINYLLAMA_CPP_BUILD_CUDA=1" >> $GITHUB_ENV
+          echo "CMAKE_CUDA_ARCHITECTURES=75;80;86;89;90" >> $GITHUB_ENV
+        else
+          echo "TINYLLAMA_CPP_BUILD_CUDA=0" >> $GITHUB_ENV
+        fi
+
+    # Modify version for CUDA builds
+    - name: Modify package version for CUDA builds
+      if: matrix.cuda_version != 'cpu'
+      shell: bash
+      run: |
+        # Create a modified pyproject.toml with CUDA suffix
+        python -c "
+        import re
+        with open('pyproject.toml', 'r') as f:
+            content = f.read()
+        
+        # Add CUDA suffix to package name
+        content = re.sub(
+            r'name = \"tinyllama-cpp\"',
+            f'name = \"tinyllama-cpp${{ matrix.wheel_suffix }}\"',
+            content
+        )
+        
+        with open('pyproject.toml', 'w') as f:
+            f.write(content)
+        "
+
+    # Install build dependencies
+    - name: Install build dependencies (Linux)
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential cmake ninja-build libboost-all-dev
+
+    - name: Install build dependencies (macOS)
+      if: matrix.os == 'macos-latest'
+      run: |
+        brew install cmake ninja boost llvm
+
+    - name: Install build dependencies (Windows)
+      if: matrix.os == 'windows-latest'
+      run: |
+        choco install cmake ninja
+        # Note: Boost will be handled by vcpkg in CMake
+
+    # Build wheels using cibuildwheel
+    - name: Build wheels
+      uses: pypa/cibuildwheel@v2.16.2
+      env:
+        CIBW_BUILD: cp38-* cp39-* cp310-* cp311-* cp312-*
+        CIBW_SKIP: "*-win32 *-manylinux_i686 *-musllinux*"
+        CIBW_ARCHS_LINUX: x86_64
+        CIBW_ARCHS_WINDOWS: AMD64
+        CIBW_ARCHS_MACOS: x86_64 arm64
+        
+        # Environment variables for the build
+        CIBW_ENVIRONMENT_LINUX: >
+          TINYLLAMA_CPP_BUILD_CUDA=${{ env.TINYLLAMA_CPP_BUILD_CUDA }}
+          CMAKE_CUDA_ARCHITECTURES=${{ env.CMAKE_CUDA_ARCHITECTURES }}
+          CUDA_HOME=${{ env.CUDA_HOME }}
+          PATH=${{ env.CUDA_HOME }}/bin:$PATH
+          LD_LIBRARY_PATH=${{ env.CUDA_HOME }}/lib64:$LD_LIBRARY_PATH
+        
+        CIBW_ENVIRONMENT_WINDOWS: >
+          TINYLLAMA_CPP_BUILD_CUDA=${{ env.TINYLLAMA_CPP_BUILD_CUDA }}
+          CMAKE_CUDA_ARCHITECTURES=${{ env.CMAKE_CUDA_ARCHITECTURES }}
+        
+        CIBW_ENVIRONMENT_MACOS: >
+          TINYLLAMA_CPP_BUILD_CUDA=0
+        
+        # Install dependencies in the build environment
+        CIBW_BEFORE_BUILD_LINUX: >
+          yum install -y boost-devel ||
+          apt-get update && apt-get install -y libboost-all-dev ||
+          apk add boost-dev
+        
+        CIBW_BEFORE_BUILD_WINDOWS: >
+          pip install cmake ninja
+        
+        CIBW_BEFORE_BUILD_MACOS: >
+          brew install boost || true
+        
+        # Test the built wheels
+        CIBW_TEST_COMMAND: python -c "import tinyllama_cpp; print('Import successful')"
+        CIBW_TEST_SKIP: "*-macosx_arm64"  # Skip ARM64 tests on x86_64 runners
+
+    # Upload artifacts
+    - name: Upload wheels
+      uses: actions/upload-artifact@v3
+      with:
+        name: wheels-${{ matrix.os }}-${{ matrix.cuda_version }}
+        path: ./wheelhouse/*.whl
+
+  # Combine all wheels into a single artifact
+  collect_wheels:
+    name: Collect all wheels
+    needs: build_wheels
+    runs-on: ubuntu-latest
+    steps:
+    - name: Download all wheel artifacts
+      uses: actions/download-artifact@v3
+      with:
+        path: all-wheels
+
+    - name: Flatten wheel directory
+      run: |
+        mkdir -p dist
+        find all-wheels -name "*.whl" -exec cp {} dist/ \;
+        ls -la dist/
+
+    - name: Upload combined wheels
+      uses: actions/upload-artifact@v3
+      with:
+        name: all-wheels
+        path: dist/*.whl
+
+  # Publish to PyPI on tags
+  publish:
+    name: Publish to PyPI
+    needs: collect_wheels
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      id-token: write  # For trusted publishing
+    
+    steps:
+    - name: Download wheels
+      uses: actions/download-artifact@v3
+      with:
+        name: all-wheels
+        path: dist
+
+    - name: Publish to PyPI
+      uses: pypa/gh-action-pypi-publish@release/v1
+      with:
+        packages-dir: dist/
+        verbose: true 
