@@ -534,40 +534,52 @@ GGUFData load_gguf_meta(const std::string& filename, bool use_mmap) {
   Logger::info("[GGUF_LOAD] Metadata ifstream closed.");
 
   if (!use_mmap) {
-    Logger::info("[GGUF_LOAD] mmap is disabled by configuration. Loading tensor data into memory using standard file I/O.");
+    Logger::info("[GGUF_LOAD] mmap is disabled by configuration. Loading tensor data into memory using OPTIMIZED bulk I/O.");
     
-    // Calculate total tensor data size
     uint64_t total_tensor_data_size = 0;
     for (const auto& tensor_info : result.tensor_infos) {
       total_tensor_data_size = std::max(total_tensor_data_size, tensor_info.offset + tensor_info.size_in_bytes);
     }
     
     if (total_tensor_data_size > 0) {
-      // Allocate memory for tensor data
       result.tensor_data.resize(total_tensor_data_size);
       
-      // Open file for reading tensor data
       std::ifstream tensor_file(filename, std::ios::binary);
       if (!tensor_file.is_open()) {
         throw std::runtime_error("Failed to open file for tensor data reading: " + filename);
       }
       
-      // Seek to tensor data start
       tensor_file.seekg(actual_data_start_offset_in_file);
       if (!tensor_file) {
         throw std::runtime_error("Failed to seek to tensor data start in file: " + filename);
       }
       
-      // Read all tensor data into memory
-      tensor_file.read(reinterpret_cast<char*>(result.tensor_data.data()), total_tensor_data_size);
-      if (!tensor_file) {
-        throw std::runtime_error("Failed to read tensor data from file: " + filename);
+      // OPTIMIZATION: Use larger buffer for bulk reading to reduce I/O overhead
+      constexpr size_t BULK_READ_BUFFER_SIZE = 64 * 1024 * 1024; // 64MB chunks
+      size_t bytes_remaining = total_tensor_data_size;
+      size_t bytes_read_total = 0;
+      
+      Logger::info("[GGUF_LOAD] Reading " + std::to_string(total_tensor_data_size) + " bytes in optimized " + std::to_string(BULK_READ_BUFFER_SIZE / (1024*1024)) + "MB chunks...");
+      
+      while (bytes_remaining > 0) {
+        size_t chunk_size = std::min(bytes_remaining, BULK_READ_BUFFER_SIZE);
+        
+        tensor_file.read(reinterpret_cast<char*>(result.tensor_data.data() + bytes_read_total), chunk_size);
+        if (!tensor_file) {
+          throw std::runtime_error("Failed to read tensor data chunk at offset " + std::to_string(bytes_read_total) + " from file: " + filename);
+        }
+        
+        bytes_read_total += chunk_size;
+        bytes_remaining -= chunk_size;
+        
+        if (bytes_read_total % (256 * 1024 * 1024) == 0) { // Log every 256MB
+          Logger::info("[GGUF_LOAD] Progress: " + std::to_string(bytes_read_total / (1024*1024)) + "MB / " + std::to_string(total_tensor_data_size / (1024*1024)) + "MB loaded");
+        }
       }
       
       tensor_file.close();
-      Logger::info("[GGUF_LOAD] Successfully loaded " + std::to_string(total_tensor_data_size) + " bytes of tensor data into memory.");
+      Logger::info("[GGUF_LOAD] Successfully loaded " + std::to_string(total_tensor_data_size) + " bytes of tensor data using optimized bulk I/O.");
       
-      // Log first few bytes for debugging
       if (total_tensor_data_size >= 16) {
         std::stringstream ss_bytes;
         ss_bytes << "[GGUF_LOAD] First 16 bytes of tensor data: ";

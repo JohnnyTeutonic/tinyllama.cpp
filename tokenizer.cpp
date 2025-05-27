@@ -419,6 +419,100 @@ Tokenizer::Tokenizer(const std::string& vocab_path,
   }
 }
 
+static std::unordered_map<std::string, int> generate_bpe_merges_from_vocab_scores(
+    const std::vector<std::string>& id_to_token,
+    const std::vector<float>& token_scores) {
+    
+    std::unordered_map<std::string, int> generated_merges;
+    
+    if (token_scores.empty() || id_to_token.empty()) {
+        Logger::warning("Cannot generate BPE merges: empty scores or vocabulary");
+        return generated_merges;
+    }
+    
+    Logger::info("Generating BPE merges from vocabulary and scores for older Llama models...");
+    
+    // Create a list of tokens with their scores, sorted by score (higher score = higher priority)
+    std::vector<std::pair<float, std::string>> scored_tokens;
+    for (size_t id = 0; id < id_to_token.size(); ++id) {
+        if (id < token_scores.size()) {
+            const std::string& token = id_to_token[id];
+            // Skip special tokens and single characters
+            if (token.length() > 1 && 
+                token.find("<") == std::string::npos && 
+                token.find(">") == std::string::npos &&
+                token != "▁") {  // Skip SentencePiece space token
+                scored_tokens.emplace_back(token_scores[id], token);
+            }
+        }
+    }
+    
+    // Sort by score (descending - higher scores first)
+    std::sort(scored_tokens.begin(), scored_tokens.end(), 
+              [](const auto& a, const auto& b) { return a.first > b.first; });
+    
+    Logger::info("Found " + std::to_string(scored_tokens.size()) + " candidate tokens for merge generation");
+    
+    // Generate merges by finding tokens that can be decomposed into pairs
+    int merge_rank = 0;
+    std::unordered_set<std::string> processed_tokens;
+    
+    for (const auto& [score, token] : scored_tokens) {
+        if (processed_tokens.count(token)) continue;
+        
+        // Try to find the best split point for this token
+        std::string best_left, best_right;
+        float best_combined_score = -std::numeric_limits<float>::infinity();
+        
+        // Try all possible split points
+        for (size_t split = 1; split < token.length(); ++split) {
+            std::string left = token.substr(0, split);
+            std::string right = token.substr(split);
+            
+            // Check if both parts exist in vocabulary
+            auto left_it = std::find(id_to_token.begin(), id_to_token.end(), left);
+            auto right_it = std::find(id_to_token.begin(), id_to_token.end(), right);
+            
+            if (left_it != id_to_token.end() && right_it != id_to_token.end()) {
+                // Both parts exist, calculate combined score
+                size_t left_id = std::distance(id_to_token.begin(), left_it);
+                size_t right_id = std::distance(id_to_token.begin(), right_it);
+                float left_score = (left_id < token_scores.size()) ? 
+                                 token_scores[left_id] : 0.0f;
+                float right_score = (right_id < token_scores.size()) ? 
+                                  token_scores[right_id] : 0.0f;
+                float combined_score = left_score + right_score;
+                
+                if (combined_score > best_combined_score) {
+                    best_combined_score = combined_score;
+                    best_left = left;
+                    best_right = right;
+                }
+            }
+        }
+        
+        // If we found a valid decomposition, add it as a merge rule
+        if (!best_left.empty() && !best_right.empty()) {
+            std::string merge_key = best_left + best_right;
+            if (generated_merges.find(merge_key) == generated_merges.end()) {
+                generated_merges[merge_key] = merge_rank++;
+                Logger::debug("Generated merge: '" + best_left + "' + '" + best_right + "' -> '" + token + "' (rank " + std::to_string(merge_rank-1) + ")");
+            }
+        }
+        
+        processed_tokens.insert(token);
+        
+        // Limit the number of merges to prevent excessive computation
+        if (merge_rank >= 50000) {
+            Logger::info("Reached maximum merge limit (50000), stopping generation");
+            break;
+        }
+    }
+    
+    Logger::info("Generated " + std::to_string(generated_merges.size()) + " BPE merge rules from vocabulary and scores");
+    return generated_merges;
+}
+
 Tokenizer::Tokenizer(const GGUFData& gguf_data, const ModelConfig& config)
     : tokenizer_family_(config.tokenizer_family),
       initialized_from_gguf_(true) {
@@ -608,7 +702,16 @@ Tokenizer::Tokenizer(const GGUFData& gguf_data, const ModelConfig& config)
         Logger::info("Processed " + std::to_string(bpe_merges_.size()) +
                      " merges from GGUF tokenizer_merges into bpe_merges_ map (SentencePiece path).");
     } else {
-        Logger::warning("SentencePiece family path: No 'tokenizer.ggml.merges' found in GGUF. The _sentencepiece_tokenize path might rely solely on character-level BPE if merges aren't handled differently.");
+        Logger::warning("SentencePiece family path: No 'tokenizer.ggml.merges' found in GGUF. Attempting to generate merges from vocabulary and scores...");
+        
+        // Generate BPE merges from vocabulary and scores (llama.cpp approach)
+        auto generated_merges = generate_bpe_merges_from_vocab_scores(id_to_token_, token_scores_);
+        if (!generated_merges.empty()) {
+            bpe_merges_ = std::move(generated_merges);
+            Logger::info("Successfully generated " + std::to_string(bpe_merges_.size()) + " BPE merges from vocabulary and scores for SentencePiece tokenizer");
+        } else {
+            Logger::warning("Failed to generate BPE merges. Tokenization may be suboptimal for this model.");
+        }
     }
     
 
@@ -2329,3 +2432,5 @@ void Tokenizer::add_bigram_to_queue_refactored(const char* text_data_base,
                      "' right='" + token_right_str + "'");
     }
 }
+
+

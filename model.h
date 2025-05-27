@@ -94,6 +94,9 @@ struct ModelConfig {
     bool use_mmap_for_gguf = true; // Whether to use mmap for GGUF files, defaults to true
     bool use_kvcache_quantization = false; /**< Whether to use INT8 quantization for KVCache on GPU */
     int num_cpu_offload_layers = 0; /**< Number of layers to offload to CPU */
+    
+    // Memory management: Enable layer-wise weight eviction to prevent OOM
+    bool enable_memory_efficient_layers = true; /**< Enable automatic layer weight eviction during forward pass */
 
     enum class TokenizerFamily {
         UNKNOWN,
@@ -343,8 +346,16 @@ class TinyLlamaModel {
 
 
 void ensure_layer_weights_dequantized(int layer_idx);
+void ensure_q_proj_dequantized(int layer_idx);
+void ensure_k_proj_dequantized(int layer_idx);
+void ensure_v_proj_dequantized(int layer_idx);
+void ensure_o_proj_dequantized(int layer_idx);
+void ensure_gate_proj_dequantized(int layer_idx);
+void ensure_up_proj_dequantized(int layer_idx);
+void ensure_down_proj_dequantized(int layer_idx);
 void ensure_lm_head_dequantized();
 void ensure_embed_tokens_dequantized();
+void ensure_f32_concatenated_weights_loaded();
 #ifdef HAS_CUDA
   /**
    * @brief Performs forward pass on GPU for the layers designated to run on GPU.
@@ -385,12 +396,6 @@ void ensure_embed_tokens_dequantized();
       cudaStream_t stream
   );
 
-  void initialize_gpu_and_rope();
-  
-
-  // Processes a batch of activations through a specified number of CPU layers.
-  // Updates the KVCache for these layers.
-  // Returns the batch of activations after processing by the last CPU layer.
   std::vector<float> forward_cpu_batch(
       const std::vector<float>& batch_input_activations, // Batched: [num_tokens, hidden_size]
       int num_tokens_in_batch,
@@ -411,6 +416,11 @@ void ensure_embed_tokens_dequantized();
       int num_tokens_in_batch,
       KVCache* kv_cache
   );
+
+  // Memory management for layer-wise weight eviction
+  void clear_layer_dequantized_weights(int layer_idx);
+
+  void initialize_gpu_and_rope();
 
 #endif // HAS_CUDA
 
@@ -505,6 +515,7 @@ void ensure_embed_tokens_dequantized();
 
   std::unique_ptr<GGUFData> gguf_data_;
   std::string model_path_;
+  bool f32_concatenated_weights_loaded_ = false;
 
   void initialize_weights(const SafeTensorsLoader* loader,
                           const GGUFData* gguf);
