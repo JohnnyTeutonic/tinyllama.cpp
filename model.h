@@ -295,6 +295,15 @@ struct LayerWeights {
 
   float* input_layernorm_dev = nullptr;
   float* post_attention_layernorm_dev = nullptr;
+  
+  // Individual layer device pointers for JIT weight loading
+  float* q_proj_f32_dev = nullptr;
+  float* k_proj_f32_dev = nullptr;
+  float* v_proj_f32_dev = nullptr;
+  float* o_proj_f32_dev = nullptr;
+  float* gate_proj_f32_dev = nullptr;
+  float* up_proj_f32_dev = nullptr;
+  float* down_proj_f32_dev = nullptr;
 #endif
 };
 
@@ -356,6 +365,8 @@ void ensure_down_proj_dequantized(int layer_idx);
 void ensure_lm_head_dequantized();
 void ensure_embed_tokens_dequantized();
 void ensure_f32_concatenated_weights_loaded();
+void ensure_layer_weights_on_gpu(int layer_idx);
+void free_layer_gpu_weights(int layer_idx);
 #ifdef HAS_CUDA
   /**
    * @brief Performs forward pass on GPU for the layers designated to run on GPU.
@@ -507,8 +518,15 @@ void ensure_f32_concatenated_weights_loaded();
   float* logits_dev_ = nullptr;
 
   // Temporary buffers for KVCache dequantization
-  float* dequant_k_cache_buffer_dev_ = nullptr; // Holds full K cache dequantized from INT8 to FP32
-  float* dequant_v_cache_buffer_dev_ = nullptr; // Holds full V cache dequantized from INT8 to FP32
+  float* dequant_k_cache_buffer_dev_ = nullptr;  // For KVCache dequantization (full cache size)
+  float* dequant_v_cache_buffer_dev_ = nullptr;  // For KVCache dequantization (full cache size)
+  
+  // Selective KVCache dequantization buffers (much smaller - only per head per token)
+  float* selective_k_dequant_buffer_dev_ = nullptr;  // Small buffer for selective K dequantization
+  float* selective_v_dequant_buffer_dev_ = nullptr;  // Small buffer for selective V dequantization
+  size_t selective_dequant_buffer_size_ = 0;         // Size of selective buffers in elements
+
+  // GPU workspace buffers
 #endif
 
   std::vector<std::pair<float, float>> precomputed_freqs_cis_;
