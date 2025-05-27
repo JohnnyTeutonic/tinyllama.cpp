@@ -4,6 +4,8 @@ This codebase supports inference for Llama 2/3 architecture models using both GG
 
 The GGUF format support includes loading models with various tensor types such as BF16, FP16, FP32, and the quantised types: Q4_K_M, Q6_K, Q8_0, and Q8_K.
 
+**Note for Older Llama Models (Llama 2/TinyLlama):** Some older GGUF files may not contain explicit BPE merge rules. The system automatically handles this by generating merge rules from vocabulary and token scores (similar to llama.cpp's approach), ensuring proper tokenization without requiring external files.
+
 ## Features
 
 *   Pure C++ inference core (CPU-based).
@@ -52,11 +54,12 @@ To run the model, you need both the model weights and tokenizer information. The
     *   `model.safetensors`: The file containing the model weights.
     *   *Data Types:* The loader supports `F32`, `BF16`, and `F16` weight types from SafeTensors. `BF16` and `F16` are automatically converted to `F32` upon loading. Internal computation then proceeds in `F32`.
 
-*   **GGUF (GPT-Generated Unified Format):** This format aims to package the model into a single file (`.gguf`).
+*   **GGUF (GPT-Generated Unified Format):** This format packages the model into a single self-contained file (`.gguf`).
     *   **Tokenizer Requirements:**
-        *   **Llama 3+ models:** Tokenizer is embedded in the GGUF file. You can set `tokenizer_path` to the same path as the model file, or omit it entirely in Python bindings.
-        *   **Llama 2 models:** Require a separate `tokenizer.json` file even when using GGUF format.
-        *   **Other models:** May require a separate tokenizer depending on how the GGUF file was created.
+        *   **All GGUF models:** Tokenizer is embedded in the GGUF file. No external tokenizer files are required.
+        *   **Llama 2/TinyLlama models:** Older GGUF files may lack explicit BPE merge rules, but the system automatically generates them from embedded vocabulary and scores.
+        *   **Llama 3+ models:** Full tokenizer with merge rules is typically embedded.
+        *   You can set `tokenizer_path` to the same path as the model file, or omit it entirely in Python bindings.
     *   *Quantizations:* Supports various tensor types including `FP32`, `FP16`, `BF16`, and common quantized types like `Q4_K_M`, `Q6_K`, `Q8_0`, `Q8_K`, etc., as supported by the underlying GGUF parsing library.
 
 #### Example Model Sources:
@@ -119,9 +122,9 @@ This process will create executables in the `build/` directory (or a subdirector
 **Key Command-Line Arguments for `tinyllama`:**
 
 *   `<model_path>`: Path to model file (.gguf) or directory (SafeTensors).
-*   `<tokenizer_path>`: Path to `tokenizer.json` or `.model` file. 
-    *   **Required for:** SafeTensors format and Llama 2 GGUF models
-    *   **Optional for:** Llama 3+ GGUF models (can use same path as model_path)
+*   `<tokenizer_path>`: Path to tokenizer file. 
+    *   **Required for:** SafeTensors format (must point to `tokenizer.json`)
+    *   **For GGUF models:** Use the same path as model_path (tokenizer is embedded)
 *   `<num_threads>`: Number of CPU threads for generation.
 *   `<prompt|chat>`: `prompt` for single generation, `chat` for interactive mode.
 *   `--system-prompt "<text>"` (Optional): System-level instruction.
@@ -141,11 +144,8 @@ This process will create executables in the `build/` directory (or a subdirector
 **Example Invocation:**
 
 ```bash
-# For Llama 3+ GGUF models (tokenizer embedded)
-./build/tinyllama ./models/Llama-3-8B.Q4_K_M.gguf ./models/Llama-3-8B.Q4_K_M.gguf 4 chat --system-prompt "You are a helpful AI." --n-gpu-layers -1 --use-kv-quant true --temperature 0.7 --top-k 50 --top-p 0.95 "Tell me a joke."
-
-# For Llama 2 GGUF models (separate tokenizer required)
-./build/tinyllama ./models/Llama-2-7B.Q4_K_M.gguf ./models/tokenizer.json 4 chat --system-prompt "You are a helpful AI." --n-gpu-layers -1 --use-kv-quant true --temperature 0.7 --top-k 50 --top-p 0.95 "Tell me a joke."
+# For GGUF models (tokenizer embedded in file)
+./build/tinyllama ./models/model.Q4_K_M.gguf ./models/model.Q4_K_M.gguf 4 chat --system-prompt "You are a helpful AI." --n-gpu-layers -1 --use-kv-quant true --temperature 0.7 --top-k 50 --top-p 0.95 "Tell me a joke."
 
 # For SafeTensors format (separate tokenizer required)
 ./build/tinyllama ./models/safetensors_directory ./models/tokenizer.json 4 chat --system-prompt "You are a helpful AI." --n-gpu-layers -1 --use-kv-quant true --temperature 0.7 --top-k 50 --top-p 0.95 "Tell me a joke."
@@ -217,18 +217,10 @@ session = tinyllama_cpp.TinyLlamaSession(
     n_gpu_layers=-1  # Use GPU if available
 )
 
-# For Llama 3+ GGUF models (tokenizer embedded, can use same path)
+# For GGUF models (tokenizer embedded, use same path for both)
 session = tinyllama_cpp.TinyLlamaSession(
-    model_path="path/to/llama3-model.gguf",
-    tokenizer_path="path/to/llama3-model.gguf",  # Same as model_path
-    threads=4,
-    n_gpu_layers=-1
-)
-
-# For Llama 2 GGUF models (separate tokenizer required)
-session = tinyllama_cpp.TinyLlamaSession(
-    model_path="path/to/llama2-model.gguf",
-    tokenizer_path="path/to/tokenizer.json",  # Separate tokenizer file
+    model_path="path/to/model.gguf",
+    tokenizer_path="path/to/model.gguf",  # Same as model_path
     threads=4,
     n_gpu_layers=-1
 )
@@ -353,12 +345,15 @@ Please refer to the `pytorch/README.md` for detailed usage instructions for this
 *   **`model.cpp`/`model.h`**: Core Transformer architecture (attention, feed-forward, RoPE, etc.) with SIMD optimizations.
 *   **`model_constants.h`**: Architecture constants and configuration parameters.
 *   **`model_macros.h`**: Utility macros for cross-platform compatibility and safe operations.
+*   **`gguf_structs.h`**: Data structures and type definitions for GGUF format parsing.
+*   **`ggml_types.h`**: Type definitions compatible with GGML format specifications.
 
 ### Data Loading & Processing
 *   **`tokenizer.cpp`/`tokenizer.h`**: BPE tokenization, chat template application, and multi-format tokenizer support.
 *   **`safetensors_loader.cpp`/`safetensors_loader.h`**: SafeTensors format parsing and tensor loading.
 *   **`gguf_parser.cpp`/`gguf_parser.h`**: GGUF format parsing with support for various quantizations.
 *   **`quantization.cpp`/`quantization.h`**: Quantization utilities and dequantization routines.
+*   **`utils.cpp`/`utils.h`**: General utility functions for string processing, file operations, and helper routines.
 
 ### GPU Acceleration (Optional)
 *   **`cuda_kernels.cu`/`cuda_kernels.h`**: CUDA kernels for GPU-accelerated inference.
@@ -376,6 +371,11 @@ Please refer to the `pytorch/README.md` for detailed usage instructions for this
     *   `utils.py`: Utility functions for PyTorch implementation.
     *   `requirements.txt`: PyTorch-specific dependencies.
     *   `README.md`: PyTorch implementation documentation.
+
+### Examples & Web Interface
+*   **`examples/`**: Example scripts and usage demonstrations
+*   **`www/`**: Web interface assets for the HTTP server
+*   **`docs/`**: Generated documentation and additional guides
 
 ### Build & Development
 *   **`build/`**: CMake build directory (created during compilation)

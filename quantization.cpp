@@ -1103,8 +1103,6 @@ void dequantize_vector_q6k_to_f32(const std::vector<block_q6_K>& q_weights,
     if (elements_processed != total_num_elements) {
         Logger::warning("[DEQUANT_VEC_Q6K] Processed " + std::to_string(elements_processed) +
                         " elements, but expected " + std::to_string(total_num_elements) + ".");
-    } else {
-        Logger::info("[DEQUANT_VEC_Q6K] Successfully dequantized all blocks. Total elements: " + std::to_string(elements_processed));
     }
 }
 
