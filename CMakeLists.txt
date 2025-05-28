@@ -112,6 +112,7 @@ add_library(tinyllama_core STATIC
     weight_management.cpp
     cpu_attention.cpp
     model_utils.cpp
+    gpu_initialization.cpp
     utils.cpp
     safetensors_loader.cpp 
     tokenizer.cpp 
