@@ -354,7 +354,6 @@ class TinyLlamaModel {
       const std::vector<int>* attention_mask);
 
 
-void ensure_layer_weights_dequantized(int layer_idx);
 void ensure_q_proj_dequantized(int layer_idx);
 void ensure_k_proj_dequantized(int layer_idx);
 void ensure_v_proj_dequantized(int layer_idx);
