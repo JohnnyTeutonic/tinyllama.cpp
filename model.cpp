@@ -160,16 +160,11 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& initial_config,
   Logger::info("TinyLlamaModel constructor entered. Model path (from string): " + model_path);
   int cli_gpu_layer_request = initial_config.num_cpu_offload_layers; 
   bool cli_mmap_preference = initial_config.use_mmap_for_gguf;
-
-
-  this->config_ = initial_config; // Start with initial_config, then overwrite with GGUF specifics
-
+  this->config_ = initial_config;
   if (this->model_path_.empty() && !model_path.empty()) {
       this->model_path_ = model_path;
   }
-
   std::unique_ptr<SafeTensorsLoader> loader = nullptr;
-
   if (!this->model_path_.empty() && this->model_path_.size() > 5 &&
       this->model_path_.substr(this->model_path_.size() - 5) == ".gguf") {
     Logger::info("GGUF file detected by path in Model Constructor: " + this->model_path_);
@@ -183,7 +178,7 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& initial_config,
 
       ModelConfig config_from_gguf = parse_model_config_from_gguf(*(this->gguf_data_));
       this->config_ = config_from_gguf; 
-      this->config_.use_mmap_for_gguf = cli_mmap_preference; // Honor CLI mmap preference for session's use of mmap later
+      this->config_.use_mmap_for_gguf = cli_mmap_preference;
       this->config_.is_gguf_file_loaded = true;
       if (cli_gpu_layer_request < 0) {
         this->config_.num_cpu_offload_layers = 0;
@@ -228,7 +223,6 @@ TinyLlamaModel::TinyLlamaModel(const ModelConfig& initial_config,
         this->config_.is_gguf_file_loaded = false;
     this->config_.use_mmap_for_gguf = cli_mmap_preference; // This field is GGUF specific, but store CLI pref anyway.
 
-    // Calculate num_cpu_offload_layers for SafeTensors based on cli_gpu_layer_request and config's num_hidden_layers
     if (cli_gpu_layer_request < 0) {
         this->config_.num_cpu_offload_layers = 0;
     } else if (cli_gpu_layer_request == 0) {
@@ -358,7 +352,6 @@ TinyLlamaModel::~TinyLlamaModel() {
       cublas_handle_ = nullptr;
     }
   }
-
   // Continue GPU cleanup only if GPU layers were active
   if (active_num_gpu_layers > 0) {
     if (final_norm_dev) {
@@ -536,8 +529,6 @@ TinyLlamaModel::~TinyLlamaModel() {
   }
 #endif
 }
-
-
 std::vector<float> TinyLlamaModel::forward(
     std::vector<float>& input,
                                            int n_tokens, KVCache* kv_cache,
@@ -574,11 +565,9 @@ std::vector<float> TinyLlamaModel::forward(
             ? bf16vec_to_float_vec(lw.input_layernorm)
             : lw.input_layernorm_f32;
     rmsnorm_vector_cpu(input, w_input_norm_vec, x_norm_vec1, eps);
-    
     Logger::info("[CPU_FWD_MEM] Layer " + std::to_string(l) + ": Allocating QKV vectors");
     std::vector<float> q_vec(hs), k_vec(n_kv_heads * head_dim), v_vec(n_kv_heads * head_dim);
-    // Example: Q-projection (adapt for other projections and quantization types)
-    bool enable_debug_logging = (l == 0); // Only log for first layer
+    bool enable_debug_logging = (l == 0);
     Logger::info("[CPU_FWD_MEM] Layer " + std::to_string(l) + ": About to ensure_q_proj_dequantized");
     ensure_q_proj_dequantized(l);
     Logger::info("[CPU_FWD_MEM] Layer " + std::to_string(l) + ": ensure_q_proj_dequantized completed");
@@ -615,8 +604,6 @@ std::vector<float> TinyLlamaModel::forward(
 
     apply_rope_vector(q_vec, n_heads, head_dim, n_tokens, precomputed_freqs_cis_, max_pos_embeddings, config_.is_gguf_file_loaded);
     apply_rope_vector(k_vec, n_kv_heads, head_dim, n_tokens, precomputed_freqs_cis_, max_pos_embeddings, config_.is_gguf_file_loaded);
-
-    // KV Cache update
     if (kv_cache) {
         if (static_cast<size_t>(l) < kv_cache->layers.size()) {
             KVCacheLayer& kv_layer = kv_cache->layers[l];
@@ -746,10 +733,6 @@ std::vector<float> TinyLlamaModel::forward(
       Logger::info("[CPU_FWD] ------ END Layer " + std::to_string(l) +
                    " (pos=" + std::to_string(n_tokens) + ") ------");
     }
-    
-    // Memory-efficient layer eviction: Clear dequantized weights from 2 layers ago
-    // This maintains a small memory footprint while preserving performance
-    // EXCEPTION: Don't clear GPU layers as they're needed for concatenated F32 weight loading
     if (config_.enable_memory_efficient_layers && l >= 2) {
         int layer_to_clear = l - 2;
         int first_gpu_layer = config_.num_cpu_offload_layers;
@@ -826,17 +809,15 @@ std::vector<float> TinyLlamaModel::forward_device(
 
   cublasStatus_t stream_status = cublasSetStream(cublas_handle_, stream);
     gpuErrchk(cudaMemcpyAsync(h_x_input_dev.data(), x_input_dev, config_.hidden_size * sizeof(float), cudaMemcpyDeviceToHost, stream));
-    gpuErrchk(cudaStreamSynchronize(stream)); // Ensure copy is done before logging
+    gpuErrchk(cudaStreamSynchronize(stream));
     
   if (stream_status != CUBLAS_STATUS_SUCCESS) {
     Logger::error("cublasSetStream failed in forward_device");
     return {};
   }
-
-  float* current_x_dev = x_input_dev; // This is effectively model_->x_dev_
-
+  float* current_x_dev = x_input_dev;
   for (int l_gpu_idx = 0; l_gpu_idx < num_gpu_layers; ++l_gpu_idx) {
-    int l_model_idx = num_cpu_layers + l_gpu_idx; // Actual layer index in the model
+    int l_model_idx = num_cpu_layers + l_gpu_idx;
     
     // Layer-specific norm weights are indexed by the model layer index (l_model_idx)
     const float* lw_in_norm_dev = layers[l_model_idx].input_layernorm_dev;
@@ -848,9 +829,7 @@ std::vector<float> TinyLlamaModel::forward_device(
     if (!lw_in_norm_dev) { 
         throw std::runtime_error("[TM::fw_dev pos=" + std::to_string(pos) + " L" + std::to_string(l_model_idx) + "] Error: input_layernorm_dev is nullptr. GPU layer cannot proceed.");
     }
-
     rmsnorm_vector_cuda(x_dev_, lw_in_norm_dev, x_norm_dev_, hs, eps, stream);
-
     // Use concatenated weights for optimal performance
     ensure_f32_concatenated_weights_loaded();
     
@@ -868,18 +847,13 @@ std::vector<float> TinyLlamaModel::forward_device(
     } else {
       Logger::error("GPU L" + std::to_string(l_model_idx) + " (gpu_idx " + std::to_string(l_gpu_idx) + "): No valid concatenated QKV weights."); return {};
     }
-
-    
-    // RoPE Application:
     rope_cuda(q_dev_, n_heads, head_dim, all_freqs_cis_dev, pos, config_.is_gguf_file_loaded, stream);
     rope_cuda(k_dev_, n_kv_heads, head_dim, all_freqs_cis_dev, pos, config_.is_gguf_file_loaded, stream);
-
 
     // K/V Cache Update Logic
     if (static_cast<size_t>(l_model_idx) < kv_cache->layers.size()) {
         KVCacheLayer& current_kv_layer = kv_cache->layers[l_model_idx];
         if (config_.use_kvcache_quantization) {
-            // Quantize and store K, V for each head
             for (int kvh = 0; kvh < n_kv_heads; ++kvh) {
                 const float* current_k_head_ptr_fp32 = k_dev_ + kvh * head_dim;
                 const float* current_v_head_ptr_fp32 = v_dev_ + kvh * head_dim;
@@ -898,7 +872,6 @@ std::vector<float> TinyLlamaModel::forward_device(
                     current_v_head_ptr_fp32, v_quant_target_ptr, v_scale_target_ptr, head_dim, stream);
             }
         } else {
-            // Store FP32 K, V directly (original path, now using k_dev_fp32, v_dev_fp32)
             for (int kvh = 0; kvh < n_kv_heads; ++kvh) {
                 const float* current_k_head_ptr = k_dev_ + kvh * head_dim;
                 const float* current_v_head_ptr = v_dev_ + kvh * head_dim;
@@ -917,19 +890,16 @@ std::vector<float> TinyLlamaModel::forward_device(
 
     } else {
         Logger::error("KVCache layer index " + std::to_string(l_model_idx) + " out of bounds for kv_cache->layers access in forward_device.");
-        return {}; // Or throw
+        return {};
     }
 
     float scale = 1.0f / SAFE_SQRT(static_cast<float>(head_dim));
-    
     const float* attention_k_cache_ptr_dev = nullptr;
     const float* attention_v_cache_ptr_dev = nullptr;
     KVCacheLayer& attention_kv_layer = kv_cache->layers[l_model_idx]; 
 
     if (config_.use_kvcache_quantization) {
-        // Always use selective dequantization approach - no upfront dequantization
-            // The attention function will handle dequantization on-demand
-            Logger::info("[GPU L" + std::to_string(l_model_idx) + "] Using SELECTIVE KVCache dequantization");
+        Logger::info("[GPU L" + std::to_string(l_model_idx) + "] Using SELECTIVE KVCache dequantization");
     } else {
         attention_k_cache_ptr_dev = attention_kv_layer.k_dev_fp32;
         attention_v_cache_ptr_dev = attention_kv_layer.v_dev_fp32;
@@ -971,7 +941,6 @@ std::vector<float> TinyLlamaModel::forward_device(
         stream                           
     );
     }
-
 
     if (w_o_f32_dev_) {
       const float* lw_o_proj_f32_dev = w_o_f32_dev_ + (size_t)l_gpu_idx * hs * hs;
@@ -1025,15 +994,10 @@ std::vector<float> TinyLlamaModel::forward_device(
       Logger::error("GPU L" + std::to_string(l_model_idx) + ": No valid Down projection weights.");
       return {};
     }
-
-
     add_residual_cuda(mlp_down_dev_, x_resid2_dev_, current_x_dev, hs, stream); 
 
-  } // End of layer loop
-
+  }
   rmsnorm_vector_cuda(x_dev_, final_norm_dev, x_norm_dev_, hs, eps, stream);
-  
-
   ensure_lm_head_dequantized();
   if (lm_head_dev_) { 
     matvec_bf16_f32_cuda(cublas_handle_, lm_head_dev_, x_norm_dev_, logits_dev_,
@@ -1043,11 +1007,7 @@ std::vector<float> TinyLlamaModel::forward_device(
     return {};
   }
 
-  gpuErrchk(cudaStreamSynchronize(stream)); // Ensure all ops including LM head are done before memcpy DtoH
-
-
-
-
+  gpuErrchk(cudaStreamSynchronize(stream));
   std::vector<float> logits(vs);
   gpuErrchk(cudaMemcpy(logits.data(), logits_dev_, vs * sizeof(float),
                        cudaMemcpyDeviceToHost));
@@ -1059,7 +1019,6 @@ std::vector<float> TinyLlamaModel::forward_device(
 std::vector<float> TinyLlamaModel::forward_cpu_logits_batch(
     const std::vector<float>& final_batch_activations, // [num_tokens, hidden_size]
     int num_tokens_in_batch) {
-
 
     if (final_batch_activations.size() != (size_t)num_tokens_in_batch * config_.hidden_size) {
         Logger::error("[CPU_LOGITS_BATCH] final_batch_activations size mismatch. Expected: " +
@@ -1170,9 +1129,6 @@ std::vector<std::vector<float>> TinyLlamaModel::forward_cpu_batch_generation(
     int kv_group = n_heads / n_kv_heads;  // Pre-calculate GQA grouping
 
     std::vector<float> current_batch_activations = batch_input_activations;
-
-    // Note: Unlike prefill batch processing, generation uses variable positions for each token
-    // We fall back to individual token processing for position-dependent operations
     for (int l = 0; l < config_.num_cpu_offload_layers; ++l) {
         const auto& lw = layers[l];
         
@@ -1354,7 +1310,6 @@ std::vector<std::vector<float>> TinyLlamaModel::forward_cpu_batch_generation(
                 }
             }
         }
-        
         // O-Projection (batched)
         std::vector<float> batch_attn_proj_out((size_t)num_tokens_in_batch * hs);
         if(!lw.o_proj_f32.empty()) {
@@ -1533,11 +1488,9 @@ std::vector<float> TinyLlamaModel::forward_device_batch_prefill(
     float* d_batch_ffn_swiglu_out;
     float* d_batch_ffn_down_proj_out;
     float* d_batch_layer_output = nullptr; 
-
     size_t batch_hidden_size_elems = (size_t)num_tokens_in_batch * hidden_size;
     size_t batch_kv_proj_size_elems = (size_t)num_tokens_in_batch * n_kv_dim;
     size_t batch_ffn_intermediate_elems = (size_t)num_tokens_in_batch * ffn_intermediate_dim;
-
     size_t batch_hidden_size_bytes = batch_hidden_size_elems * sizeof(float);
     size_t batch_kv_proj_size_bytes = batch_kv_proj_size_elems * sizeof(float);
     size_t batch_ffn_intermediate_bytes = batch_ffn_intermediate_elems * sizeof(float);
@@ -1623,7 +1576,6 @@ std::vector<float> TinyLlamaModel::forward_device_batch_prefill(
                           d_batch_x_norm_out_attn, hidden_size, w_v_layer_ptr, n_kv_dim, &beta,
                           d_batch_v_proj_out, n_kv_dim, stream);
 
-        // PRE-ROPE LOGGING (Unchanged)
         if (l_model_idx == config_.num_cpu_offload_layers && num_tokens_in_batch > 0 && head_dim > 0) { // Existing logging condition
             int log_elements_rope = std::min(3, head_dim);
             for (int token_to_log_idx_rope = 0; token_to_log_idx_rope < std::min(num_tokens_in_batch, 2); ++token_to_log_idx_rope) {
@@ -1704,13 +1656,9 @@ std::vector<float> TinyLlamaModel::forward_device_batch_prefill(
                           d_batch_attn_heads_concat_out, hidden_size, w_o_layer_ptr, hidden_size, &beta,
                           d_batch_attn_final_proj_out, hidden_size, stream);
 
-        // O_PROJ_OUT LOGGING (Unchanged) - Logging Point 1
         if (l_model_idx == config_.num_cpu_offload_layers && num_tokens_in_batch > 1 && hidden_size > 0) { /* ... */ }
-
-
         add_residual_batch_cuda(d_batch_residual_ffn_in, d_batch_attn_final_proj_out, d_batch_residual_attn_in,
                                 num_tokens_in_batch, hidden_size, stream);
-        // POST_RESIDUAL_ATTN LOGGING (Unchanged) - Logging Point 2
         if (l_model_idx == config_.num_cpu_offload_layers && num_tokens_in_batch > 1 && hidden_size > 0) { /* ... */ }
 
 
@@ -1761,12 +1709,8 @@ std::vector<float> TinyLlamaModel::forward_device_batch_prefill(
         Logger::info("[FWD_DEV_BATCH_PREFILL_LAYER_END] Layer " + std::to_string(l_model_idx) + " finished. Next d_batch_x_ptr: " + Logger::ptrToString(d_batch_x_ptr));
     }
 
-  // =============== BEGIN DEBUG LOG: Hidden state of LAST TOKEN before final RMSNorm ===============
   if (num_tokens_in_batch > 0) {
       std::vector<float> h_last_token_hidden_state(config_.hidden_size);
-      // current_d_batch_x_ptr should hold the final hidden states for all tokens in the batch after all layers.
-      // The layout is [token0_hs, token1_hs, ..., tokenN-1_hs].
-      // Offset for the last token (num_tokens_in_batch - 1) is (num_tokens_in_batch - 1) * hidden_size.
       size_t offset_last_token_hidden_state = (size_t)(num_tokens_in_batch - 1) * config_.hidden_size;
       
       gpuErrchk(cudaMemcpyAsync(h_last_token_hidden_state.data(),
@@ -1776,17 +1720,11 @@ std::vector<float> TinyLlamaModel::forward_device_batch_prefill(
       gpuErrchk(cudaStreamSynchronize(stream)); 
       Logger::log_vector_stats("[FWD_DEV_BATCH_PREFILL_LAST_TOKEN_HIDDEN_STATE_PRE_FINAL_RMSNORM]", h_last_token_hidden_state, 20);
   }
-  // =============== END DEBUG LOG ===============
-
-
     rmsnorm_batch_cuda(d_batch_x_norm_out_attn, d_batch_x_ptr, 
                        final_norm_dev,
                        num_tokens_in_batch, hidden_size, config_.rms_norm_eps, stream);
     
-    // FINAL_NORM_OUT LOGGING (Unchanged)
     if (config_.num_cpu_offload_layers < config_.num_hidden_layers && num_tokens_in_batch > 0 && hidden_size > 0) { /* ... */ }
-
-
     float* d_logits_last_token;
     gpuErrchk(cudaMalloc(&d_logits_last_token, (size_t)vocab_size * sizeof(float)));
     
@@ -1803,7 +1741,6 @@ std::vector<float> TinyLlamaModel::forward_device_batch_prefill(
 
     Logger::log_vector_stats("[FWD_DEV_BATCH_PREFILL_FINAL_LOGITS]", h_logits, 20);
 
-    // =============== BEGIN KVCache DUMP AFTER BATCH PREFILL ===============
     if (config_.num_hidden_layers > config_.num_cpu_offload_layers && kv_cache != nullptr && num_tokens_in_batch > 0) {
         int first_gpu_layer_model_idx = config_.num_cpu_offload_layers;
         if (static_cast<size_t>(first_gpu_layer_model_idx) < kv_cache->layers.size()) {
@@ -1811,7 +1748,6 @@ std::vector<float> TinyLlamaModel::forward_device_batch_prefill(
             const float* d_k_cache_ptr = cache_layer_to_log.k_dev_fp32;
             const float* d_v_cache_ptr = cache_layer_to_log.v_dev_fp32;
             const int num_kv_h = config_.num_key_value_heads;
-            // head_dim is already defined in this function's scope
             const int local_n_kv_dim_for_log = num_kv_h * head_dim; 
             const int log_elems_kv = std::min(3, head_dim);
 
@@ -1844,7 +1780,6 @@ std::vector<float> TinyLlamaModel::forward_device_batch_prefill(
                              " out of bounds for kv_cache->layers (size " + std::to_string(kv_cache->layers.size()) + ")");
         }
     }
-    // =============== END KVCache DUMP AFTER BATCH PREFILL ===============
 
     gpuErrchk(cudaFree(d_batch_x_norm_out_attn));
     gpuErrchk(cudaFree(d_batch_q_proj_out));
@@ -1866,7 +1801,6 @@ std::vector<float> TinyLlamaModel::forward_device_batch_prefill(
     Logger::info("[FWD_DEV_BATCH_PREFILL_EXIT] Function finished.");
     return h_logits;
 }
-
 std::vector<std::vector<float>> TinyLlamaModel::forward_device_batch_generation(
     float* d_batch_input_embeddings,    // Device pointer to [num_tokens_in_batch, config_.hidden_size]
     const std::vector<int>& token_positions, // Position of each token in its respective sequence
@@ -1898,7 +1832,6 @@ std::vector<std::vector<float>> TinyLlamaModel::forward_device_batch_generation(
     const size_t batch_q_size_bytes = (size_t)num_tokens_in_batch * hidden_size * sizeof(float);
     const size_t batch_kv_size_bytes = (size_t)num_tokens_in_batch * n_kv_dim * sizeof(float);
 
-    // Allocate GPU memory for batch processing
     float* d_batch_x_norm_out_attn;
     float* d_batch_q_proj_out;
     float* d_batch_k_proj_out;
@@ -1934,7 +1867,6 @@ std::vector<std::vector<float>> TinyLlamaModel::forward_device_batch_generation(
     cublasStatus_t stream_status = cublasSetStream(cublas_handle_, stream);
     if (stream_status != CUBLAS_STATUS_SUCCESS) {
         Logger::fatal("cublasSetStream failed in forward_device_batch_generation");
-        // Free allocated memory before returning
         gpuErrchk(cudaFree(d_batch_x_norm_out_attn));
         gpuErrchk(cudaFree(d_batch_q_proj_out));
         gpuErrchk(cudaFree(d_batch_k_proj_out));
@@ -1952,7 +1884,7 @@ std::vector<std::vector<float>> TinyLlamaModel::forward_device_batch_generation(
         throw std::runtime_error("cublasSetStream failed");
     }
 
-    float* d_batch_x_ptr = d_batch_input_embeddings; // Input to the first GPU layer
+    float* d_batch_x_ptr = d_batch_input_embeddings;
 
     Logger::info("[FWD_DEV_BATCH_GENERATION_MAIN_LOOP_ENTRY] num_cpu_offload_layers: " + std::to_string(config_.num_cpu_offload_layers) + 
                  ", total_hidden_layers: " + std::to_string(config_.num_hidden_layers));
@@ -1967,7 +1899,6 @@ std::vector<std::vector<float>> TinyLlamaModel::forward_device_batch_generation(
         rmsnorm_batch_cuda(d_batch_x_norm_out_attn, d_batch_x_ptr, 
                            layers[l_model_idx].input_layernorm_dev,
                            num_tokens_in_batch, hidden_size, config_.rms_norm_eps, stream);
-        // Weight dequantization handled by ensure_f32_concatenated_weights_loaded() below
         ensure_f32_concatenated_weights_loaded();
         
         const float* w_q_layer_ptr = w_q_f32_dev_ + (size_t)l_gpu_idx * hidden_size * hidden_size;
@@ -1985,9 +1916,6 @@ std::vector<std::vector<float>> TinyLlamaModel::forward_device_batch_generation(
                           d_batch_x_norm_out_attn, hidden_size, w_v_layer_ptr, n_kv_dim, &beta,
                           d_batch_v_proj_out, n_kv_dim, stream);
 
-        // For generation mode, we need to apply RoPE with individual positions for each token
-        // We'll use the single-token RoPE function in a loop for now
-        // TODO: Create a batch RoPE function that handles variable positions
         for (int token_idx = 0; token_idx < num_tokens_in_batch; ++token_idx) {
             int current_pos = token_positions[token_idx];
             
@@ -2030,9 +1958,6 @@ for (int token_idx = 0; token_idx < num_tokens_in_batch; ++token_idx) {
                              kv_cache->allocated_head_dim, stream);
     }
 }
-        // For attention, we need a generation-specific function that handles variable positions
-        // For now, we'll use the single-token attention function in a loop
-        // TODO: Create a batch attention function for generation
         for (int token_idx = 0; token_idx < num_tokens_in_batch; ++token_idx) {
             int current_pos = token_positions[token_idx];
             
@@ -2279,7 +2204,6 @@ std::vector<float> TinyLlamaModel::forward_cpu_batch(
             return {};
         }
 
-        // FIXED: Sequence-aware RoPE Application
         if (!prompt_lengths.empty()) {
             // Multi-sequence mode: use sequence-aware RoPE
             for (int t = 0; t < num_tokens_in_batch; ++t) {
@@ -2377,22 +2301,18 @@ std::vector<float> TinyLlamaModel::forward_cpu_batch(
         for(size_t i=0; i < current_batch_activations.size(); ++i) {
             current_batch_activations[i] = residual_batch_component_attn[i] + batch_attn_proj_out[i];
         }
-
         // --- Batched MLP Part ---
         std::vector<float> residual_batch_component_mlp = current_batch_activations;
         std::vector<float> batch_x_norm2(current_batch_activations.size());
-        
         const std::vector<float>& w_post_attn_norm_vec =
             lw.post_attention_layernorm_f32.empty()
                 ? bf16vec_to_float_vec(lw.post_attention_layernorm)
                 : lw.post_attention_layernorm_f32;
         // Batched RMSNorm for MLP
         rmsnorm_batch_cpu(current_batch_activations, w_post_attn_norm_vec, batch_x_norm2, num_tokens_in_batch, hs, eps);
-        
         // Batched Gate and Up Projections
         std::vector<float> batch_gate_proj_out((size_t)num_tokens_in_batch * is);
         std::vector<float> batch_up_proj_out((size_t)num_tokens_in_batch * is);
-
         // Gate Projection
         if (!lw.gate_proj_f32.empty()) {
             matmul_f32_f32_batch_cpu(lw.gate_proj_f32, batch_x_norm2, batch_gate_proj_out, num_tokens_in_batch, is, hs);
@@ -2406,7 +2326,6 @@ std::vector<float> TinyLlamaModel::forward_cpu_batch(
             Logger::error("[CPU_BATCH_FWD] Layer " + std::to_string(l) + ": No gate_proj weights found for CPU"); 
             return {};
         }
-
         // Up Projection
         if (!lw.up_proj_f32.empty()) {
             matmul_f32_f32_batch_cpu(lw.up_proj_f32, batch_x_norm2, batch_up_proj_out, num_tokens_in_batch, is, hs);
@@ -2451,6 +2370,5 @@ std::vector<float> TinyLlamaModel::forward_cpu_batch(
     if (kv_cache && num_tokens_in_batch > 0) {
         kv_cache->seq_len = start_pos_in_sequence + num_tokens_in_batch;
     }
-
     return current_batch_activations;
 }
