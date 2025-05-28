@@ -111,6 +111,7 @@ add_library(tinyllama_core STATIC
     kv_cache.cpp
     weight_management.cpp
     cpu_attention.cpp
+    model_utils.cpp
     utils.cpp
     safetensors_loader.cpp 
     tokenizer.cpp 
