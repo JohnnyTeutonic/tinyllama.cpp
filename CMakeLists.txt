@@ -107,6 +107,7 @@ endif()
 # --- Core Library Definition ---
 add_library(tinyllama_core STATIC
     model.cpp 
+    model_config.cpp
     utils.cpp
     safetensors_loader.cpp 
     tokenizer.cpp 
