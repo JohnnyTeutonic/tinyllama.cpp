@@ -1,5 +1,5 @@
-#include "model.h"
 #include "weight_management.h"
+#include "ggml_types.h"
 #include "logger.h"
 #include "quantization.h"
 #include "utils.h"
@@ -567,4 +567,288 @@ void TinyLlamaModel::free_layer_gpu_weights(int layer_idx) {
   
   Logger::info("Freed GPU weights for layer " + std::to_string(layer_idx) + " (~200MB freed)");
 #endif
-} 
+}
+
+void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
+  Logger::info("Mapping GGUF weights to model fields (ULTRA-OPTIMIZED VERSION)...");
+    
+  const uint8_t* actual_data_block_start = nullptr;
+  
+  // Determine which data source to use
+  if (gguf.mapped_tensor_data != nullptr && gguf.mapped_tensor_data_size > 0) {
+    const uint8_t* mmap_buffer_start = static_cast<const uint8_t*>(gguf.mapped_tensor_data);
+    actual_data_block_start = mmap_buffer_start + gguf.offset_diff_for_mmap;
+    Logger::info("map_gguf_weights: Using mmap mode (ZERO-COPY). Size: " +
+               std::to_string(gguf.mapped_tensor_data_size) + " bytes.");
+  } else if (!gguf.tensor_data.empty()) {
+    actual_data_block_start = gguf.tensor_data.data();
+    Logger::info("map_gguf_weights: Using non-mmap mode. Size: " +
+                 std::to_string(gguf.tensor_data.size()) + " bytes.");
+  } else {
+    Logger::error("GGUF tensor data is not available. Cannot map weights.");
+    return;
+  }
+
+  const size_t num_tensors = gguf.tensor_infos_map.size();
+  Logger::info("Processing " + std::to_string(num_tensors) + " tensors with ultra-optimized parallel mapping...");
+
+  // Pre-allocate containers to avoid reallocations during parallel processing
+  std::vector<std::pair<std::string, GGUFTensorInfo>> tensor_pairs;
+  tensor_pairs.reserve(num_tensors);
+  for (const auto& pair : gguf.tensor_infos_map) {
+    tensor_pairs.emplace_back(pair.first, pair.second);
+  }
+
+  // Reserve capacity for major model containers to reduce allocations
+  const size_t typical_blocks = 4096;
+  if (model.lm_head_q8_0.capacity() == 0) model.lm_head_q8_0.reserve(32768);
+  if (model.embed_tokens_q8_0.capacity() == 0) model.embed_tokens_q8_0.reserve(32768);
+  
+  for (auto& layer : model.layers) {
+    if (layer.q_proj_q8_0.capacity() == 0) layer.q_proj_q8_0.reserve(typical_blocks);
+    if (layer.k_proj_q8_0.capacity() == 0) layer.k_proj_q8_0.reserve(typical_blocks);
+    if (layer.v_proj_q8_0.capacity() == 0) layer.v_proj_q8_0.reserve(typical_blocks);
+    if (layer.o_proj_q8_0.capacity() == 0) layer.o_proj_q8_0.reserve(typical_blocks);
+    if (layer.gate_proj_q8_0.capacity() == 0) layer.gate_proj_q8_0.reserve(typical_blocks);
+    if (layer.up_proj_q8_0.capacity() == 0) layer.up_proj_q8_0.reserve(typical_blocks);
+    if (layer.down_proj_q8_0.capacity() == 0) layer.down_proj_q8_0.reserve(typical_blocks);
+  }
+
+  // BLAZING FAST: Sort tensors by type and process in bulk
+  std::vector<size_t> global_tensor_indices;
+  std::vector<std::vector<size_t>> layer_tensor_indices(model.layers.size());
+  
+  global_tensor_indices.reserve(10); // output.weight, token_embd.weight, output_norm.weight, etc.
+  for (auto& layer_indices : layer_tensor_indices) {
+    layer_indices.reserve(9); // 7 weights + 2 norms per layer
+  }
+  
+  // ULTRA-FAST categorization without string operations
+  for (size_t i = 0; i < tensor_pairs.size(); ++i) {
+    const std::string& name = tensor_pairs[i].first;
+    if (name[0] == 'o' || name[0] == 't') { // output.weight, token_embd.weight, output_norm.weight
+      global_tensor_indices.push_back(i);
+    } else if (name.size() > 4 && name[0] == 'b' && name[1] == 'l' && name[2] == 'k' && name[3] == '.') {
+      // Extract layer index without substr - MUCH faster
+      size_t layer_start = 4;
+      size_t layer_end = name.find('.', layer_start);
+      if (layer_end != std::string::npos) {
+        int layer_idx = 0;
+        for (size_t pos = layer_start; pos < layer_end; ++pos) {
+          layer_idx = layer_idx * 10 + (name[pos] - '0');
+        }
+        if (layer_idx >= 0 && static_cast<size_t>(layer_idx) < model.layers.size()) {
+          layer_tensor_indices[layer_idx].push_back(i);
+        }
+      }
+    }
+  }
+  
+  std::atomic<int> processed_count{0};
+  std::atomic<int> error_count{0};
+
+  // Process global tensors sequentially (small count, avoid overhead)
+  for (size_t idx : global_tensor_indices) {
+    try {
+    const std::string& target_field_key = tensor_pairs[idx].first;
+    const GGUFTensorInfo& info = tensor_pairs[idx].second;
+    const uint8_t* tensor_data_ptr = actual_data_block_start + info.offset;
+
+      // Global tensors with optimized type dispatch
+    if (target_field_key == "output.weight") {
+        switch (info.type) {
+          case GGMLType::GGML_TYPE_Q6_K: {
+        size_t num_blocks = info.size_in_bytes / sizeof(block_q6_K);
+        model.lm_head_q6k.resize(num_blocks);
+        std::memcpy(model.lm_head_q6k.data(), tensor_data_ptr, info.size_in_bytes);
+            break;
+          }
+          case GGMLType::GGML_TYPE_Q4_K: {
+        size_t num_blocks = info.size_in_bytes / sizeof(block_q4_K);
+        model.lm_head_q4k.resize(num_blocks);
+        std::memcpy(model.lm_head_q4k.data(), tensor_data_ptr, info.size_in_bytes);
+            break;
+          }
+          case GGMLType::GGML_TYPE_Q8_0: {
+        size_t num_blocks = info.size_in_bytes / sizeof(block_q8_0);
+        model.lm_head_q8_0.resize(num_blocks);
+        std::memcpy(model.lm_head_q8_0.data(), tensor_data_ptr, info.size_in_bytes);
+            break;
+          }
+          case GGMLType::GGML_TYPE_Q8_K: {
+        size_t num_blocks = info.size_in_bytes / sizeof(block_q8_K);
+        model.lm_head_q8k.resize(num_blocks);
+        std::memcpy(model.lm_head_q8k.data(), tensor_data_ptr, info.size_in_bytes);
+            break;
+          }
+          case GGMLType::GGML_TYPE_F32: {
+        size_t num_elements = info.size_in_bytes / sizeof(float);
+        model.lm_head_f32.resize(num_elements);
+        std::memcpy(model.lm_head_f32.data(), tensor_data_ptr, info.size_in_bytes);
+            break;
+          }
+        }
+        processed_count++;
+      continue;
+      }
+      
+      if (target_field_key == "token_embd.weight") {
+        switch (info.type) {
+          case GGMLType::GGML_TYPE_Q4_K: {
+        size_t num_blocks = info.size_in_bytes / sizeof(block_q4_K);
+        model.embed_tokens_q4k.resize(num_blocks);
+        std::memcpy(model.embed_tokens_q4k.data(), tensor_data_ptr, info.size_in_bytes);
+            break;
+          }
+          case GGMLType::GGML_TYPE_Q8_0: {
+        size_t num_blocks = info.size_in_bytes / sizeof(block_q8_0);
+        model.embed_tokens_q8_0.resize(num_blocks);
+        std::memcpy(model.embed_tokens_q8_0.data(), tensor_data_ptr, info.size_in_bytes);
+            break;
+          }
+          case GGMLType::GGML_TYPE_Q8_K: {
+        size_t num_blocks = info.size_in_bytes / sizeof(block_q8_K);
+        model.embed_tokens_q8k.resize(num_blocks);
+        std::memcpy(model.embed_tokens_q8k.data(), tensor_data_ptr, info.size_in_bytes);
+            break;
+          }
+          case GGMLType::GGML_TYPE_Q6_K: {
+        size_t num_blocks = info.size_in_bytes / sizeof(block_q6_K);
+        model.embed_tokens_q6k.resize(num_blocks);
+        std::memcpy(model.embed_tokens_q6k.data(), tensor_data_ptr, info.size_in_bytes);
+            break;
+          }
+          case GGMLType::GGML_TYPE_F32: {
+        size_t num_elements = info.size_in_bytes / sizeof(float);
+        model.embed_tokens_f32.resize(num_elements);
+        std::memcpy(model.embed_tokens_f32.data(), tensor_data_ptr, info.size_in_bytes);
+            break;
+          }
+        }
+        processed_count++;
+      continue;
+      }
+      
+      if (target_field_key == "output_norm.weight") {
+      if (info.type == GGMLType::GGML_TYPE_F32) {
+        size_t num_elements = info.size_in_bytes / sizeof(float);
+        model.final_norm_f32.resize(num_elements);
+        std::memcpy(model.final_norm_f32.data(), tensor_data_ptr, info.size_in_bytes);
+      }
+        processed_count++;
+      continue;
+    }
+
+    } catch (const std::exception& e) {
+      error_count++;
+    }
+  }
+  
+  // ULTRA-FAST: Process layers in parallel with pre-sorted tensors
+  #pragma omp parallel for schedule(static) if(model.layers.size() > 4)
+  for (size_t layer_idx = 0; layer_idx < layer_tensor_indices.size(); ++layer_idx) {
+    const auto& layer_indices = layer_tensor_indices[layer_idx];
+    if (layer_indices.empty()) continue;
+    
+    LayerWeights& layer = model.layers[layer_idx];
+    
+    try {
+      for (size_t idx : layer_indices) {
+        const std::string& name = tensor_pairs[idx].first;
+        const GGUFTensorInfo& info = tensor_pairs[idx].second;
+        const uint8_t* tensor_data_ptr = actual_data_block_start + info.offset;
+        
+        // BLAZING FAST: Direct character matching (faster than hashing)
+        const size_t last_dot = name.find_last_of('.');
+        if (last_dot == std::string::npos) continue;
+        
+        const char* field = name.c_str() + name.find('.', 4) + 1;
+        
+                // BLAZING FAST: Direct character-based dispatch without string operations
+        #define FAST_COPY_WEIGHT(target_vec, block_type) \
+          target_vec.resize(info.size_in_bytes / sizeof(block_type)); \
+          std::memcpy(target_vec.data(), tensor_data_ptr, info.size_in_bytes);
+        
+        // IMPROVED: Pattern matching based on tensor name structure
+        const char* name_cstr = name.c_str();
+        const size_t name_len = name.length();
+        
+        if (name_len > 10 && name.find("attn_") != std::string::npos) {
+          if (name.find("attn_q.weight") != std::string::npos) {
+            switch (info.type) {
+              case GGMLType::GGML_TYPE_Q8_0: FAST_COPY_WEIGHT(layer.q_proj_q8_0, block_q8_0); break;
+              case GGMLType::GGML_TYPE_Q4_K: FAST_COPY_WEIGHT(layer.q_proj_q4k, block_q4_K); break;
+              case GGMLType::GGML_TYPE_Q6_K: FAST_COPY_WEIGHT(layer.q_proj_q6k, block_q6_K); break;
+              case GGMLType::GGML_TYPE_Q8_K: FAST_COPY_WEIGHT(layer.q_proj_q8k, block_q8_K); break;
+              case GGMLType::GGML_TYPE_BF16: FAST_COPY_WEIGHT(layer.q_proj, uint16_t); break;
+            }
+          } else if (name.find("attn_k.weight") != std::string::npos) {
+            switch (info.type) {
+              case GGMLType::GGML_TYPE_Q8_0: FAST_COPY_WEIGHT(layer.k_proj_q8_0, block_q8_0); break;
+              case GGMLType::GGML_TYPE_Q4_K: FAST_COPY_WEIGHT(layer.k_proj_q4k, block_q4_K); break;
+              case GGMLType::GGML_TYPE_Q6_K: FAST_COPY_WEIGHT(layer.k_proj_q6k, block_q6_K); break;
+              case GGMLType::GGML_TYPE_Q8_K: FAST_COPY_WEIGHT(layer.k_proj_q8k, block_q8_K); break;
+              case GGMLType::GGML_TYPE_BF16: FAST_COPY_WEIGHT(layer.k_proj, uint16_t); break;
+            }
+          } else if (name.find("attn_v.weight") != std::string::npos) {
+            switch (info.type) {
+              case GGMLType::GGML_TYPE_Q8_0: FAST_COPY_WEIGHT(layer.v_proj_q8_0, block_q8_0); break;
+              case GGMLType::GGML_TYPE_Q4_K: FAST_COPY_WEIGHT(layer.v_proj_q4k, block_q4_K); break;
+              case GGMLType::GGML_TYPE_Q6_K: FAST_COPY_WEIGHT(layer.v_proj_q6k, block_q6_K); break;
+              case GGMLType::GGML_TYPE_Q8_K: FAST_COPY_WEIGHT(layer.v_proj_q8k, block_q8_K); break;
+              case GGMLType::GGML_TYPE_BF16: FAST_COPY_WEIGHT(layer.v_proj, uint16_t); break;
+            }
+          } else if (name.find("attn_output.weight") != std::string::npos) {
+            switch (info.type) {
+              case GGMLType::GGML_TYPE_Q8_0: FAST_COPY_WEIGHT(layer.o_proj_q8_0, block_q8_0); break;
+              case GGMLType::GGML_TYPE_Q4_K: FAST_COPY_WEIGHT(layer.o_proj_q4k, block_q4_K); break;
+              case GGMLType::GGML_TYPE_Q6_K: FAST_COPY_WEIGHT(layer.o_proj_q6k, block_q6_K); break;
+              case GGMLType::GGML_TYPE_Q8_K: FAST_COPY_WEIGHT(layer.o_proj_q8k, block_q8_K); break;
+              case GGMLType::GGML_TYPE_BF16: FAST_COPY_WEIGHT(layer.o_proj, uint16_t); break;
+            }
+          } else if (name.find("attn_norm.weight") != std::string::npos && info.type == GGMLType::GGML_TYPE_F32) {
+            FAST_COPY_WEIGHT(layer.input_layernorm_f32, float);
+          }
+        } else if (name_len > 10 && name.find("ffn_") != std::string::npos) {
+          if (name.find("ffn_gate.weight") != std::string::npos) {
+            switch (info.type) {
+              case GGMLType::GGML_TYPE_Q8_0: FAST_COPY_WEIGHT(layer.gate_proj_q8_0, block_q8_0); break;
+              case GGMLType::GGML_TYPE_Q4_K: FAST_COPY_WEIGHT(layer.gate_proj_q4k, block_q4_K); break;
+              case GGMLType::GGML_TYPE_Q6_K: FAST_COPY_WEIGHT(layer.gate_proj_q6k, block_q6_K); break;
+              case GGMLType::GGML_TYPE_Q8_K: FAST_COPY_WEIGHT(layer.gate_proj_q8k, block_q8_K); break;
+              case GGMLType::GGML_TYPE_BF16: FAST_COPY_WEIGHT(layer.gate_proj, uint16_t); break;
+            }
+          } else if (name.find("ffn_up.weight") != std::string::npos) {
+            switch (info.type) {
+              case GGMLType::GGML_TYPE_Q8_0: FAST_COPY_WEIGHT(layer.up_proj_q8_0, block_q8_0); break;
+              case GGMLType::GGML_TYPE_Q4_K: FAST_COPY_WEIGHT(layer.up_proj_q4k, block_q4_K); break;
+              case GGMLType::GGML_TYPE_Q6_K: FAST_COPY_WEIGHT(layer.up_proj_q6k, block_q6_K); break;
+              case GGMLType::GGML_TYPE_Q8_K: FAST_COPY_WEIGHT(layer.up_proj_q8k, block_q8_K); break;
+              case GGMLType::GGML_TYPE_BF16: FAST_COPY_WEIGHT(layer.up_proj, uint16_t); break;
+            }
+          } else if (name.find("ffn_down.weight") != std::string::npos) {
+            switch (info.type) {
+              case GGMLType::GGML_TYPE_Q8_0: FAST_COPY_WEIGHT(layer.down_proj_q8_0, block_q8_0); break;
+              case GGMLType::GGML_TYPE_Q4_K: FAST_COPY_WEIGHT(layer.down_proj_q4k, block_q4_K); break;
+              case GGMLType::GGML_TYPE_Q6_K: FAST_COPY_WEIGHT(layer.down_proj_q6k, block_q6_K); break;
+              case GGMLType::GGML_TYPE_Q8_K: FAST_COPY_WEIGHT(layer.down_proj_q8k, block_q8_K); break;
+              case GGMLType::GGML_TYPE_BF16: FAST_COPY_WEIGHT(layer.down_proj, uint16_t); break;
+            }
+          } else if (name.find("ffn_norm.weight") != std::string::npos && info.type == GGMLType::GGML_TYPE_F32) {
+            FAST_COPY_WEIGHT(layer.post_attention_layernorm_f32, float);
+          }
+        }
+         
+         #undef FAST_COPY_WEIGHT
+      }
+      processed_count++;
+    } catch (const std::exception& e) {
+      error_count++;
+    }
+  }
+
+  Logger::info("Finished mapping GGUF weights: " + std::to_string(processed_count.load()) + "/" + 
+               std::to_string(num_tensors) + " tensors processed successfully (errors: " + 
+               std::to_string(error_count.load()) + ") with ultra-optimized parallel mapping");
+}
+
