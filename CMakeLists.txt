@@ -110,6 +110,7 @@ add_library(tinyllama_core STATIC
     model_config.cpp
     kv_cache.cpp
     weight_management.cpp
+    cpu_attention.cpp
     utils.cpp
     safetensors_loader.cpp 
     tokenizer.cpp 
@@ -146,11 +147,10 @@ if(CUDA_ENABLED)
     target_link_libraries(tinyllama_core PRIVATE ${CUDA_LIBRARIES} CUDA::cublas)
 endif()
 
-add_executable(tinyllama 
-    main.cpp 
+add_executable(tinyllama
+    main.cpp
 )
 
-# Link tinyllama executable against the core library
 target_link_libraries(tinyllama PRIVATE tinyllama_core)
 
 if(NOT SKBUILD)
