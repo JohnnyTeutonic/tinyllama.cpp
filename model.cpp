@@ -1325,8 +1325,6 @@ std::vector<float> TinyLlamaModel::forward(
   return input; // Return the intermediate activations if not all layers were processed here.
 }
 
-int TinyLlamaModel::get_vocab_size() const { return config_.vocab_size; }
-
 #ifdef HAS_CUDA
 std::vector<float> TinyLlamaModel::forward_device(
     float* x_input_dev,
@@ -1594,68 +1592,6 @@ std::vector<float> TinyLlamaModel::forward_device(
 }
 
 #endif // HAS_CUDA
-
-
-void TinyLlamaModel::initialize_rope_freqs() {
-  Logger::info("[ROPE_FREQ_ENTRY] Entered initialize_rope_freqs.");
-
-  Logger::info("[ROPE_FREQ_CHECK] num_attention_heads: " + std::to_string(config_.num_attention_heads));
-  if (config_.num_attention_heads == 0) {
-    Logger::error("Cannot initialize RoPE frequencies: num_attention_heads is zero.");
-    return;
-  }
-  int head_dim = config_.hidden_size / config_.num_attention_heads;
-  Logger::info("[ROPE_FREQ_CHECK] calculated head_dim: " + std::to_string(head_dim));
-  if (head_dim == 0) {
-    Logger::error("Cannot initialize RoPE frequencies: calculated head_dim is zero.");
-    return;
-  }
-  Logger::info("[ROPE_FREQ_CHECK] head_dim % 2 check. head_dim: " + std::to_string(head_dim));
-  if (head_dim % 2 != 0) {
-    Logger::error("Cannot initialize RoPE frequencies: head_dim must be even.");
-    return;
-  }
-
-  // Log parameters used for RoPE initialization
-  Logger::info("[ROPE_INIT] Initializing RoPE with head_dim=" + std::to_string(head_dim) +
-               ", configured max_pos_emb=" + std::to_string(config_.max_position_embeddings) +
-               ", using internal rope::MAX_SEQUENCE_LENGTH=" + std::to_string(rope::MAX_SEQUENCE_LENGTH) +
-               ", configured rope_theta=" + std::to_string(config_.rope_theta));
-
-
-  if (precomputed_freqs_cis_.empty()) { 
-    int max_seq_len = rope::MAX_SEQUENCE_LENGTH; // Or config_.max_position_embeddings if preferred
-    size_t required_size = (static_cast<size_t>(max_seq_len) * head_dim) / 2;
-    if (required_size == 0) {
-        Logger::warning("RoPE precomputation resulted in zero size. Max seq len: " + 
-                        std::to_string(max_seq_len) + ", head_dim: " + std::to_string(head_dim));
-        return;
-    }
-    precomputed_freqs_cis_.resize(required_size);
-    
-    float rope_theta = config_.rope_theta > 0 ? config_.rope_theta : rope::ROPE_THETA;
-
-    for (int pos = 0; pos < max_seq_len; ++pos) {
-      for (int i = 0; i < head_dim; i += 2) {
-        float freq = 1.0f / std::pow(rope_theta, float(i) / head_dim);
-        float val = static_cast<float>(pos) * freq;
-        float cos_val = std::cos(val);
-        float sin_val = std::sin(val);
-        size_t flat_idx = (static_cast<size_t>(pos) * head_dim / 2) + (i / 2);
-        if (flat_idx < precomputed_freqs_cis_.size()){
-            precomputed_freqs_cis_[flat_idx] = {cos_val, sin_val};
-        } else {
-            Logger::error("RoPE precomputation index out of bounds: " + std::to_string(flat_idx) + 
-                          " vs size " + std::to_string(precomputed_freqs_cis_.size()));
-            return; 
-        }
-      }
-    }
-    Logger::info("Precomputed RoPE frequencies on CPU. Size: " + std::to_string(precomputed_freqs_cis_.size()));
-  } else {
-      Logger::info("RoPE frequencies already precomputed.");
-  }
-}
 
 std::vector<float> TinyLlamaModel::forward_cpu_logits_batch(
     const std::vector<float>& final_batch_activations, // [num_tokens, hidden_size]
