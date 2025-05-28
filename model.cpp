@@ -523,6 +523,9 @@ TinyLlamaModel::~TinyLlamaModel() {
     selective_v_dequant_buffer_dev_ = nullptr;
   }
 
+  // Free persistent batch processing buffers
+  free_persistent_batch_buffers();
+
     Logger::info("Freed persistent GPU workspace buffers.");
     Logger::info("Finished freeing TinyLlamaModel CUDA weight memory.");
   } else {
@@ -1495,25 +1498,26 @@ std::vector<float> TinyLlamaModel::forward_device_batch_prefill(
     size_t batch_hidden_size_bytes = batch_hidden_size_elems * sizeof(float);
     size_t batch_kv_proj_size_bytes = batch_kv_proj_size_elems * sizeof(float);
     size_t batch_ffn_intermediate_bytes = batch_ffn_intermediate_elems * sizeof(float);
-
-    gpuErrchk(cudaMalloc(&d_batch_x_norm_out_attn, batch_hidden_size_bytes));
-    gpuErrchk(cudaMalloc(&d_batch_q_proj_out, batch_hidden_size_bytes));
-    gpuErrchk(cudaMalloc(&d_batch_k_proj_out, batch_kv_proj_size_bytes));
-    gpuErrchk(cudaMalloc(&d_batch_v_proj_out, batch_kv_proj_size_bytes));
-    gpuErrchk(cudaMalloc(&d_batch_attn_heads_concat_out, batch_hidden_size_bytes));
-    gpuErrchk(cudaMalloc(&d_batch_attn_final_proj_out, batch_hidden_size_bytes));
-    gpuErrchk(cudaMalloc(&d_batch_residual_attn_in, batch_hidden_size_bytes)); 
-    gpuErrchk(cudaMalloc(&d_batch_residual_ffn_in, batch_hidden_size_bytes)); 
-    gpuErrchk(cudaMalloc(&d_batch_x_norm_out_ffn, batch_hidden_size_bytes));
-    gpuErrchk(cudaMalloc(&d_batch_ffn_gate_proj_out, batch_ffn_intermediate_bytes));
-    gpuErrchk(cudaMalloc(&d_batch_ffn_up_proj_out, batch_ffn_intermediate_bytes));
-    gpuErrchk(cudaMalloc(&d_batch_ffn_swiglu_out, batch_ffn_intermediate_bytes));
-    gpuErrchk(cudaMalloc(&d_batch_ffn_down_proj_out, batch_hidden_size_bytes));
+    resize_persistent_batch_buffers_if_needed(num_tokens_in_batch);
+    
+    // Assign persistent buffers instead of allocating per forward pass
+    d_batch_x_norm_out_attn = d_persistent_batch_norm_out_;
+    d_batch_q_proj_out = d_persistent_q_batch_;
+    d_batch_k_proj_out = d_persistent_k_batch_;
+    d_batch_v_proj_out = d_persistent_v_batch_;
+    d_batch_attn_heads_concat_out = d_persistent_attn_output_;
+    d_batch_attn_final_proj_out = d_persistent_attn_proj_out_;
+    d_batch_residual_attn_in = d_persistent_batch_residual_;
+    d_batch_residual_ffn_in = d_persistent_batch_residual_ + num_tokens_in_batch * hidden_size; // Offset for second residual
+    d_batch_x_norm_out_ffn = d_persistent_batch_norm_out_;  // Can reuse norm buffer
+    d_batch_ffn_gate_proj_out = d_persistent_gate_proj_out_;
+    d_batch_ffn_up_proj_out = d_persistent_up_proj_out_;
+    d_batch_ffn_swiglu_out = d_persistent_swiglu_out_;
+    d_batch_ffn_down_proj_out = d_persistent_mlp_down_out_;
 
     if (config_.num_cpu_offload_layers < config_.num_hidden_layers) {
-         gpuErrchk(cudaMalloc(&d_batch_layer_output, batch_hidden_size_bytes));
+         d_batch_layer_output = d_persistent_batch_input_; // Can reuse input buffer for layer output
     }
-
     const float alpha = 1.0f;
     const float beta = 0.0f;
 
@@ -1781,23 +1785,6 @@ std::vector<float> TinyLlamaModel::forward_device_batch_prefill(
                              " out of bounds for kv_cache->layers (size " + std::to_string(kv_cache->layers.size()) + ")");
         }
     }
-
-    gpuErrchk(cudaFree(d_batch_x_norm_out_attn));
-    gpuErrchk(cudaFree(d_batch_q_proj_out));
-    gpuErrchk(cudaFree(d_batch_k_proj_out));
-    gpuErrchk(cudaFree(d_batch_v_proj_out));
-    gpuErrchk(cudaFree(d_batch_attn_heads_concat_out));
-    gpuErrchk(cudaFree(d_batch_attn_final_proj_out));
-    gpuErrchk(cudaFree(d_batch_residual_attn_in));
-    gpuErrchk(cudaFree(d_batch_residual_ffn_in));
-    gpuErrchk(cudaFree(d_batch_x_norm_out_ffn));
-    gpuErrchk(cudaFree(d_batch_ffn_gate_proj_out));
-    gpuErrchk(cudaFree(d_batch_ffn_up_proj_out));
-    gpuErrchk(cudaFree(d_batch_ffn_swiglu_out));
-    gpuErrchk(cudaFree(d_batch_ffn_down_proj_out));
-    if (d_batch_layer_output) { 
-        gpuErrchk(cudaFree(d_batch_layer_output));
-    }
     gpuErrchk(cudaFree(d_logits_last_token));
     Logger::info("[FWD_DEV_BATCH_PREFILL_EXIT] Function finished.");
     return h_logits;
@@ -1848,40 +1835,28 @@ std::vector<std::vector<float>> TinyLlamaModel::forward_device_batch_generation(
     float* d_batch_ffn_down_proj_out;
     float* d_batch_layer_output = nullptr;
 
-    gpuErrchk(cudaMalloc(&d_batch_x_norm_out_attn, batch_hidden_size_bytes));
-    gpuErrchk(cudaMalloc(&d_batch_q_proj_out, batch_q_size_bytes));
-    gpuErrchk(cudaMalloc(&d_batch_k_proj_out, batch_kv_size_bytes));
-    gpuErrchk(cudaMalloc(&d_batch_v_proj_out, batch_kv_size_bytes));
-    gpuErrchk(cudaMalloc(&d_batch_attn_heads_concat_out, batch_hidden_size_bytes));
-    gpuErrchk(cudaMalloc(&d_batch_attn_final_proj_out, batch_hidden_size_bytes));
-    gpuErrchk(cudaMalloc(&d_batch_residual_attn_in, batch_hidden_size_bytes));
-    gpuErrchk(cudaMalloc(&d_batch_residual_ffn_in, batch_hidden_size_bytes));
-    gpuErrchk(cudaMalloc(&d_batch_x_norm_out_ffn, batch_hidden_size_bytes));
-    gpuErrchk(cudaMalloc(&d_batch_ffn_gate_proj_out, batch_intermediate_size_bytes));
-    gpuErrchk(cudaMalloc(&d_batch_ffn_up_proj_out, batch_intermediate_size_bytes));
-    gpuErrchk(cudaMalloc(&d_batch_ffn_swiglu_out, batch_intermediate_size_bytes));
-    gpuErrchk(cudaMalloc(&d_batch_ffn_down_proj_out, batch_hidden_size_bytes));
-    gpuErrchk(cudaMalloc(&d_batch_layer_output, batch_hidden_size_bytes));
+    resize_persistent_batch_buffers_if_needed(num_tokens_in_batch);
+
+    d_batch_x_norm_out_attn = d_persistent_batch_norm_out_;
+    d_batch_q_proj_out = d_persistent_q_batch_;
+    d_batch_k_proj_out = d_persistent_k_batch_;
+    d_batch_v_proj_out = d_persistent_v_batch_;
+    d_batch_attn_heads_concat_out = d_persistent_attn_output_;
+    d_batch_attn_final_proj_out = d_persistent_attn_proj_out_;
+    d_batch_residual_attn_in = d_persistent_batch_residual_;
+    d_batch_residual_ffn_in = d_persistent_batch_residual_ + num_tokens_in_batch * hidden_size;
+    d_batch_x_norm_out_ffn = d_persistent_batch_norm_out_;
+    d_batch_ffn_gate_proj_out = d_persistent_gate_proj_out_;
+    d_batch_ffn_up_proj_out = d_persistent_up_proj_out_;
+    d_batch_ffn_swiglu_out = d_persistent_swiglu_out_;
+    d_batch_ffn_down_proj_out = d_persistent_mlp_down_out_;
+    d_batch_layer_output = d_persistent_batch_input_;
 
     const float alpha = 1.0f, beta = 0.0f;
 
     cublasStatus_t stream_status = cublasSetStream(cublas_handle_, stream);
     if (stream_status != CUBLAS_STATUS_SUCCESS) {
         Logger::fatal("cublasSetStream failed in forward_device_batch_generation");
-        gpuErrchk(cudaFree(d_batch_x_norm_out_attn));
-        gpuErrchk(cudaFree(d_batch_q_proj_out));
-        gpuErrchk(cudaFree(d_batch_k_proj_out));
-        gpuErrchk(cudaFree(d_batch_v_proj_out));
-        gpuErrchk(cudaFree(d_batch_attn_heads_concat_out));
-        gpuErrchk(cudaFree(d_batch_attn_final_proj_out));
-        gpuErrchk(cudaFree(d_batch_residual_attn_in));
-        gpuErrchk(cudaFree(d_batch_residual_ffn_in));
-        gpuErrchk(cudaFree(d_batch_x_norm_out_ffn));
-        gpuErrchk(cudaFree(d_batch_ffn_gate_proj_out));
-        gpuErrchk(cudaFree(d_batch_ffn_up_proj_out));
-        gpuErrchk(cudaFree(d_batch_ffn_swiglu_out));
-        gpuErrchk(cudaFree(d_batch_ffn_down_proj_out));
-        gpuErrchk(cudaFree(d_batch_layer_output));
         throw std::runtime_error("cublasSetStream failed");
     }
 
@@ -2055,26 +2030,7 @@ for (int token_idx = 0; token_idx < num_tokens_in_batch; ++token_idx) {
     gpuErrchk(cudaStreamSynchronize(stream)); 
 
     Logger::info("[FWD_DEV_BATCH_GENERATION_FINAL_LOGITS] Calculated logits for " + std::to_string(num_tokens_in_batch) + " tokens");
-
-    // Free allocated memory
-    gpuErrchk(cudaFree(d_batch_x_norm_out_attn));
-    gpuErrchk(cudaFree(d_batch_q_proj_out));
-    gpuErrchk(cudaFree(d_batch_k_proj_out));
-    gpuErrchk(cudaFree(d_batch_v_proj_out));
-    gpuErrchk(cudaFree(d_batch_attn_heads_concat_out));
-    gpuErrchk(cudaFree(d_batch_attn_final_proj_out));
-    gpuErrchk(cudaFree(d_batch_residual_attn_in));
-    gpuErrchk(cudaFree(d_batch_residual_ffn_in));
-    gpuErrchk(cudaFree(d_batch_x_norm_out_ffn));
-    gpuErrchk(cudaFree(d_batch_ffn_gate_proj_out));
-    gpuErrchk(cudaFree(d_batch_ffn_up_proj_out));
-    gpuErrchk(cudaFree(d_batch_ffn_swiglu_out));
-    gpuErrchk(cudaFree(d_batch_ffn_down_proj_out));
-    if (d_batch_layer_output) { 
-        gpuErrchk(cudaFree(d_batch_layer_output));
-    }
     gpuErrchk(cudaFree(d_logits_batch));
-    
     Logger::info("[FWD_DEV_BATCH_GENERATION_EXIT] Function finished.");
     return all_logits;
 }

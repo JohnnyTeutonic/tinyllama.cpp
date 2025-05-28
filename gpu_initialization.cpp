@@ -501,6 +501,11 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
 
   Logger::info("Finished deferring concatenated F32 weight processing for GPU layers.");
 
+  // Allocate persistent batch processing buffers for GPU memory optimization
+  if (active_num_gpu_layers > 0) {
+    allocate_persistent_batch_buffers();
+  }
+
 #undef SAFE_CUDA_FREE
 #else
   if (active_num_gpu_layers > 0 && nhl > 0) {

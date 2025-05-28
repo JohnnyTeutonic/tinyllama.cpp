@@ -432,6 +432,30 @@ void free_layer_gpu_weights(int layer_idx);
 
   void initialize_gpu_and_rope();
 
+  // GPU workspace buffers
+  
+  // Persistent batch processing buffers to eliminate per-forward-pass allocations
+  static constexpr int MAX_BATCH_TOKENS = 2048;  // Maximum tokens we can process in one batch
+  
+  // Persistent GPU buffers for batch processing (allocated once, reused)
+  float* d_persistent_batch_input_ = nullptr;           // [MAX_BATCH_TOKENS, hidden_size]
+  float* d_persistent_batch_norm_out_ = nullptr;        // [MAX_BATCH_TOKENS, hidden_size]
+  float* d_persistent_batch_residual_ = nullptr;        // [MAX_BATCH_TOKENS, hidden_size]
+  float* d_persistent_q_batch_ = nullptr;               // [MAX_BATCH_TOKENS, hidden_size]
+  float* d_persistent_k_batch_ = nullptr;               // [MAX_BATCH_TOKENS, n_kv_heads * head_dim]
+  float* d_persistent_v_batch_ = nullptr;               // [MAX_BATCH_TOKENS, n_kv_heads * head_dim]
+  float* d_persistent_attn_output_ = nullptr;           // [MAX_BATCH_TOKENS, hidden_size]
+  float* d_persistent_attn_proj_out_ = nullptr;         // [MAX_BATCH_TOKENS, hidden_size]
+  float* d_persistent_gate_proj_out_ = nullptr;         // [MAX_BATCH_TOKENS, intermediate_size]
+  float* d_persistent_up_proj_out_ = nullptr;           // [MAX_BATCH_TOKENS, intermediate_size]
+  float* d_persistent_swiglu_out_ = nullptr;            // [MAX_BATCH_TOKENS, intermediate_size]
+  float* d_persistent_mlp_down_out_ = nullptr;          // [MAX_BATCH_TOKENS, hidden_size]
+  
+  // Buffer management functions
+  void allocate_persistent_batch_buffers();
+  void free_persistent_batch_buffers();
+  void resize_persistent_batch_buffers_if_needed(int required_batch_size);
+
 #endif // HAS_CUDA
 
   const ModelConfig& get_config() const { return config_; }

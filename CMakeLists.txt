@@ -113,6 +113,7 @@ add_library(tinyllama_core STATIC
     cpu_attention.cpp
     model_utils.cpp
     gpu_initialization.cpp
+    gpu_memory_optimization.cpp
     cpu_batch_processor.cpp
     utils.cpp
     safetensors_loader.cpp 
