@@ -464,6 +464,7 @@ void free_layer_gpu_weights(int layer_idx);
   void initialize_rope_freqs();
 
   friend void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model);
+  friend class CPUBatchProcessor;
 
  private:
   ModelConfig config_;
@@ -533,6 +534,8 @@ void free_layer_gpu_weights(int layer_idx);
   std::unique_ptr<GGUFData> gguf_data_;
   std::string model_path_;
   bool f32_concatenated_weights_loaded_ = false;
+
+  std::unique_ptr<class CPUBatchProcessor> cpu_batch_processor_;
 
   void initialize_weights(const SafeTensorsLoader* loader,
                           const GGUFData* gguf);
