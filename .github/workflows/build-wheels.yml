@@ -69,46 +69,44 @@ jobs:
         python -m pip install --upgrade pip
         pip install build wheel cibuildwheel
 
-    # Linux CUDA setup using apt packages
-    - name: Install CUDA Toolkit (Linux)
+    # Linux CUDA setup using conda/mamba (matching release workflow)
+    - name: Setup Mamba for CUDA (Linux)
       if: matrix.os == 'ubuntu-latest' && matrix.cuda_version != 'cpu'
+      uses: conda-incubator/setup-miniconda@v3.1.0
+      with:
+        activate-environment: "cuda-env"
+        python-version: '3.10'
+        miniforge-version: latest
+        add-pip-as-python-dependency: true
+        auto-activate-base: false
+
+    - name: Install CUDA Toolkit via Mamba (Linux)
+      if: matrix.os == 'ubuntu-latest' && matrix.cuda_version != 'cpu'
+      shell: bash -el {0}
       run: |
-        echo "Installing minimal CUDA ${{ matrix.cuda_version }} toolkit using apt..."
-        wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.0-1_all.deb || true
-        sudo dpkg -i cuda-keyring_1.0-1_all.deb || true
-        sudo apt-get update || true
+        echo "Installing CUDA toolkit using Mamba for version ${{ matrix.cuda_version }}..."
         
         if [ "${{ matrix.cuda_version }}" == "12.1" ]; then
-          sudo apt-get install -y cuda-nvcc-12-1 cuda-cudart-dev-12-1 cuda-driver-dev-12-1 libcublas-dev-12-1 libcurand-dev-12-1 || true
-          echo "CUDA_HOME=/usr/local/cuda-12.1" >> $GITHUB_ENV
-          export CUDA_HOME=/usr/local/cuda-12.1
+          mamba install -y -n cuda-env -c nvidia/label/cuda-12.1.1 cuda-toolkit
         elif [ "${{ matrix.cuda_version }}" == "12.4" ]; then
-          sudo apt-get install -y cuda-nvcc-12-4 cuda-cudart-dev-12-4 cuda-driver-dev-12-4 libcublas-dev-12-4 libcurand-dev-12-4 || true
-          echo "CUDA_HOME=/usr/local/cuda-12.4" >> $GITHUB_ENV
-          export CUDA_HOME=/usr/local/cuda-12.4
+          mamba install -y -n cuda-env -c nvidia/label/cuda-12.4.1 cuda-toolkit
         elif [ "${{ matrix.cuda_version }}" == "11.8" ]; then
-          sudo apt-get install -y cuda-nvcc-11-8 cuda-cudart-dev-11-8 cuda-driver-dev-11-8 libcublas-dev-11-8 libcurand-dev-11-8 || true
-          echo "CUDA_HOME=/usr/local/cuda-11.8" >> $GITHUB_ENV
-          export CUDA_HOME=/usr/local/cuda-11.8
+          mamba install -y -n cuda-env -c nvidia/label/cuda-11.8.0 cuda-toolkit
         else
           echo "Unsupported CUDA version: ${{ matrix.cuda_version }}"
           exit 1
         fi
         
-        echo "PATH=$CUDA_HOME/bin:$PATH" >> $GITHUB_ENV
-        echo "LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+        echo "Setting CUDA environment variables..."
+        echo "CUDA_HOME=${CONDA_PREFIX}" >> $GITHUB_ENV
+        echo "CUDA_TOOLKIT_ROOT_DIR=${CONDA_PREFIX}" >> $GITHUB_ENV
+        echo "CUDAToolkit_ROOT=${CONDA_PREFIX}" >> $GITHUB_ENV
+        echo "LD_LIBRARY_PATH=${CONDA_PREFIX}/lib:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
+        echo "${CONDA_PREFIX}/bin" >> $GITHUB_PATH
         
-        # Verify installation (never fail the step)
-        echo "CUDA packages installed successfully!"
-        echo "CUDA_HOME set to: $CUDA_HOME"
-        export PATH=$CUDA_HOME/bin:$PATH
-        if command -v nvcc >/dev/null 2>&1; then
-          echo "✅ nvcc found and working!"
-          nvcc --version || echo "nvcc found but version check failed"
-        else
-          echo "ℹ️  nvcc not immediately available in PATH, but CUDA libraries are installed"
-          echo "This is normal - nvcc will be available during the build process"
-        fi
+        echo "Verifying CUDA installation..."
+        which nvcc
+        nvcc --version
         echo "CUDA setup complete!"
 
     # Windows CUDA setup
@@ -181,8 +179,39 @@ jobs:
 
     - name: Install build dependencies (Windows)
       if: matrix.os == 'windows-latest'
+      shell: pwsh
       run: |
-        choco install cmake ninja
+        Write-Host "Installing build dependencies for Windows..."
+        choco install cmake ninja -y
+        
+        Write-Host "Installing Boost using chocolatey..."
+        choco install boost-msvc-14.3 --version=1.81.0 -y --debug --verbose
+        if ($LASTEXITCODE -ne 0) {
+          Write-Warning "Failed to install Boost with default sources. Retrying with explicit community source..."
+          choco install boost-msvc-14.3 --version=1.81.0 -y --source=https://community.chocolatey.org/api/v2/
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Failed to install Boost even with explicit community source. Exit code: $LASTEXITCODE"
+            exit 1
+          }
+        }
+        
+        Write-Host "Setting up Boost environment variables..."
+        $BOOST_VERSION_UNDERSCORE = "1_81_0"
+        $TARGET_BOOST_ROOT_DIR = "C:\local\boost_$($BOOST_VERSION_UNDERSCORE)"
+        
+        if (-not (Test-Path $TARGET_BOOST_ROOT_DIR)) {
+          Write-Warning "Boost not found at $TARGET_BOOST_ROOT_DIR. Trying C:\Boost as fallback..."
+          $TARGET_BOOST_ROOT_DIR = "C:\Boost"
+          if (-not (Test-Path $TARGET_BOOST_ROOT_DIR)) {
+            Write-Error "Boost not found at either location. Installation may have failed."
+            exit 1
+          }
+        }
+        
+        Write-Host "Setting BOOST_ROOT to: $TARGET_BOOST_ROOT_DIR"
+        echo "BOOST_ROOT=$TARGET_BOOST_ROOT_DIR" >> $env:GITHUB_ENV
+        echo "Boost_ROOT=$TARGET_BOOST_ROOT_DIR" >> $env:GITHUB_ENV
+        echo "Boost_INCLUDE_DIR=$TARGET_BOOST_ROOT_DIR" >> $env:GITHUB_ENV
 
     # Clear any problematic environment variables
     - name: Clear problematic environment variables
@@ -214,7 +243,7 @@ jobs:
         
         CIBW_ENVIRONMENT_LINUX: "TINYLLAMA_CPP_BUILD_CUDA=0 CMAKE_POLICY_DEFAULT_CMP0167=NEW Python_EXECUTABLE={python} Python_FIND_STRATEGY=LOCATION CMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER SETUPTOOLS_USE_DISTUTILS=stdlib"
         
-        CIBW_ENVIRONMENT_WINDOWS: "TINYLLAMA_CPP_BUILD_CUDA=0 CMAKE_POLICY_DEFAULT_CMP0167=NEW"
+        CIBW_ENVIRONMENT_WINDOWS: "TINYLLAMA_CPP_BUILD_CUDA=0 CMAKE_POLICY_DEFAULT_CMP0167=NEW BOOST_ROOT=C:\\local\\boost_1_81_0 Boost_ROOT=C:\\local\\boost_1_81_0 Boost_INCLUDE_DIR=C:\\local\\boost_1_81_0"
         
         CIBW_ENVIRONMENT_MACOS: "TINYLLAMA_CPP_BUILD_CUDA=0 OpenMP_CXX_FLAGS='-Xpreprocessor -fopenmp' OpenMP_CXX_LIB_NAMES=omp CMAKE_FIND_DEBUG_MODE=ON"
         
@@ -243,9 +272,19 @@ jobs:
           yum install -y python3-devel || 
           (PYTHON_VERSION_SHORT=$(python -c "import sys; print(f'{sys.version_info.major}{sys.version_info.minor}')") &&
           yum install -y python${PYTHON_VERSION_SHORT}-devel) ||
-          echo "Python development packages not available, using existing Python installation"
+          echo "Python development packages not available, using existing Python installation" &&
+          if command -v nvcc >/dev/null 2>&1; then
+            echo "CUDA available: $(which nvcc)" &&
+            nvcc --version
+          else
+            echo "CUDA not available in this environment"
+          fi
         
-        CIBW_BEFORE_BUILD_WINDOWS: "pip install cmake ninja"
+        CIBW_BEFORE_BUILD_WINDOWS: >
+          echo "Installing build dependencies for Windows wheel build..." &&
+          pip install cmake ninja &&
+          choco install boost-msvc-14.3 --version=1.81.0 -y --force ||
+          choco install boost-msvc-14.3 --version=1.81.0 -y --source=https://community.chocolatey.org/api/v2/ --force
         
         CIBW_BEFORE_BUILD_MACOS: >
           echo "Setting up macOS build environment..." &&
@@ -288,9 +327,9 @@ jobs:
         CIBW_ARCHS_WINDOWS: AMD64
         CIBW_ARCHS_MACOS: x86_64 arm64
         
-        CIBW_ENVIRONMENT_LINUX: "TINYLLAMA_CPP_BUILD_CUDA=1 CMAKE_CUDA_ARCHITECTURES=\"75;80;86;89;90\" CMAKE_POLICY_DEFAULT_CMP0167=NEW CUDA_HOME=/usr/local/cuda Python_EXECUTABLE={python} Python_FIND_STRATEGY=LOCATION CMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER SETUPTOOLS_USE_DISTUTILS=stdlib"
+        CIBW_ENVIRONMENT_LINUX: "TINYLLAMA_CPP_BUILD_CUDA=1 CMAKE_CUDA_ARCHITECTURES=\"75;80;86;89;90\" CMAKE_POLICY_DEFAULT_CMP0167=NEW Python_EXECUTABLE={python} Python_FIND_STRATEGY=LOCATION CMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER SETUPTOOLS_USE_DISTUTILS=stdlib"
         
-        CIBW_ENVIRONMENT_WINDOWS: "TINYLLAMA_CPP_BUILD_CUDA=1 CMAKE_CUDA_ARCHITECTURES=\"75;80;86;89;90\" CMAKE_POLICY_DEFAULT_CMP0167=NEW"
+        CIBW_ENVIRONMENT_WINDOWS: "TINYLLAMA_CPP_BUILD_CUDA=1 CMAKE_CUDA_ARCHITECTURES=\"75;80;86;89;90\" CMAKE_POLICY_DEFAULT_CMP0167=NEW BOOST_ROOT=C:\\local\\boost_1_81_0 Boost_ROOT=C:\\local\\boost_1_81_0 Boost_INCLUDE_DIR=C:\\local\\boost_1_81_0"
         
         CIBW_ENVIRONMENT_MACOS: "TINYLLAMA_CPP_BUILD_CUDA=0 OpenMP_CXX_FLAGS='-Xpreprocessor -fopenmp' OpenMP_CXX_LIB_NAMES=omp CMAKE_FIND_DEBUG_MODE=ON"
         
@@ -320,10 +359,12 @@ jobs:
           (PYTHON_VERSION_SHORT=$(python -c "import sys; print(f'{sys.version_info.major}{sys.version_info.minor}')") &&
           yum install -y python${PYTHON_VERSION_SHORT}-devel) ||
           echo "Python development packages not available, using existing Python installation" &&
-          export PATH=/usr/local/cuda/bin:$PATH &&
-          export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH &&
-          echo "Using CUDA from /usr/local/cuda" &&
-          which nvcc && nvcc --version || echo "NVCC not found, CUDA may not be available"
+          if command -v nvcc >/dev/null 2>&1; then
+            echo "CUDA available: $(which nvcc)" &&
+            nvcc --version
+          else
+            echo "CUDA not available in this environment"
+          fi
         
         CIBW_BEFORE_BUILD_WINDOWS: "pip install cmake ninja"
         CIBW_BEFORE_BUILD_MACOS: >
