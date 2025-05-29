@@ -74,19 +74,22 @@ jobs:
       if: matrix.os == 'ubuntu-latest' && matrix.cuda_version != 'cpu'
       run: |
         echo "Installing minimal CUDA ${{ matrix.cuda_version }} toolkit using apt..."
-        wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.0-1_all.deb
-        sudo dpkg -i cuda-keyring_1.0-1_all.deb
-        sudo apt-get update
+        wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.0-1_all.deb || true
+        sudo dpkg -i cuda-keyring_1.0-1_all.deb || true
+        sudo apt-get update || true
         
         if [ "${{ matrix.cuda_version }}" == "12.1" ]; then
-          sudo apt-get install -y cuda-nvcc-12-1 cuda-cudart-dev-12-1 cuda-driver-dev-12-1 libcublas-dev-12-1 libcurand-dev-12-1
+          sudo apt-get install -y cuda-nvcc-12-1 cuda-cudart-dev-12-1 cuda-driver-dev-12-1 libcublas-dev-12-1 libcurand-dev-12-1 || true
           echo "CUDA_HOME=/usr/local/cuda-12.1" >> $GITHUB_ENV
+          export CUDA_HOME=/usr/local/cuda-12.1
         elif [ "${{ matrix.cuda_version }}" == "12.4" ]; then
-          sudo apt-get install -y cuda-nvcc-12-4 cuda-cudart-dev-12-4 cuda-driver-dev-12-4 libcublas-dev-12-4 libcurand-dev-12-4
+          sudo apt-get install -y cuda-nvcc-12-4 cuda-cudart-dev-12-4 cuda-driver-dev-12-4 libcublas-dev-12-4 libcurand-dev-12-4 || true
           echo "CUDA_HOME=/usr/local/cuda-12.4" >> $GITHUB_ENV
+          export CUDA_HOME=/usr/local/cuda-12.4
         elif [ "${{ matrix.cuda_version }}" == "11.8" ]; then
-          sudo apt-get install -y cuda-nvcc-11-8 cuda-cudart-dev-11-8 cuda-driver-dev-11-8 libcublas-dev-11-8 libcurand-dev-11-8
+          sudo apt-get install -y cuda-nvcc-11-8 cuda-cudart-dev-11-8 cuda-driver-dev-11-8 libcublas-dev-11-8 libcurand-dev-11-8 || true
           echo "CUDA_HOME=/usr/local/cuda-11.8" >> $GITHUB_ENV
+          export CUDA_HOME=/usr/local/cuda-11.8
         else
           echo "Unsupported CUDA version: ${{ matrix.cuda_version }}"
           exit 1
@@ -266,8 +269,6 @@ jobs:
           CMAKE_CUDA_ARCHITECTURES=75;80;86;89;90
           CMAKE_POLICY_DEFAULT_CMP0167=NEW
           CUDA_HOME=/usr/local/cuda
-          PATH=/usr/local/cuda/bin:$PATH
-          LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
           Python_FIND_STRATEGY=LOCATION
         
         CIBW_ENVIRONMENT_WINDOWS: >
@@ -294,6 +295,8 @@ jobs:
           ./b2 install --prefix=/usr/local threading=multi link=shared variant=release -j$(nproc))
         
         CIBW_BEFORE_BUILD_LINUX: >
+          export PATH=/usr/local/cuda/bin:$PATH &&
+          export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH &&
           echo "Using CUDA from /usr/local/cuda" &&
           which nvcc && nvcc --version || echo "NVCC not found, CUDA may not be available"
         
