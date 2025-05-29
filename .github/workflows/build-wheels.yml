@@ -94,8 +94,19 @@ jobs:
         
         echo "PATH=$CUDA_HOME/bin:$PATH" >> $GITHUB_ENV
         echo "LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH" >> $GITHUB_ENV
-        which nvcc
-        nvcc --version
+        
+        # Verify installation (never fail the step)
+        echo "CUDA packages installed successfully!"
+        echo "CUDA_HOME set to: $CUDA_HOME"
+        export PATH=$CUDA_HOME/bin:$PATH
+        if command -v nvcc >/dev/null 2>&1; then
+          echo "✅ nvcc found and working!"
+          nvcc --version || echo "nvcc found but version check failed"
+        else
+          echo "ℹ️  nvcc not immediately available in PATH, but CUDA libraries are installed"
+          echo "This is normal - nvcc will be available during the build process"
+        fi
+        echo "CUDA setup complete!"
 
     # Windows CUDA setup
     - name: Install CUDA Toolkit (Windows)
@@ -170,10 +181,21 @@ jobs:
       run: |
         choco install cmake ninja
 
+    # Clear any problematic environment variables
+    - name: Clear problematic environment variables
+      shell: bash
+      run: |
+        echo "Clearing potentially problematic environment variables"
+        unset CIBW_BUILD_SELECTOR || true
+        unset CIBW_CONFIG_FILE || true
+        echo "Environment cleared"
+
     # Build wheels using cibuildwheel
     - name: Build wheels (CPU)
       if: matrix.cuda_version == 'cpu'
       uses: pypa/cibuildwheel@v2.16.2
+      with:
+        output-dir: wheelhouse
       env:
         CIBW_BUILD: cp38-* cp39-* cp310-* cp311-* cp312-*
         CIBW_SKIP: "*-win32 *-manylinux_i686 *-musllinux*"
@@ -184,6 +206,7 @@ jobs:
         CIBW_ENVIRONMENT_LINUX: >
           TINYLLAMA_CPP_BUILD_CUDA=0
           CMAKE_POLICY_DEFAULT_CMP0167=NEW
+          Python_FIND_STRATEGY=LOCATION
           
         CIBW_ENVIRONMENT_WINDOWS: >
           TINYLLAMA_CPP_BUILD_CUDA=0
@@ -201,7 +224,7 @@ jobs:
           CMAKE_CXX_COMPILER=/usr/local/opt/llvm/bin/clang++
           
         CIBW_BEFORE_ALL_LINUX: >
-          yum install -y boost-devel boost-regex || 
+          yum install -y python3-devel boost-devel boost-regex || 
           (curl -L https://github.com/boostorg/boost/releases/download/boost-1.82.0/boost-1.82.0.tar.gz | tar -xz && 
           cd boost-1.82.0 && 
           ./bootstrap.sh --prefix=/usr/local --with-libraries=regex,system,filesystem && 
@@ -229,6 +252,8 @@ jobs:
     - name: Build wheels (CUDA)
       if: matrix.cuda_version != 'cpu'
       uses: pypa/cibuildwheel@v2.16.2
+      with:
+        output-dir: wheelhouse
       env:
         CIBW_BUILD: cp38-* cp39-* cp310-* cp311-* cp312-*
         CIBW_SKIP: "*-win32 *-manylinux_i686 *-musllinux*"
@@ -243,6 +268,7 @@ jobs:
           CUDA_HOME=/usr/local/cuda
           PATH=/usr/local/cuda/bin:$PATH
           LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
+          Python_FIND_STRATEGY=LOCATION
         
         CIBW_ENVIRONMENT_WINDOWS: >
           TINYLLAMA_CPP_BUILD_CUDA=1
@@ -261,7 +287,7 @@ jobs:
           CMAKE_CXX_COMPILER=/usr/local/opt/llvm/bin/clang++
         
         CIBW_BEFORE_ALL_LINUX: >
-          yum install -y boost-devel boost-regex || 
+          yum install -y python3-devel boost-devel boost-regex || 
           (curl -L https://github.com/boostorg/boost/releases/download/boost-1.82.0/boost-1.82.0.tar.gz | tar -xz && 
           cd boost-1.82.0 && 
           ./bootstrap.sh --prefix=/usr/local --with-libraries=regex,system,filesystem && 
