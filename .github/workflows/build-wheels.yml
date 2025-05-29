@@ -51,7 +51,7 @@ jobs:
             wheel_suffix: "+cu118"
           - os: windows-latest
             cuda_version: "12.1"
-            cuda_toolkit: "12.1.1"
+            cuda_toolkit: "12.1.0"
             wheel_suffix: "+cu121"
 
     steps:
@@ -102,6 +102,10 @@ jobs:
         echo "${CONDA_PREFIX}/bin" >> $GITHUB_PATH
         which nvcc
         nvcc --version
+        
+        # Export CUDA paths for use outside conda environment
+        echo "CUDA_BIN_PATH=${CONDA_PREFIX}/bin" >> $GITHUB_ENV
+        echo "CUDA_LIB_PATH=${CONDA_PREFIX}/lib64" >> $GITHUB_ENV
 
     # Windows CUDA setup
     - name: Install CUDA Toolkit (Windows)
@@ -169,6 +173,17 @@ jobs:
       run: |
         choco install cmake ninja
 
+    # Deactivate conda environment for CUDA builds to avoid Python version parsing issues
+    - name: Deactivate conda environment
+      if: matrix.cuda_version != 'cpu' && matrix.os == 'ubuntu-latest'
+      shell: bash
+      run: |
+        echo "Deactivating conda environment to use system Python for cibuildwheel"
+        conda deactivate || true
+        # Ensure system Python is used
+        which python3
+        python3 --version
+
     # Build wheels using cibuildwheel
     - name: Build wheels (CPU)
       if: matrix.cuda_version == 'cpu'
@@ -180,18 +195,32 @@ jobs:
         CIBW_ARCHS_WINDOWS: AMD64
         CIBW_ARCHS_MACOS: x86_64 arm64
         
-        CIBW_ENVIRONMENT_LINUX: TINYLLAMA_CPP_BUILD_CUDA=0
+        CIBW_ENVIRONMENT_LINUX: >
+          TINYLLAMA_CPP_BUILD_CUDA=0
+          CMAKE_POLICY_DEFAULT_CMP0167=NEW
+          BOOST_ROOT=/usr
+          Boost_ROOT=/usr
+          BOOST_INCLUDEDIR=/usr/include
+          Boost_INCLUDE_DIR=/usr/include
+          
         CIBW_ENVIRONMENT_WINDOWS: TINYLLAMA_CPP_BUILD_CUDA=0
         CIBW_ENVIRONMENT_MACOS: >
           TINYLLAMA_CPP_BUILD_CUDA=0
           LDFLAGS=-L$(brew --prefix libomp)/lib
           CPPFLAGS=-I$(brew --prefix libomp)/include
+          OpenMP_ROOT=$(brew --prefix libomp)
+          OpenMP_CXX_FLAGS=-Xpreprocessor -fopenmp -I$(brew --prefix libomp)/include
+          OpenMP_CXX_LIB_NAMES=omp
+          OpenMP_omp_LIBRARY=$(brew --prefix libomp)/lib/libomp.dylib
         
         CIBW_BEFORE_BUILD_LINUX: >
           (yum install -y boost-devel boost-static || true) &&
           (apt-get update && apt-get install -y libboost-all-dev || true) &&
           (apk add --no-cache boost-dev || true) &&
-          echo "Package installation completed"
+          echo "Package installation completed" &&
+          echo "Boost search paths:" &&
+          (find /usr -name "boost" -type d 2>/dev/null | head -5 || true) &&
+          (find /usr -name "*boost*" -type d 2>/dev/null | head -10 || true)
         
         CIBW_BEFORE_BUILD_WINDOWS: pip install cmake ninja
         CIBW_BEFORE_BUILD_MACOS: >
@@ -215,8 +244,13 @@ jobs:
           TINYLLAMA_CPP_BUILD_CUDA=1
           CMAKE_CUDA_ARCHITECTURES=${{ env.CMAKE_CUDA_ARCHITECTURES }}
           CUDA_HOME=${{ env.CUDA_HOME }}
-          PATH=${{ env.CUDA_HOME }}/bin:$PATH
-          LD_LIBRARY_PATH=${{ env.CUDA_HOME }}/lib64:$LD_LIBRARY_PATH
+          PATH=${{ env.CUDA_BIN_PATH }}:$PATH
+          LD_LIBRARY_PATH=${{ env.CUDA_LIB_PATH }}:$LD_LIBRARY_PATH
+          CMAKE_POLICY_DEFAULT_CMP0167=NEW
+          BOOST_ROOT=/usr
+          Boost_ROOT=/usr
+          BOOST_INCLUDEDIR=/usr/include
+          Boost_INCLUDE_DIR=/usr/include
         
         CIBW_ENVIRONMENT_WINDOWS: >
           TINYLLAMA_CPP_BUILD_CUDA=1
@@ -226,12 +260,19 @@ jobs:
           TINYLLAMA_CPP_BUILD_CUDA=0
           LDFLAGS=-L$(brew --prefix libomp)/lib
           CPPFLAGS=-I$(brew --prefix libomp)/include
+          OpenMP_ROOT=$(brew --prefix libomp)
+          OpenMP_CXX_FLAGS=-Xpreprocessor -fopenmp -I$(brew --prefix libomp)/include
+          OpenMP_CXX_LIB_NAMES=omp
+          OpenMP_omp_LIBRARY=$(brew --prefix libomp)/lib/libomp.dylib
         
         CIBW_BEFORE_BUILD_LINUX: >
           (yum install -y boost-devel boost-static || true) &&
           (apt-get update && apt-get install -y libboost-all-dev || true) &&
           (apk add --no-cache boost-dev || true) &&
-          echo "Package installation completed"
+          echo "Package installation completed" &&
+          echo "Boost search paths:" &&
+          (find /usr -name "boost" -type d 2>/dev/null | head -5 || true) &&
+          (find /usr -name "*boost*" -type d 2>/dev/null | head -10 || true)
         
         CIBW_BEFORE_BUILD_WINDOWS: pip install cmake ninja
         CIBW_BEFORE_BUILD_MACOS: >
