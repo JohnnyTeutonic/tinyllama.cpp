@@ -221,10 +221,20 @@ jobs:
               echo "Installing CUDA toolkit (silent install)..." &&
               sh "$CUDA_INSTALLER" --silent --toolkit --installpath=/usr/local/cuda &&
               rm "$CUDA_INSTALLER" &&
-              echo "Setting up CUDA environment..." &&
+              echo "Setting up CUDA environment and symlinks..." &&
               export PATH=/usr/local/cuda/bin:$PATH &&
               export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH &&
+              export CUDA_HOME=/usr/local/cuda &&
+              export CUDA_ROOT=/usr/local/cuda &&
+              export CUDA_PATH=/usr/local/cuda &&
               ln -sf /usr/local/cuda/bin/nvcc /usr/bin/nvcc &&
+              echo "Creating library symlinks for CMake discovery..." &&
+              ln -sf /usr/local/cuda/lib64 /usr/local/cuda/lib &&
+              mkdir -p /usr/lib64 &&
+              ln -sf /usr/local/cuda/lib64/* /usr/lib64/ &&
+              echo "Verifying CUDA installation..." &&
+              ls -la /usr/local/cuda/bin/ &&
+              ls -la /usr/local/cuda/lib64/ &&
               echo "CUDA installation complete" &&
               nvcc --version
             else
@@ -307,7 +317,7 @@ jobs:
         CIBW_ARCHS_WINDOWS: AMD64
         CIBW_ARCHS_MACOS: x86_64 arm64
         
-        CIBW_ENVIRONMENT_LINUX: "TINYLLAMA_CPP_BUILD_CUDA=1 CMAKE_CUDA_ARCHITECTURES=\"75;80;86;89;90\" CMAKE_POLICY_DEFAULT_CMP0167=NEW CUDA_HOME=/usr/local/cuda CUDAToolkit_ROOT=/usr/local/cuda Python_EXECUTABLE={python} Python_FIND_STRATEGY=LOCATION CMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER SETUPTOOLS_USE_DISTUTILS=stdlib"
+        CIBW_ENVIRONMENT_LINUX: "TINYLLAMA_CPP_BUILD_CUDA=1 CMAKE_CUDA_ARCHITECTURES=\"75;80;86;89;90\" CMAKE_POLICY_DEFAULT_CMP0167=NEW CUDA_HOME=/usr/local/cuda CUDA_ROOT=/usr/local/cuda CUDA_PATH=/usr/local/cuda CUDAToolkit_ROOT=/usr/local/cuda CMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc Python_EXECUTABLE={python} Python_FIND_STRATEGY=LOCATION CMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER SETUPTOOLS_USE_DISTUTILS=stdlib"
         
         CIBW_ENVIRONMENT_WINDOWS: "TINYLLAMA_CPP_BUILD_CUDA=1 CMAKE_CUDA_ARCHITECTURES=\"75;80;86;89;90\" CMAKE_POLICY_DEFAULT_CMP0167=NEW CMAKE_TOOLCHAIN_FILE=C:\\vcpkg\\scripts\\buildsystems\\vcpkg.cmake VCPKG_TARGET_TRIPLET=x64-windows"
         
@@ -340,10 +350,20 @@ jobs:
               echo "Installing CUDA toolkit (silent install)..." &&
               sh "$CUDA_INSTALLER" --silent --toolkit --installpath=/usr/local/cuda &&
               rm "$CUDA_INSTALLER" &&
-              echo "Setting up CUDA environment..." &&
+              echo "Setting up CUDA environment and symlinks..." &&
               export PATH=/usr/local/cuda/bin:$PATH &&
               export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH &&
+              export CUDA_HOME=/usr/local/cuda &&
+              export CUDA_ROOT=/usr/local/cuda &&
+              export CUDA_PATH=/usr/local/cuda &&
               ln -sf /usr/local/cuda/bin/nvcc /usr/bin/nvcc &&
+              echo "Creating library symlinks for CMake discovery..." &&
+              ln -sf /usr/local/cuda/lib64 /usr/local/cuda/lib &&
+              mkdir -p /usr/lib64 &&
+              ln -sf /usr/local/cuda/lib64/* /usr/lib64/ &&
+              echo "Verifying CUDA installation..." &&
+              ls -la /usr/local/cuda/bin/ &&
+              ls -la /usr/local/cuda/lib64/ &&
               echo "CUDA installation complete" &&
               nvcc --version
             else
