@@ -69,46 +69,6 @@ jobs:
         python -m pip install --upgrade pip
         pip install build wheel cibuildwheel
 
-    # Linux CUDA setup using conda/mamba (matching release workflow)
-    - name: Setup Mamba for CUDA (Linux)
-      if: matrix.os == 'ubuntu-latest' && matrix.cuda_version != 'cpu'
-      uses: conda-incubator/setup-miniconda@v3.1.0
-      with:
-        activate-environment: "cuda-env"
-        python-version: '3.10'
-        miniforge-version: latest
-        add-pip-as-python-dependency: true
-        auto-activate-base: false
-
-    - name: Install CUDA Toolkit via Mamba (Linux)
-      if: matrix.os == 'ubuntu-latest' && matrix.cuda_version != 'cpu'
-      shell: bash -el {0}
-      run: |
-        echo "Installing CUDA toolkit using Mamba for version ${{ matrix.cuda_version }}..."
-        
-        if [ "${{ matrix.cuda_version }}" == "12.1" ]; then
-          mamba install -y -n cuda-env -c nvidia/label/cuda-12.1.1 cuda-toolkit
-        elif [ "${{ matrix.cuda_version }}" == "12.4" ]; then
-          mamba install -y -n cuda-env -c nvidia/label/cuda-12.4.1 cuda-toolkit
-        elif [ "${{ matrix.cuda_version }}" == "11.8" ]; then
-          mamba install -y -n cuda-env -c nvidia/label/cuda-11.8.0 cuda-toolkit
-        else
-          echo "Unsupported CUDA version: ${{ matrix.cuda_version }}"
-          exit 1
-        fi
-        
-        echo "Setting CUDA environment variables..."
-        echo "CUDA_HOME=${CONDA_PREFIX}" >> $GITHUB_ENV
-        echo "CUDA_TOOLKIT_ROOT_DIR=${CONDA_PREFIX}" >> $GITHUB_ENV
-        echo "CUDAToolkit_ROOT=${CONDA_PREFIX}" >> $GITHUB_ENV
-        echo "LD_LIBRARY_PATH=${CONDA_PREFIX}/lib:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
-        echo "${CONDA_PREFIX}/bin" >> $GITHUB_PATH
-        
-        echo "Verifying CUDA installation..."
-        which nvcc
-        nvcc --version
-        echo "CUDA setup complete!"
-
     # Windows CUDA setup
     - name: Install CUDA Toolkit (Windows)
       if: matrix.os == 'windows-latest' && matrix.cuda_version != 'cpu'
@@ -253,7 +213,37 @@ jobs:
           (curl -L https://github.com/boostorg/boost/releases/download/boost-1.82.0/boost-1.82.0.tar.gz | tar -xz && 
           cd boost-1.82.0 && 
           ./bootstrap.sh --prefix=/usr/local --with-libraries=regex,system,filesystem && 
-          ./b2 install --prefix=/usr/local threading=multi link=shared variant=release -j$(nproc)))
+          ./b2 install --prefix=/usr/local threading=multi link=shared variant=release -j$(nproc))) &&
+          if [ "$TINYLLAMA_CPP_BUILD_CUDA" = "1" ]; then
+            echo "Installing CUDA toolkit for manylinux container..." &&
+            cd /tmp &&
+            if [ ! -d "/usr/local/cuda" ]; then
+              CUDA_VERSION_MAJOR=$(echo "$CMAKE_CUDA_ARCHITECTURES" | cut -d';' -f1 | head -c2) &&
+              if [ "$CUDA_VERSION_MAJOR" = "75" ] || [ "$CUDA_VERSION_MAJOR" = "80" ]; then
+                CUDA_VERSION="11.8"
+                CUDA_INSTALLER="cuda_11.8.0_520.61.05_linux.run"
+                CUDA_URL="https://developer.download.nvidia.com/compute/cuda/11.8.0/local_installers/$CUDA_INSTALLER"
+              else
+                CUDA_VERSION="12.1"
+                CUDA_INSTALLER="cuda_12.1.1_530.30.02_linux.run"
+                CUDA_URL="https://developer.download.nvidia.com/compute/cuda/12.1.1/local_installers/$CUDA_INSTALLER"
+              fi &&
+              echo "Downloading CUDA $CUDA_VERSION installer..." &&
+              wget -q "$CUDA_URL" &&
+              chmod +x "$CUDA_INSTALLER" &&
+              echo "Installing CUDA toolkit (silent install)..." &&
+              sh "$CUDA_INSTALLER" --silent --toolkit --installpath=/usr/local/cuda &&
+              rm "$CUDA_INSTALLER" &&
+              echo "Setting up CUDA environment..." &&
+              export PATH=/usr/local/cuda/bin:$PATH &&
+              export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH &&
+              ln -sf /usr/local/cuda/bin/nvcc /usr/bin/nvcc &&
+              echo "CUDA installation complete" &&
+              nvcc --version
+            else
+              echo "CUDA already installed"
+            fi
+          fi
         
         CIBW_BEFORE_BUILD_LINUX: >
           echo "Setting up Python development environment..." &&
@@ -327,7 +317,7 @@ jobs:
         CIBW_ARCHS_WINDOWS: AMD64
         CIBW_ARCHS_MACOS: x86_64 arm64
         
-        CIBW_ENVIRONMENT_LINUX: "TINYLLAMA_CPP_BUILD_CUDA=1 CMAKE_CUDA_ARCHITECTURES=\"75;80;86;89;90\" CMAKE_POLICY_DEFAULT_CMP0167=NEW Python_EXECUTABLE={python} Python_FIND_STRATEGY=LOCATION CMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER SETUPTOOLS_USE_DISTUTILS=stdlib"
+        CIBW_ENVIRONMENT_LINUX: "TINYLLAMA_CPP_BUILD_CUDA=1 CMAKE_CUDA_ARCHITECTURES=\"75;80;86;89;90\" CMAKE_POLICY_DEFAULT_CMP0167=NEW CUDA_HOME=/usr/local/cuda CUDAToolkit_ROOT=/usr/local/cuda Python_EXECUTABLE={python} Python_FIND_STRATEGY=LOCATION CMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER SETUPTOOLS_USE_DISTUTILS=stdlib"
         
         CIBW_ENVIRONMENT_WINDOWS: "TINYLLAMA_CPP_BUILD_CUDA=1 CMAKE_CUDA_ARCHITECTURES=\"75;80;86;89;90\" CMAKE_POLICY_DEFAULT_CMP0167=NEW BOOST_ROOT=C:\\local\\boost_1_81_0 Boost_ROOT=C:\\local\\boost_1_81_0 Boost_INCLUDE_DIR=C:\\local\\boost_1_81_0"
         
@@ -339,7 +329,37 @@ jobs:
           (curl -L https://github.com/boostorg/boost/releases/download/boost-1.82.0/boost-1.82.0.tar.gz | tar -xz && 
           cd boost-1.82.0 && 
           ./bootstrap.sh --prefix=/usr/local --with-libraries=regex,system,filesystem && 
-          ./b2 install --prefix=/usr/local threading=multi link=shared variant=release -j$(nproc)))
+          ./b2 install --prefix=/usr/local threading=multi link=shared variant=release -j$(nproc))) &&
+          if [ "$TINYLLAMA_CPP_BUILD_CUDA" = "1" ]; then
+            echo "Installing CUDA toolkit for manylinux container..." &&
+            cd /tmp &&
+            if [ ! -d "/usr/local/cuda" ]; then
+              CUDA_VERSION_MAJOR=$(echo "$CMAKE_CUDA_ARCHITECTURES" | cut -d';' -f1 | head -c2) &&
+              if [ "$CUDA_VERSION_MAJOR" = "75" ] || [ "$CUDA_VERSION_MAJOR" = "80" ]; then
+                CUDA_VERSION="11.8"
+                CUDA_INSTALLER="cuda_11.8.0_520.61.05_linux.run"
+                CUDA_URL="https://developer.download.nvidia.com/compute/cuda/11.8.0/local_installers/$CUDA_INSTALLER"
+              else
+                CUDA_VERSION="12.1"
+                CUDA_INSTALLER="cuda_12.1.1_530.30.02_linux.run"
+                CUDA_URL="https://developer.download.nvidia.com/compute/cuda/12.1.1/local_installers/$CUDA_INSTALLER"
+              fi &&
+              echo "Downloading CUDA $CUDA_VERSION installer..." &&
+              wget -q "$CUDA_URL" &&
+              chmod +x "$CUDA_INSTALLER" &&
+              echo "Installing CUDA toolkit (silent install)..." &&
+              sh "$CUDA_INSTALLER" --silent --toolkit --installpath=/usr/local/cuda &&
+              rm "$CUDA_INSTALLER" &&
+              echo "Setting up CUDA environment..." &&
+              export PATH=/usr/local/cuda/bin:$PATH &&
+              export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH &&
+              ln -sf /usr/local/cuda/bin/nvcc /usr/bin/nvcc &&
+              echo "CUDA installation complete" &&
+              nvcc --version
+            else
+              echo "CUDA already installed"
+            fi
+          fi
         
         CIBW_BEFORE_BUILD_LINUX: >
           echo "Setting up Python development environment..." &&
