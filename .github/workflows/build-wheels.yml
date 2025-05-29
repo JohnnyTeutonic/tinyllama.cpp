@@ -69,43 +69,33 @@ jobs:
         python -m pip install --upgrade pip
         pip install build wheel cibuildwheel
 
-    # Setup Mamba for Linux CUDA builds
-    - name: Setup Mamba (Linux CUDA Build)
+    # Linux CUDA setup using apt packages
+    - name: Install CUDA Toolkit (Linux)
       if: matrix.os == 'ubuntu-latest' && matrix.cuda_version != 'cpu'
-      uses: conda-incubator/setup-miniconda@v3.1.0
-      with:
-        activate-environment: "cuda-env"
-        python-version: '3.11'
-        miniforge-version: latest
-        add-pip-as-python-dependency: true
-        auto-activate-base: false
-
-    # Linux CUDA setup using Mamba (more reliable than apt packages)
-    - name: Install CUDA Toolkit via Mamba (Linux)
-      if: matrix.os == 'ubuntu-latest' && matrix.cuda_version != 'cpu'
-      shell: bash -el {0}
       run: |
-        echo "Installing CUDA ${{ matrix.cuda_version }} toolkit using Mamba..."
+        echo "Installing CUDA ${{ matrix.cuda_version }} toolkit using apt..."
+        wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.0-1_all.deb
+        sudo dpkg -i cuda-keyring_1.0-1_all.deb
+        sudo apt-get update
+        
         if [ "${{ matrix.cuda_version }}" == "12.1" ]; then
-          mamba install -y -n cuda-env -c nvidia/label/cuda-12.1.1 cuda-toolkit
+          sudo apt-get install -y cuda-toolkit-12-1
+          echo "CUDA_HOME=/usr/local/cuda-12.1" >> $GITHUB_ENV
         elif [ "${{ matrix.cuda_version }}" == "12.4" ]; then
-          mamba install -y -n cuda-env -c nvidia/label/cuda-12.4.0 cuda-toolkit
+          sudo apt-get install -y cuda-toolkit-12-4
+          echo "CUDA_HOME=/usr/local/cuda-12.4" >> $GITHUB_ENV
         elif [ "${{ matrix.cuda_version }}" == "11.8" ]; then
-          mamba install -y -n cuda-env -c nvidia/label/cuda-11.8.0 cuda-toolkit
+          sudo apt-get install -y cuda-toolkit-11-8
+          echo "CUDA_HOME=/usr/local/cuda-11.8" >> $GITHUB_ENV
         else
           echo "Unsupported CUDA version: ${{ matrix.cuda_version }}"
           exit 1
         fi
-        echo "CUDA_HOME=${CONDA_PREFIX}" >> $GITHUB_ENV
-        echo "CUDA_TOOLKIT_ROOT_DIR=${CONDA_PREFIX}" >> $GITHUB_ENV
-        echo "LD_LIBRARY_PATH=${CONDA_PREFIX}/lib:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
-        echo "${CONDA_PREFIX}/bin" >> $GITHUB_PATH
+        
+        echo "PATH=$CUDA_HOME/bin:$PATH" >> $GITHUB_ENV
+        echo "LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH" >> $GITHUB_ENV
         which nvcc
         nvcc --version
-        
-        # Export CUDA paths for use outside conda environment
-        echo "CUDA_BIN_PATH=${CONDA_PREFIX}/bin" >> $GITHUB_ENV
-        echo "CUDA_LIB_PATH=${CONDA_PREFIX}/lib64" >> $GITHUB_ENV
 
     # Windows CUDA setup
     - name: Install CUDA Toolkit (Windows)
@@ -169,6 +159,9 @@ jobs:
         sudo mkdir -p /usr/local/include /usr/local/lib
         sudo ln -sf $(brew --prefix libomp)/include/omp.h /usr/local/include/omp.h || true
         sudo ln -sf $(brew --prefix libomp)/lib/libomp.dylib /usr/local/lib/libomp.dylib || true
+        # Set compiler to use LLVM's clang which supports OpenMP better
+        echo "CC=$(brew --prefix llvm)/bin/clang" >> $GITHUB_ENV
+        echo "CXX=$(brew --prefix llvm)/bin/clang++" >> $GITHUB_ENV
         echo "LDFLAGS=-L$(brew --prefix libomp)/lib" >> $GITHUB_ENV
         echo "CPPFLAGS=-I$(brew --prefix libomp)/include" >> $GITHUB_ENV
 
@@ -176,23 +169,6 @@ jobs:
       if: matrix.os == 'windows-latest'
       run: |
         choco install cmake ninja
-
-    # Deactivate conda environment for CUDA builds to avoid Python version parsing issues
-    - name: Deactivate conda environment
-      if: matrix.cuda_version != 'cpu' && matrix.os == 'ubuntu-latest'
-      shell: bash
-      run: |
-        echo "Deactivating conda environment to use system Python for cibuildwheel"
-        conda deactivate || true
-        # Ensure system Python is used
-        which python3
-        python3 --version
-        # Remove conda from PATH to prevent auto-activation
-        echo "PATH=$(echo $PATH | tr ':' '\n' | grep -v conda | tr '\n' ':')" >> $GITHUB_ENV
-        # Unset conda environment variables
-        echo "CONDA_DEFAULT_ENV=" >> $GITHUB_ENV
-        echo "CONDA_PREFIX=" >> $GITHUB_ENV
-        echo "CONDA_PROMPT_MODIFIER=" >> $GITHUB_ENV
 
     # Build wheels using cibuildwheel
     - name: Build wheels (CPU)
@@ -218,25 +194,27 @@ jobs:
           LDFLAGS=-L/usr/local/lib
           CPPFLAGS=-I/usr/local/include
           OpenMP_ROOT=/usr/local
-          
-        CIBW_BEFORE_ALL_LINUX: >
-          yum install -y boost-devel boost-static ||
-          (curl -L https://boostorg.jfrog.io/artifactory/main/release/1.82.0/source/boost_1_82_0.tar.bz2 | tar -xj &&
-          cd boost_1_82_0 &&
-          ./bootstrap.sh --prefix=/usr/local &&
-          ./b2 install --with-regex --with-system --with-filesystem threading=multi link=shared)
-          
+          OpenMP_CXX_FLAGS=-Xpreprocessor\ -fopenmp
+          OpenMP_CXX_LIB_NAMES=omp
+          OpenMP_omp_LIBRARY=/usr/local/lib/libomp.dylib
+          CMAKE_C_COMPILER=/usr/local/opt/llvm/bin/clang
+          CMAKE_CXX_COMPILER=/usr/local/opt/llvm/bin/clang++
+        
         CIBW_BEFORE_BUILD_LINUX: >
-          echo "Using system Boost libraries" &&
-          echo "Available libraries:" &&
-          (find /usr -name "*boost*" -type f 2>/dev/null | head -10 || true)
+          echo "Using CUDA from /usr/local/cuda" &&
+          which nvcc && nvcc --version || echo "NVCC not found, CUDA may not be available"
         
         CIBW_BEFORE_BUILD_WINDOWS: >
           pip install cmake ninja &&
           echo "Windows Boost will be handled by vcpkg in CMake"
         
         CIBW_BEFORE_BUILD_MACOS: >
-          brew install boost libomp || true
+          brew install boost libomp llvm || true &&
+          sudo mkdir -p /usr/local/include /usr/local/lib &&
+          sudo ln -sf $(brew --prefix libomp)/include/omp.h /usr/local/include/omp.h || true &&
+          sudo ln -sf $(brew --prefix libomp)/lib/libomp.dylib /usr/local/lib/libomp.dylib || true &&
+          export CC=$(brew --prefix llvm)/bin/clang &&
+          export CXX=$(brew --prefix llvm)/bin/clang++
         
         CIBW_BUILD_VERBOSITY: 1
         CIBW_TEST_COMMAND: python -c "import tinyllama_cpp; print('Import successful')"
@@ -254,15 +232,15 @@ jobs:
         
         CIBW_ENVIRONMENT_LINUX: >
           TINYLLAMA_CPP_BUILD_CUDA=1
-          CMAKE_CUDA_ARCHITECTURES=${{ env.CMAKE_CUDA_ARCHITECTURES }}
-          CUDA_HOME=${{ env.CUDA_HOME }}
-          PATH=${{ env.CUDA_BIN_PATH }}:/usr/local/bin:/usr/bin:/bin
-          LD_LIBRARY_PATH=${{ env.CUDA_LIB_PATH }}:$LD_LIBRARY_PATH
+          CMAKE_CUDA_ARCHITECTURES=75;80;86;89;90
           CMAKE_POLICY_DEFAULT_CMP0167=NEW
+          CUDA_HOME=/usr/local/cuda
+          PATH=/usr/local/cuda/bin:$PATH
+          LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
         
         CIBW_ENVIRONMENT_WINDOWS: >
           TINYLLAMA_CPP_BUILD_CUDA=1
-          CMAKE_CUDA_ARCHITECTURES=${{ env.CMAKE_CUDA_ARCHITECTURES }}
+          CMAKE_CUDA_ARCHITECTURES=75;80;86;89;90
           CMAKE_POLICY_DEFAULT_CMP0167=NEW
           
         CIBW_ENVIRONMENT_MACOS: >
@@ -270,22 +248,24 @@ jobs:
           LDFLAGS=-L/usr/local/lib
           CPPFLAGS=-I/usr/local/include
           OpenMP_ROOT=/usr/local
+          OpenMP_CXX_FLAGS=-Xpreprocessor\ -fopenmp
+          OpenMP_CXX_LIB_NAMES=omp
+          OpenMP_omp_LIBRARY=/usr/local/lib/libomp.dylib
+          CMAKE_C_COMPILER=/usr/local/opt/llvm/bin/clang
+          CMAKE_CXX_COMPILER=/usr/local/opt/llvm/bin/clang++
         
-        CIBW_BEFORE_ALL_LINUX: >
-          yum install -y boost-devel boost-static ||
-          (curl -L https://boostorg.jfrog.io/artifactory/main/release/1.82.0/source/boost_1_82_0.tar.bz2 | tar -xj &&
-          cd boost_1_82_0 &&
-          ./bootstrap.sh --prefix=/usr/local &&
-          ./b2 install --with-regex --with-system --with-filesystem threading=multi link=shared)
-          
         CIBW_BEFORE_BUILD_LINUX: >
-          echo "Using system Boost libraries" &&
-          echo "Available libraries:" &&
-          (find /usr -name "*boost*" -type f 2>/dev/null | head -10 || true)
+          echo "Using CUDA from /usr/local/cuda" &&
+          which nvcc && nvcc --version || echo "NVCC not found, CUDA may not be available"
         
         CIBW_BEFORE_BUILD_WINDOWS: pip install cmake ninja
         CIBW_BEFORE_BUILD_MACOS: >
-          brew install boost libomp || true
+          brew install boost libomp llvm || true &&
+          sudo mkdir -p /usr/local/include /usr/local/lib &&
+          sudo ln -sf $(brew --prefix libomp)/include/omp.h /usr/local/include/omp.h || true &&
+          sudo ln -sf $(brew --prefix libomp)/lib/libomp.dylib /usr/local/lib/libomp.dylib || true &&
+          export CC=$(brew --prefix llvm)/bin/clang &&
+          export CXX=$(brew --prefix llvm)/bin/clang++
         
         CIBW_BUILD_VERBOSITY: 1
         CIBW_TEST_COMMAND: python -c "import tinyllama_cpp; print('Import successful')"
