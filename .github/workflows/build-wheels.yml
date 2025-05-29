@@ -73,19 +73,19 @@ jobs:
     - name: Install CUDA Toolkit (Linux)
       if: matrix.os == 'ubuntu-latest' && matrix.cuda_version != 'cpu'
       run: |
-        echo "Installing CUDA ${{ matrix.cuda_version }} toolkit using apt..."
+        echo "Installing minimal CUDA ${{ matrix.cuda_version }} toolkit using apt..."
         wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.0-1_all.deb
         sudo dpkg -i cuda-keyring_1.0-1_all.deb
         sudo apt-get update
         
         if [ "${{ matrix.cuda_version }}" == "12.1" ]; then
-          sudo apt-get install -y cuda-toolkit-12-1
+          sudo apt-get install -y cuda-nvcc-12-1 cuda-cudart-dev-12-1 cuda-driver-dev-12-1 libcublas-dev-12-1 libcurand-dev-12-1
           echo "CUDA_HOME=/usr/local/cuda-12.1" >> $GITHUB_ENV
         elif [ "${{ matrix.cuda_version }}" == "12.4" ]; then
-          sudo apt-get install -y cuda-toolkit-12-4
+          sudo apt-get install -y cuda-nvcc-12-4 cuda-cudart-dev-12-4 cuda-driver-dev-12-4 libcublas-dev-12-4 libcurand-dev-12-4
           echo "CUDA_HOME=/usr/local/cuda-12.4" >> $GITHUB_ENV
         elif [ "${{ matrix.cuda_version }}" == "11.8" ]; then
-          sudo apt-get install -y cuda-toolkit-11-8
+          sudo apt-get install -y cuda-nvcc-11-8 cuda-cudart-dev-11-8 cuda-driver-dev-11-8 libcublas-dev-11-8 libcurand-dev-11-8
           echo "CUDA_HOME=/usr/local/cuda-11.8" >> $GITHUB_ENV
         else
           echo "Unsupported CUDA version: ${{ matrix.cuda_version }}"
@@ -199,10 +199,16 @@ jobs:
           OpenMP_omp_LIBRARY=/usr/local/lib/libomp.dylib
           CMAKE_C_COMPILER=/usr/local/opt/llvm/bin/clang
           CMAKE_CXX_COMPILER=/usr/local/opt/llvm/bin/clang++
+          
+        CIBW_BEFORE_ALL_LINUX: >
+          yum install -y boost-devel boost-regex || 
+          (curl -L https://github.com/boostorg/boost/releases/download/boost-1.82.0/boost-1.82.0.tar.gz | tar -xz && 
+          cd boost-1.82.0 && 
+          ./bootstrap.sh --prefix=/usr/local --with-libraries=regex,system,filesystem && 
+          ./b2 install --prefix=/usr/local threading=multi link=shared variant=release -j$(nproc))
         
         CIBW_BEFORE_BUILD_LINUX: >
-          echo "Using CUDA from /usr/local/cuda" &&
-          which nvcc && nvcc --version || echo "NVCC not found, CUDA may not be available"
+          echo "Using manylinux container libraries"
         
         CIBW_BEFORE_BUILD_WINDOWS: >
           pip install cmake ninja &&
@@ -253,6 +259,13 @@ jobs:
           OpenMP_omp_LIBRARY=/usr/local/lib/libomp.dylib
           CMAKE_C_COMPILER=/usr/local/opt/llvm/bin/clang
           CMAKE_CXX_COMPILER=/usr/local/opt/llvm/bin/clang++
+        
+        CIBW_BEFORE_ALL_LINUX: >
+          yum install -y boost-devel boost-regex || 
+          (curl -L https://github.com/boostorg/boost/releases/download/boost-1.82.0/boost-1.82.0.tar.gz | tar -xz && 
+          cd boost-1.82.0 && 
+          ./bootstrap.sh --prefix=/usr/local --with-libraries=regex,system,filesystem && 
+          ./b2 install --prefix=/usr/local threading=multi link=shared variant=release -j$(nproc))
         
         CIBW_BEFORE_BUILD_LINUX: >
           echo "Using CUDA from /usr/local/cuda" &&
