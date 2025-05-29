@@ -184,7 +184,7 @@ jobs:
 
     # Upload artifacts
     - name: Upload wheels
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: wheels-${{ matrix.os }}-${{ matrix.cuda_version }}
         path: ./wheelhouse/*.whl
@@ -196,7 +196,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Download all wheel artifacts
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4
       with:
         path: all-wheels
 
@@ -207,7 +207,7 @@ jobs:
         ls -la dist/
 
     - name: Upload combined wheels
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: all-wheels
         path: dist/*.whl
@@ -223,7 +223,7 @@ jobs:
     
     steps:
     - name: Download wheels
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4
       with:
         name: all-wheels
         path: dist
