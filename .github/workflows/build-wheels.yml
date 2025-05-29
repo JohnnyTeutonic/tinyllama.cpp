@@ -210,6 +210,10 @@ jobs:
           TINYLLAMA_CPP_BUILD_CUDA=0
           CMAKE_POLICY_DEFAULT_CMP0167=NEW
           Python_FIND_STRATEGY=LOCATION
+          Python_ROOT_DIR={project}/venv
+          Python_EXECUTABLE={project}/venv/bin/python
+          Python_INCLUDE_DIR={project}/venv/include/python{python_version}
+          Python_LIBRARY={project}/venv/lib/libpython{python_version}.so
           
         CIBW_ENVIRONMENT_WINDOWS: >
           TINYLLAMA_CPP_BUILD_CUDA=0
@@ -227,13 +231,23 @@ jobs:
           CMAKE_CXX_COMPILER=/usr/local/opt/llvm/bin/clang++
           
         CIBW_BEFORE_ALL_LINUX: >
-          yum install -y python3-devel boost-devel boost-regex || 
+          echo "Installing Python development packages..." &&
+          yum install -y python3-devel python3-libs python38-devel python39-devel python310-devel python311-devel python312-devel 2>/dev/null || 
+          (echo "Fallback Python devel installation..." && yum install -y python3-devel 2>/dev/null || true) &&
+          echo "Installing Boost packages..." &&
+          yum install -y boost-devel boost-regex || 
           (curl -L https://github.com/boostorg/boost/releases/download/boost-1.82.0/boost-1.82.0.tar.gz | tar -xz && 
           cd boost-1.82.0 && 
           ./bootstrap.sh --prefix=/usr/local --with-libraries=regex,system,filesystem && 
           ./b2 install --prefix=/usr/local threading=multi link=shared variant=release -j$(nproc))
         
         CIBW_BEFORE_BUILD_LINUX: >
+          echo "Python debug info:" &&
+          python --version &&
+          python -c "import sys; print('Python executable:', sys.executable)" &&
+          python -c "import sys; print('Python include dir:', sys.prefix + '/include/python' + sys.version[:3])" &&
+          echo "Checking for Python development files:" &&
+          find /opt/python -name "Python.h" 2>/dev/null | head -5 &&
           echo "Using manylinux container libraries"
         
         CIBW_BEFORE_BUILD_WINDOWS: >
@@ -288,7 +302,11 @@ jobs:
           CMAKE_CXX_COMPILER=/usr/local/opt/llvm/bin/clang++
         
         CIBW_BEFORE_ALL_LINUX: >
-          yum install -y python3-devel boost-devel boost-regex || 
+          echo "Installing Python development packages..." &&
+          yum install -y python3-devel python3-libs python38-devel python39-devel python310-devel python311-devel python312-devel 2>/dev/null || 
+          (echo "Fallback Python devel installation..." && yum install -y python3-devel 2>/dev/null || true) &&
+          echo "Installing Boost packages..." &&
+          yum install -y boost-devel boost-regex || 
           (curl -L https://github.com/boostorg/boost/releases/download/boost-1.82.0/boost-1.82.0.tar.gz | tar -xz && 
           cd boost-1.82.0 && 
           ./bootstrap.sh --prefix=/usr/local --with-libraries=regex,system,filesystem && 
