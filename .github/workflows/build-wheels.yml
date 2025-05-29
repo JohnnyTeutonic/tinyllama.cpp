@@ -190,7 +190,7 @@ jobs:
         
         CIBW_ENVIRONMENT_LINUX: "TINYLLAMA_CPP_BUILD_CUDA=0 CMAKE_POLICY_DEFAULT_CMP0167=NEW Python_EXECUTABLE={python} Python_FIND_STRATEGY=LOCATION CMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER SETUPTOOLS_USE_DISTUTILS=stdlib"
         
-        CIBW_ENVIRONMENT_WINDOWS: "TINYLLAMA_CPP_BUILD_CUDA=0 CMAKE_POLICY_DEFAULT_CMP0167=NEW CMAKE_TOOLCHAIN_FILE=C:\\vcpkg\\scripts\\buildsystems\\vcpkg.cmake VCPKG_TARGET_TRIPLET=x64-windows"
+        CIBW_ENVIRONMENT_WINDOWS: "TINYLLAMA_CPP_BUILD_CUDA=0 CMAKE_POLICY_DEFAULT_CMP0167=NEW CMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake VCPKG_TARGET_TRIPLET=x64-windows"
         
         CIBW_ENVIRONMENT_MACOS: "TINYLLAMA_CPP_BUILD_CUDA=0 OpenMP_CXX_FLAGS='-Xpreprocessor -fopenmp' OpenMP_CXX_LIB_NAMES=omp CMAKE_FIND_DEBUG_MODE=ON"
         
@@ -287,13 +287,26 @@ jobs:
           fi
         
         CIBW_BEFORE_BUILD_WINDOWS: >
-          echo "Installing build dependencies for Windows wheel build..." &&
-          pip install cmake ninja &&
+          echo "Installing build dependencies for Windows wheel build..." &
+          pip install cmake ninja &
+          echo "Setting up vcpkg for Boost..." &
           if not exist C:\vcpkg (
-            git clone https://github.com/Microsoft/vcpkg.git C:\vcpkg &&
+            echo "Cloning vcpkg..." &
+            git clone https://github.com/Microsoft/vcpkg.git C:\vcpkg &
+            echo "Bootstrapping vcpkg..." &
             C:\vcpkg\bootstrap-vcpkg.bat
-          ) &&
-          C:\vcpkg\vcpkg install boost-regex:x64-windows boost-system:x64-windows boost-filesystem:x64-windows
+          ) else (
+            echo "vcpkg already exists"
+          ) &
+          echo "Installing Boost components..." &
+          C:\vcpkg\vcpkg install boost-regex:x64-windows boost-system:x64-windows boost-filesystem:x64-windows &
+          echo "Verifying vcpkg toolchain file..." &
+          if exist C:\vcpkg\scripts\buildsystems\vcpkg.cmake (
+            echo "✓ vcpkg toolchain file found"
+          ) else (
+            echo "✗ vcpkg toolchain file missing!" & exit 1
+          ) &
+          echo "Windows build setup complete"
         
         CIBW_BEFORE_BUILD_MACOS: >
           echo "Setting up macOS build environment..." &&
@@ -338,7 +351,7 @@ jobs:
         
         CIBW_ENVIRONMENT_LINUX: "TINYLLAMA_CPP_BUILD_CUDA=1 CMAKE_CUDA_ARCHITECTURES=\"75;80;86;89;90\" CMAKE_POLICY_DEFAULT_CMP0167=NEW CUDA_HOME=/usr/local/cuda CUDA_ROOT=/usr/local/cuda CUDA_PATH=/usr/local/cuda CUDAToolkit_ROOT=/usr/local/cuda CMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc Python_EXECUTABLE={python} Python_FIND_STRATEGY=LOCATION CMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER SETUPTOOLS_USE_DISTUTILS=stdlib"
         
-        CIBW_ENVIRONMENT_WINDOWS: "TINYLLAMA_CPP_BUILD_CUDA=1 CMAKE_CUDA_ARCHITECTURES=\"75;80;86;89;90\" CMAKE_POLICY_DEFAULT_CMP0167=NEW CMAKE_TOOLCHAIN_FILE=C:\\vcpkg\\scripts\\buildsystems\\vcpkg.cmake VCPKG_TARGET_TRIPLET=x64-windows"
+        CIBW_ENVIRONMENT_WINDOWS: "TINYLLAMA_CPP_BUILD_CUDA=1 CMAKE_CUDA_ARCHITECTURES=\"75;80;86;89;90\" CMAKE_POLICY_DEFAULT_CMP0167=NEW CMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake VCPKG_TARGET_TRIPLET=x64-windows"
         
         CIBW_ENVIRONMENT_MACOS: "TINYLLAMA_CPP_BUILD_CUDA=0 OpenMP_CXX_FLAGS='-Xpreprocessor -fopenmp' OpenMP_CXX_LIB_NAMES=omp CMAKE_FIND_DEBUG_MODE=ON"
         
