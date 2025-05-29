@@ -160,7 +160,9 @@ jobs:
     - name: Install build dependencies (macOS)
       if: matrix.os == 'macos-latest'
       run: |
-        brew install cmake ninja boost llvm
+        brew install cmake ninja boost llvm libomp
+        echo "LDFLAGS=-L$(brew --prefix libomp)/lib" >> $GITHUB_ENV
+        echo "CPPFLAGS=-I$(brew --prefix libomp)/include" >> $GITHUB_ENV
 
     - name: Install build dependencies (Windows)
       if: matrix.os == 'windows-latest'
@@ -168,7 +170,8 @@ jobs:
         choco install cmake ninja
 
     # Build wheels using cibuildwheel
-    - name: Build wheels
+    - name: Build wheels (CPU)
+      if: matrix.cuda_version == 'cpu'
       uses: pypa/cibuildwheel@v2.16.2
       env:
         CIBW_BUILD: cp38-* cp39-* cp310-* cp311-* cp312-*
@@ -177,34 +180,64 @@ jobs:
         CIBW_ARCHS_WINDOWS: AMD64
         CIBW_ARCHS_MACOS: x86_64 arm64
         
-        # Environment variables for the build - conditional based on CUDA vs CPU
+        CIBW_ENVIRONMENT_LINUX: TINYLLAMA_CPP_BUILD_CUDA=0
+        CIBW_ENVIRONMENT_WINDOWS: TINYLLAMA_CPP_BUILD_CUDA=0
+        CIBW_ENVIRONMENT_MACOS: >
+          TINYLLAMA_CPP_BUILD_CUDA=0
+          LDFLAGS=-L$(brew --prefix libomp)/lib
+          CPPFLAGS=-I$(brew --prefix libomp)/include
+        
+        CIBW_BEFORE_BUILD_LINUX: >
+          (yum install -y boost-devel boost-static || true) &&
+          (apt-get update && apt-get install -y libboost-all-dev || true) &&
+          (apk add --no-cache boost-dev || true) &&
+          echo "Package installation completed"
+        
+        CIBW_BEFORE_BUILD_WINDOWS: pip install cmake ninja
+        CIBW_BEFORE_BUILD_MACOS: >
+          brew install boost libomp || true
+        
+        CIBW_BUILD_VERBOSITY: 1
+        CIBW_TEST_COMMAND: python -c "import tinyllama_cpp; print('Import successful')"
+        CIBW_TEST_SKIP: "*-macosx_arm64"
+
+    - name: Build wheels (CUDA)
+      if: matrix.cuda_version != 'cpu'
+      uses: pypa/cibuildwheel@v2.16.2
+      env:
+        CIBW_BUILD: cp38-* cp39-* cp310-* cp311-* cp312-*
+        CIBW_SKIP: "*-win32 *-manylinux_i686 *-musllinux*"
+        CIBW_ARCHS_LINUX: x86_64
+        CIBW_ARCHS_WINDOWS: AMD64
+        CIBW_ARCHS_MACOS: x86_64 arm64
+        
         CIBW_ENVIRONMENT_LINUX: >
-          TINYLLAMA_CPP_BUILD_CUDA=${{ env.TINYLLAMA_CPP_BUILD_CUDA }}
-          ${{ matrix.cuda_version != 'cpu' && format('CMAKE_CUDA_ARCHITECTURES={0}', env.CMAKE_CUDA_ARCHITECTURES) || '' }}
-          ${{ matrix.cuda_version != 'cpu' && format('CUDA_HOME={0}', env.CUDA_HOME) || '' }}
-          ${{ matrix.cuda_version != 'cpu' && format('PATH={0}/bin:$PATH', env.CUDA_HOME) || '' }}
-          ${{ matrix.cuda_version != 'cpu' && format('LD_LIBRARY_PATH={0}/lib64:$LD_LIBRARY_PATH', env.CUDA_HOME) || '' }}
+          TINYLLAMA_CPP_BUILD_CUDA=1
+          CMAKE_CUDA_ARCHITECTURES=${{ env.CMAKE_CUDA_ARCHITECTURES }}
+          CUDA_HOME=${{ env.CUDA_HOME }}
+          PATH=${{ env.CUDA_HOME }}/bin:$PATH
+          LD_LIBRARY_PATH=${{ env.CUDA_HOME }}/lib64:$LD_LIBRARY_PATH
         
         CIBW_ENVIRONMENT_WINDOWS: >
-          TINYLLAMA_CPP_BUILD_CUDA=${{ env.TINYLLAMA_CPP_BUILD_CUDA }}
-          ${{ matrix.cuda_version != 'cpu' && format('CMAKE_CUDA_ARCHITECTURES={0}', env.CMAKE_CUDA_ARCHITECTURES) || '' }}
+          TINYLLAMA_CPP_BUILD_CUDA=1
+          CMAKE_CUDA_ARCHITECTURES=${{ env.CMAKE_CUDA_ARCHITECTURES }}
         
         CIBW_ENVIRONMENT_MACOS: >
           TINYLLAMA_CPP_BUILD_CUDA=0
+          LDFLAGS=-L$(brew --prefix libomp)/lib
+          CPPFLAGS=-I$(brew --prefix libomp)/include
         
-        # Install dependencies in the build environment
         CIBW_BEFORE_BUILD_LINUX: >
-          yum install -y boost-devel ||
-          apt-get update && apt-get install -y libboost-all-dev ||
-          apk add boost-dev
+          (yum install -y boost-devel boost-static || true) &&
+          (apt-get update && apt-get install -y libboost-all-dev || true) &&
+          (apk add --no-cache boost-dev || true) &&
+          echo "Package installation completed"
         
-        CIBW_BEFORE_BUILD_WINDOWS: >
-          pip install cmake ninja
-        
+        CIBW_BEFORE_BUILD_WINDOWS: pip install cmake ninja
         CIBW_BEFORE_BUILD_MACOS: >
-          brew install boost || true
+          brew install boost libomp || true
         
-        # Test the built wheels
+        CIBW_BUILD_VERBOSITY: 1
         CIBW_TEST_COMMAND: python -c "import tinyllama_cpp; print('Import successful')"
         CIBW_TEST_SKIP: "*-macosx_arm64"
 
