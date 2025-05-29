@@ -938,20 +938,119 @@ __global__ void attention_kernel(const float* Q_current,
 
 void attention_cuda(const float* Q_current_dev, const float* K_layer_cache_base,
                     const float* V_layer_cache_base, float* out_dev,
-                    int num_q_heads, int current_seq_len, int head_dim,
+                    int num_heads, int current_seq_len, int head_dim,
                     float scale, int cache_max_seq_len, int cache_num_kv_heads,
                     cudaStream_t stream) {
-  dim3 grid(num_q_heads);  // One block per Q head
-  dim3 block(head_dim);   // head_dim threads per block
+  // Grid: num_heads blocks, each block handles one attention head
+  // Block: head_dim threads, each thread handles one output dimension
+  dim3 grid_dim(num_heads);
+  dim3 block_dim(head_dim);
 
-  // Shared memory: scores array (size current_seq_len) + dot_product_terms (size head_dim for reduction)
-  size_t shared_mem_bytes = (current_seq_len + head_dim) * sizeof(float);
-  
-
-  attention_kernel<<<grid, block, shared_mem_bytes, stream>>>(
+  attention_kernel<<<grid_dim, block_dim, 0, stream>>>(
       Q_current_dev, K_layer_cache_base, V_layer_cache_base, out_dev,
-      current_seq_len, head_dim, scale, cache_num_kv_heads, num_q_heads);
+      current_seq_len, head_dim, scale, cache_num_kv_heads, num_heads);
   gpuErrchk(cudaGetLastError());
+}
+
+// Selective dequantization attention implementation
+__global__ void attention_selective_dequant_kernel(
+    const float* __restrict__ Q_current_dev,
+    const int8_t* __restrict__ K_quantized_cache_base,
+    const int8_t* __restrict__ V_quantized_cache_base,
+    const float* __restrict__ K_scales_cache_base,
+    const float* __restrict__ V_scales_cache_base,
+    float* __restrict__ selective_k_dequant_buffer,
+    float* __restrict__ selective_v_dequant_buffer,
+    float* __restrict__ out_dev,
+    int num_heads, int current_seq_len, int head_dim,
+    float scale, int cache_max_seq_len, int cache_num_kv_heads) {
+    
+    int head_idx = blockIdx.x;
+    int dim_idx = threadIdx.x;
+    
+    if (head_idx >= num_heads || dim_idx >= head_dim) return;
+    
+    // Map query head to corresponding KV head (for GQA/MQA)
+    int kv_heads_per_q_group = num_heads / cache_num_kv_heads;
+    int kv_head_idx = head_idx / kv_heads_per_q_group;
+    
+    // Get current query vector for this head and dimension
+    float q_val = Q_current_dev[head_idx * head_dim + dim_idx];
+    
+    float attn_out = 0.0f;
+    
+    // Selective dequantization and attention computation
+    for (int t = 0; t < current_seq_len; ++t) {
+        // Calculate offset for this token and KV head in the quantized cache
+        size_t cache_offset_base = (size_t)t * cache_num_kv_heads * head_dim + (size_t)kv_head_idx * head_dim;
+        size_t scale_offset = (size_t)t * cache_num_kv_heads + kv_head_idx;
+        
+        // Dequantize only the specific elements we need for this head/dimension
+        if (dim_idx == 0) {
+            // Only thread 0 in each block dequantizes the entire head for this token
+            float k_scale = K_scales_cache_base[scale_offset];
+            float v_scale = V_scales_cache_base[scale_offset];
+            
+            for (int d = 0; d < head_dim; ++d) {
+                // Dequantize K values for this token/head
+                int8_t k_quant = K_quantized_cache_base[cache_offset_base + d];
+                selective_k_dequant_buffer[t * head_dim + d] = k_scale * (float)k_quant;
+                
+                // Dequantize V values for this token/head  
+                int8_t v_quant = V_quantized_cache_base[cache_offset_base + d];
+                selective_v_dequant_buffer[t * head_dim + d] = v_scale * (float)v_quant;
+            }
+        }
+        
+        __syncthreads(); // Ensure dequantization is complete before using values
+        
+        // Compute attention score for this token
+        float k_val = selective_k_dequant_buffer[t * head_dim + dim_idx];
+        float score = q_val * k_val * scale;
+        
+        // Apply attention score to value
+        float v_val = selective_v_dequant_buffer[t * head_dim + dim_idx];
+        attn_out += score * v_val;
+        
+        __syncthreads(); // Ensure all threads are done before next iteration
+    }
+    
+    // Write output
+    out_dev[head_idx * head_dim + dim_idx] = attn_out;
+}
+
+void attention_cuda_selective_dequant(const float* Q_current_dev, 
+                                     const int8_t* K_quantized_cache_base,
+                                     const int8_t* V_quantized_cache_base,
+                                     const float* K_scales_cache_base,
+                                     const float* V_scales_cache_base,
+                                     float* selective_k_dequant_buffer,
+                                     float* selective_v_dequant_buffer,
+                                     float* out_dev,
+                                     int num_heads, int current_seq_len, int head_dim,
+                                     float scale, int cache_max_seq_len, int cache_num_kv_heads,
+                                     cudaStream_t stream) {
+    
+    if (num_heads == 0 || current_seq_len == 0 || head_dim == 0) {
+        Logger::warning("[ATTENTION_SELECTIVE_DEQUANT] Invalid parameters: num_heads=" + 
+                       std::to_string(num_heads) + ", current_seq_len=" + std::to_string(current_seq_len) + 
+                       ", head_dim=" + std::to_string(head_dim));
+        return;
+    }
+    
+    // Grid: num_heads blocks, each block handles one attention head
+    // Block: head_dim threads, each thread handles one output dimension  
+    dim3 grid_dim(num_heads);
+    dim3 block_dim(head_dim);
+    
+    attention_selective_dequant_kernel<<<grid_dim, block_dim, 0, stream>>>(
+        Q_current_dev, K_quantized_cache_base, V_quantized_cache_base,
+        K_scales_cache_base, V_scales_cache_base,
+        selective_k_dequant_buffer, selective_v_dequant_buffer,
+        out_dev, num_heads, current_seq_len, head_dim, scale,
+        cache_max_seq_len, cache_num_kv_heads);
+    
+    gpuErrchk(cudaGetLastError());
 }
 
 __global__ void add_vectors_kernel(const float* a, const float* b,

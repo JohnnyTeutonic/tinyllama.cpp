@@ -255,6 +255,40 @@ void attention_cuda(const float* Q_current_dev, const float* K_layer_cache_base,
                     cudaStream_t stream = 0);
 
 /**
+ * @brief Computes attention with selective dequantization of quantized KVCache
+ * 
+ * Performs attention computation by selectively dequantizing only the required 
+ * portions of the INT8 KVCache for each head, significantly reducing memory usage.
+ *
+ * @param Q_current_dev Current query vectors (device pointer)
+ * @param K_quantized_cache_base Quantized INT8 K cache base pointer (device pointer)
+ * @param V_quantized_cache_base Quantized INT8 V cache base pointer (device pointer) 
+ * @param K_scales_cache_base K cache scales (device pointer)
+ * @param V_scales_cache_base V cache scales (device pointer)
+ * @param selective_k_dequant_buffer Temporary K dequantization buffer (device pointer)
+ * @param selective_v_dequant_buffer Temporary V dequantization buffer (device pointer)
+ * @param out_dev Output attention vectors (device pointer)
+ * @param num_heads Number of attention heads
+ * @param current_seq_len Current sequence length
+ * @param head_dim Dimension of each head
+ * @param scale Attention scale factor
+ * @param cache_max_seq_len Maximum sequence length in cache
+ * @param cache_num_kv_heads Number of key-value heads
+ * @param stream CUDA stream (optional)
+ */
+void attention_cuda_selective_dequant(const float* Q_current_dev, 
+                                     const int8_t* K_quantized_cache_base,
+                                     const int8_t* V_quantized_cache_base,
+                                     const float* K_scales_cache_base,
+                                     const float* V_scales_cache_base,
+                                     float* selective_k_dequant_buffer,
+                                     float* selective_v_dequant_buffer,
+                                     float* out_dev,
+                                     int num_heads, int current_seq_len, int head_dim,
+                                     float scale, int cache_max_seq_len, int cache_num_kv_heads,
+                                     cudaStream_t stream = 0);
+
+/**
  * @brief Vector Operations
  * 
  * Basic vector operations optimized for GPU execution:
