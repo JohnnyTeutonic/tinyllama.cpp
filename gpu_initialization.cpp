@@ -89,12 +89,12 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
 
   Logger::info("Initializing CUDA resources for " + std::to_string(active_num_gpu_layers) + " GPU layers.");
   if (!cublas_handle_) {
-  cublasStatus_t cublas_status = cublasCreate(&cublas_handle_);
-  if (cublas_status != CUBLAS_STATUS_SUCCESS) {
-      throw std::runtime_error("Failed to initialize cuBLAS: " + std::to_string(cublas_status));
+    cublasStatus_t cublas_status = cublasCreate(&cublas_handle_);
+    if (cublas_status != CUBLAS_STATUS_SUCCESS) {
+        throw std::runtime_error("Failed to initialize cuBLAS: " + std::to_string(cublas_status));
+    }
+    Logger::info("cuBLAS handle created successfully.");
   }
-  Logger::info("cuBLAS handle created successfully.");
-  
 
   if (final_norm_f32.empty() && !final_norm.empty()) {
       Logger::info("Converting final_norm (BF16) to FP32 for GPU.");
@@ -514,5 +514,4 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
       Logger::info("CUDA not available or no GPU layers configured. Model will run entirely on CPU.");
   }
 #endif
-}
 } 

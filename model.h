@@ -333,7 +333,8 @@ class TinyLlamaModel {
    * @param config_from_session Model configuration.
    * @param gguf_data_from_session Unique pointer to GGUFData.
    */
-  TinyLlamaModel(const ModelConfig& config_from_session, std::unique_ptr<GGUFData> gguf_data_from_session);
+  TinyLlamaModel(const ModelConfig& config_from_session,
+                 std::unique_ptr<GGUFData> gguf_data_from_session);
 
   /**
    * @brief Destructor. Cleans up all allocated resources.
@@ -353,19 +354,20 @@ class TinyLlamaModel {
       int n_tokens, KVCache* kv_cache,
       const std::vector<int>* attention_mask);
 
-
-void ensure_q_proj_dequantized(int layer_idx);
-void ensure_k_proj_dequantized(int layer_idx);
-void ensure_v_proj_dequantized(int layer_idx);
-void ensure_o_proj_dequantized(int layer_idx);
-void ensure_gate_proj_dequantized(int layer_idx);
-void ensure_up_proj_dequantized(int layer_idx);
-void ensure_down_proj_dequantized(int layer_idx);
-void ensure_lm_head_dequantized();
-void ensure_embed_tokens_dequantized();
-void ensure_f32_concatenated_weights_loaded();
-void ensure_layer_weights_on_gpu(int layer_idx);
-void free_layer_gpu_weights(int layer_idx);
+  void ensure_q_proj_dequantized(int layer_idx);
+  void ensure_k_proj_dequantized(int layer_idx);
+  void ensure_v_proj_dequantized(int layer_idx);
+  void ensure_o_proj_dequantized(int layer_idx);
+  void ensure_gate_proj_dequantized(int layer_idx);
+  void ensure_up_proj_dequantized(int layer_idx);
+  void ensure_down_proj_dequantized(int layer_idx);
+  void ensure_lm_head_dequantized();
+  void ensure_embed_tokens_dequantized();
+  void ensure_f32_concatenated_weights_loaded();
+  void ensure_layer_weights_on_gpu(int layer_idx);
+  void free_layer_gpu_weights(int layer_idx);
+  void clear_layer_dequantized_weights(int layer_idx);
+  void initialize_gpu_and_rope();
 #ifdef HAS_CUDA
   /**
    * @brief Performs forward pass on GPU for the layers designated to run on GPU.
@@ -406,31 +408,7 @@ void free_layer_gpu_weights(int layer_idx);
       cudaStream_t stream
   );
 
-  std::vector<float> forward_cpu_batch(
-      const std::vector<float>& batch_input_activations, // Batched: [num_tokens, hidden_size]
-      int num_tokens_in_batch,
-      int num_cpu_layers_to_process,
-      int start_pos_in_sequence, // Starting position of this batch in the overall sequence (for KVCache)
-      KVCache* kv_cache,
-      const std::vector<int>& prompt_lengths = {} // Length of each sequence in the batch (empty = single sequence mode)
-  );
-  std::vector<float> forward_cpu_logits_batch(
-      const std::vector<float>& final_batch_activations, // [num_tokens, hidden_size]
-      int num_tokens_in_batch
-  );
-
-  std::vector<std::vector<float>> forward_cpu_batch_generation(
-      const std::vector<float>& batch_input_activations, // [num_tokens, hidden_size]
-      const std::vector<int>& token_positions, // Position of each token in its respective sequence
-      const std::vector<int>& original_sequence_indices, // Original sequence index for each token
-      int num_tokens_in_batch,
-      KVCache* kv_cache
-  );
-
   // Memory management for layer-wise weight eviction
-  void clear_layer_dequantized_weights(int layer_idx);
-
-  void initialize_gpu_and_rope();
 
   // GPU workspace buffers
   
@@ -486,6 +464,28 @@ void free_layer_gpu_weights(int layer_idx);
   GGUFData* get_gguf_data_ptr() { return gguf_data_.get(); }
 
   void initialize_rope_freqs();
+
+  std::vector<float> forward_cpu_batch(
+      const std::vector<float>& batch_input_activations,
+      int num_tokens_in_batch,
+      int num_cpu_layers_to_process,
+      int start_pos_in_sequence,
+      KVCache* kv_cache,
+      const std::vector<int>& prompt_lengths = {}
+  );
+
+  std::vector<float> forward_cpu_logits_batch(
+      const std::vector<float>& final_batch_activations,
+      int num_tokens_in_batch
+  );
+
+  std::vector<std::vector<float>> forward_cpu_batch_generation(
+      const std::vector<float>& batch_input_activations,
+      const std::vector<int>& token_positions,
+      const std::vector<int>& original_sequence_indices,
+      int num_tokens_in_batch,
+      KVCache* kv_cache
+  );
 
   friend void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model);
   friend class CPUBatchProcessor;

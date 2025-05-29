@@ -588,6 +588,7 @@ if (prefill_enabled) {
           logits.assign(batch_logits.begin() + (num_prompt_tokens - 1) * config_.vocab_size,
                         batch_logits.begin() + num_prompt_tokens * config_.vocab_size);
       } else { // GPU layers exist and need to be processed
+#ifdef HAS_CUDA
           Logger::info("[Generate API] Prefill: Processing GPU layers for the batch.");
           // Copy the (potentially CPU-processed) embeddings to the device
           float* d_temp_batch_embeddings = nullptr;
@@ -608,28 +609,14 @@ if (prefill_enabled) {
                                batch_embeddings_size_bytes, cudaMemcpyHostToDevice));
 
           logits = model_->forward_device_batch_prefill(d_temp_batch_embeddings, num_prompt_tokens, start_pos_for_loop, &kv_cache_, 0);
-            // DEBUG: Check if logits are coherent after GPU batch prefill
-  if (logits.size() >= config_.vocab_size) {
-      std::vector<float> logits_sample(std::min(10, (int)config_.vocab_size));
-      std::copy(logits.begin(), logits.begin() + logits_sample.size(), logits_sample.begin());
-            
-      // Check for NaN/Inf
-      bool has_nan_inf = false;
-      for (float val : logits) {
-          if (std::isnan(val) || std::isinf(val)) {
-              has_nan_inf = true;
-              break;
-          }
-      }
-    if (has_nan_inf) {
-        std::cout << "ERROR: GPU batch prefill produced NaN/Inf logits!" << std::endl;
-    }
-    
-}
-
+          
           if (d_temp_batch_embeddings) {
               gpuErrchk(cudaFree(d_temp_batch_embeddings));
           }
+#else
+          Logger::error("[Generate API] GPU layers requested but CUDA not available. Cannot proceed.");
+          return "";
+#endif
       }
       
       if (logits.empty()) {
@@ -696,6 +683,7 @@ if (prefill_enabled) {
 
     // Mixed-mode forward pass logic
     if (config_.num_cpu_offload_layers > 0 && config_.num_cpu_offload_layers < config_.num_hidden_layers) {
+#ifdef HAS_CUDA
       // Mixed CPU/GPU mode: First process CPU layers, then GPU layers
       Logger::debug("[Mixed Mode] Processing " + std::to_string(config_.num_cpu_offload_layers) + " CPU layers first");
       std::vector<float> intermediate_activations = model_->forward(current_data_host, pos, &kv_cache_, nullptr);
@@ -703,10 +691,19 @@ if (prefill_enabled) {
       Logger::debug("[Mixed Mode] CPU layers complete, transferring to GPU for remaining layers");
       gpuErrchk(cudaMemcpy(model_->get_x_dev(), intermediate_activations.data(), intermediate_activations.size() * sizeof(float), cudaMemcpyHostToDevice));
       logits = model_->forward_device(model_->get_x_dev(), pos, &kv_cache_, nullptr);
+#else
+      Logger::error("[Mixed Mode] Mixed CPU/GPU mode requested but CUDA not available. Cannot proceed.");
+      break;
+#endif
     } else if (config_.num_cpu_offload_layers == 0) {
+#ifdef HAS_CUDA
       // GPU-only mode
       gpuErrchk(cudaMemcpy(model_->get_x_dev(), current_data_host.data(), current_data_host.size() * sizeof(float), cudaMemcpyHostToDevice));
       logits = model_->forward_device(model_->get_x_dev(), pos, &kv_cache_, nullptr);
+#else
+      Logger::error("[GPU-only Mode] GPU-only mode requested but CUDA not available. Cannot proceed.");
+      break;
+#endif
     } else {
       // CPU-only mode
       logits = model_->forward(current_data_host, pos, &kv_cache_, nullptr);
@@ -1197,6 +1194,7 @@ bool TinyLlamaSession::batch_prefill_parallel(const std::vector<std::vector<int>
                                                          total_tokens_across_all_prompts);
   } else {
     // GPU layers exist - transfer to GPU and process
+#ifdef HAS_CUDA
     Logger::info("[Batch Prefill] Processing GPU layers for batch prefill");
     
     Logger::info("[DEBUG] About to allocate GPU memory for batch prefill");
@@ -1223,15 +1221,11 @@ bool TinyLlamaSession::batch_prefill_parallel(const std::vector<std::vector<int>
     
     gpuErrchk(cudaFree(d_batch_embeddings));
     
-    // Now extract the logits for the last token of each sequence
-    if (all_batch_logits.size() != static_cast<size_t>(total_tokens_across_all_prompts * config_.vocab_size)) {
-      Logger::error("[Batch Prefill] GPU prefill returned wrong total logit size. Expected: " + 
-                   std::to_string(total_tokens_across_all_prompts * config_.vocab_size) + 
-                   ", got: " + std::to_string(all_batch_logits.size()));
-      return false;
-    }
-    
     final_batch_logits = all_batch_logits;
+#else
+    Logger::error("[Batch Prefill] GPU processing requested but CUDA not available.");
+    return false;
+#endif
   }
 
   Logger::info("[Batch Prefill] Successfully processed batch prefill for " + 
@@ -1430,6 +1424,7 @@ bool TinyLlamaSession::batch_generation_parallel(const std::vector<int>& current
 
   // GPU-only processing
   if (config_.num_cpu_offload_layers < config_.num_hidden_layers) {
+#ifdef HAS_CUDA
     Logger::info("[Batch Generation] Processing GPU layers for batch generation");
     
     float* d_batch_embeddings = nullptr;
@@ -1452,6 +1447,10 @@ bool TinyLlamaSession::batch_generation_parallel(const std::vector<int>& current
     batch_logits = gpu_batch_logits;
     Logger::info("[Batch Generation] GPU batch generation completed successfully");
     return true;
+#else
+    Logger::error("[Batch Generation] GPU processing requested but CUDA not available.");
+    return false;
+#endif
   }
   
   Logger::error("[Batch Generation] No valid processing path found");
