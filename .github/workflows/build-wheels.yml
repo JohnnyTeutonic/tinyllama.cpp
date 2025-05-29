@@ -144,34 +144,21 @@ jobs:
         Write-Host "Installing build dependencies for Windows..."
         choco install cmake ninja -y
         
-        Write-Host "Installing Boost using chocolatey..."
-        choco install boost-msvc-14.3 --version=1.81.0 -y --debug --verbose
-        if ($LASTEXITCODE -ne 0) {
-          Write-Warning "Failed to install Boost with default sources. Retrying with explicit community source..."
-          choco install boost-msvc-14.3 --version=1.81.0 -y --source=https://community.chocolatey.org/api/v2/
-          if ($LASTEXITCODE -ne 0) {
-            Write-Error "Failed to install Boost even with explicit community source. Exit code: $LASTEXITCODE"
-            exit 1
-          }
-        }
+        Write-Host "Installing Boost using vcpkg..."
+        git clone https://github.com/Microsoft/vcpkg.git C:\vcpkg
+        C:\vcpkg\bootstrap-vcpkg.bat
+        C:\vcpkg\vcpkg install boost-regex:x64-windows boost-system:x64-windows boost-filesystem:x64-windows
         
         Write-Host "Setting up Boost environment variables..."
-        $BOOST_VERSION_UNDERSCORE = "1_81_0"
-        $TARGET_BOOST_ROOT_DIR = "C:\local\boost_$($BOOST_VERSION_UNDERSCORE)"
+        $VCPKG_ROOT = "C:\vcpkg"
+        $BOOST_ROOT = "$VCPKG_ROOT\installed\x64-windows"
         
-        if (-not (Test-Path $TARGET_BOOST_ROOT_DIR)) {
-          Write-Warning "Boost not found at $TARGET_BOOST_ROOT_DIR. Trying C:\Boost as fallback..."
-          $TARGET_BOOST_ROOT_DIR = "C:\Boost"
-          if (-not (Test-Path $TARGET_BOOST_ROOT_DIR)) {
-            Write-Error "Boost not found at either location. Installation may have failed."
-            exit 1
-          }
-        }
-        
-        Write-Host "Setting BOOST_ROOT to: $TARGET_BOOST_ROOT_DIR"
-        echo "BOOST_ROOT=$TARGET_BOOST_ROOT_DIR" >> $env:GITHUB_ENV
-        echo "Boost_ROOT=$TARGET_BOOST_ROOT_DIR" >> $env:GITHUB_ENV
-        echo "Boost_INCLUDE_DIR=$TARGET_BOOST_ROOT_DIR" >> $env:GITHUB_ENV
+        Write-Host "Setting BOOST_ROOT to: $BOOST_ROOT"
+        echo "BOOST_ROOT=$BOOST_ROOT" >> $env:GITHUB_ENV
+        echo "Boost_ROOT=$BOOST_ROOT" >> $env:GITHUB_ENV
+        echo "Boost_INCLUDE_DIR=$BOOST_ROOT\include" >> $env:GITHUB_ENV
+        echo "CMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake" >> $env:GITHUB_ENV
+        echo "VCPKG_TARGET_TRIPLET=x64-windows" >> $env:GITHUB_ENV
 
     # Clear any problematic environment variables
     - name: Clear problematic environment variables
@@ -203,7 +190,7 @@ jobs:
         
         CIBW_ENVIRONMENT_LINUX: "TINYLLAMA_CPP_BUILD_CUDA=0 CMAKE_POLICY_DEFAULT_CMP0167=NEW Python_EXECUTABLE={python} Python_FIND_STRATEGY=LOCATION CMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER SETUPTOOLS_USE_DISTUTILS=stdlib"
         
-        CIBW_ENVIRONMENT_WINDOWS: "TINYLLAMA_CPP_BUILD_CUDA=0 CMAKE_POLICY_DEFAULT_CMP0167=NEW BOOST_ROOT=C:\\local\\boost_1_81_0 Boost_ROOT=C:\\local\\boost_1_81_0 Boost_INCLUDE_DIR=C:\\local\\boost_1_81_0"
+        CIBW_ENVIRONMENT_WINDOWS: "TINYLLAMA_CPP_BUILD_CUDA=0 CMAKE_POLICY_DEFAULT_CMP0167=NEW CMAKE_TOOLCHAIN_FILE=C:\\vcpkg\\scripts\\buildsystems\\vcpkg.cmake VCPKG_TARGET_TRIPLET=x64-windows"
         
         CIBW_ENVIRONMENT_MACOS: "TINYLLAMA_CPP_BUILD_CUDA=0 OpenMP_CXX_FLAGS='-Xpreprocessor -fopenmp' OpenMP_CXX_LIB_NAMES=omp CMAKE_FIND_DEBUG_MODE=ON"
         
@@ -229,7 +216,7 @@ jobs:
                 CUDA_URL="https://developer.download.nvidia.com/compute/cuda/12.1.1/local_installers/$CUDA_INSTALLER"
               fi &&
               echo "Downloading CUDA $CUDA_VERSION installer..." &&
-              wget -q "$CUDA_URL" &&
+              curl -L -o "$CUDA_INSTALLER" "$CUDA_URL" &&
               chmod +x "$CUDA_INSTALLER" &&
               echo "Installing CUDA toolkit (silent install)..." &&
               sh "$CUDA_INSTALLER" --silent --toolkit --installpath=/usr/local/cuda &&
@@ -273,8 +260,11 @@ jobs:
         CIBW_BEFORE_BUILD_WINDOWS: >
           echo "Installing build dependencies for Windows wheel build..." &&
           pip install cmake ninja &&
-          choco install boost-msvc-14.3 --version=1.81.0 -y --force ||
-          choco install boost-msvc-14.3 --version=1.81.0 -y --source=https://community.chocolatey.org/api/v2/ --force
+          if not exist C:\vcpkg (
+            git clone https://github.com/Microsoft/vcpkg.git C:\vcpkg &&
+            C:\vcpkg\bootstrap-vcpkg.bat
+          ) &&
+          C:\vcpkg\vcpkg install boost-regex:x64-windows boost-system:x64-windows boost-filesystem:x64-windows
         
         CIBW_BEFORE_BUILD_MACOS: >
           echo "Setting up macOS build environment..." &&
@@ -319,7 +309,7 @@ jobs:
         
         CIBW_ENVIRONMENT_LINUX: "TINYLLAMA_CPP_BUILD_CUDA=1 CMAKE_CUDA_ARCHITECTURES=\"75;80;86;89;90\" CMAKE_POLICY_DEFAULT_CMP0167=NEW CUDA_HOME=/usr/local/cuda CUDAToolkit_ROOT=/usr/local/cuda Python_EXECUTABLE={python} Python_FIND_STRATEGY=LOCATION CMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER SETUPTOOLS_USE_DISTUTILS=stdlib"
         
-        CIBW_ENVIRONMENT_WINDOWS: "TINYLLAMA_CPP_BUILD_CUDA=1 CMAKE_CUDA_ARCHITECTURES=\"75;80;86;89;90\" CMAKE_POLICY_DEFAULT_CMP0167=NEW BOOST_ROOT=C:\\local\\boost_1_81_0 Boost_ROOT=C:\\local\\boost_1_81_0 Boost_INCLUDE_DIR=C:\\local\\boost_1_81_0"
+        CIBW_ENVIRONMENT_WINDOWS: "TINYLLAMA_CPP_BUILD_CUDA=1 CMAKE_CUDA_ARCHITECTURES=\"75;80;86;89;90\" CMAKE_POLICY_DEFAULT_CMP0167=NEW CMAKE_TOOLCHAIN_FILE=C:\\vcpkg\\scripts\\buildsystems\\vcpkg.cmake VCPKG_TARGET_TRIPLET=x64-windows"
         
         CIBW_ENVIRONMENT_MACOS: "TINYLLAMA_CPP_BUILD_CUDA=0 OpenMP_CXX_FLAGS='-Xpreprocessor -fopenmp' OpenMP_CXX_LIB_NAMES=omp CMAKE_FIND_DEBUG_MODE=ON"
         
@@ -345,7 +335,7 @@ jobs:
                 CUDA_URL="https://developer.download.nvidia.com/compute/cuda/12.1.1/local_installers/$CUDA_INSTALLER"
               fi &&
               echo "Downloading CUDA $CUDA_VERSION installer..." &&
-              wget -q "$CUDA_URL" &&
+              curl -L -o "$CUDA_INSTALLER" "$CUDA_URL" &&
               chmod +x "$CUDA_INSTALLER" &&
               echo "Installing CUDA toolkit (silent install)..." &&
               sh "$CUDA_INSTALLER" --silent --toolkit --installpath=/usr/local/cuda &&
