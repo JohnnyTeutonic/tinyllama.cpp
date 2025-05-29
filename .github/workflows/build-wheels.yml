@@ -210,6 +210,7 @@ jobs:
           TINYLLAMA_CPP_BUILD_CUDA=0
           CMAKE_POLICY_DEFAULT_CMP0167=NEW
           Python_EXECUTABLE="{python}"
+          SETUPTOOLS_USE_DISTUTILS=stdlib
           
         CIBW_ENVIRONMENT_WINDOWS: >
           TINYLLAMA_CPP_BUILD_CUDA=0
@@ -235,10 +236,17 @@ jobs:
           ./b2 install --prefix=/usr/local threading=multi link=shared variant=release -j$(nproc)))
         
         CIBW_BEFORE_BUILD_LINUX: >
-          PY_VERSION_SHORT=$(${python} -c "import sys; print(f'{sys.version_info.major}{sys.version_info.minor}')") &&
-          echo "Attempting to install python${PY_VERSION_SHORT}-devel for CUDA build" &&
-          (yum install -y python${PY_VERSION_SHORT}-devel || echo "Failed to install python${PY_VERSION_SHORT}-devel, trying python3-devel") &&
-          (yum install -y python3-devel || echo "Failed to install python3-devel. Python headers might be missing.") &&
+          echo "Setting up Python environment for CMake (CUDA Build)..." &&
+          PYTHON_VERSION_SHORT=$(${python} -c "import sys; print(f'{sys.version_info.major}{sys.version_info.minor}')") &&
+          PYTHON_MM_VERSION=$(${python} -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')") &&
+          EXPECTED_INCLUDE_PATH="$(${python} -c 'import sysconfig; print(sysconfig.get_path("include"))')" &&
+          EXPECTED_LIBRARY_PATH_DIR="$(${python} -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR"))')" &&
+          EXPECTED_LIBRARY_PATH="${EXPECTED_LIBRARY_PATH_DIR}/libpython${PYTHON_MM_VERSION}$(${python} -c 'import sysconfig; print(sysconfig.get_config_var("ABIFLAGS"))').so" &&
+          echo "Python Executable: ${python}" &&
+          echo "Expected Include Dir: ${EXPECTED_INCLUDE_PATH}" &&
+          echo "Expected Library Path: ${EXPECTED_LIBRARY_PATH}" &&
+          export CMAKE_ARGS="-DPython_EXECUTABLE:FILEPATH=${python} -DPython_INCLUDE_DIR:PATH=${EXPECTED_INCLUDE_PATH} -DPython_LIBRARY:FILEPATH=${EXPECTED_LIBRARY_PATH}" &&
+          (yum install -y python${PYTHON_VERSION_SHORT}-devel || yum install -y python3-devel || echo "Python devel packages not found or already installed.") &&
           export PATH=/usr/local/cuda/bin:$PATH &&
           export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH &&
           echo "Using CUDA from /usr/local/cuda" &&
@@ -278,6 +286,7 @@ jobs:
           CMAKE_POLICY_DEFAULT_CMP0167=NEW
           CUDA_HOME=/usr/local/cuda
           Python_EXECUTABLE="{python}"
+          SETUPTOOLS_USE_DISTUTILS=stdlib
         
         CIBW_ENVIRONMENT_WINDOWS: >
           TINYLLAMA_CPP_BUILD_CUDA=1
@@ -304,10 +313,17 @@ jobs:
           ./b2 install --prefix=/usr/local threading=multi link=shared variant=release -j$(nproc)))
         
         CIBW_BEFORE_BUILD_LINUX: >
-          PY_VERSION_SHORT=$(${python} -c "import sys; print(f'{sys.version_info.major}{sys.version_info.minor}')") &&
-          echo "Attempting to install python${PY_VERSION_SHORT}-devel for CUDA build" &&
-          (yum install -y python${PY_VERSION_SHORT}-devel || echo "Failed to install python${PY_VERSION_SHORT}-devel, trying python3-devel") &&
-          (yum install -y python3-devel || echo "Failed to install python3-devel. Python headers might be missing.") &&
+          echo "Setting up Python environment for CMake (CUDA Build)..." &&
+          PYTHON_VERSION_SHORT=$(${python} -c "import sys; print(f'{sys.version_info.major}{sys.version_info.minor}')") &&
+          PYTHON_MM_VERSION=$(${python} -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')") &&
+          EXPECTED_INCLUDE_PATH="$(${python} -c 'import sysconfig; print(sysconfig.get_path("include"))')" &&
+          EXPECTED_LIBRARY_PATH_DIR="$(${python} -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR"))')" &&
+          EXPECTED_LIBRARY_PATH="${EXPECTED_LIBRARY_PATH_DIR}/libpython${PYTHON_MM_VERSION}$(${python} -c 'import sysconfig; print(sysconfig.get_config_var("ABIFLAGS"))').so" &&
+          echo "Python Executable: ${python}" &&
+          echo "Expected Include Dir: ${EXPECTED_INCLUDE_PATH}" &&
+          echo "Expected Library Path: ${EXPECTED_LIBRARY_PATH}" &&
+          export CMAKE_ARGS="-DPython_EXECUTABLE:FILEPATH=${python} -DPython_INCLUDE_DIR:PATH=${EXPECTED_INCLUDE_PATH} -DPython_LIBRARY:FILEPATH=${EXPECTED_LIBRARY_PATH}" &&
+          (yum install -y python${PYTHON_VERSION_SHORT}-devel || yum install -y python3-devel || echo "Python devel packages not found or already installed.") &&
           export PATH=/usr/local/cuda/bin:$PATH &&
           export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH &&
           echo "Using CUDA from /usr/local/cuda" &&
