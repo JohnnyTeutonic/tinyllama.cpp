@@ -210,6 +210,8 @@ jobs:
           TINYLLAMA_CPP_BUILD_CUDA=0
           CMAKE_POLICY_DEFAULT_CMP0167=NEW
           Python_EXECUTABLE="{python}"
+          Python_FIND_STRATEGY="LOCATION"
+          CMAKE_FIND_ROOT_PATH_MODE_PROGRAM="NEVER"
           SETUPTOOLS_USE_DISTUTILS=stdlib
           
         CIBW_ENVIRONMENT_WINDOWS: >
@@ -236,10 +238,23 @@ jobs:
           ./b2 install --prefix=/usr/local threading=multi link=shared variant=release -j$(nproc)))
         
         CIBW_BEFORE_BUILD_LINUX: >
-          PYTHON_VERSION_SHORT=$({python} -c "import sys; print(f'{sys.version_info.major}{sys.version_info.minor}')") &&
-          echo "Attempting to install python${PYTHON_VERSION_SHORT}-devel (and python3-devel as fallback)" &&
-          (yum install -y python${PYTHON_VERSION_SHORT}-devel || yum install -y python3-devel || echo "Python devel packages not found or already installed.") &&
-          echo "Using manylinux container libraries"
+          echo "Setting up Python development environment..." &&
+          python -m pip install --upgrade pip setuptools wheel &&
+          PYTHON_INCLUDE_DIR=$(python -c "import sysconfig; print(sysconfig.get_path('include'))") &&
+          PYTHON_LIBRARY_DIR=$(python -c "import sysconfig; print(sysconfig.get_path('stdlib'))") &&
+          PYTHON_EXECUTABLE=$(which python) &&
+          echo "Python executable: $PYTHON_EXECUTABLE" &&
+          echo "Python include dir: $PYTHON_INCLUDE_DIR" &&
+          echo "Python library dir: $PYTHON_LIBRARY_DIR" &&
+          ls -la $PYTHON_INCLUDE_DIR || echo "Python include directory not found" &&
+          export Python3_EXECUTABLE=$PYTHON_EXECUTABLE &&
+          export Python_EXECUTABLE=$PYTHON_EXECUTABLE &&
+          export Python3_INCLUDE_DIR=$PYTHON_INCLUDE_DIR &&
+          export Python_INCLUDE_DIR=$PYTHON_INCLUDE_DIR &&
+          yum install -y python3-devel || 
+          (PYTHON_VERSION_SHORT=$(python -c "import sys; print(f'{sys.version_info.major}{sys.version_info.minor}')") &&
+          yum install -y python${PYTHON_VERSION_SHORT}-devel) ||
+          echo "Python development packages not available, using existing Python installation"
         
         CIBW_BEFORE_BUILD_WINDOWS: >
           pip install cmake ninja &&
@@ -275,6 +290,8 @@ jobs:
           CMAKE_POLICY_DEFAULT_CMP0167=NEW
           CUDA_HOME=/usr/local/cuda
           Python_EXECUTABLE="{python}"
+          Python_FIND_STRATEGY="LOCATION"
+          CMAKE_FIND_ROOT_PATH_MODE_PROGRAM="NEVER"
           SETUPTOOLS_USE_DISTUTILS=stdlib
         
         CIBW_ENVIRONMENT_WINDOWS: >
@@ -302,9 +319,23 @@ jobs:
           ./b2 install --prefix=/usr/local threading=multi link=shared variant=release -j$(nproc)))
         
         CIBW_BEFORE_BUILD_LINUX: >
-          PYTHON_VERSION_SHORT=$({python} -c "import sys; print(f'{sys.version_info.major}{sys.version_info.minor}')") &&
-          echo "Attempting to install python${PYTHON_VERSION_SHORT}-devel (and python3-devel as fallback) for CUDA build" &&
-          (yum install -y python${PYTHON_VERSION_SHORT}-devel || yum install -y python3-devel || echo "Python devel packages not found or already installed.") &&
+          echo "Setting up Python development environment..." &&
+          python -m pip install --upgrade pip setuptools wheel &&
+          PYTHON_INCLUDE_DIR=$(python -c "import sysconfig; print(sysconfig.get_path('include'))") &&
+          PYTHON_LIBRARY_DIR=$(python -c "import sysconfig; print(sysconfig.get_path('stdlib'))") &&
+          PYTHON_EXECUTABLE=$(which python) &&
+          echo "Python executable: $PYTHON_EXECUTABLE" &&
+          echo "Python include dir: $PYTHON_INCLUDE_DIR" &&
+          echo "Python library dir: $PYTHON_LIBRARY_DIR" &&
+          ls -la $PYTHON_INCLUDE_DIR || echo "Python include directory not found" &&
+          export Python3_EXECUTABLE=$PYTHON_EXECUTABLE &&
+          export Python_EXECUTABLE=$PYTHON_EXECUTABLE &&
+          export Python3_INCLUDE_DIR=$PYTHON_INCLUDE_DIR &&
+          export Python_INCLUDE_DIR=$PYTHON_INCLUDE_DIR &&
+          yum install -y python3-devel || 
+          (PYTHON_VERSION_SHORT=$(python -c "import sys; print(f'{sys.version_info.major}{sys.version_info.minor}')") &&
+          yum install -y python${PYTHON_VERSION_SHORT}-devel) ||
+          echo "Python development packages not available, using existing Python installation" &&
           export PATH=/usr/local/cuda/bin:$PATH &&
           export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH &&
           echo "Using CUDA from /usr/local/cuda" &&
