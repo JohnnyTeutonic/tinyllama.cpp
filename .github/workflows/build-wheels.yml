@@ -260,11 +260,30 @@ jobs:
           (PYTHON_VERSION_SHORT=$(python -c "import sys; print(f'{sys.version_info.major}{sys.version_info.minor}')") &&
           yum install -y python${PYTHON_VERSION_SHORT}-devel) ||
           echo "Python development packages not available, using existing Python installation" &&
-          if command -v nvcc >/dev/null 2>&1; then
-            echo "CUDA available: $(which nvcc)" &&
-            nvcc --version
+          if [ "$TINYLLAMA_CPP_BUILD_CUDA" = "1" ]; then
+            echo "=== CUDA VERIFICATION AND SETUP ===" &&
+            echo "Checking for CUDA installation..." &&
+            ls -la /usr/local/cuda/ || echo "CUDA directory not found!" &&
+            ls -la /usr/local/cuda/bin/ || echo "CUDA bin directory not found!" &&
+            ls -la /usr/local/cuda/lib64/ || echo "CUDA lib64 directory not found!" &&
+            if [ -f "/usr/local/cuda/bin/nvcc" ]; then
+              echo "✓ Found nvcc at /usr/local/cuda/bin/nvcc" &&
+              /usr/local/cuda/bin/nvcc --version
+            else
+              echo "✗ nvcc not found!" &&
+              exit 1
+            fi &&
+            echo "Setting CUDA environment variables for build..." &&
+            export CUDA_HOME=/usr/local/cuda &&
+            export CUDA_ROOT=/usr/local/cuda &&
+            export CUDA_PATH=/usr/local/cuda &&
+            export CUDAToolkit_ROOT=/usr/local/cuda &&
+            export CMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc &&
+            export PATH=/usr/local/cuda/bin:$PATH &&
+            export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH &&
+            echo "CUDA environment set for wheel build"
           else
-            echo "CUDA not available in this environment"
+            echo "CPU-only build, skipping CUDA setup"
           fi
         
         CIBW_BEFORE_BUILD_WINDOWS: >
@@ -389,11 +408,30 @@ jobs:
           (PYTHON_VERSION_SHORT=$(python -c "import sys; print(f'{sys.version_info.major}{sys.version_info.minor}')") &&
           yum install -y python${PYTHON_VERSION_SHORT}-devel) ||
           echo "Python development packages not available, using existing Python installation" &&
-          if command -v nvcc >/dev/null 2>&1; then
-            echo "CUDA available: $(which nvcc)" &&
-            nvcc --version
+          if [ "$TINYLLAMA_CPP_BUILD_CUDA" = "1" ]; then
+            echo "=== CUDA VERIFICATION AND SETUP ===" &&
+            echo "Checking for CUDA installation..." &&
+            ls -la /usr/local/cuda/ || echo "CUDA directory not found!" &&
+            ls -la /usr/local/cuda/bin/ || echo "CUDA bin directory not found!" &&
+            ls -la /usr/local/cuda/lib64/ || echo "CUDA lib64 directory not found!" &&
+            if [ -f "/usr/local/cuda/bin/nvcc" ]; then
+              echo "✓ Found nvcc at /usr/local/cuda/bin/nvcc" &&
+              /usr/local/cuda/bin/nvcc --version
+            else
+              echo "✗ nvcc not found!" &&
+              exit 1
+            fi &&
+            echo "Setting CUDA environment variables for build..." &&
+            export CUDA_HOME=/usr/local/cuda &&
+            export CUDA_ROOT=/usr/local/cuda &&
+            export CUDA_PATH=/usr/local/cuda &&
+            export CUDAToolkit_ROOT=/usr/local/cuda &&
+            export CMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc &&
+            export PATH=/usr/local/cuda/bin:$PATH &&
+            export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH &&
+            echo "CUDA environment set for wheel build"
           else
-            echo "CUDA not available in this environment"
+            echo "CPU-only build, skipping CUDA setup"
           fi
         
         CIBW_BEFORE_BUILD_WINDOWS: "pip install cmake ninja"

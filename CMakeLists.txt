@@ -83,7 +83,33 @@ set(CUDA_ENABLED FALSE) # Default to disabled
 set(CUDA_SOURCES "")   # Default to no CUDA sources
 
 if(HAS_CUDA)
-    enable_language(CUDA)
+    # Add explicit CUDA toolkit path hints for better detection
+    if(DEFINED ENV{CUDA_HOME})
+        set(CMAKE_CUDA_COMPILER "$ENV{CUDA_HOME}/bin/nvcc")
+        list(APPEND CMAKE_PREFIX_PATH "$ENV{CUDA_HOME}")
+        message(STATUS "Using CUDA_HOME: $ENV{CUDA_HOME}")
+    endif()
+    
+    if(DEFINED ENV{CUDAToolkit_ROOT})
+        set(CUDAToolkit_ROOT "$ENV{CUDAToolkit_ROOT}")
+        list(APPEND CMAKE_PREFIX_PATH "$ENV{CUDAToolkit_ROOT}")
+        message(STATUS "Using CUDAToolkit_ROOT: $ENV{CUDAToolkit_ROOT}")
+    endif()
+    
+    # Verify nvcc exists before enabling CUDA language
+    if(CMAKE_CUDA_COMPILER AND EXISTS "${CMAKE_CUDA_COMPILER}")
+        message(STATUS "Found CUDA compiler: ${CMAKE_CUDA_COMPILER}")
+        enable_language(CUDA)
+    elseif(EXISTS "/usr/local/cuda/bin/nvcc")
+        message(STATUS "Found CUDA compiler at: /usr/local/cuda/bin/nvcc")
+        set(CMAKE_CUDA_COMPILER "/usr/local/cuda/bin/nvcc")
+        list(APPEND CMAKE_PREFIX_PATH "/usr/local/cuda")
+        enable_language(CUDA)
+    else()
+        message(WARNING "CUDA compiler not found. Trying enable_language(CUDA) anyway...")
+        enable_language(CUDA)
+    endif()
+    
     find_package(CUDA)
     if(CUDA_FOUND)
         find_package(CUDAToolkit COMPONENTS cublas) 
