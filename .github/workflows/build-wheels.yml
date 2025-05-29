@@ -165,6 +165,10 @@ jobs:
       if: matrix.os == 'macos-latest'
       run: |
         brew install cmake ninja boost llvm libomp
+        # Create symlinks in standard paths for easier discovery by cibuildwheel
+        sudo mkdir -p /usr/local/include /usr/local/lib
+        sudo ln -sf $(brew --prefix libomp)/include/omp.h /usr/local/include/omp.h || true
+        sudo ln -sf $(brew --prefix libomp)/lib/libomp.dylib /usr/local/lib/libomp.dylib || true
         echo "LDFLAGS=-L$(brew --prefix libomp)/lib" >> $GITHUB_ENV
         echo "CPPFLAGS=-I$(brew --prefix libomp)/include" >> $GITHUB_ENV
 
@@ -183,6 +187,12 @@ jobs:
         # Ensure system Python is used
         which python3
         python3 --version
+        # Remove conda from PATH to prevent auto-activation
+        echo "PATH=$(echo $PATH | tr ':' '\n' | grep -v conda | tr '\n' ':')" >> $GITHUB_ENV
+        # Unset conda environment variables
+        echo "CONDA_DEFAULT_ENV=" >> $GITHUB_ENV
+        echo "CONDA_PREFIX=" >> $GITHUB_ENV
+        echo "CONDA_PROMPT_MODIFIER=" >> $GITHUB_ENV
 
     # Build wheels using cibuildwheel
     - name: Build wheels (CPU)
@@ -198,31 +208,33 @@ jobs:
         CIBW_ENVIRONMENT_LINUX: >
           TINYLLAMA_CPP_BUILD_CUDA=0
           CMAKE_POLICY_DEFAULT_CMP0167=NEW
-          BOOST_ROOT=/usr
-          Boost_ROOT=/usr
-          BOOST_INCLUDEDIR=/usr/include
-          Boost_INCLUDE_DIR=/usr/include
           
-        CIBW_ENVIRONMENT_WINDOWS: TINYLLAMA_CPP_BUILD_CUDA=0
+        CIBW_ENVIRONMENT_WINDOWS: >
+          TINYLLAMA_CPP_BUILD_CUDA=0
+          CMAKE_POLICY_DEFAULT_CMP0167=NEW
+          
         CIBW_ENVIRONMENT_MACOS: >
           TINYLLAMA_CPP_BUILD_CUDA=0
-          LDFLAGS=-L$(brew --prefix libomp)/lib
-          CPPFLAGS=-I$(brew --prefix libomp)/include
-          OpenMP_ROOT=$(brew --prefix libomp)
-          OpenMP_CXX_FLAGS=-Xpreprocessor -fopenmp -I$(brew --prefix libomp)/include
-          OpenMP_CXX_LIB_NAMES=omp
-          OpenMP_omp_LIBRARY=$(brew --prefix libomp)/lib/libomp.dylib
-        
+          LDFLAGS=-L/usr/local/lib
+          CPPFLAGS=-I/usr/local/include
+          OpenMP_ROOT=/usr/local
+          
+        CIBW_BEFORE_ALL_LINUX: >
+          yum install -y boost-devel boost-static ||
+          (curl -L https://boostorg.jfrog.io/artifactory/main/release/1.82.0/source/boost_1_82_0.tar.bz2 | tar -xj &&
+          cd boost_1_82_0 &&
+          ./bootstrap.sh --prefix=/usr/local &&
+          ./b2 install --with-regex --with-system --with-filesystem threading=multi link=shared)
+          
         CIBW_BEFORE_BUILD_LINUX: >
-          (yum install -y boost-devel boost-static || true) &&
-          (apt-get update && apt-get install -y libboost-all-dev || true) &&
-          (apk add --no-cache boost-dev || true) &&
-          echo "Package installation completed" &&
-          echo "Boost search paths:" &&
-          (find /usr -name "boost" -type d 2>/dev/null | head -5 || true) &&
-          (find /usr -name "*boost*" -type d 2>/dev/null | head -10 || true)
+          echo "Using system Boost libraries" &&
+          echo "Available libraries:" &&
+          (find /usr -name "*boost*" -type f 2>/dev/null | head -10 || true)
         
-        CIBW_BEFORE_BUILD_WINDOWS: pip install cmake ninja
+        CIBW_BEFORE_BUILD_WINDOWS: >
+          pip install cmake ninja &&
+          echo "Windows Boost will be handled by vcpkg in CMake"
+        
         CIBW_BEFORE_BUILD_MACOS: >
           brew install boost libomp || true
         
@@ -244,35 +256,32 @@ jobs:
           TINYLLAMA_CPP_BUILD_CUDA=1
           CMAKE_CUDA_ARCHITECTURES=${{ env.CMAKE_CUDA_ARCHITECTURES }}
           CUDA_HOME=${{ env.CUDA_HOME }}
-          PATH=${{ env.CUDA_BIN_PATH }}:$PATH
+          PATH=${{ env.CUDA_BIN_PATH }}:/usr/local/bin:/usr/bin:/bin
           LD_LIBRARY_PATH=${{ env.CUDA_LIB_PATH }}:$LD_LIBRARY_PATH
           CMAKE_POLICY_DEFAULT_CMP0167=NEW
-          BOOST_ROOT=/usr
-          Boost_ROOT=/usr
-          BOOST_INCLUDEDIR=/usr/include
-          Boost_INCLUDE_DIR=/usr/include
         
         CIBW_ENVIRONMENT_WINDOWS: >
           TINYLLAMA_CPP_BUILD_CUDA=1
           CMAKE_CUDA_ARCHITECTURES=${{ env.CMAKE_CUDA_ARCHITECTURES }}
-        
+          CMAKE_POLICY_DEFAULT_CMP0167=NEW
+          
         CIBW_ENVIRONMENT_MACOS: >
           TINYLLAMA_CPP_BUILD_CUDA=0
-          LDFLAGS=-L$(brew --prefix libomp)/lib
-          CPPFLAGS=-I$(brew --prefix libomp)/include
-          OpenMP_ROOT=$(brew --prefix libomp)
-          OpenMP_CXX_FLAGS=-Xpreprocessor -fopenmp -I$(brew --prefix libomp)/include
-          OpenMP_CXX_LIB_NAMES=omp
-          OpenMP_omp_LIBRARY=$(brew --prefix libomp)/lib/libomp.dylib
+          LDFLAGS=-L/usr/local/lib
+          CPPFLAGS=-I/usr/local/include
+          OpenMP_ROOT=/usr/local
         
+        CIBW_BEFORE_ALL_LINUX: >
+          yum install -y boost-devel boost-static ||
+          (curl -L https://boostorg.jfrog.io/artifactory/main/release/1.82.0/source/boost_1_82_0.tar.bz2 | tar -xj &&
+          cd boost_1_82_0 &&
+          ./bootstrap.sh --prefix=/usr/local &&
+          ./b2 install --with-regex --with-system --with-filesystem threading=multi link=shared)
+          
         CIBW_BEFORE_BUILD_LINUX: >
-          (yum install -y boost-devel boost-static || true) &&
-          (apt-get update && apt-get install -y libboost-all-dev || true) &&
-          (apk add --no-cache boost-dev || true) &&
-          echo "Package installation completed" &&
-          echo "Boost search paths:" &&
-          (find /usr -name "boost" -type d 2>/dev/null | head -5 || true) &&
-          (find /usr -name "*boost*" -type d 2>/dev/null | head -10 || true)
+          echo "Using system Boost libraries" &&
+          echo "Available libraries:" &&
+          (find /usr -name "*boost*" -type f 2>/dev/null | head -10 || true)
         
         CIBW_BEFORE_BUILD_WINDOWS: pip install cmake ninja
         CIBW_BEFORE_BUILD_MACOS: >
