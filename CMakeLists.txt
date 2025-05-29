@@ -230,7 +230,15 @@ else()
 endif()
 
 if (MSVC)
-  foreach(target tinyllama tinyllama_server tinyllama_core)
+  # Define list of targets that always exist
+  set(MSVC_TARGETS tinyllama tinyllama_core)
+  
+  # Add tinyllama_server only if it was actually created (when NOT SKBUILD)
+  if(NOT SKBUILD AND TARGET tinyllama_server)
+    list(APPEND MSVC_TARGETS tinyllama_server)
+  endif()
+  
+  foreach(target ${MSVC_TARGETS})
     if(CMAKE_BUILD_TYPE STREQUAL "Debug")
       set_property(TARGET ${target} PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreadedDebug") # /MTd
     else()
