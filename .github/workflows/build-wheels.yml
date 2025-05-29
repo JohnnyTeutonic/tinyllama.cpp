@@ -226,11 +226,19 @@ jobs:
           CMAKE_CXX_COMPILER=/usr/local/opt/llvm/bin/clang++
           
         CIBW_BEFORE_ALL_LINUX: >
-          yum install -y boost-devel boost-regex || 
+          echo "Installing Python development packages..." &&
+          (yum install -y python3-devel python3-libs || echo "yum python3-devel failed, trying specific versions") && 
+          (yum install -y python38-devel || echo "yum python38-devel failed") && 
+          (yum install -y python39-devel || echo "yum python39-devel failed") && 
+          (yum install -y python310-devel || echo "yum python310-devel failed") && 
+          (yum install -y python311-devel || echo "yum python311-devel failed") && 
+          (yum install -y python312-devel || echo "yum python312-devel failed") && 
+          echo "Installing Boost packages..." &&
+          (yum install -y boost-devel boost-regex || 
           (curl -L https://github.com/boostorg/boost/releases/download/boost-1.82.0/boost-1.82.0.tar.gz | tar -xz && 
           cd boost-1.82.0 && 
           ./bootstrap.sh --prefix=/usr/local --with-libraries=regex,system,filesystem && 
-          ./b2 install --prefix=/usr/local threading=multi link=shared variant=release -j$(nproc))
+          ./b2 install --prefix=/usr/local threading=multi link=shared variant=release -j$(nproc)))
         
         CIBW_BEFORE_BUILD_LINUX: >
           echo "Using manylinux container libraries"
@@ -286,11 +294,19 @@ jobs:
           CMAKE_CXX_COMPILER=/usr/local/opt/llvm/bin/clang++
         
         CIBW_BEFORE_ALL_LINUX: >
-          yum install -y boost-devel boost-regex || 
+          echo "Installing Python development packages..." &&
+          (yum install -y python3-devel python3-libs || echo "yum python3-devel failed, trying specific versions") && 
+          (yum install -y python38-devel || echo "yum python38-devel failed") && 
+          (yum install -y python39-devel || echo "yum python39-devel failed") && 
+          (yum install -y python310-devel || echo "yum python310-devel failed") && 
+          (yum install -y python311-devel || echo "yum python311-devel failed") && 
+          (yum install -y python312-devel || echo "yum python312-devel failed") && 
+          echo "Installing Boost packages..." &&
+          (yum install -y boost-devel boost-regex || 
           (curl -L https://github.com/boostorg/boost/releases/download/boost-1.82.0/boost-1.82.0.tar.gz | tar -xz && 
           cd boost-1.82.0 && 
           ./bootstrap.sh --prefix=/usr/local --with-libraries=regex,system,filesystem && 
-          ./b2 install --prefix=/usr/local threading=multi link=shared variant=release -j$(nproc))
+          ./b2 install --prefix=/usr/local threading=multi link=shared variant=release -j$(nproc)))
         
         CIBW_BEFORE_BUILD_LINUX: >
           export PATH=/usr/local/cuda/bin:$PATH &&
