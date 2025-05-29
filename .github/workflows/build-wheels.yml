@@ -191,12 +191,18 @@ jobs:
         echo "Clearing potentially problematic environment variables"
         unset CIBW_BUILD_SELECTOR || true
         unset CIBW_CONFIG_FILE || true
+        unset CIBW_ONLY || true
+        # Clear any empty string environment variables that might interfere
+        export CIBW_CONFIG_FILE=""
+        export CIBW_ONLY=""
+        unset CIBW_CONFIG_FILE || true
+        unset CIBW_ONLY || true
         echo "Environment cleared"
 
     # Build wheels using cibuildwheel
     - name: Build wheels (CPU)
       if: matrix.cuda_version == 'cpu'
-      uses: pypa/cibuildwheel@v2.16.2
+      uses: pypa/cibuildwheel@v2.17.0
       with:
         output-dir: wheelhouse
       env:
@@ -274,7 +280,7 @@ jobs:
 
     - name: Build wheels (CUDA)
       if: matrix.cuda_version != 'cpu'
-      uses: pypa/cibuildwheel@v2.16.2
+      uses: pypa/cibuildwheel@v2.17.0
       with:
         output-dir: wheelhouse
       env:

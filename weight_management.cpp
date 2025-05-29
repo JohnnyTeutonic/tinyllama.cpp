@@ -3,6 +3,9 @@
 #include "logger.h"
 #include "quantization.h"
 #include "utils.h"
+#ifdef HAS_CUDA
+#include "cuda_kernels.h"
+#endif
 
 void TinyLlamaModel::ensure_embed_tokens_dequantized() {
     if (!this->embed_tokens_f32.empty()) return;
@@ -175,6 +178,7 @@ void TinyLlamaModel::ensure_down_proj_dequantized(int layer_idx) {
     else if (!lw.down_proj.empty()) lw.down_proj_f32 = bf16vec_to_float_vec(lw.down_proj);
 }
 
+#ifdef HAS_CUDA
 void TinyLlamaModel::ensure_f32_concatenated_weights_loaded() {
   // OPTIMIZED: Use concatenated weights for maximum GPU performance
   Logger::info("Loading concatenated F32 weights for optimal GPU performance");
@@ -412,6 +416,12 @@ void TinyLlamaModel::ensure_f32_concatenated_weights_loaded() {
   f32_concatenated_weights_loaded_ = true;
   Logger::info("F32 concatenated weights loaded successfully on-demand with immediate memory cleanup");
 }
+#else
+void TinyLlamaModel::ensure_f32_concatenated_weights_loaded() {
+  // CPU-only build - this function is a no-op
+  Logger::info("CPU-only build: ensure_f32_concatenated_weights_loaded is a no-op");
+}
+#endif // HAS_CUDA
 
 void TinyLlamaModel::ensure_layer_weights_on_gpu(int layer_idx) {
 #ifdef HAS_CUDA
@@ -548,6 +558,9 @@ void TinyLlamaModel::ensure_layer_weights_on_gpu(int layer_idx) {
     lw.down_proj_f32_dev,
     "Down Proj"
   );
+#else
+  // CPU-only build - this function is a no-op
+  Logger::info("CPU-only build: ensure_layer_weights_on_gpu is a no-op for layer " + std::to_string(layer_idx));
 #endif
 }
 
@@ -566,6 +579,9 @@ void TinyLlamaModel::free_layer_gpu_weights(int layer_idx) {
   if (lw.down_proj_f32_dev) { cudaFree(lw.down_proj_f32_dev); lw.down_proj_f32_dev = nullptr; }
   
   Logger::info("Freed GPU weights for layer " + std::to_string(layer_idx) + " (~200MB freed)");
+#else  
+  // CPU-only build - this function is a no-op
+  Logger::info("CPU-only build: free_layer_gpu_weights is a no-op for layer " + std::to_string(layer_idx));
 #endif
 }
 
