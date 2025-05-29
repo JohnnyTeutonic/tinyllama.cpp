@@ -6,6 +6,32 @@
 #include <sstream>
 #include <iomanip>
 
+// Windows header protection
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+// Undefine common Windows macros that might conflict
+#ifdef ERROR
+#undef ERROR
+#endif
+#ifdef DEBUG
+#undef DEBUG
+#endif
+#ifdef INFO
+#undef INFO
+#endif
+#ifdef WARNING
+#undef WARNING
+#endif
+#ifdef CRITICAL
+#undef CRITICAL
+#endif
+#endif // _WIN32
+
 /**
  * @file logger.h
  * @brief Logging utilities for the TinyLlama implementation
@@ -25,7 +51,15 @@
 class Logger {
 
  public:
-  enum class Level { DEBUG, INFO, WARNING, ERROR, CRITICAL, OFF };
+  // Explicitly scoped enumeration to avoid conflicts with Windows macros
+  enum class Level : int { 
+    DEBUG = 0, 
+    INFO = 1, 
+    WARNING = 2, 
+    ERROR = 3, 
+    CRITICAL = 4, 
+    OFF = 5 
+  };
 
   static void set_level(Level new_level);
   static Level get_level();
