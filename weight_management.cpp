@@ -60,29 +60,28 @@ void TinyLlamaModel::ensure_q_proj_dequantized(int layer_idx) {
 }
 
 void TinyLlamaModel::clear_layer_dequantized_weights(int layer_idx) {
-    if (layer_idx < 0 || layer_idx >= layers.size()) {
+    if (layer_idx < 0 || layer_idx >= static_cast<int>(layers.size())) {
         Logger::warning("clear_layer_dequantized_weights: Invalid layer index " + std::to_string(layer_idx));
         return;
     }
     
-    LayerWeights& lw = layers[layer_idx];
+    Logger::info("Clearing dequantized weights for layer " + std::to_string(layer_idx) + " to save memory.");
     
-    lw.q_proj_f32.clear();
-    lw.q_proj_f32.shrink_to_fit();
-    lw.k_proj_f32.clear();
-    lw.k_proj_f32.shrink_to_fit();
-    lw.v_proj_f32.clear();
-    lw.v_proj_f32.shrink_to_fit();
-    lw.o_proj_f32.clear();
-    lw.o_proj_f32.shrink_to_fit();
-    lw.gate_proj_f32.clear();
-    lw.gate_proj_f32.shrink_to_fit();
-    lw.up_proj_f32.clear();
-    lw.up_proj_f32.shrink_to_fit();
-    lw.down_proj_f32.clear();
-    lw.down_proj_f32.shrink_to_fit();
-    
-    Logger::info("Cleared dequantized weights for layer " + std::to_string(layer_idx));
+    auto& layer = layers[layer_idx];
+    layer.q_proj_f32.clear();
+    layer.q_proj_f32.shrink_to_fit();
+    layer.k_proj_f32.clear();
+    layer.k_proj_f32.shrink_to_fit();
+    layer.v_proj_f32.clear();
+    layer.v_proj_f32.shrink_to_fit();
+    layer.o_proj_f32.clear();
+    layer.o_proj_f32.shrink_to_fit();
+    layer.gate_proj_f32.clear();
+    layer.gate_proj_f32.shrink_to_fit();
+    layer.up_proj_f32.clear();
+    layer.up_proj_f32.shrink_to_fit();
+    layer.down_proj_f32.clear();
+    layer.down_proj_f32.shrink_to_fit();
 }
 
 void TinyLlamaModel::ensure_k_proj_dequantized(int layer_idx) {

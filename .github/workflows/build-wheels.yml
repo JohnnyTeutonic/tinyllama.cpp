@@ -212,29 +212,12 @@ jobs:
         CIBW_ARCHS_WINDOWS: AMD64
         CIBW_ARCHS_MACOS: x86_64 arm64
         
-        CIBW_ENVIRONMENT_LINUX: >
-          TINYLLAMA_CPP_BUILD_CUDA=0
-          CMAKE_POLICY_DEFAULT_CMP0167=NEW
-          Python_EXECUTABLE="{python}"
-          Python_FIND_STRATEGY="LOCATION"
-          CMAKE_FIND_ROOT_PATH_MODE_PROGRAM="NEVER"
-          SETUPTOOLS_USE_DISTUTILS=stdlib
-          
-        CIBW_ENVIRONMENT_WINDOWS: >
-          TINYLLAMA_CPP_BUILD_CUDA=0
-          CMAKE_POLICY_DEFAULT_CMP0167=NEW
-          
-        CIBW_ENVIRONMENT_MACOS: >
-          TINYLLAMA_CPP_BUILD_CUDA=0
-          LDFLAGS=-L/usr/local/lib
-          CPPFLAGS=-I/usr/local/include
-          OpenMP_ROOT=/usr/local
-          OpenMP_CXX_FLAGS=-Xpreprocessor\ -fopenmp
-          OpenMP_CXX_LIB_NAMES=omp
-          OpenMP_omp_LIBRARY=/usr/local/lib/libomp.dylib
-          CMAKE_C_COMPILER=/usr/local/opt/llvm/bin/clang
-          CMAKE_CXX_COMPILER=/usr/local/opt/llvm/bin/clang++
-          
+        CIBW_ENVIRONMENT_LINUX: "TINYLLAMA_CPP_BUILD_CUDA=0 CMAKE_POLICY_DEFAULT_CMP0167=NEW Python_EXECUTABLE={python} Python_FIND_STRATEGY=LOCATION CMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER SETUPTOOLS_USE_DISTUTILS=stdlib"
+        
+        CIBW_ENVIRONMENT_WINDOWS: "TINYLLAMA_CPP_BUILD_CUDA=0 CMAKE_POLICY_DEFAULT_CMP0167=NEW"
+        
+        CIBW_ENVIRONMENT_MACOS: "TINYLLAMA_CPP_BUILD_CUDA=0 LDFLAGS=-L/usr/local/lib CPPFLAGS=-I/usr/local/include OpenMP_ROOT=/usr/local OpenMP_CXX_FLAGS=-Xpreprocessor\\ -fopenmp OpenMP_CXX_LIB_NAMES=omp OpenMP_omp_LIBRARY=/usr/local/lib/libomp.dylib CMAKE_C_COMPILER=/usr/local/opt/llvm/bin/clang CMAKE_CXX_COMPILER=/usr/local/opt/llvm/bin/clang++"
+        
         CIBW_BEFORE_ALL_LINUX: >
           echo "Installing Boost packages..." &&
           (yum install -y boost-devel boost-regex || 
@@ -262,9 +245,7 @@ jobs:
           yum install -y python${PYTHON_VERSION_SHORT}-devel) ||
           echo "Python development packages not available, using existing Python installation"
         
-        CIBW_BEFORE_BUILD_WINDOWS: >
-          pip install cmake ninja &&
-          echo "Windows Boost will be handled by vcpkg in CMake"
+        CIBW_BEFORE_BUILD_WINDOWS: "pip install cmake ninja"
         
         CIBW_BEFORE_BUILD_MACOS: >
           brew install boost libomp llvm || true &&
@@ -290,31 +271,11 @@ jobs:
         CIBW_ARCHS_WINDOWS: AMD64
         CIBW_ARCHS_MACOS: x86_64 arm64
         
-        CIBW_ENVIRONMENT_LINUX: >
-          TINYLLAMA_CPP_BUILD_CUDA=1
-          CMAKE_CUDA_ARCHITECTURES=75;80;86;89;90
-          CMAKE_POLICY_DEFAULT_CMP0167=NEW
-          CUDA_HOME=/usr/local/cuda
-          Python_EXECUTABLE="{python}"
-          Python_FIND_STRATEGY="LOCATION"
-          CMAKE_FIND_ROOT_PATH_MODE_PROGRAM="NEVER"
-          SETUPTOOLS_USE_DISTUTILS=stdlib
+        CIBW_ENVIRONMENT_LINUX: "TINYLLAMA_CPP_BUILD_CUDA=1 CMAKE_CUDA_ARCHITECTURES=75;80;86;89;90 CMAKE_POLICY_DEFAULT_CMP0167=NEW CUDA_HOME=/usr/local/cuda Python_EXECUTABLE={python} Python_FIND_STRATEGY=LOCATION CMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER SETUPTOOLS_USE_DISTUTILS=stdlib"
         
-        CIBW_ENVIRONMENT_WINDOWS: >
-          TINYLLAMA_CPP_BUILD_CUDA=1
-          CMAKE_CUDA_ARCHITECTURES=75;80;86;89;90
-          CMAKE_POLICY_DEFAULT_CMP0167=NEW
-          
-        CIBW_ENVIRONMENT_MACOS: >
-          TINYLLAMA_CPP_BUILD_CUDA=0
-          LDFLAGS=-L/usr/local/lib
-          CPPFLAGS=-I/usr/local/include
-          OpenMP_ROOT=/usr/local
-          OpenMP_CXX_FLAGS=-Xpreprocessor\ -fopenmp
-          OpenMP_CXX_LIB_NAMES=omp
-          OpenMP_omp_LIBRARY=/usr/local/lib/libomp.dylib
-          CMAKE_C_COMPILER=/usr/local/opt/llvm/bin/clang
-          CMAKE_CXX_COMPILER=/usr/local/opt/llvm/bin/clang++
+        CIBW_ENVIRONMENT_WINDOWS: "TINYLLAMA_CPP_BUILD_CUDA=1 CMAKE_CUDA_ARCHITECTURES=75;80;86;89;90 CMAKE_POLICY_DEFAULT_CMP0167=NEW"
+        
+        CIBW_ENVIRONMENT_MACOS: "TINYLLAMA_CPP_BUILD_CUDA=0 LDFLAGS=-L/usr/local/lib CPPFLAGS=-I/usr/local/include OpenMP_ROOT=/usr/local OpenMP_CXX_FLAGS=-Xpreprocessor\\ -fopenmp OpenMP_CXX_LIB_NAMES=omp OpenMP_omp_LIBRARY=/usr/local/lib/libomp.dylib CMAKE_C_COMPILER=/usr/local/opt/llvm/bin/clang CMAKE_CXX_COMPILER=/usr/local/opt/llvm/bin/clang++"
         
         CIBW_BEFORE_ALL_LINUX: >
           echo "Installing Boost packages..." &&
@@ -347,7 +308,7 @@ jobs:
           echo "Using CUDA from /usr/local/cuda" &&
           which nvcc && nvcc --version || echo "NVCC not found, CUDA may not be available"
         
-        CIBW_BEFORE_BUILD_WINDOWS: pip install cmake ninja
+        CIBW_BEFORE_BUILD_WINDOWS: "pip install cmake ninja"
         CIBW_BEFORE_BUILD_MACOS: >
           brew install boost libomp llvm || true &&
           sudo mkdir -p /usr/local/include /usr/local/lib &&
