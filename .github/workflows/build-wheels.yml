@@ -236,7 +236,7 @@ jobs:
           ./b2 install --prefix=/usr/local threading=multi link=shared variant=release -j$(nproc)))
         
         CIBW_BEFORE_BUILD_LINUX: >
-          PYTHON_VERSION_SHORT=$(${python} -c "import sys; print(f'{sys.version_info.major}{sys.version_info.minor}')") &&
+          PYTHON_VERSION_SHORT=$({python} -c "import sys; print(f'{sys.version_info.major}{sys.version_info.minor}')") &&
           echo "Attempting to install python${PYTHON_VERSION_SHORT}-devel (and python3-devel as fallback)" &&
           (yum install -y python${PYTHON_VERSION_SHORT}-devel || yum install -y python3-devel || echo "Python devel packages not found or already installed.") &&
           echo "Using manylinux container libraries"
@@ -302,7 +302,7 @@ jobs:
           ./b2 install --prefix=/usr/local threading=multi link=shared variant=release -j$(nproc)))
         
         CIBW_BEFORE_BUILD_LINUX: >
-          PYTHON_VERSION_SHORT=$(${python} -c "import sys; print(f'{sys.version_info.major}{sys.version_info.minor}')") &&
+          PYTHON_VERSION_SHORT=$({python} -c "import sys; print(f'{sys.version_info.major}{sys.version_info.minor}')") &&
           echo "Attempting to install python${PYTHON_VERSION_SHORT}-devel (and python3-devel as fallback) for CUDA build" &&
           (yum install -y python${PYTHON_VERSION_SHORT}-devel || yum install -y python3-devel || echo "Python devel packages not found or already installed.") &&
           export PATH=/usr/local/cuda/bin:$PATH &&
