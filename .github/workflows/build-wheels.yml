@@ -209,6 +209,7 @@ jobs:
         CIBW_ENVIRONMENT_LINUX: >
           TINYLLAMA_CPP_BUILD_CUDA=0
           CMAKE_POLICY_DEFAULT_CMP0167=NEW
+          Python_EXECUTABLE="{python}"
           
         CIBW_ENVIRONMENT_WINDOWS: >
           TINYLLAMA_CPP_BUILD_CUDA=0
@@ -226,13 +227,6 @@ jobs:
           CMAKE_CXX_COMPILER=/usr/local/opt/llvm/bin/clang++
           
         CIBW_BEFORE_ALL_LINUX: >
-          echo "Installing Python development packages..." &&
-          (yum install -y python3-devel python3-libs || echo "yum python3-devel failed, trying specific versions") && 
-          (yum install -y python38-devel || echo "yum python38-devel failed") && 
-          (yum install -y python39-devel || echo "yum python39-devel failed") && 
-          (yum install -y python310-devel || echo "yum python310-devel failed") && 
-          (yum install -y python311-devel || echo "yum python311-devel failed") && 
-          (yum install -y python312-devel || echo "yum python312-devel failed") && 
           echo "Installing Boost packages..." &&
           (yum install -y boost-devel boost-regex || 
           (curl -L https://github.com/boostorg/boost/releases/download/boost-1.82.0/boost-1.82.0.tar.gz | tar -xz && 
@@ -241,7 +235,14 @@ jobs:
           ./b2 install --prefix=/usr/local threading=multi link=shared variant=release -j$(nproc)))
         
         CIBW_BEFORE_BUILD_LINUX: >
-          echo "Using manylinux container libraries"
+          PY_VERSION_SHORT=$(${python} -c "import sys; print(f'{sys.version_info.major}{sys.version_info.minor}')") &&
+          echo "Attempting to install python${PY_VERSION_SHORT}-devel for CUDA build" &&
+          (yum install -y python${PY_VERSION_SHORT}-devel || echo "Failed to install python${PY_VERSION_SHORT}-devel, trying python3-devel") &&
+          (yum install -y python3-devel || echo "Failed to install python3-devel. Python headers might be missing.") &&
+          export PATH=/usr/local/cuda/bin:$PATH &&
+          export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH &&
+          echo "Using CUDA from /usr/local/cuda" &&
+          which nvcc && nvcc --version || echo "NVCC not found, CUDA may not be available"
         
         CIBW_BEFORE_BUILD_WINDOWS: >
           pip install cmake ninja &&
@@ -276,6 +277,7 @@ jobs:
           CMAKE_CUDA_ARCHITECTURES=75;80;86;89;90
           CMAKE_POLICY_DEFAULT_CMP0167=NEW
           CUDA_HOME=/usr/local/cuda
+          Python_EXECUTABLE="{python}"
         
         CIBW_ENVIRONMENT_WINDOWS: >
           TINYLLAMA_CPP_BUILD_CUDA=1
@@ -294,13 +296,6 @@ jobs:
           CMAKE_CXX_COMPILER=/usr/local/opt/llvm/bin/clang++
         
         CIBW_BEFORE_ALL_LINUX: >
-          echo "Installing Python development packages..." &&
-          (yum install -y python3-devel python3-libs || echo "yum python3-devel failed, trying specific versions") && 
-          (yum install -y python38-devel || echo "yum python38-devel failed") && 
-          (yum install -y python39-devel || echo "yum python39-devel failed") && 
-          (yum install -y python310-devel || echo "yum python310-devel failed") && 
-          (yum install -y python311-devel || echo "yum python311-devel failed") && 
-          (yum install -y python312-devel || echo "yum python312-devel failed") && 
           echo "Installing Boost packages..." &&
           (yum install -y boost-devel boost-regex || 
           (curl -L https://github.com/boostorg/boost/releases/download/boost-1.82.0/boost-1.82.0.tar.gz | tar -xz && 
@@ -309,6 +304,10 @@ jobs:
           ./b2 install --prefix=/usr/local threading=multi link=shared variant=release -j$(nproc)))
         
         CIBW_BEFORE_BUILD_LINUX: >
+          PY_VERSION_SHORT=$(${python} -c "import sys; print(f'{sys.version_info.major}{sys.version_info.minor}')") &&
+          echo "Attempting to install python${PY_VERSION_SHORT}-devel for CUDA build" &&
+          (yum install -y python${PY_VERSION_SHORT}-devel || echo "Failed to install python${PY_VERSION_SHORT}-devel, trying python3-devel") &&
+          (yum install -y python3-devel || echo "Failed to install python3-devel. Python headers might be missing.") &&
           export PATH=/usr/local/cuda/bin:$PATH &&
           export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH &&
           echo "Using CUDA from /usr/local/cuda" &&
