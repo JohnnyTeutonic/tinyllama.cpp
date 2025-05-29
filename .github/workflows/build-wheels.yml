@@ -34,25 +34,25 @@ jobs:
           - os: ubuntu-latest
             cuda_version: "11.8"
             cuda_toolkit: "cuda-toolkit-11-8"
-            wheel_suffix: "+cu118"
+            wheel_suffix: "-cu118"
           - os: ubuntu-latest
             cuda_version: "12.1"
             cuda_toolkit: "cuda-toolkit-12-1"
-            wheel_suffix: "+cu121"
+            wheel_suffix: "-cu121"
           - os: ubuntu-latest
             cuda_version: "12.4"
             cuda_toolkit: "cuda-toolkit-12-4"
-            wheel_suffix: "+cu124"
+            wheel_suffix: "-cu124"
           
           # Windows GPU builds
           - os: windows-latest
             cuda_version: "11.8"
             cuda_toolkit: "11.8.0"
-            wheel_suffix: "+cu118"
+            wheel_suffix: "-cu118"
           - os: windows-latest
             cuda_version: "12.1"
             cuda_toolkit: "12.1.0"
-            wheel_suffix: "+cu121"
+            wheel_suffix: "-cu121"
 
     steps:
     - uses: actions/checkout@v4
@@ -216,7 +216,7 @@ jobs:
         
         CIBW_ENVIRONMENT_WINDOWS: "TINYLLAMA_CPP_BUILD_CUDA=0 CMAKE_POLICY_DEFAULT_CMP0167=NEW"
         
-        CIBW_ENVIRONMENT_MACOS: "TINYLLAMA_CPP_BUILD_CUDA=0 LDFLAGS=-L/usr/local/lib CPPFLAGS=-I/usr/local/include OpenMP_ROOT=/usr/local OpenMP_CXX_FLAGS=-Xpreprocessor\\ -fopenmp OpenMP_CXX_LIB_NAMES=omp OpenMP_omp_LIBRARY=/usr/local/lib/libomp.dylib CMAKE_C_COMPILER=/usr/local/opt/llvm/bin/clang CMAKE_CXX_COMPILER=/usr/local/opt/llvm/bin/clang++"
+        CIBW_ENVIRONMENT_MACOS: "TINYLLAMA_CPP_BUILD_CUDA=0 OpenMP_CXX_FLAGS='-Xpreprocessor -fopenmp' OpenMP_CXX_LIB_NAMES=omp CMAKE_FIND_DEBUG_MODE=ON"
         
         CIBW_BEFORE_ALL_LINUX: >
           echo "Installing Boost packages..." &&
@@ -248,12 +248,29 @@ jobs:
         CIBW_BEFORE_BUILD_WINDOWS: "pip install cmake ninja"
         
         CIBW_BEFORE_BUILD_MACOS: >
-          brew install boost libomp llvm || true &&
-          sudo mkdir -p /usr/local/include /usr/local/lib &&
-          sudo ln -sf $(brew --prefix libomp)/include/omp.h /usr/local/include/omp.h || true &&
-          sudo ln -sf $(brew --prefix libomp)/lib/libomp.dylib /usr/local/lib/libomp.dylib || true &&
-          export CC=$(brew --prefix llvm)/bin/clang &&
-          export CXX=$(brew --prefix llvm)/bin/clang++
+          echo "Setting up macOS build environment..." &&
+          brew install boost libomp llvm cmake ninja || true &&
+          echo "Detecting architecture and setting paths..." &&
+          if [[ $(uname -m) == "arm64" ]]; then
+            BREW_PREFIX="/opt/homebrew"
+          else
+            BREW_PREFIX="/usr/local"
+          fi &&
+          echo "Using brew prefix: $BREW_PREFIX" &&
+          LIBOMP_PREFIX="$BREW_PREFIX/opt/libomp" &&
+          LLVM_PREFIX="$BREW_PREFIX/opt/llvm" &&
+          echo "LibOMP prefix: $LIBOMP_PREFIX" &&
+          echo "LLVM prefix: $LLVM_PREFIX" &&
+          ls -la $LIBOMP_PREFIX/lib/ || echo "LibOMP lib directory not found" &&
+          ls -la $LLVM_PREFIX/bin/ || echo "LLVM bin directory not found" &&
+          export CC="$LLVM_PREFIX/bin/clang" &&
+          export CXX="$LLVM_PREFIX/bin/clang++" &&
+          export LDFLAGS="-L$LIBOMP_PREFIX/lib" &&
+          export CPPFLAGS="-I$LIBOMP_PREFIX/include" &&
+          export OpenMP_ROOT="$LIBOMP_PREFIX" &&
+          export OpenMP_omp_LIBRARY="$LIBOMP_PREFIX/lib/libomp.dylib" &&
+          export CMAKE_PREFIX_PATH="$LIBOMP_PREFIX:$LLVM_PREFIX:$BREW_PREFIX" &&
+          echo "Environment configured for OpenMP at $LIBOMP_PREFIX"
         
         CIBW_BUILD_VERBOSITY: 1
         CIBW_TEST_COMMAND: python -c "import tinyllama_cpp; print('Import successful')"
@@ -275,7 +292,7 @@ jobs:
         
         CIBW_ENVIRONMENT_WINDOWS: "TINYLLAMA_CPP_BUILD_CUDA=1 CMAKE_CUDA_ARCHITECTURES=\"75;80;86;89;90\" CMAKE_POLICY_DEFAULT_CMP0167=NEW"
         
-        CIBW_ENVIRONMENT_MACOS: "TINYLLAMA_CPP_BUILD_CUDA=0 LDFLAGS=-L/usr/local/lib CPPFLAGS=-I/usr/local/include OpenMP_ROOT=/usr/local OpenMP_CXX_FLAGS=-Xpreprocessor\\ -fopenmp OpenMP_CXX_LIB_NAMES=omp OpenMP_omp_LIBRARY=/usr/local/lib/libomp.dylib CMAKE_C_COMPILER=/usr/local/opt/llvm/bin/clang CMAKE_CXX_COMPILER=/usr/local/opt/llvm/bin/clang++"
+        CIBW_ENVIRONMENT_MACOS: "TINYLLAMA_CPP_BUILD_CUDA=0 OpenMP_CXX_FLAGS='-Xpreprocessor -fopenmp' OpenMP_CXX_LIB_NAMES=omp CMAKE_FIND_DEBUG_MODE=ON"
         
         CIBW_BEFORE_ALL_LINUX: >
           echo "Installing Boost packages..." &&
@@ -310,12 +327,24 @@ jobs:
         
         CIBW_BEFORE_BUILD_WINDOWS: "pip install cmake ninja"
         CIBW_BEFORE_BUILD_MACOS: >
-          brew install boost libomp llvm || true &&
-          sudo mkdir -p /usr/local/include /usr/local/lib &&
-          sudo ln -sf $(brew --prefix libomp)/include/omp.h /usr/local/include/omp.h || true &&
-          sudo ln -sf $(brew --prefix libomp)/lib/libomp.dylib /usr/local/lib/libomp.dylib || true &&
-          export CC=$(brew --prefix llvm)/bin/clang &&
-          export CXX=$(brew --prefix llvm)/bin/clang++
+          echo "Setting up macOS build environment..." &&
+          brew install boost libomp llvm cmake ninja || true &&
+          echo "Brew installations complete, detecting architecture..." &&
+          if [[ $(uname -m) == "arm64" ]]; then
+            BREW_PREFIX="/opt/homebrew"
+          else
+            BREW_PREFIX="/usr/local"
+          fi &&
+          echo "Using brew prefix: $BREW_PREFIX" &&
+          LIBOMP_PREFIX="$BREW_PREFIX/opt/libomp" &&
+          LLVM_PREFIX="$BREW_PREFIX/opt/llvm" &&
+          echo "LibOMP prefix: $LIBOMP_PREFIX" &&
+          echo "LLVM prefix: $LLVM_PREFIX" &&
+          ls -la $LIBOMP_PREFIX/lib/ || echo "LibOMP lib directory not found" &&
+          ls -la $LLVM_PREFIX/bin/ || echo "LLVM bin directory not found" &&
+          export CC="$LLVM_PREFIX/bin/clang" &&
+          export CXX="$LLVM_PREFIX/bin/clang++" &&
+          echo "Compilers set successfully"
         
         CIBW_BUILD_VERBOSITY: 1
         CIBW_TEST_COMMAND: python -c "import tinyllama_cpp; print('Import successful')"
