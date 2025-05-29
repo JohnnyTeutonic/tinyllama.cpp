@@ -69,17 +69,39 @@ jobs:
         python -m pip install --upgrade pip
         pip install build wheel cibuildwheel
 
-    # Linux CUDA setup
-    - name: Install CUDA Toolkit (Linux)
+    # Setup Mamba for Linux CUDA builds
+    - name: Setup Mamba (Linux CUDA Build)
       if: matrix.os == 'ubuntu-latest' && matrix.cuda_version != 'cpu'
+      uses: conda-incubator/setup-miniconda@v3.1.0
+      with:
+        activate-environment: "cuda-env"
+        python-version: '3.11'
+        miniforge-version: latest
+        add-pip-as-python-dependency: true
+        auto-activate-base: false
+
+    # Linux CUDA setup using Mamba (more reliable than apt packages)
+    - name: Install CUDA Toolkit via Mamba (Linux)
+      if: matrix.os == 'ubuntu-latest' && matrix.cuda_version != 'cpu'
+      shell: bash -el {0}
       run: |
-        wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.0-1_all.deb
-        sudo dpkg -i cuda-keyring_1.0-1_all.deb
-        sudo apt-get update
-        sudo apt-get -y install ${{ matrix.cuda_toolkit }} cuda-nvcc-${{ matrix.cuda_version }}
-        echo "/usr/local/cuda-${{ matrix.cuda_version }}/bin" >> $GITHUB_PATH
-        echo "CUDA_HOME=/usr/local/cuda-${{ matrix.cuda_version }}" >> $GITHUB_ENV
-        echo "LD_LIBRARY_PATH=/usr/local/cuda-${{ matrix.cuda_version }}/lib64:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+        echo "Installing CUDA ${{ matrix.cuda_version }} toolkit using Mamba..."
+        if [ "${{ matrix.cuda_version }}" == "12.1" ]; then
+          mamba install -y -n cuda-env -c nvidia/label/cuda-12.1.1 cuda-toolkit
+        elif [ "${{ matrix.cuda_version }}" == "12.4" ]; then
+          mamba install -y -n cuda-env -c nvidia/label/cuda-12.4.0 cuda-toolkit
+        elif [ "${{ matrix.cuda_version }}" == "11.8" ]; then
+          mamba install -y -n cuda-env -c nvidia/label/cuda-11.8.0 cuda-toolkit
+        else
+          echo "Unsupported CUDA version: ${{ matrix.cuda_version }}"
+          exit 1
+        fi
+        echo "CUDA_HOME=${CONDA_PREFIX}" >> $GITHUB_ENV
+        echo "CUDA_TOOLKIT_ROOT_DIR=${CONDA_PREFIX}" >> $GITHUB_ENV
+        echo "LD_LIBRARY_PATH=${CONDA_PREFIX}/lib:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
+        echo "${CONDA_PREFIX}/bin" >> $GITHUB_PATH
+        which nvcc
+        nvcc --version
 
     # Windows CUDA setup
     - name: Install CUDA Toolkit (Windows)
@@ -129,6 +151,11 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y build-essential cmake ninja-build libboost-all-dev
+        if [ "${{ matrix.cuda_version }}" != "cpu" ]; then
+          sudo apt-get install -y g++-11 gcc-11
+          echo "CC=/usr/bin/gcc-11" >> $GITHUB_ENV
+          echo "CXX=/usr/bin/g++-11" >> $GITHUB_ENV
+        fi
 
     - name: Install build dependencies (macOS)
       if: matrix.os == 'macos-latest'
@@ -139,7 +166,6 @@ jobs:
       if: matrix.os == 'windows-latest'
       run: |
         choco install cmake ninja
-        # Note: Boost will be handled by vcpkg in CMake
 
     # Build wheels using cibuildwheel
     - name: Build wheels
@@ -151,17 +177,17 @@ jobs:
         CIBW_ARCHS_WINDOWS: AMD64
         CIBW_ARCHS_MACOS: x86_64 arm64
         
-        # Environment variables for the build
+        # Environment variables for the build - conditional based on CUDA vs CPU
         CIBW_ENVIRONMENT_LINUX: >
           TINYLLAMA_CPP_BUILD_CUDA=${{ env.TINYLLAMA_CPP_BUILD_CUDA }}
-          CMAKE_CUDA_ARCHITECTURES=${{ env.CMAKE_CUDA_ARCHITECTURES }}
-          CUDA_HOME=${{ env.CUDA_HOME }}
-          PATH=${{ env.CUDA_HOME }}/bin:$PATH
-          LD_LIBRARY_PATH=${{ env.CUDA_HOME }}/lib64:$LD_LIBRARY_PATH
+          ${{ matrix.cuda_version != 'cpu' && format('CMAKE_CUDA_ARCHITECTURES={0}', env.CMAKE_CUDA_ARCHITECTURES) || '' }}
+          ${{ matrix.cuda_version != 'cpu' && format('CUDA_HOME={0}', env.CUDA_HOME) || '' }}
+          ${{ matrix.cuda_version != 'cpu' && format('PATH={0}/bin:$PATH', env.CUDA_HOME) || '' }}
+          ${{ matrix.cuda_version != 'cpu' && format('LD_LIBRARY_PATH={0}/lib64:$LD_LIBRARY_PATH', env.CUDA_HOME) || '' }}
         
         CIBW_ENVIRONMENT_WINDOWS: >
           TINYLLAMA_CPP_BUILD_CUDA=${{ env.TINYLLAMA_CPP_BUILD_CUDA }}
-          CMAKE_CUDA_ARCHITECTURES=${{ env.CMAKE_CUDA_ARCHITECTURES }}
+          ${{ matrix.cuda_version != 'cpu' && format('CMAKE_CUDA_ARCHITECTURES={0}', env.CMAKE_CUDA_ARCHITECTURES) || '' }}
         
         CIBW_ENVIRONMENT_MACOS: >
           TINYLLAMA_CPP_BUILD_CUDA=0
@@ -180,9 +206,8 @@ jobs:
         
         # Test the built wheels
         CIBW_TEST_COMMAND: python -c "import tinyllama_cpp; print('Import successful')"
-        CIBW_TEST_SKIP: "*-macosx_arm64"  # Skip ARM64 tests on x86_64 runners
+        CIBW_TEST_SKIP: "*-macosx_arm64"
 
-    # Upload artifacts
     - name: Upload wheels
       uses: actions/upload-artifact@v4
       with:
