@@ -89,11 +89,20 @@ set(CUDA_ENABLED FALSE) # Default to disabled
 set(CUDA_SOURCES "")   # Default to no CUDA sources
 
 if(HAS_CUDA)
-    # Add explicit CUDA toolkit path hints for better detection
-    if(DEFINED ENV{CUDA_HOME})
-        set(CMAKE_CUDA_COMPILER "$ENV{CUDA_HOME}/bin/nvcc")
+    # Use CMAKE_CUDA_COMPILER from environment if set, otherwise try to find it
+    if(DEFINED ENV{CMAKE_CUDA_COMPILER})
+        set(CMAKE_CUDA_COMPILER "$ENV{CMAKE_CUDA_COMPILER}")
+        message(STATUS "Using CMAKE_CUDA_COMPILER from environment: ${CMAKE_CUDA_COMPILER}")
+    elseif(DEFINED ENV{CUDA_HOME})
+        # Build the path with proper extension for Windows
+        if(WIN32)
+            set(CMAKE_CUDA_COMPILER "$ENV{CUDA_HOME}/bin/nvcc.exe")
+        else()
+            set(CMAKE_CUDA_COMPILER "$ENV{CUDA_HOME}/bin/nvcc")
+        endif()
         list(APPEND CMAKE_PREFIX_PATH "$ENV{CUDA_HOME}")
         message(STATUS "Using CUDA_HOME: $ENV{CUDA_HOME}")
+        message(STATUS "Constructed CUDA compiler path: ${CMAKE_CUDA_COMPILER}")
     endif()
     
     if(DEFINED ENV{CUDAToolkit_ROOT})
