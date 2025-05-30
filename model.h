@@ -209,50 +209,7 @@ struct KVCache {
     int allocated_num_kv_heads = 0;   /**< Number of key/value heads allocated */
     int allocated_head_dim = 0;       /**< Dimension of each head allocated */
 
-    void destroy_gpu_resources() {
-        if (allocated_num_layers > 0) {
-            Logger::info("KVCache::destroy_gpu_resources: Freeing KVCache CUDA memory for " + 
-                         std::to_string(allocated_num_layers) + " allocated layers.");
-        }
-        if (allocated_num_layers > 0 && total_model_layers_ > 0) {
-            int gpu_layer_start_model_idx = total_model_layers_ - allocated_num_layers;
-            if (gpu_layer_start_model_idx < 0) {
-                Logger::warning("KVCache::destroy_gpu_resources: gpu_layer_start_model_idx (" + 
-                                std::to_string(gpu_layer_start_model_idx) + ") is negative. Clamping to 0.");
-                gpu_layer_start_model_idx = 0;
-            }
-
-            for (int i = 0; i < allocated_num_layers; ++i) {
-                int current_model_idx_for_gpu = gpu_layer_start_model_idx + i;
-                if (static_cast<size_t>(current_model_idx_for_gpu) < layers.size()) {
-                    if (layers[current_model_idx_for_gpu].k_dev_quantized) {
-                        gpuErrchk(cudaFree(layers[current_model_idx_for_gpu].k_dev_quantized));
-                        layers[current_model_idx_for_gpu].k_dev_quantized = nullptr;
-                    }
-                    if (layers[current_model_idx_for_gpu].v_dev_quantized) {
-                        gpuErrchk(cudaFree(layers[current_model_idx_for_gpu].v_dev_quantized));
-                        layers[current_model_idx_for_gpu].v_dev_quantized = nullptr;
-                    }
-                    if (layers[current_model_idx_for_gpu].k_dev_scales) {
-                        gpuErrchk(cudaFree(layers[current_model_idx_for_gpu].k_dev_scales));
-                        layers[current_model_idx_for_gpu].k_dev_scales = nullptr;
-                    }
-                    if (layers[current_model_idx_for_gpu].v_dev_scales) {
-                        gpuErrchk(cudaFree(layers[current_model_idx_for_gpu].v_dev_scales));
-                        layers[current_model_idx_for_gpu].v_dev_scales = nullptr;
-                    }
-                } else {
-                     Logger::warning("KVCache::destroy_gpu_resources: current_model_idx_for_gpu (" + 
-                                     std::to_string(current_model_idx_for_gpu) + ") out of bounds for layers vector (size " + 
-                                     std::to_string(layers.size()) + "). Skipping free for this index.");
-                }
-            }
-        } else if (allocated_num_layers > 0) {
-            Logger::warning("KVCache::destroy_gpu_resources: allocated_num_layers is " + std::to_string(allocated_num_layers) + 
-                            " but total_model_layers_ is " + std::to_string(total_model_layers_) + ". Skipping GPU free to prevent errors.");
-        }
-        allocated_num_layers = 0;
-    }
+    void destroy_gpu_resources(); // Implementation moved to kv_cache.cpp
 
     ~KVCache() {
 #ifdef HAS_CUDA
