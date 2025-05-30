@@ -334,7 +334,12 @@ if (MSVC)
     # Explicitly set the MSVC_RUNTIME_LIBRARY property for each target
     set_property(TARGET ${target} PROPERTY MSVC_RUNTIME_LIBRARY ${SELECTED_MSVC_RUNTIME_LIBRARY})
 
-    target_compile_options(${target} PRIVATE "/openmp:llvm" "/DNOMINMAX" "/D_USE_MATH_DEFINES")
+    # Skip OpenMP flags for CUDA targets to avoid nvcc command line issues
+    if(target STREQUAL "tinyllama_core" AND CUDA_ENABLED)
+      target_compile_options(${target} PRIVATE "/DNOMINMAX" "/D_USE_MATH_DEFINES")
+    else()
+      target_compile_options(${target} PRIVATE "/openmp:llvm" "/DNOMINMAX" "/D_USE_MATH_DEFINES")
+    endif()
     target_compile_definitions(${target} PRIVATE NOMINMAX _USE_MATH_DEFINES)
   endforeach()
 endif()
