@@ -476,9 +476,11 @@ jobs:
           set "CUDA_ROOT=%DETECTED_CUDA_PATH%" &
           set "CUDAToolkit_ROOT=%DETECTED_CUDA_PATH%" &
           set "CUDA_TOOLKIT_ROOT_DIR=%DETECTED_CUDA_PATH%" &
+          set "CMAKE_CUDA_COMPILER=%DETECTED_CUDA_PATH%\bin\nvcc.exe" &
           set "PATH=%DETECTED_CUDA_PATH%\bin;%DETECTED_CUDA_PATH%\libnvvp;%PATH%" &
           set "CUDA_LIB_PATH=%DETECTED_CUDA_PATH%\lib\x64" &
           set "CUDA_INC_PATH=%DETECTED_CUDA_PATH%\include" &
+          echo "Set CMAKE_CUDA_COMPILER to: %CMAKE_CUDA_COMPILER%" &
           echo "Verifying CUDA installation structure..." &
           dir "%DETECTED_CUDA_PATH%" &
           dir "%DETECTED_CUDA_PATH%\bin" &
