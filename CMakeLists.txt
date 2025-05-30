@@ -253,10 +253,7 @@ target_link_libraries(tinyllama_core PRIVATE
 # Conditionally add CUDA definition and link CUDA libs for the library
 if(CUDA_ENABLED)
     target_compile_definitions(tinyllama_core PUBLIC HAS_CUDA)
-    # Only add CUDA headers to CUDA source files, not all source files
-    set_source_files_properties(${CUDA_SOURCES} PROPERTIES
-        INCLUDE_DIRECTORIES "${CUDA_INCLUDE_DIRS}"
-    )
+    target_include_directories(tinyllama_core PUBLIC ${CUDA_INCLUDE_DIRS})
     target_link_libraries(tinyllama_core PRIVATE ${CUDA_LIBRARIES} CUDA::cublas)
 endif()
 
