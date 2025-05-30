@@ -100,7 +100,7 @@ if(HAS_CUDA)
     
     # Set CUDA flags for Windows before enabling CUDA language
     if(WIN32)
-        set(CMAKE_CUDA_FLAGS "-allow-unsupported-compiler")
+        set(CMAKE_CUDA_FLAGS "-allow-unsupported-compiler -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH")
         message(STATUS "Set CMAKE_CUDA_FLAGS for Windows: ${CMAKE_CUDA_FLAGS}")
     endif()
     

@@ -340,7 +340,6 @@ jobs:
       uses: ilammy/msvc-dev-cmd@v1
       with:
         arch: x64
-        vs: 2019
 
     - name: Build wheels (CUDA)
       if: matrix.cuda_version != 'cpu'
