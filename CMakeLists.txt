@@ -98,6 +98,12 @@ if(HAS_CUDA)
         message(STATUS "Using default CMAKE_CUDA_ARCHITECTURES: ${CMAKE_CUDA_ARCHITECTURES}")
     endif()
     
+    # Set CUDA flags for Windows before enabling CUDA language
+    if(WIN32)
+        set(CMAKE_CUDA_FLAGS "-allow-unsupported-compiler")
+        message(STATUS "Set CMAKE_CUDA_FLAGS for Windows: ${CMAKE_CUDA_FLAGS}")
+    endif()
+    
     # Use CMAKE_CUDA_COMPILER from environment if set, otherwise try to find it
     if(DEFINED ENV{CMAKE_CUDA_COMPILER})
         set(CMAKE_CUDA_COMPILER "$ENV{CMAKE_CUDA_COMPILER}")
@@ -168,10 +174,6 @@ if(HAS_CUDA)
     if(WIN32 AND CMAKE_CXX_COMPILER)
         set(CMAKE_CUDA_HOST_COMPILER "${CMAKE_CXX_COMPILER}")
         message(STATUS "Set CUDA host compiler to: ${CMAKE_CUDA_HOST_COMPILER}")
-        
-        # Allow unsupported compiler versions for Windows CUDA builds
-        set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -allow-unsupported-compiler")
-        message(STATUS "Added -allow-unsupported-compiler flag for Windows CUDA build")
     endif()
     
     find_package(CUDA)
