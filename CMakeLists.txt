@@ -164,6 +164,12 @@ if(HAS_CUDA)
         enable_language(CUDA)
     endif()
     
+    # Set CUDA host compiler for Windows to ensure nvcc can find cl.exe
+    if(WIN32 AND CMAKE_CXX_COMPILER)
+        set(CMAKE_CUDA_HOST_COMPILER "${CMAKE_CXX_COMPILER}")
+        message(STATUS "Set CUDA host compiler to: ${CMAKE_CUDA_HOST_COMPILER}")
+    endif()
+    
     find_package(CUDA)
     if(CUDA_FOUND)
         find_package(CUDAToolkit COMPONENTS cublas) 
