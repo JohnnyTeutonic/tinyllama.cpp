@@ -12,6 +12,12 @@ endif()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Define NOMINMAX globally for MSVC to prevent conflicts with std::min/max
+if(MSVC)
+  add_compile_definitions(NOMINMAX)
+  message(STATUS "NOMINMAX definition added globally for MSVC")
+endif()
+
 include(FetchContent)
 
 find_package(nlohmann_json 3.2.0 QUIET)

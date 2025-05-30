@@ -298,8 +298,8 @@ jobs:
           ) else (
             echo "vcpkg already exists"
           ) &
-          echo "Installing Boost components..." &
-          C:\vcpkg\vcpkg install boost-regex:x64-windows boost-system:x64-windows boost-filesystem:x64-windows &
+          echo "Installing ALL Boost components via vcpkg (this might take a while)..." &
+          C:\vcpkg\vcpkg install boost:x64-windows &
           echo "Verifying vcpkg toolchain file..." &
           if exist C:\vcpkg\scripts\buildsystems\vcpkg.cmake (
             echo "✓ vcpkg toolchain file found"
