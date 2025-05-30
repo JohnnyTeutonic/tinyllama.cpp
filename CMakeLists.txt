@@ -89,6 +89,15 @@ set(CUDA_ENABLED FALSE) # Default to disabled
 set(CUDA_SOURCES "")   # Default to no CUDA sources
 
 if(HAS_CUDA)
+    # Set CUDA architectures before enable_language to help with toolset detection
+    if(DEFINED ENV{CMAKE_CUDA_ARCHITECTURES})
+        set(CMAKE_CUDA_ARCHITECTURES "$ENV{CMAKE_CUDA_ARCHITECTURES}")
+        message(STATUS "Using CMAKE_CUDA_ARCHITECTURES from environment: ${CMAKE_CUDA_ARCHITECTURES}")
+    else()
+        set(CMAKE_CUDA_ARCHITECTURES 60 61 70 75 80 86 CACHE STRING "CUDA architectures")
+        message(STATUS "Using default CMAKE_CUDA_ARCHITECTURES: ${CMAKE_CUDA_ARCHITECTURES}")
+    endif()
+    
     # Use CMAKE_CUDA_COMPILER from environment if set, otherwise try to find it
     if(DEFINED ENV{CMAKE_CUDA_COMPILER})
         set(CMAKE_CUDA_COMPILER "$ENV{CMAKE_CUDA_COMPILER}")
@@ -109,6 +118,13 @@ if(HAS_CUDA)
         set(CUDAToolkit_ROOT "$ENV{CUDAToolkit_ROOT}")
         list(APPEND CMAKE_PREFIX_PATH "$ENV{CUDAToolkit_ROOT}")
         message(STATUS "Using CUDAToolkit_ROOT: $ENV{CUDAToolkit_ROOT}")
+    endif()
+    
+    # Add additional CUDA paths for Windows
+    if(WIN32 AND DEFINED ENV{CUDA_PATH})
+        list(APPEND CMAKE_PREFIX_PATH "$ENV{CUDA_PATH}")
+        set(CUDA_TOOLKIT_ROOT_DIR "$ENV{CUDA_PATH}")
+        message(STATUS "Added CUDA_PATH to CMAKE_PREFIX_PATH: $ENV{CUDA_PATH}")
     endif()
     
     # Verify nvcc exists before enabling CUDA language
@@ -133,7 +149,6 @@ if(HAS_CUDA)
     if(CUDA_FOUND AND CUDAToolkit_FOUND)
         message(STATUS "CUDA toolkit and cuBLAS found, and HAS_CUDA option is ON.")
         message(STATUS "Found CUDA toolkit version: ${CUDA_VERSION}")
-        set(CMAKE_CUDA_ARCHITECTURES 60 61 70 75 80 86 CACHE STRING "CUDA architectures") 
         message(STATUS "CUDA Enabled. Will define HAS_CUDA for tinyllama_core library.")
         set(CUDA_ENABLED TRUE)
         set(CUDA_SOURCES cuda_kernels.cu) # Only include CUDA source if enabled

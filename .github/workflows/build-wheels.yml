@@ -291,8 +291,10 @@ jobs:
         CIBW_BEFORE_BUILD_WINDOWS: >
           echo "Installing build dependencies for Windows CUDA build..." &
           pip install cmake ninja &
-          echo "Installing CUDA toolkit via Chocolatey..." &
-          choco install cuda --version=12.1.1 -y --no-progress --allow-downgrade &
+          echo "Installing complete CUDA toolkit via Chocolatey..." &
+          choco install cuda --version=12.1.1 -y --no-progress --allow-downgrade --force &
+          echo "Waiting for CUDA installation to complete..." &
+          timeout /t 30 /nobreak &
           echo "Setting up vcpkg for Boost..." &
           if not exist C:\vcpkg (
             echo "Cloning vcpkg..." &
@@ -304,12 +306,20 @@ jobs:
           ) &
           echo "Installing Boost components via vcpkg..." &
           C:\vcpkg\vcpkg install boost:x64-windows boost-xpressive:x64-windows &
-          echo "Setting up CUDA environment variables..." &
+          echo "Setting up comprehensive CUDA environment variables..." &
           set "CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1" &
           set "CUDA_HOME=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1" &
-          set "PATH=%CUDA_PATH%\bin;%PATH%" &
-          echo "Verifying CUDA installation..." &
+          set "CUDA_ROOT=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1" &
+          set "CUDAToolkit_ROOT=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1" &
+          set "CUDA_TOOLKIT_ROOT_DIR=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1" &
+          set "PATH=%CUDA_PATH%\bin;%CUDA_PATH%\libnvvp;%PATH%" &
+          set "CUDA_LIB_PATH=%CUDA_PATH%\lib\x64" &
+          set "CUDA_INC_PATH=%CUDA_PATH%\include" &
+          echo "Verifying CUDA installation structure..." &
+          dir "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1" &
           dir "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1\bin" &
+          dir "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1\lib\x64" &
+          dir "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1\include" &
           "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1\bin\nvcc.exe" --version &
           echo "Verifying vcpkg toolchain file..." &
           if exist C:\vcpkg\scripts\buildsystems\vcpkg.cmake (
@@ -362,7 +372,7 @@ jobs:
         
         CIBW_ENVIRONMENT_LINUX: "TINYLLAMA_CPP_BUILD_CUDA=1 CMAKE_CUDA_ARCHITECTURES=\"75;80;86;89;90\" CMAKE_POLICY_DEFAULT_CMP0167=NEW CUDA_HOME=/usr/local/cuda CUDA_ROOT=/usr/local/cuda CUDA_PATH=/usr/local/cuda CUDAToolkit_ROOT=/usr/local/cuda CMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc Python_EXECUTABLE={python} Python_FIND_STRATEGY=LOCATION CMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER SETUPTOOLS_USE_DISTUTILS=stdlib"
         
-        CIBW_ENVIRONMENT_WINDOWS: "TINYLLAMA_CPP_BUILD_CUDA=1 CMAKE_CUDA_ARCHITECTURES=\"75;80;86;89;90\" CMAKE_POLICY_DEFAULT_CMP0167=NEW CMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake VCPKG_TARGET_TRIPLET=x64-windows CMAKE_PREFIX_PATH=C:/vcpkg/installed/x64-windows CUDA_PATH=\"C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.1\" CUDA_HOME=\"C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.1\" CMAKE_CUDA_COMPILER=\"C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.1/bin/nvcc.exe\""
+        CIBW_ENVIRONMENT_WINDOWS: "TINYLLAMA_CPP_BUILD_CUDA=1 CMAKE_CUDA_ARCHITECTURES=\"75;80;86;89;90\" CMAKE_POLICY_DEFAULT_CMP0167=NEW CMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake VCPKG_TARGET_TRIPLET=x64-windows CMAKE_PREFIX_PATH=C:/vcpkg/installed/x64-windows CUDA_PATH=\"C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.1\" CUDA_HOME=\"C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.1\" CUDA_ROOT=\"C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.1\" CUDAToolkit_ROOT=\"C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.1\" CUDA_TOOLKIT_ROOT_DIR=\"C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.1\" CMAKE_CUDA_COMPILER=\"C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.1/bin/nvcc.exe\""
         
         CIBW_ENVIRONMENT_MACOS: "TINYLLAMA_CPP_BUILD_CUDA=0 CMAKE_FIND_DEBUG_MODE=ON"
         
