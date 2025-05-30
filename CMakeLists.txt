@@ -237,7 +237,7 @@ endif()
 
 if (MSVC)
   # Define list of targets that always exist
-  set(MSVC_TARGETS tinyllama tinyllama_core)
+  set(MSVC_TARGETS tinyllama tinyllama_core tinyllama_bindings)
   
   # Add tinyllama_server only if it was actually created (when NOT SKBUILD)
   if(NOT SKBUILD AND TARGET tinyllama_server)
@@ -246,9 +246,17 @@ if (MSVC)
   
   foreach(target ${MSVC_TARGETS})
     if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-      set_property(TARGET ${target} PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreadedDebug") # /MTd
-    else()
-      set_property(TARGET ${target} PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded") # /MT
+      if (target STREQUAL "tinyllama_core" OR target STREQUAL "tinyllama_bindings")
+        set_property(TARGET ${target} PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreadedDebugDLL") # /MDd
+      else()
+        set_property(TARGET ${target} PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreadedDebug")     # /MTd
+      endif()
+    else() # Release or other
+      if (target STREQUAL "tinyllama_core" OR target STREQUAL "tinyllama_bindings")
+        set_property(TARGET ${target} PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreadedDLL") # /MD
+      else()
+        set_property(TARGET ${target} PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded")    # /MT
+      endif()
     endif()
 
     target_compile_options(${target} PRIVATE "/openmp:llvm" "/DNOMINMAX" "/D_USE_MATH_DEFINES")
