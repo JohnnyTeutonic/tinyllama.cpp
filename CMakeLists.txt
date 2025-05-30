@@ -174,7 +174,14 @@ if(HAS_CUDA)
         message(STATUS "Found CUDA toolkit version: ${CUDA_VERSION}")
         message(STATUS "CUDA Enabled. Will define HAS_CUDA for tinyllama_core library.")
         set(CUDA_ENABLED TRUE)
-        set(CUDA_SOURCES cuda_kernels.cu) # Only include CUDA source if enabled
+        
+        # Set CUDA sources based on compilation method
+        if(WIN32)
+            message(STATUS "Windows detected: Using standard CUDA compilation")
+            set(CUDA_SOURCES cuda_kernels.cu) # Include CUDA source for standard compilation
+        else()
+            set(CUDA_SOURCES cuda_kernels.cu) # Include CUDA source for standard compilation
+        endif()
     else()
         message(WARNING "HAS_CUDA option is ON, but CUDA Toolkit or cuBLAS not found. Disabling CUDA support.")
         set(HAS_CUDA FALSE) # Force the option OFF if prerequisites are missing
