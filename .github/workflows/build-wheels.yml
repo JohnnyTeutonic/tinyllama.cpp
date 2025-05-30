@@ -337,23 +337,10 @@ jobs:
 
     - name: Setup Visual Studio Environment (Windows CUDA)
       if: matrix.os == 'windows-latest' && matrix.cuda_version != 'cpu'
-      shell: pwsh
-      run: |
-        Write-Host "Finding Visual Studio installation using vswhere..."
-        $vsPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
-        Write-Host "Found Visual Studio at: $vsPath"
-        
-        $msvcPath = Get-ChildItem "$vsPath\VC\Tools\MSVC" | Sort-Object Name -Descending | Select-Object -First 1
-        $compilerPath = "$($msvcPath.FullName)\bin\Hostx64\x64"
-        Write-Host "MSVC compiler path: $compilerPath"
-        
-        $currentPath = $env:PATH
-        $newPath = "$compilerPath;$currentPath"
-        Write-Host "Setting PATH for Visual Studio compiler..."
-        echo "PATH=$newPath" >> $env:GITHUB_ENV
-        
-        Write-Host "Verifying cl.exe is accessible..."
-        & "$compilerPath\cl.exe" 2>&1 | Write-Host
+      uses: ilammy/msvc-dev-cmd@v1
+      with:
+        arch: x64
+        sdk: 10.0.22621.0
 
     - name: Build wheels (CUDA)
       if: matrix.cuda_version != 'cpu'
