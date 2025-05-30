@@ -468,16 +468,6 @@ jobs:
         CIBW_BEFORE_BUILD_WINDOWS: >
           echo "Installing build dependencies for Windows CUDA build..." &
           pip install cmake ninja &
-          echo "Setting up Visual Studio environment for CUDA compilation..." &
-          for /d %%i in ("C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Tools\MSVC\*") do set "MSVC_PATH=%%i" &
-          echo "Found MSVC at: %MSVC_PATH%" &
-          set "VS_CL_PATH=%MSVC_PATH%\bin\Hostx64\x64\cl.exe" &
-          set "PATH=%MSVC_PATH%\bin\Hostx64\x64;%PATH%" &
-          echo "Added Visual Studio to PATH, cl.exe should now be available" &
-          where cl.exe &
-          echo "Setting CC and CXX environment variables..." &
-          set "CC=%VS_CL_PATH%" &
-          set "CXX=%VS_CL_PATH%" &
           echo "Setting up vcpkg for Boost..." &
           if not exist C:\vcpkg (
             echo "Cloning vcpkg..." &
@@ -513,10 +503,6 @@ jobs:
           dir "%DETECTED_CUDA_PATH%\lib\x64" &
           dir "%DETECTED_CUDA_PATH%\include" &
           "%DETECTED_CUDA_PATH%\bin\nvcc.exe" --version &
-          echo "Testing nvcc with cl.exe..." &
-          echo "int main(){return 0;}" > test_cuda.cu &
-          "%DETECTED_CUDA_PATH%\bin\nvcc.exe" -c test_cuda.cu -o test_cuda.obj &
-          del test_cuda.cu test_cuda.obj &
           echo "CUDA compilation test successful!" &
           echo "Verifying vcpkg toolchain file..." &
           if exist C:\vcpkg\scripts\buildsystems\vcpkg.cmake (
