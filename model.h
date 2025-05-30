@@ -202,18 +202,20 @@ struct KVCache {
         batch_seq_lens.resize(batch_size, 0);
     }
 
+    void destroy_gpu_resources(); // Implementation moved to kv_cache.cpp
+
 #ifdef HAS_CUDA
     int allocated_num_layers = 0;     /**< Number of GPU layers for which device memory was actually allocated */
     int allocated_max_seq_len = 0;    /**< Maximum sequence length allocated */
     int allocated_num_kv_heads = 0;   /**< Number of key/value heads allocated */
     int allocated_head_dim = 0;       /**< Dimension of each head allocated */
 
-    void destroy_gpu_resources(); // Implementation moved to kv_cache.cpp
-
     ~KVCache() {
-#ifdef HAS_CUDA
         destroy_gpu_resources();
-#endif
+    }
+#else
+    ~KVCache() {
+        destroy_gpu_resources();
     }
 #endif
 };
