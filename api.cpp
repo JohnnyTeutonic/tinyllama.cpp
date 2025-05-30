@@ -907,7 +907,7 @@ std::vector<std::string> TinyLlamaSession::generate_batch(const std::vector<std:
           goto fallback_sequential;
         }
         // Check for NaN/Inf values
-        for (size_t j = 0; j < std::min(10UL, batch_final_logits[i].size()); ++j) {
+        for (size_t j = 0; j < std::min(static_cast<size_t>(10UL), batch_final_logits[i].size()); ++j) {
           if (!std::isfinite(batch_final_logits[i][j])) {
             Logger::error("[DEBUG] batch_final_logits[" + std::to_string(i) + "][" + std::to_string(j) + "] is not finite: " + std::to_string(batch_final_logits[i][j]));
             goto fallback_sequential;

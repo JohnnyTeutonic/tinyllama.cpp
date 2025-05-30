@@ -313,7 +313,7 @@ jobs:
         CIBW_BEFORE_BUILD_MACOS: >
           echo "Setting up macOS build environment..." &&
           brew install boost libomp llvm cmake ninja || true &&
-          echo "Detecting architecture and setting paths..." &&
+          echo "Brew installations complete, detecting architecture..." &&
           if [[ $(uname -m) == "arm64" ]]; then
             BREW_PREFIX="/opt/homebrew"
           else
@@ -333,7 +333,7 @@ jobs:
           export OpenMP_ROOT="$LIBOMP_PREFIX" &&
           export OpenMP_omp_LIBRARY="$LIBOMP_PREFIX/lib/libomp.dylib" &&
           export CMAKE_PREFIX_PATH="$LIBOMP_PREFIX:$LLVM_PREFIX:$BREW_PREFIX" &&
-          echo "Environment configured for OpenMP at $LIBOMP_PREFIX"
+          echo "Compilers and OpenMP environment set successfully for macOS CUDA (CPU) build"
         
         CIBW_BUILD_VERBOSITY: 1
         CIBW_TEST_COMMAND: python -c "import tinyllama_cpp; print('Import successful')"
@@ -468,7 +468,12 @@ jobs:
           ls -la $LLVM_PREFIX/bin/ || echo "LLVM bin directory not found" &&
           export CC="$LLVM_PREFIX/bin/clang" &&
           export CXX="$LLVM_PREFIX/bin/clang++" &&
-          echo "Compilers set successfully"
+          export LDFLAGS="-L$LIBOMP_PREFIX/lib" &&
+          export CPPFLAGS="-I$LIBOMP_PREFIX/include" &&
+          export OpenMP_ROOT="$LIBOMP_PREFIX" &&
+          export OpenMP_omp_LIBRARY="$LIBOMP_PREFIX/lib/libomp.dylib" &&
+          export CMAKE_PREFIX_PATH="$LIBOMP_PREFIX:$LLVM_PREFIX:$BREW_PREFIX" &&
+          echo "Compilers and OpenMP environment set successfully for macOS CUDA (CPU) build"
         
         CIBW_BUILD_VERBOSITY: 1
         CIBW_TEST_COMMAND: python -c "import tinyllama_cpp; print('Import successful')"
