@@ -35,11 +35,6 @@ jobs:
             cuda_version: "12.1"
             cuda_toolkit: "cuda-toolkit-12-1"
             wheel_suffix: "-cu121"
-          - os: ubuntu-latest
-            cuda_version: "12.4"
-            cuda_toolkit: "cuda-toolkit-12-4"
-            wheel_suffix: "-cu124"
-          
           # Windows GPU builds
           - os: windows-latest
             cuda_version: "11.8"
@@ -49,11 +44,6 @@ jobs:
             cuda_version: "12.1"
             cuda_toolkit: "12.1.0"
             wheel_suffix: "-cu121"
-          # Windows GPU builds - use newer CUDA versions with complete headers
-          - os: windows-latest
-            cuda_version: "12.4"
-            cuda_toolkit: "12.4.1"
-            wheel_suffix: "-cu124"
 
     steps:
     - uses: actions/checkout@v4

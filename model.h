@@ -10,10 +10,15 @@
 
 #include "safetensors_loader.h"
 #ifdef HAS_CUDA
+// Forward declarations to avoid including CUDA headers in CPU files
+typedef struct CUstream_st* cudaStream_t;
+typedef struct cublasContext* cublasHandle_t;
+// Only include CUDA headers when compiling .cu files
+#ifdef __CUDACC__
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
-
 #include "cuda_kernels.h"
+#endif
 #endif
 #include <memory>
 
