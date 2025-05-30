@@ -285,18 +285,8 @@ jobs:
           fi
         
         CIBW_BEFORE_BUILD_WINDOWS: >
-          echo "Installing build dependencies for Windows CUDA build..." &
+          echo "Installing build dependencies for Windows CPU build..." &
           pip install cmake ninja &
-          echo "Setting up Visual Studio environment for CUDA compilation..." &
-          for /d %%i in ("C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Tools\MSVC\*") do set "MSVC_PATH=%%i" &
-          echo "Found MSVC at: %MSVC_PATH%" &
-          set "VS_CL_PATH=%MSVC_PATH%\bin\Hostx64\x64\cl.exe" &
-          set "PATH=%MSVC_PATH%\bin\Hostx64\x64;%PATH%" &
-          echo "Added Visual Studio to PATH, cl.exe should now be available" &
-          where cl.exe &
-          echo "Setting CC and CXX environment variables..." &
-          set "CC=%VS_CL_PATH%" &
-          set "CXX=%VS_CL_PATH%" &
           echo "Setting up vcpkg for Boost..." &
           if not exist C:\vcpkg (
             echo "Cloning vcpkg..." &
@@ -308,42 +298,13 @@ jobs:
           ) &
           echo "Installing Boost components via vcpkg..." &
           C:\vcpkg\vcpkg install boost:x64-windows boost-xpressive:x64-windows &
-          echo "Detecting and using host CUDA installation..." &
-          for /d %%i in ("C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v*") do set "DETECTED_CUDA_PATH=%%i" &
-          if not defined DETECTED_CUDA_PATH (
-            echo "No CUDA installation detected, trying default paths..." &
-            set "DETECTED_CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1"
-          ) &
-          echo "Using CUDA path: %DETECTED_CUDA_PATH%" &
-          echo "Setting up comprehensive CUDA environment variables..." &
-          set "CUDA_PATH=%DETECTED_CUDA_PATH%" &
-          set "CUDA_HOME=%DETECTED_CUDA_PATH%" &
-          set "CUDA_ROOT=%DETECTED_CUDA_PATH%" &
-          set "CUDAToolkit_ROOT=%DETECTED_CUDA_PATH%" &
-          set "CUDA_TOOLKIT_ROOT_DIR=%DETECTED_CUDA_PATH%" &
-          set "CMAKE_CUDA_COMPILER=%DETECTED_CUDA_PATH%\bin\nvcc.exe" &
-          set "PATH=%DETECTED_CUDA_PATH%\bin;%DETECTED_CUDA_PATH%\libnvvp;%PATH%" &
-          set "CUDA_LIB_PATH=%DETECTED_CUDA_PATH%\lib\x64" &
-          set "CUDA_INC_PATH=%DETECTED_CUDA_PATH%\include" &
-          echo "Set CMAKE_CUDA_COMPILER to: %CMAKE_CUDA_COMPILER%" &
-          echo "Verifying CUDA installation structure..." &
-          dir "%DETECTED_CUDA_PATH%" &
-          dir "%DETECTED_CUDA_PATH%\bin" &
-          dir "%DETECTED_CUDA_PATH%\lib\x64" &
-          dir "%DETECTED_CUDA_PATH%\include" &
-          "%DETECTED_CUDA_PATH%\bin\nvcc.exe" --version &
-          echo "Testing nvcc with cl.exe..." &
-          echo "int main(){return 0;}" > test_cuda.cu &
-          "%DETECTED_CUDA_PATH%\bin\nvcc.exe" -c test_cuda.cu -o test_cuda.obj &
-          del test_cuda.cu test_cuda.obj &
-          echo "CUDA compilation test successful!" &
           echo "Verifying vcpkg toolchain file..." &
           if exist C:\vcpkg\scripts\buildsystems\vcpkg.cmake (
             echo "✓ vcpkg toolchain file found"
           ) else (
             echo "✗ vcpkg toolchain file missing!" & exit 1
           ) &
-          echo "Windows CUDA build setup complete"
+          echo "Windows CPU build setup complete"
         
         CIBW_BEFORE_BUILD_MACOS: >
           echo "Setting up macOS build environment..." &&
@@ -374,6 +335,26 @@ jobs:
         CIBW_TEST_COMMAND: python -c "import tinyllama_cpp; print('Import successful')"
         CIBW_TEST_SKIP: "*-macosx_arm64"
 
+    - name: Setup Visual Studio Environment (Windows CUDA)
+      if: matrix.os == 'windows-latest' && matrix.cuda_version != 'cpu'
+      shell: pwsh
+      run: |
+        Write-Host "Finding Visual Studio installation using vswhere..."
+        $vsPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+        Write-Host "Found Visual Studio at: $vsPath"
+        
+        $msvcPath = Get-ChildItem "$vsPath\VC\Tools\MSVC" | Sort-Object Name -Descending | Select-Object -First 1
+        $compilerPath = "$($msvcPath.FullName)\bin\Hostx64\x64"
+        Write-Host "MSVC compiler path: $compilerPath"
+        
+        $currentPath = $env:PATH
+        $newPath = "$compilerPath;$currentPath"
+        Write-Host "Setting PATH for Visual Studio compiler..."
+        echo "PATH=$newPath" >> $env:GITHUB_ENV
+        
+        Write-Host "Verifying cl.exe is accessible..."
+        & "$compilerPath\cl.exe" 2>&1 | Write-Host
+
     - name: Build wheels (CUDA)
       if: matrix.cuda_version != 'cpu'
       uses: pypa/cibuildwheel@v2.17.0
@@ -388,7 +369,7 @@ jobs:
         
         CIBW_ENVIRONMENT_LINUX: "TINYLLAMA_CPP_BUILD_CUDA=1 CMAKE_CUDA_ARCHITECTURES=\"75;80;86;89;90\" CMAKE_POLICY_DEFAULT_CMP0167=NEW CUDA_HOME=/usr/local/cuda CUDA_ROOT=/usr/local/cuda CUDA_PATH=/usr/local/cuda CUDAToolkit_ROOT=/usr/local/cuda CMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc Python_EXECUTABLE={python} Python_FIND_STRATEGY=LOCATION CMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER SETUPTOOLS_USE_DISTUTILS=stdlib"
         
-        CIBW_ENVIRONMENT_WINDOWS: "TINYLLAMA_CPP_BUILD_CUDA=1 CMAKE_CUDA_ARCHITECTURES=\"75;80;86;89;90\" CMAKE_POLICY_DEFAULT_CMP0167=NEW CMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake VCPKG_TARGET_TRIPLET=x64-windows CMAKE_PREFIX_PATH=C:/vcpkg/installed/x64-windows CMAKE_GENERATOR=Ninja CMAKE_C_COMPILER=\"C:/Program Files/Microsoft Visual Studio/2022/Enterprise/VC/Tools/MSVC/14.40.33807/bin/Hostx64/x64/cl.exe\" CMAKE_CXX_COMPILER=\"C:/Program Files/Microsoft Visual Studio/2022/Enterprise/VC/Tools/MSVC/14.40.33807/bin/Hostx64/x64/cl.exe\""
+        CIBW_ENVIRONMENT_WINDOWS: "TINYLLAMA_CPP_BUILD_CUDA=1 CMAKE_CUDA_ARCHITECTURES=\"75;80;86;89;90\" CMAKE_POLICY_DEFAULT_CMP0167=NEW CMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake VCPKG_TARGET_TRIPLET=x64-windows CMAKE_PREFIX_PATH=C:/vcpkg/installed/x64-windows CMAKE_GENERATOR=Ninja"
         
         CIBW_ENVIRONMENT_MACOS: "TINYLLAMA_CPP_BUILD_CUDA=0 CMAKE_FIND_DEBUG_MODE=ON"
         
