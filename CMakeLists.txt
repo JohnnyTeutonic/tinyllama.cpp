@@ -236,6 +236,18 @@ else()
 endif()
 
 if (MSVC)
+  # Determine desired MSVC runtime based on build type
+  if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    set(SELECTED_MSVC_RUNTIME_LIBRARY "MultiThreadedDebugDLL") # /MDd
+  else() # Covers Release, MinSizeRel, RelWithDebInfo, or empty CMAKE_BUILD_TYPE
+    set(SELECTED_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL") # /MD
+  endif()
+
+  # Set the global CMAKE_MSVC_RUNTIME_LIBRARY variable. This initializes the
+  # MSVC_RUNTIME_LIBRARY property for all targets when they are created.
+  set(CMAKE_MSVC_RUNTIME_LIBRARY ${SELECTED_MSVC_RUNTIME_LIBRARY} CACHE STRING "MSVC Runtime library selection" FORCE)
+  message(STATUS "Globally set CMAKE_MSVC_RUNTIME_LIBRARY to ${CMAKE_MSVC_RUNTIME_LIBRARY} (intended for build type: ${CMAKE_BUILD_TYPE})")
+
   # Define list of targets that always exist
   set(MSVC_TARGETS tinyllama tinyllama_core tinyllama_bindings)
   
@@ -245,19 +257,8 @@ if (MSVC)
   endif()
   
   foreach(target ${MSVC_TARGETS})
-    if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-      if (target STREQUAL "tinyllama_core" OR target STREQUAL "tinyllama_bindings")
-        set_property(TARGET ${target} PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreadedDebugDLL") # /MDd
-      else()
-        set_property(TARGET ${target} PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreadedDebug")     # /MTd
-      endif()
-    else() # Release or other
-      if (target STREQUAL "tinyllama_core" OR target STREQUAL "tinyllama_bindings")
-        set_property(TARGET ${target} PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreadedDLL") # /MD
-      else()
-        set_property(TARGET ${target} PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded")    # /MT
-      endif()
-    endif()
+    # Explicitly set the MSVC_RUNTIME_LIBRARY property for each target
+    set_property(TARGET ${target} PROPERTY MSVC_RUNTIME_LIBRARY ${SELECTED_MSVC_RUNTIME_LIBRARY})
 
     target_compile_options(${target} PRIVATE "/openmp:llvm" "/DNOMINMAX" "/D_USE_MATH_DEFINES")
     target_compile_definitions(${target} PRIVATE NOMINMAX _USE_MATH_DEFINES)
