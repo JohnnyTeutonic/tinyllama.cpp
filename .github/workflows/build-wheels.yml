@@ -147,11 +147,12 @@ jobs:
         Write-Host "Installing Boost using vcpkg..."
         git clone https://github.com/Microsoft/vcpkg.git C:\vcpkg
         C:\vcpkg\bootstrap-vcpkg.bat
-        C:\vcpkg\vcpkg install boost-regex:x64-windows boost-system:x64-windows boost-filesystem:x64-windows
+        C:\vcpkg\vcpkg install boost-regex:x64-windows boost-system:x64-windows boost-filesystem:x64-windows boost-xpressive:x64-windows
         
         Write-Host "Setting up Boost environment variables..."
         $VCPKG_ROOT = "C:\vcpkg"
         $BOOST_ROOT = "$VCPKG_ROOT\installed\x64-windows"
+        $VCPKG_INSTALLED_DIR = "$VCPKG_ROOT\installed\x64-windows"
         
         Write-Host "Setting BOOST_ROOT to: $BOOST_ROOT"
         echo "BOOST_ROOT=$BOOST_ROOT" >> $env:GITHUB_ENV
@@ -159,6 +160,7 @@ jobs:
         echo "Boost_INCLUDE_DIR=$BOOST_ROOT\include" >> $env:GITHUB_ENV
         echo "CMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake" >> $env:GITHUB_ENV
         echo "VCPKG_TARGET_TRIPLET=x64-windows" >> $env:GITHUB_ENV
+        echo "CMAKE_PREFIX_PATH=$VCPKG_INSTALLED_DIR" >> $env:GITHUB_ENV
 
     # Clear any problematic environment variables
     - name: Clear problematic environment variables
@@ -299,7 +301,7 @@ jobs:
             echo "vcpkg already exists"
           ) &
           echo "Installing ALL Boost components via vcpkg (this might take a while)..." &
-          C:\vcpkg\vcpkg install boost:x64-windows &
+          C:\vcpkg\vcpkg install boost:x64-windows boost-xpressive:x64-windows &
           echo "Verifying vcpkg toolchain file..." &
           if exist C:\vcpkg\scripts\buildsystems\vcpkg.cmake (
             echo "✓ vcpkg toolchain file found"
@@ -351,7 +353,7 @@ jobs:
         
         CIBW_ENVIRONMENT_LINUX: "TINYLLAMA_CPP_BUILD_CUDA=1 CMAKE_CUDA_ARCHITECTURES=\"75;80;86;89;90\" CMAKE_POLICY_DEFAULT_CMP0167=NEW CUDA_HOME=/usr/local/cuda CUDA_ROOT=/usr/local/cuda CUDA_PATH=/usr/local/cuda CUDAToolkit_ROOT=/usr/local/cuda CMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc Python_EXECUTABLE={python} Python_FIND_STRATEGY=LOCATION CMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER SETUPTOOLS_USE_DISTUTILS=stdlib"
         
-        CIBW_ENVIRONMENT_WINDOWS: "TINYLLAMA_CPP_BUILD_CUDA=1 CMAKE_CUDA_ARCHITECTURES=\"75;80;86;89;90\" CMAKE_POLICY_DEFAULT_CMP0167=NEW CMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake VCPKG_TARGET_TRIPLET=x64-windows"
+        CIBW_ENVIRONMENT_WINDOWS: "TINYLLAMA_CPP_BUILD_CUDA=1 CMAKE_CUDA_ARCHITECTURES=\"75;80;86;89;90\" CMAKE_POLICY_DEFAULT_CMP0167=NEW CMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake VCPKG_TARGET_TRIPLET=x64-windows CMAKE_PREFIX_PATH=C:/vcpkg/installed/x64-windows"
         
         CIBW_ENVIRONMENT_MACOS: "TINYLLAMA_CPP_BUILD_CUDA=0 OpenMP_CXX_FLAGS='-Xpreprocessor -fopenmp' OpenMP_CXX_LIB_NAMES=omp CMAKE_FIND_DEBUG_MODE=ON"
         
