@@ -1,21 +1,6 @@
 #ifndef CUDA_KERNELS_H
 #define CUDA_KERNELS_H
 
-#ifdef _WIN32
-#ifdef HAS_CUDA
-#ifndef CUDA_NO_HALF
-#define CUDA_NO_HALF
-#endif
-#define __CUDA_NO_HALF_OPERATORS__
-#define __CUDA_NO_HALF_CONVERSIONS__
-#define __CUDA_NO_HALF2_OPERATORS__
-#define __CUDA_NO_BFLOAT16_CONVERSIONS__
-#define CUDA_NO_HALF_OPERATORS
-#define CUDA_NO_HALF_CONVERSIONS
-#define __CUDA_NO_BFLOAT16_CONVERSIONS__
-#endif
-#endif
-
 #ifdef HAS_CUDA
 
 #include <cublas_v2.h>

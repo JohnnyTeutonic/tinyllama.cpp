@@ -257,17 +257,16 @@ if(CUDA_ENABLED)
     # Add CUDA_NO_HALF for Windows to prevent cuda_fp16.hpp 'nv/target' include issues in CUDA 12.x
     if(WIN32)
         target_compile_definitions(tinyllama_core PUBLIC CUDA_NO_HALF)
-        # Additional macros for Windows CUDA 12.1+ to prevent fp16 dependency issues
+        # Additional CUDA 12.1+ specific compiler flags for Windows
         if(CUDA_VERSION VERSION_GREATER_EQUAL "12.1")
-            target_compile_definitions(tinyllama_core PUBLIC 
-                __CUDA_NO_HALF_OPERATORS__
-                __CUDA_NO_HALF_CONVERSIONS__
-                __CUDA_NO_HALF2_OPERATORS__
-                __CUDA_NO_BFLOAT16_CONVERSIONS__
-                CUDA_NO_HALF_OPERATORS
-                CUDA_NO_HALF_CONVERSIONS
+            target_compile_options(tinyllama_core PRIVATE
+                $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/DCUDA_NO_HALF>
+                $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/D__CUDA_FP16_H__>
+                $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/D__CUDA_FP16_HPP__>
+                $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/D__CUDA_BF16_H__>
+                $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/D__CUDA_BF16_HPP__>
             )
-            message(STATUS "Added additional fp16 blocking macros for Windows CUDA ${CUDA_VERSION}")
+            message(STATUS "Added targeted CUDA 12.1+ include guards for Windows")
         endif()
         message(STATUS "Added CUDA_NO_HALF definition for Windows CUDA build")
     endif()
@@ -292,34 +291,12 @@ if(CUDA_ENABLED)
         if(CUDA_VERSION VERSION_GREATER_EQUAL "12.1")
             target_compile_options(tinyllama_core PRIVATE
                 $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/DCUDA_NO_HALF>
-                $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/D__CUDA_NO_HALF_OPERATORS__>
-                $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/D__CUDA_NO_HALF_CONVERSIONS__>
                 $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/D__CUDA_FP16_H__>
                 $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/D__CUDA_FP16_HPP__>
-                $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/DCUDA_NO_FP16_HEADER>
                 $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/D__CUDA_BF16_H__>
                 $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/D__CUDA_BF16_HPP__>
-                $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/D__CUDA_NO_BFLOAT16__>
-                $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/DCUDA_NO_BF16_HEADER>
             )
-            # Also add for C++ compilation (not just CUDA)
-            target_compile_definitions(tinyllama_core PUBLIC 
-                __CUDA_NO_HALF_OPERATORS__
-                __CUDA_NO_HALF_CONVERSIONS__
-                __CUDA_NO_HALF2_OPERATORS__
-                __CUDA_NO_BFLOAT16_CONVERSIONS__
-                CUDA_NO_HALF_OPERATORS
-                CUDA_NO_HALF_CONVERSIONS
-                __CUDA_NO_BFLOAT16_CONVERSIONS__
-                __CUDA_FP16_H__
-                __CUDA_FP16_HPP__
-                CUDA_NO_FP16_HEADER
-                __CUDA_BF16_H__
-                __CUDA_BF16_HPP__
-                __CUDA_NO_BFLOAT16__
-                CUDA_NO_BF16_HEADER
-            )
-            message(STATUS "Added CUDA 12.1+ specific compiler flags for Windows including fp16 header blocking")
+            message(STATUS "Added targeted CUDA 12.1+ include guards for Windows")
         endif()
         # Add explicit CUDA runtime library for Windows linking
         target_link_libraries(tinyllama_core PRIVATE 
