@@ -85,22 +85,25 @@ jobs:
       if: matrix.cuda_version != 'cpu'
       shell: bash
       run: |
-        # Create a modified pyproject.toml with CUDA suffix
+        # Create a modified pyproject.toml with CUDA version suffix (NOT package name change)
         python -c "
         import re
         with open('pyproject.toml', 'r') as f:
             content = f.read()
         
-        # Add CUDA suffix to package name
+        # Add CUDA suffix to VERSION, not package name
+        # This creates local version identifiers like 1.0.0+cu118
         content = re.sub(
-            r'name = \"tinyllama-cpp\"',
-            f'name = \"tinyllama-cpp${{ matrix.wheel_suffix }}\"',
+            r'version = \"([^\"]+)\"',
+            lambda m: f'version = \"{m.group(1)}${{ matrix.wheel_suffix }}\"',
             content
         )
         
         with open('pyproject.toml', 'w') as f:
             f.write(content)
         "
+        echo "Modified pyproject.toml for CUDA ${{ matrix.cuda_version }}:"
+        grep -A5 -B5 "version\|name" pyproject.toml
 
     # Install build dependencies
     - name: Install build dependencies (Linux)
