@@ -273,6 +273,12 @@ if(CUDA_ENABLED)
             $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler="/MD">
             $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler="/O2">
         )
+        # Add explicit CUDA runtime library for Windows linking
+        target_link_libraries(tinyllama_core PRIVATE 
+            CUDA::cudart_static
+            CUDA::cublas
+        )
+        message(STATUS "Added Windows-specific CUDA linking libraries")
     endif()
 endif()
 
@@ -340,6 +346,11 @@ if (MSVC)
   # MSVC_RUNTIME_LIBRARY property for all targets when they are created.
   set(CMAKE_MSVC_RUNTIME_LIBRARY ${SELECTED_MSVC_RUNTIME_LIBRARY} CACHE STRING "MSVC Runtime library selection" FORCE)
   message(STATUS "Globally set CMAKE_MSVC_RUNTIME_LIBRARY to ${CMAKE_MSVC_RUNTIME_LIBRARY} (intended for build type: ${CMAKE_BUILD_TYPE})")
+
+  # Enable verbose linking for Windows to show actual errors
+  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /VERBOSE:LIB")
+  set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} /VERBOSE:LIB")
+  message(STATUS "Enabled verbose linking for Windows debugging")
 
   # Define list of targets that always exist
   set(MSVC_TARGETS tinyllama tinyllama_core tinyllama_bindings)
