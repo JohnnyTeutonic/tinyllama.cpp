@@ -101,10 +101,7 @@ if(HAS_CUDA)
     # Set CUDA flags for Windows before enabling CUDA language
     if(WIN32)
         set(CMAKE_CUDA_FLAGS "-allow-unsupported-compiler -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH")
-        # Remove problematic flags that cause nvcc command line issues
         set(CMAKE_CUDA_FLAGS_RELEASE "-O2")
-        # Separate host compiler flags to avoid nvcc command line conflicts
-        set(CMAKE_CUDA_HOST_COMPILER_FLAGS "")
         message(STATUS "Set CMAKE_CUDA_FLAGS for Windows: ${CMAKE_CUDA_FLAGS}")
     endif()
     
@@ -268,10 +265,11 @@ if(CUDA_ENABLED)
             CUDA_EXTENSIONS OFF
             CUDA_SEPARABLE_COMPILATION OFF
         )
-        # Set Windows-specific CUDA compile options
+        # Clean CUDA compile options for Windows - avoid duplicate flags
         target_compile_options(tinyllama_core PRIVATE
-            $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler="/MD">
-            $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler="/O2">
+            $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/MD>
+            $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/DNOMINMAX>
+            $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/D_USE_MATH_DEFINES>
         )
         # Add explicit CUDA runtime library for Windows linking
         target_link_libraries(tinyllama_core PRIVATE 
@@ -364,13 +362,15 @@ if (MSVC)
     # Explicitly set the MSVC_RUNTIME_LIBRARY property for each target
     set_property(TARGET ${target} PROPERTY MSVC_RUNTIME_LIBRARY ${SELECTED_MSVC_RUNTIME_LIBRARY})
 
-    # Skip OpenMP flags for CUDA targets to avoid nvcc command line issues
+    # Skip MSVC-specific flags for tinyllama_core when CUDA is enabled to avoid nvcc conflicts
     if(target STREQUAL "tinyllama_core" AND CUDA_ENABLED)
-      target_compile_options(${target} PRIVATE "/DNOMINMAX" "/D_USE_MATH_DEFINES")
+      # Only add non-conflicting flags for CUDA builds
+      target_compile_definitions(${target} PRIVATE _USE_MATH_DEFINES)
     else()
+      # Full MSVC flags for non-CUDA targets
       target_compile_options(${target} PRIVATE "/openmp:llvm" "/DNOMINMAX" "/D_USE_MATH_DEFINES")
+      target_compile_definitions(${target} PRIVATE NOMINMAX _USE_MATH_DEFINES)
     endif()
-    target_compile_definitions(${target} PRIVATE NOMINMAX _USE_MATH_DEFINES)
   endforeach()
 endif()
 
