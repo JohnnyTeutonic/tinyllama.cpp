@@ -1,6 +1,8 @@
 #ifndef MODEL_H
 #define MODEL_H
 
+#include "cuda_compat_windows.h"
+
 #include <cstdint>
 #include <functional>
 #include <nlohmann/json.hpp>

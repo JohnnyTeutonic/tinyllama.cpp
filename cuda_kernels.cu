@@ -14,6 +14,8 @@
  * - Includes error checking and memory management
  */
 
+#include "cuda_compat_windows.h"
+
 #ifdef _WIN32
 #ifndef CUDA_NO_HALF
 #define CUDA_NO_HALF

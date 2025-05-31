@@ -1,6 +1,8 @@
 #ifndef CUDA_KERNELS_H
 #define CUDA_KERNELS_H
 
+#include "cuda_compat_windows.h"
+
 #ifdef HAS_CUDA
 
 #ifdef _WIN32
