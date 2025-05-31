@@ -100,23 +100,14 @@ if(HAS_CUDA)
     
     # Set CUDA flags for Windows before enabling CUDA language
     if(WIN32)
-        # Set compiler override flag globally since it's needed during language enablement
-        set(CMAKE_CUDA_FLAGS "-allow-unsupported-compiler")
-        message(STATUS "Set global CMAKE_CUDA_FLAGS for Windows: ${CMAKE_CUDA_FLAGS}")
-        message(STATUS "Additional CUDA-specific flags will be set per-target to avoid duplicates")
+        set(CMAKE_CUDA_FLAGS "-allow-unsupported-compiler -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH")
+        message(STATUS "Set CMAKE_CUDA_FLAGS for Windows: ${CMAKE_CUDA_FLAGS}")
     endif()
     
     # Use CMAKE_CUDA_COMPILER from environment if set, otherwise try to find it
     if(DEFINED ENV{CMAKE_CUDA_COMPILER})
-        # Check if the environment variable points to a valid file for this platform
-        if(EXISTS "$ENV{CMAKE_CUDA_COMPILER}")
-            set(CMAKE_CUDA_COMPILER "$ENV{CMAKE_CUDA_COMPILER}")
-            message(STATUS "Using CMAKE_CUDA_COMPILER from environment: ${CMAKE_CUDA_COMPILER}")
-        else()
-            message(WARNING "CMAKE_CUDA_COMPILER from environment does not exist: $ENV{CMAKE_CUDA_COMPILER}")
-            message(STATUS "Will attempt to auto-detect CUDA compiler for this platform instead")
-            # Don't set CMAKE_CUDA_COMPILER, let the subsequent logic handle detection
-        endif()
+        set(CMAKE_CUDA_COMPILER "$ENV{CMAKE_CUDA_COMPILER}")
+        message(STATUS "Using CMAKE_CUDA_COMPILER from environment: ${CMAKE_CUDA_COMPILER}")
     elseif(DEFINED ENV{CUDA_HOME})
         # Build the path with proper extension and Windows path separators
         if(WIN32)
@@ -264,19 +255,6 @@ if(CUDA_ENABLED)
     target_compile_definitions(tinyllama_core PUBLIC HAS_CUDA)
     target_include_directories(tinyllama_core PUBLIC ${CUDA_INCLUDE_DIRS})
     target_link_libraries(tinyllama_core PRIVATE ${CUDA_LIBRARIES} CUDA::cublas)
-    
-    # Set CUDA-specific properties to avoid flag conflicts
-    set_target_properties(tinyllama_core PROPERTIES
-        CUDA_STANDARD 17
-        CUDA_STANDARD_REQUIRED ON
-    )
-    
-    # Set CUDA-specific compile options for Windows
-    if(WIN32)
-        target_compile_options(tinyllama_core PRIVATE
-            $<$<COMPILE_LANGUAGE:CUDA>:-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH>
-        )
-    endif()
 endif()
 
 add_executable(tinyllama
@@ -358,11 +336,7 @@ if (MSVC)
 
     # Skip OpenMP flags for CUDA targets to avoid nvcc command line issues
     if(target STREQUAL "tinyllama_core" AND CUDA_ENABLED)
-      # For CUDA-enabled targets, only apply MSVC flags to C++ files, not CUDA files
-      target_compile_options(${target} PRIVATE 
-        "$<$<COMPILE_LANGUAGE:CXX>:/DNOMINMAX>"
-        "$<$<COMPILE_LANGUAGE:CXX>:/D_USE_MATH_DEFINES>"
-      )
+      target_compile_options(${target} PRIVATE "/DNOMINMAX" "/D_USE_MATH_DEFINES")
     else()
       target_compile_options(${target} PRIVATE "/openmp:llvm" "/DNOMINMAX" "/D_USE_MATH_DEFINES")
     endif()
