@@ -254,6 +254,11 @@ target_link_libraries(tinyllama_core PRIVATE
 # Conditionally add CUDA definition and link CUDA libs for the library
 if(CUDA_ENABLED)
     target_compile_definitions(tinyllama_core PUBLIC HAS_CUDA)
+    # Add CUDA_NO_HALF for Windows to prevent cuda_fp16.hpp 'nv/target' include issues in CUDA 12.x
+    if(WIN32)
+        target_compile_definitions(tinyllama_core PUBLIC CUDA_NO_HALF)
+        message(STATUS "Added CUDA_NO_HALF definition for Windows CUDA build")
+    endif()
     target_include_directories(tinyllama_core PUBLIC ${CUDA_INCLUDE_DIRS})
     target_link_libraries(tinyllama_core PRIVATE ${CUDA_LIBRARIES} CUDA::cublas)
     
