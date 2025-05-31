@@ -108,8 +108,15 @@ if(HAS_CUDA)
     
     # Use CMAKE_CUDA_COMPILER from environment if set, otherwise try to find it
     if(DEFINED ENV{CMAKE_CUDA_COMPILER})
-        set(CMAKE_CUDA_COMPILER "$ENV{CMAKE_CUDA_COMPILER}")
-        message(STATUS "Using CMAKE_CUDA_COMPILER from environment: ${CMAKE_CUDA_COMPILER}")
+        # Check if the environment variable points to a valid file for this platform
+        if(EXISTS "$ENV{CMAKE_CUDA_COMPILER}")
+            set(CMAKE_CUDA_COMPILER "$ENV{CMAKE_CUDA_COMPILER}")
+            message(STATUS "Using CMAKE_CUDA_COMPILER from environment: ${CMAKE_CUDA_COMPILER}")
+        else()
+            message(WARNING "CMAKE_CUDA_COMPILER from environment does not exist: $ENV{CMAKE_CUDA_COMPILER}")
+            message(STATUS "Will attempt to auto-detect CUDA compiler for this platform instead")
+            # Don't set CMAKE_CUDA_COMPILER, let the subsequent logic handle detection
+        endif()
     elseif(DEFINED ENV{CUDA_HOME})
         # Build the path with proper extension and Windows path separators
         if(WIN32)
