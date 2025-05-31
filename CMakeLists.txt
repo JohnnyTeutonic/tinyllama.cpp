@@ -255,6 +255,22 @@ if(CUDA_ENABLED)
     target_compile_definitions(tinyllama_core PUBLIC HAS_CUDA)
     target_include_directories(tinyllama_core PUBLIC ${CUDA_INCLUDE_DIRS})
     target_link_libraries(tinyllama_core PRIVATE ${CUDA_LIBRARIES} CUDA::cublas)
+    
+    # Set CUDA-specific properties to avoid flag conflicts
+    set_target_properties(tinyllama_core PROPERTIES
+        CUDA_STANDARD 17
+        CUDA_STANDARD_REQUIRED ON
+    )
+    
+    # Set CUDA-specific compile options for Windows
+    if(WIN32)
+        target_compile_options(tinyllama_core PRIVATE
+            $<$<COMPILE_LANGUAGE:CUDA>:-allow-unsupported-compiler>
+            $<$<COMPILE_LANGUAGE:CUDA>:-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH>
+            $<$<COMPILE_LANGUAGE:CUDA>:-DNOMINMAX>
+            $<$<COMPILE_LANGUAGE:CUDA>:-D_USE_MATH_DEFINES>
+        )
+    endif()
 endif()
 
 add_executable(tinyllama
@@ -336,7 +352,11 @@ if (MSVC)
 
     # Skip OpenMP flags for CUDA targets to avoid nvcc command line issues
     if(target STREQUAL "tinyllama_core" AND CUDA_ENABLED)
-      target_compile_options(${target} PRIVATE "/DNOMINMAX" "/D_USE_MATH_DEFINES")
+      # For CUDA-enabled targets, only apply MSVC flags to C++ files, not CUDA files
+      target_compile_options(${target} PRIVATE 
+        "$<$<COMPILE_LANGUAGE:CXX>:/DNOMINMAX>"
+        "$<$<COMPILE_LANGUAGE:CXX>:/D_USE_MATH_DEFINES>"
+      )
     else()
       target_compile_options(${target} PRIVATE "/openmp:llvm" "/DNOMINMAX" "/D_USE_MATH_DEFINES")
     endif()
