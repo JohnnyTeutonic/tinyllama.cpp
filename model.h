@@ -10,9 +10,12 @@
 
 #include "safetensors_loader.h"
 #ifdef HAS_CUDA
-// On Windows, disable fp16 headers that require missing nv/target
+// On Windows, prevent problematic fp16 headers that require missing nv/target in CUDA 12.x
 #ifdef _WIN32
 #define CUDA_NO_HALF
+#define __CUDA_NO_HALF_OPERATORS__
+#define __CUDA_NO_HALF_CONVERSIONS__
+#define __CUDA_NO_HALF2_OPERATORS__
 #endif
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
