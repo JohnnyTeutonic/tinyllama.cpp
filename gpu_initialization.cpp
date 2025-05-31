@@ -173,7 +173,7 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
     else if (!embed_tokens_f32.empty()) {
       std::vector<uint16_t> bf16_data(embed_tokens_f32.size());
       #pragma omp parallel for
-      for (size_t i = 0; i < embed_tokens_f32.size(); ++i) {
+      for (int i = 0; i < (int)embed_tokens_f32.size(); ++i) {
         bf16_data[i] = float32_to_bfloat16(embed_tokens_f32[i]);
       }
       gpuErrchk(cudaMalloc(&token_embedding_table_dev_, bf16_data.size() * sizeof(uint16_t)));
@@ -184,12 +184,12 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
     else if (!embed_tokens_q8_0.empty()) {
       std::vector<float> temp_f32_data(embed_tokens_q8_0.size() * GGML_QK8_0);
       #pragma omp parallel for
-      for (size_t i = 0; i < embed_tokens_q8_0.size(); ++i) {
+      for (int i = 0; i < (int)embed_tokens_q8_0.size(); ++i) {
         dequantize_q8_0_block(&embed_tokens_q8_0[i], &temp_f32_data[i * GGML_QK8_0]);
       }
       std::vector<uint16_t> bf16_data(temp_f32_data.size());
       #pragma omp parallel for
-      for (size_t i = 0; i < temp_f32_data.size(); ++i) {
+      for (int i = 0; i < (int)temp_f32_data.size(); ++i) {
         bf16_data[i] = float32_to_bfloat16(temp_f32_data[i]);
       }
       gpuErrchk(cudaMalloc(&token_embedding_table_dev_, bf16_data.size() * sizeof(uint16_t)));
@@ -200,12 +200,12 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
     else if (!embed_tokens_q4k.empty()) {
       std::vector<float> temp_f32_data(embed_tokens_q4k.size() * GGML_QK_K);
       #pragma omp parallel for
-      for (size_t i = 0; i < embed_tokens_q4k.size(); ++i) {
+      for (int i = 0; i < (int)embed_tokens_q4k.size(); ++i) {
         dequantize_q4_k_m(&embed_tokens_q4k[i], &temp_f32_data[i * GGML_QK_K], GGML_QK_K);
       }
       std::vector<uint16_t> bf16_data(temp_f32_data.size());
       #pragma omp parallel for
-      for (size_t i = 0; i < temp_f32_data.size(); ++i) {
+      for (int i = 0; i < (int)temp_f32_data.size(); ++i) {
         bf16_data[i] = float32_to_bfloat16(temp_f32_data[i]);
       }
       gpuErrchk(cudaMalloc(&token_embedding_table_dev_, bf16_data.size() * sizeof(uint16_t)));
@@ -216,12 +216,12 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
     else if (!embed_tokens_q6k.empty()) {
       std::vector<float> temp_f32_data(embed_tokens_q6k.size() * GGML_QK_K);
       #pragma omp parallel for
-      for (size_t i = 0; i < embed_tokens_q6k.size(); ++i) {
+      for (int i = 0; i < (int)embed_tokens_q6k.size(); ++i) {
         dequantize_q6_k(&embed_tokens_q6k[i], &temp_f32_data[i * GGML_QK_K], GGML_QK_K);
       }
       std::vector<uint16_t> bf16_data(temp_f32_data.size());
       #pragma omp parallel for
-      for (size_t i = 0; i < temp_f32_data.size(); ++i) {
+      for (int i = 0; i < (int)temp_f32_data.size(); ++i) {
         bf16_data[i] = float32_to_bfloat16(temp_f32_data[i]);
       }
       gpuErrchk(cudaMalloc(&token_embedding_table_dev_, bf16_data.size() * sizeof(uint16_t)));
@@ -256,7 +256,7 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
     else if (!lm_head_f32.empty()) {
       std::vector<uint16_t> bf16_data(lm_head_f32.size());
       #pragma omp parallel for
-      for (size_t i = 0; i < lm_head_f32.size(); ++i) {
+      for (int i = 0; i < (int)lm_head_f32.size(); ++i) {
         bf16_data[i] = float32_to_bfloat16(lm_head_f32[i]);
       }
       gpuErrchk(cudaMalloc(&lm_head_dev_, bf16_data.size() * sizeof(uint16_t)));
@@ -267,12 +267,12 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
     else if (!lm_head_q8_0.empty()) {
       std::vector<float> temp_f32_data(lm_head_q8_0.size() * GGML_QK8_0);
       #pragma omp parallel for
-      for (size_t i = 0; i < lm_head_q8_0.size(); ++i) {
+      for (int i = 0; i < (int)lm_head_q8_0.size(); ++i) {
         dequantize_q8_0_block(&lm_head_q8_0[i], &temp_f32_data[i * GGML_QK8_0]);
       }
       std::vector<uint16_t> bf16_data(temp_f32_data.size());
       #pragma omp parallel for
-      for (size_t i = 0; i < temp_f32_data.size(); ++i) {
+      for (int i = 0; i < (int)temp_f32_data.size(); ++i) {
         bf16_data[i] = float32_to_bfloat16(temp_f32_data[i]);
       }
       gpuErrchk(cudaMalloc(&lm_head_dev_, bf16_data.size() * sizeof(uint16_t)));
@@ -283,12 +283,12 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
     else if (!lm_head_q4k.empty()) {
       std::vector<float> temp_f32_data(lm_head_q4k.size() * GGML_QK_K);
       #pragma omp parallel for
-      for (size_t i = 0; i < lm_head_q4k.size(); ++i) {
+      for (int i = 0; i < (int)lm_head_q4k.size(); ++i) {
         dequantize_q4_k_m(&lm_head_q4k[i], &temp_f32_data[i * GGML_QK_K], GGML_QK_K);
       }
       std::vector<uint16_t> bf16_data(temp_f32_data.size());
       #pragma omp parallel for
-      for (size_t i = 0; i < temp_f32_data.size(); ++i) {
+      for (int i = 0; i < (int)temp_f32_data.size(); ++i) {
         bf16_data[i] = float32_to_bfloat16(temp_f32_data[i]);
       }
       gpuErrchk(cudaMalloc(&lm_head_dev_, bf16_data.size() * sizeof(uint16_t)));
@@ -299,12 +299,12 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
     else if (!lm_head_q6k.empty()) {
       std::vector<float> temp_f32_data(lm_head_q6k.size() * GGML_QK_K);
       #pragma omp parallel for
-      for (size_t i = 0; i < lm_head_q6k.size(); ++i) {
+      for (int i = 0; i < (int)lm_head_q6k.size(); ++i) {
         dequantize_q6_k(&lm_head_q6k[i], &temp_f32_data[i * GGML_QK_K], GGML_QK_K);
       }
       std::vector<uint16_t> bf16_data(temp_f32_data.size());
       #pragma omp parallel for
-      for (size_t i = 0; i < temp_f32_data.size(); ++i) {
+      for (int i = 0; i < (int)temp_f32_data.size(); ++i) {
         bf16_data[i] = float32_to_bfloat16(temp_f32_data[i]);
       }
       gpuErrchk(cudaMalloc(&lm_head_dev_, bf16_data.size() * sizeof(uint16_t)));
