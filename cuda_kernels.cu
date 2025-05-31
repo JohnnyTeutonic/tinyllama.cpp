@@ -31,6 +31,7 @@
 
 #include <cmath>
 #include <iostream>
+#include <cfloat>
 
 /**
  * @brief Converts BF16 to FP32 on the device
@@ -1632,7 +1633,7 @@ __global__ void attention_batch_prefill_cuda_kernel(
         if (dim_thread_idx == 0) {
             // Apply causal masking: token can only attend to positions <= its own position
             if (context_pos > max_attend_pos_for_this_token) {
-                s_scores[context_pos] = -__FLT_MAX__; // Mask out future positions
+                s_scores[context_pos] = -FLT_MAX; // Mask out future positions
             } else {
                 s_scores[context_pos] = 0.0f;
             }
@@ -1663,9 +1664,9 @@ __global__ void attention_batch_prefill_cuda_kernel(
     // --- Softmax ---
     // Parallel softmax over s_scores[0...total_context_len-1]
     // 1. Find max score in s_scores (reduction)
-    float max_score = -__FLT_MAX__; 
+    float max_score = -FLT_MAX; 
 
-    float thread_local_max_for_scores = -__FLT_MAX__;
+    float thread_local_max_for_scores = -FLT_MAX;
     for (int i = dim_thread_idx; i < total_context_len; i += blockDim.x) {
          thread_local_max_for_scores = fmaxf(thread_local_max_for_scores, s_scores[i]);
     }
