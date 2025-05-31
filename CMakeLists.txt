@@ -100,8 +100,10 @@ if(HAS_CUDA)
     
     # Set CUDA flags for Windows before enabling CUDA language
     if(WIN32)
-        # Note: CUDA-specific flags are now set per-target to avoid duplicates
-        message(STATUS "CUDA flags will be set per-target for Windows to avoid duplicates")
+        # Set compiler override flag globally since it's needed during language enablement
+        set(CMAKE_CUDA_FLAGS "-allow-unsupported-compiler")
+        message(STATUS "Set global CMAKE_CUDA_FLAGS for Windows: ${CMAKE_CUDA_FLAGS}")
+        message(STATUS "Additional CUDA-specific flags will be set per-target to avoid duplicates")
     endif()
     
     # Use CMAKE_CUDA_COMPILER from environment if set, otherwise try to find it
@@ -265,10 +267,7 @@ if(CUDA_ENABLED)
     # Set CUDA-specific compile options for Windows
     if(WIN32)
         target_compile_options(tinyllama_core PRIVATE
-            $<$<COMPILE_LANGUAGE:CUDA>:-allow-unsupported-compiler>
             $<$<COMPILE_LANGUAGE:CUDA>:-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH>
-            $<$<COMPILE_LANGUAGE:CUDA>:-DNOMINMAX>
-            $<$<COMPILE_LANGUAGE:CUDA>:-D_USE_MATH_DEFINES>
         )
     endif()
 endif()
