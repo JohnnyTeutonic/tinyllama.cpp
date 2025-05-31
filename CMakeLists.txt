@@ -259,14 +259,27 @@ if(CUDA_ENABLED)
         target_compile_definitions(tinyllama_core PUBLIC CUDA_NO_HALF)
         # Additional CUDA 12.1+ specific compiler flags for Windows
         if(CUDA_VERSION VERSION_GREATER_EQUAL "12.1")
-            target_compile_options(tinyllama_core PRIVATE
-                $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/DCUDA_NO_HALF>
-                $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/D__CUDA_FP16_H__>
-                $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/D__CUDA_FP16_HPP__>
-                $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/D__CUDA_BF16_H__>
-                $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/D__CUDA_BF16_HPP__>
+            # Nuclear option: completely block problematic CUDA headers for C++ compilation
+            target_compile_definitions(tinyllama_core PUBLIC 
+                WINDOWS_CUDA_12_1_WORKAROUND=1
+                __CUDA_FP16_H__=1
+                __CUDA_FP16_HPP__=1  
+                __CUDA_BF16_H__=1
+                __CUDA_BF16_HPP__=1
+                CUDA_NO_FP16_HEADER=1
+                CUDA_NO_BF16_HEADER=1
             )
-            message(STATUS "Added targeted CUDA 12.1+ include guards for Windows")
+            # Also add these as compiler flags to ensure they take effect
+            target_compile_options(tinyllama_core PRIVATE
+                $<$<COMPILE_LANGUAGE:CXX>:/DWINDOWS_CUDA_12_1_WORKAROUND=1>
+                $<$<COMPILE_LANGUAGE:CXX>:/D__CUDA_FP16_H__=1>
+                $<$<COMPILE_LANGUAGE:CXX>:/D__CUDA_FP16_HPP__=1>
+                $<$<COMPILE_LANGUAGE:CXX>:/D__CUDA_BF16_H__=1>
+                $<$<COMPILE_LANGUAGE:CXX>:/D__CUDA_BF16_HPP__=1>
+                $<$<COMPILE_LANGUAGE:CXX>:/DCUDA_NO_FP16_HEADER=1>
+                $<$<COMPILE_LANGUAGE:CXX>:/DCUDA_NO_BF16_HEADER=1>
+            )
+            message(STATUS "Applied nuclear option for Windows CUDA 12.1+ header blocking")
         endif()
         message(STATUS "Added CUDA_NO_HALF definition for Windows CUDA build")
     endif()

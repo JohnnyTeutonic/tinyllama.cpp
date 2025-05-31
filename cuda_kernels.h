@@ -3,8 +3,7 @@
 
 #ifdef HAS_CUDA
 
-#include <cublas_v2.h>
-#include <cuda_runtime.h>
+#include "cuda_safe_headers.h"
 
 #include <cstdint>
 #include <stdexcept>
