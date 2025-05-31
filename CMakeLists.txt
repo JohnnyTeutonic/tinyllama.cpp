@@ -101,6 +101,10 @@ if(HAS_CUDA)
     # Set CUDA flags for Windows before enabling CUDA language
     if(WIN32)
         set(CMAKE_CUDA_FLAGS "-allow-unsupported-compiler -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH")
+        # Remove problematic flags that cause nvcc command line issues
+        set(CMAKE_CUDA_FLAGS_RELEASE "-O2")
+        # Separate host compiler flags to avoid nvcc command line conflicts
+        set(CMAKE_CUDA_HOST_COMPILER_FLAGS "")
         message(STATUS "Set CMAKE_CUDA_FLAGS for Windows: ${CMAKE_CUDA_FLAGS}")
     endif()
     
@@ -255,6 +259,21 @@ if(CUDA_ENABLED)
     target_compile_definitions(tinyllama_core PUBLIC HAS_CUDA)
     target_include_directories(tinyllama_core PUBLIC ${CUDA_INCLUDE_DIRS})
     target_link_libraries(tinyllama_core PRIVATE ${CUDA_LIBRARIES} CUDA::cublas)
+    
+    # Set Windows-specific CUDA properties to fix nvcc command line issues
+    if(WIN32)
+        set_target_properties(tinyllama_core PROPERTIES
+            CUDA_STANDARD 17
+            CUDA_STANDARD_REQUIRED ON
+            CUDA_EXTENSIONS OFF
+            CUDA_SEPARABLE_COMPILATION OFF
+        )
+        # Set Windows-specific CUDA compile options
+        target_compile_options(tinyllama_core PRIVATE
+            $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler="/MD">
+            $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler="/O2">
+        )
+    endif()
 endif()
 
 add_executable(tinyllama
