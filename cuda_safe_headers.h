@@ -39,14 +39,14 @@ extern "C" {
 
 // Declare and implement essential functions that cuBLAS might expect
 // These are minimal stub implementations to satisfy linking requirements
-static inline __half __float2half(const float a) {
+static inline __host__ __device__ __half __float2half(const float a) {
     __half result;
     // Basic float to half conversion (truncated, not IEEE-compliant but functional)
     result.__x = (unsigned short)((*(unsigned int*)&a) >> 16);
     return result;
 }
 
-static inline float __half2float(const __half a) {
+static inline __host__ __device__ float __half2float(const __half a) {
     // Basic half to float conversion (zero-extended, not IEEE-compliant but functional)
     unsigned int temp = ((unsigned int)a.__x) << 16;
     return *(float*)&temp;
@@ -76,14 +76,14 @@ extern "C" {
 #endif
 
 // Essential BF16 conversion functions for cuBLAS compatibility
-static inline __nv_bfloat16 __float2bfloat16(const float a) {
+static inline __host__ __device__ __nv_bfloat16 __float2bfloat16(const float a) {
     __nv_bfloat16 result;
     // Basic float to bfloat16 conversion (truncate mantissa, keep exponent and sign)
     result.__x = (unsigned short)((*(unsigned int*)&a) >> 16);
     return result;
 }
 
-static inline float __bfloat162float(const __nv_bfloat16 a) {
+static inline __host__ __device__ float __bfloat162float(const __nv_bfloat16 a) {
     // Basic bfloat16 to float conversion (zero-extend mantissa)
     unsigned int temp = ((unsigned int)a.__x) << 16;
     return *(float*)&temp;
