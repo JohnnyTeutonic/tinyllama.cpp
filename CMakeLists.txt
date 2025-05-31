@@ -297,12 +297,27 @@ if(CUDA_ENABLED)
                 $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/D__CUDA_FP16_H__>
                 $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/D__CUDA_FP16_HPP__>
                 $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/DCUDA_NO_FP16_HEADER>
+                $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/D__CUDA_BF16_H__>
+                $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/D__CUDA_BF16_HPP__>
+                $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/D__CUDA_NO_BFLOAT16__>
+                $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/DCUDA_NO_BF16_HEADER>
             )
             # Also add for C++ compilation (not just CUDA)
-            target_compile_definitions(tinyllama_core PRIVATE
+            target_compile_definitions(tinyllama_core PUBLIC 
+                __CUDA_NO_HALF_OPERATORS__
+                __CUDA_NO_HALF_CONVERSIONS__
+                __CUDA_NO_HALF2_OPERATORS__
+                __CUDA_NO_BFLOAT16_CONVERSIONS__
+                CUDA_NO_HALF_OPERATORS
+                CUDA_NO_HALF_CONVERSIONS
+                __CUDA_NO_BFLOAT16_CONVERSIONS__
                 __CUDA_FP16_H__
                 __CUDA_FP16_HPP__
                 CUDA_NO_FP16_HEADER
+                __CUDA_BF16_H__
+                __CUDA_BF16_HPP__
+                __CUDA_NO_BFLOAT16__
+                CUDA_NO_BF16_HEADER
             )
             message(STATUS "Added CUDA 12.1+ specific compiler flags for Windows including fp16 header blocking")
         endif()
