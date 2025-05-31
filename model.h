@@ -10,7 +10,16 @@
 
 #include "safetensors_loader.h"
 #ifdef HAS_CUDA
+// Use safe headers only for Windows CUDA 12.1+ workaround, normal headers everywhere else
+#if defined(WINDOWS_CUDA_12_1_WORKAROUND) && defined(_WIN32)
 #include "cuda_safe_headers.h"
+#else
+// Normal CUDA header inclusion for non-problematic platforms (Ubuntu, etc.)
+#include <cuda_runtime.h>
+#include <cublas_v2.h>
+#include <cuda_fp16.h>
+#include <cuda_bf16.h>
+#endif
 
 #include "cuda_kernels.h"
 #endif
