@@ -14,34 +14,6 @@
  * - Includes error checking and memory management
  */
 
-#ifdef _WIN32
-#ifdef HAS_CUDA
-#ifndef CUDA_NO_HALF
-#define CUDA_NO_HALF
-#endif
-#define __CUDA_NO_HALF_OPERATORS__
-#define __CUDA_NO_HALF_CONVERSIONS__
-#define __CUDA_NO_HALF2_OPERATORS__
-#define __CUDA_NO_BFLOAT16_CONVERSIONS__
-#define CUDA_NO_HALF_OPERATORS
-#define CUDA_NO_HALF_CONVERSIONS
-#define __CUDA_NO_BFLOAT16_CONVERSIONS__
-#endif
-#endif
-
-#ifdef _WIN32
-#ifndef CUDA_NO_HALF
-#define CUDA_NO_HALF
-#endif
-#define __CUDA_NO_HALF_OPERATORS__
-#define __CUDA_NO_HALF_CONVERSIONS__
-#define __CUDA_NO_HALF2_OPERATORS__
-#define __CUDA_NO_BFLOAT16_CONVERSIONS__
-#define CUDA_NO_HALF_OPERATORS
-#define CUDA_NO_HALF_CONVERSIONS
-#define __CUDA_NO_BFLOAT16_CONVERSIONS__
-#endif
-
 #include "cuda_kernels.h"
 #include "logger.h"
 #include "model_macros.h"

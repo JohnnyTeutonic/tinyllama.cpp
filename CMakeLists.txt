@@ -294,8 +294,17 @@ if(CUDA_ENABLED)
                 $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/DCUDA_NO_HALF>
                 $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/D__CUDA_NO_HALF_OPERATORS__>
                 $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/D__CUDA_NO_HALF_CONVERSIONS__>
+                $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/D__CUDA_FP16_H__>
+                $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/D__CUDA_FP16_HPP__>
+                $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/DCUDA_NO_FP16_HEADER>
             )
-            message(STATUS "Added CUDA 12.1+ specific compiler flags for Windows")
+            # Also add for C++ compilation (not just CUDA)
+            target_compile_definitions(tinyllama_core PRIVATE
+                __CUDA_FP16_H__
+                __CUDA_FP16_HPP__
+                CUDA_NO_FP16_HEADER
+            )
+            message(STATUS "Added CUDA 12.1+ specific compiler flags for Windows including fp16 header blocking")
         endif()
         # Add explicit CUDA runtime library for Windows linking
         target_link_libraries(tinyllama_core PRIVATE 
