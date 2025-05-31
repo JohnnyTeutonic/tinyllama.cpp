@@ -609,7 +609,7 @@ if (prefill_enabled) {
                                batch_embeddings_size_bytes, cudaMemcpyHostToDevice));
 
           logits = model_->forward_device_batch_prefill(d_temp_batch_embeddings, num_prompt_tokens, start_pos_for_loop, &kv_cache_, 0);
-          
+
           if (d_temp_batch_embeddings) {
               gpuErrchk(cudaFree(d_temp_batch_embeddings));
           }
@@ -1224,7 +1224,7 @@ bool TinyLlamaSession::batch_prefill_parallel(const std::vector<std::vector<int>
     final_batch_logits = all_batch_logits;
 #else
     Logger::error("[Batch Prefill] GPU processing requested but CUDA not available.");
-    return false;
+      return false;
 #endif
   }
 
