@@ -761,7 +761,7 @@ void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
   
   // ULTRA-FAST: Process layers in parallel with pre-sorted tensors
   #pragma omp parallel for schedule(static) if(model.layers.size() > 4)
-  for (size_t layer_idx = 0; layer_idx < layer_tensor_indices.size(); ++layer_idx) {
+  for (int layer_idx = 0; layer_idx < (int)layer_tensor_indices.size(); ++layer_idx) {
     const auto& layer_indices = layer_tensor_indices[layer_idx];
     if (layer_indices.empty()) continue;
     
