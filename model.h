@@ -106,6 +106,9 @@ struct ModelConfig {
     // Memory management: Enable layer-wise weight eviction to prevent OOM
     bool enable_memory_efficient_layers = true; /**< Enable automatic layer weight eviction during forward pass */
 
+    bool enable_prefill_chunking = true;
+    bool use_optimized_cuda_kernels = true; // Re-enabled: fixed performance issues with simpler implementations
+
     enum class TokenizerFamily {
         UNKNOWN,
         LLAMA_SENTENCEPIECE, // For Llama 2 and similar SentencePiece BPE

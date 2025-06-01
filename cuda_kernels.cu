@@ -33,6 +33,29 @@
 #include <iostream>
 #include <cfloat>
 
+// Place these at the top of the file before any kernel uses them
+__device__ float atomicMaxFloat(float* address, float val) {
+    int* address_as_int = (int*)address;
+    int old = *address_as_int, assumed;
+    do {
+        assumed = old;
+        old = atomicCAS(address_as_int, assumed,
+                        __float_as_int(fmaxf(val, __int_as_float(assumed))));
+    } while (assumed != old);
+    return __int_as_float(old);
+}
+
+__device__ float atomicAddFloat(float* address, float val) {
+    int* address_as_int = (int*)address;
+    int old = *address_as_int, assumed;
+    do {
+        assumed = old;
+        old = atomicCAS(address_as_int, assumed,
+                        __float_as_int(val + __int_as_float(assumed)));
+    } while (assumed != old);
+    return __int_as_float(old);
+}
+
 /**
  * @brief Converts BF16 to FP32 on the device
  * 
@@ -719,7 +742,7 @@ __global__ void rope_batch_kernel_cuda(
 void rope_batch_cuda(float* d_q_batch, float* d_k_batch,
                      const float* d_all_freqs_cis_base, // Moved to 3rd position
                      int num_tokens, int num_q_heads, int num_kv_heads, int head_dim,
-                     int start_pos_offset, 
+                     int start_pos_in_kv_cache, 
                      bool use_adjacent_pairing,
                      cudaStream_t stream) {
 
@@ -777,7 +800,7 @@ void rope_batch_cuda(float* d_q_batch, float* d_k_batch,
             num_q_heads,
             head_dim,
             d_all_freqs_cis_base,
-            start_pos_offset,
+            start_pos_in_kv_cache,
             use_adjacent_pairing
         );
         gpuErrchk(cudaGetLastError()); 
@@ -792,7 +815,7 @@ void rope_batch_cuda(float* d_q_batch, float* d_k_batch,
             num_kv_heads, 
             head_dim,
             d_all_freqs_cis_base,
-            start_pos_offset,
+            start_pos_in_kv_cache,
             use_adjacent_pairing
         );
         gpuErrchk(cudaGetLastError()); 
@@ -2156,3 +2179,244 @@ void update_kv_cache_batch_cuda(
 }
 
 #endif // HAS_CUDA
+
+/**
+ * @brief Optimized RMS normalization using simple warp primitives and shared memory
+ *
+ * This kernel uses warp-level reductions and a shared memory variable for block-wide sum.
+ */
+__global__ void rmsnorm_optimized_kernel(const float* __restrict__ x,
+                                       const float* __restrict__ weight,
+                                       float* __restrict__ out,
+                                       int n, float eps) {
+    const int tid_global = threadIdx.x + blockIdx.x * blockDim.x;
+    const int tid_block = threadIdx.x;
+
+    __shared__ float s_block_sum_sq;
+
+    if (tid_block == 0) {
+        s_block_sum_sq = 0.0f;
+    }
+    __syncthreads();
+
+    float thread_partial_sum_sq = 0.0f;
+    for (int i = tid_global; i < n; i += gridDim.x * blockDim.x) {
+        float val = x[i];
+        thread_partial_sum_sq += val * val;
+    }
+
+    // Reduce within warp
+    for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
+        thread_partial_sum_sq += __shfl_down_sync(0xFFFFFFFF, thread_partial_sum_sq, offset);
+    }
+
+    // Warp leaders add to shared memory sum
+    if ((tid_block % warpSize) == 0) {
+        atomicAdd(&s_block_sum_sq, thread_partial_sum_sq);
+    }
+    __syncthreads(); // Ensure all warps have added their sums
+
+    float total_sum_sq = s_block_sum_sq;
+    float rms_scale = rsqrtf(total_sum_sq / n + eps);
+
+    for (int i = tid_global; i < n; i += gridDim.x * blockDim.x) {
+        out[i] = x[i] * weight[i] * rms_scale;
+    }
+}
+
+/**
+ * @brief Optimized softmax using shared memory and warp primitives
+ *
+ * Correctly finds max and sum of exponentials at block level for accurate softmax.
+ */
+__global__ void softmax_optimized_kernel(const float* __restrict__ x,
+                                        float* __restrict__ out,
+                                        int n) {
+    const int tid_global = threadIdx.x + blockIdx.x * blockDim.x;
+    const int tid_block = threadIdx.x;
+
+    __shared__ float s_block_max_val;
+    __shared__ float s_block_sum_exp;
+
+    // Initialize shared variables by the first thread of the block
+    if (tid_block == 0) {
+        s_block_max_val = -INFINITY;
+        s_block_sum_exp = 0.0f;
+    }
+    __syncthreads();
+
+    // Phase 1: Find max
+    float thread_max_val = -INFINITY;
+    for (int i = tid_global; i < n; i += gridDim.x * blockDim.x) {
+        thread_max_val = fmaxf(thread_max_val, x[i]);
+    }
+    for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
+        thread_max_val = fmaxf(thread_max_val, __shfl_down_sync(0xFFFFFFFF, thread_max_val, offset));
+    }
+    if ((tid_block % warpSize) == 0) { // Warp leaders
+        atomicMaxFloat(&s_block_max_val, thread_max_val);
+    }
+    __syncthreads();
+    float global_max = s_block_max_val;
+
+    // Phase 2: Compute sum of exp
+    float thread_sum_exp = 0.0f;
+    for (int i = tid_global; i < n; i += gridDim.x * blockDim.x) {
+        thread_sum_exp += expf(x[i] - global_max);
+    }
+    for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
+        thread_sum_exp += __shfl_down_sync(0xFFFFFFFF, thread_sum_exp, offset);
+    }
+    if ((tid_block % warpSize) == 0) { // Warp leaders
+        atomicAddFloat(&s_block_sum_exp, thread_sum_exp);
+    }
+    __syncthreads();
+    float global_sum_exp = s_block_sum_exp;
+
+    // Phase 3: Apply softmax
+    float inv_sum = (global_sum_exp == 0.0f) ? 0.0f : 1.0f / global_sum_exp;
+    for (int i = tid_global; i < n; i += gridDim.x * blockDim.x) {
+        out[i] = expf(x[i] - global_max) * inv_sum;
+    }
+}
+
+/**
+ * @brief Corrected and optimized attention kernel
+ *
+ * Uses shared memory for scores and performs a full softmax operation correctly.
+ * Each block computes attention for one head.
+ */
+__global__ void attention_optimized_kernel(const float* __restrict__ Q_current,      // Base Q for all heads: [num_q_heads, head_dim] (actually, [num_tokens_batch * num_q_heads * head_dim] from model.cpp)
+                                          const float* __restrict__ K_layer_cache_base, // Full K cache: [max_seq_len, num_kv_heads, head_dim]
+                                          const float* __restrict__ V_layer_cache_base, // Full V cache: [max_seq_len, num_kv_heads, head_dim]
+                                          float* __restrict__ out,                    // Output for all heads: [num_q_heads, head_dim]
+                                          int current_seq_len, int head_dim, float scale,
+                                          int cache_num_kv_heads, int num_q_heads) {
+
+    const int head_idx = blockIdx.x; // Current Q head index this block is working on
+    const int tid_in_block = threadIdx.x;
+    const int block_dim_x = blockDim.x; // Threads per block (e.g., 256)
+
+    if (head_idx >= num_q_heads) return;
+
+    // Map current Q head to its corresponding KV cache head index (for GQA/MQA)
+    const int heads_per_kv = num_q_heads / cache_num_kv_heads;
+    const int kv_head_idx = head_idx / heads_per_kv;
+
+    // Dynamic shared memory. Layout:
+    // s_scores[current_seq_len]: to store Q.K^T results
+    // s_reduction_val[1]: for block-wide max and sum_exp
+    extern __shared__ float s_data[];
+    float* s_scores = s_data;
+    float* s_reduction_val = &s_data[current_seq_len]; // Single float for block-wide reduction
+
+    // Pointer to the current Q vector for this specific head
+    // Assuming Q_current is already offset for the specific token if in batch generation.
+    // Here, Q_current is expected to be just [head_idx * head_dim] for the current token's Q vector.
+    const float* q_vec = Q_current + head_idx * head_dim;
+
+    // --- 1. Compute Q.K^T scores and store in s_scores ---
+    for (int k_idx = tid_in_block; k_idx < current_seq_len; k_idx += block_dim_x) {
+        // Pointer to the k_idx-th K vector in the cache for the relevant kv_head
+        const float* k_vec = K_layer_cache_base + ((size_t)k_idx * cache_num_kv_heads + kv_head_idx) * head_dim;
+        float score = 0.0f;
+        for (int d = 0; d < head_dim; ++d) {
+            score += q_vec[d] * k_vec[d];
+        }
+        s_scores[k_idx] = score * scale;
+    }
+    __syncthreads(); // Ensure all scores are computed and stored in s_scores
+
+    // --- 2. Softmax calculation on s_scores ---
+    // a. Find max score in s_scores (block-wide reduction)
+    if (tid_in_block == 0) *s_reduction_val = -INFINITY;
+    __syncthreads();
+
+    float thread_max_score = -INFINITY;
+    for (int k_idx = tid_in_block; k_idx < current_seq_len; k_idx += block_dim_x) {
+        thread_max_score = fmaxf(thread_max_score, s_scores[k_idx]);
+    }
+    for (int offset = warpSize / 2; offset > 0; offset >>= 1) thread_max_score = fmaxf(thread_max_score, __shfl_down_sync(0xFFFFFFFF, thread_max_score, offset));
+    if ((tid_in_block % warpSize) == 0) atomicMaxFloat(s_reduction_val, thread_max_score);
+    __syncthreads();
+    float max_score = *s_reduction_val;
+
+    // b. Subtract max, compute exp, and sum exp (block-wide reduction for sum)
+    if (tid_in_block == 0) *s_reduction_val = 0.0f;
+    __syncthreads();
+
+    float thread_sum_exp = 0.0f;
+    for (int k_idx = tid_in_block; k_idx < current_seq_len; k_idx += block_dim_x) {
+        float val = expf(s_scores[k_idx] - max_score);
+        s_scores[k_idx] = val; // Store exp(score - max)
+        thread_sum_exp += val;
+    }
+    for (int offset = warpSize / 2; offset > 0; offset >>= 1) thread_sum_exp += __shfl_down_sync(0xFFFFFFFF, thread_sum_exp, offset);
+    if ((tid_in_block % warpSize) == 0) atomicAddFloat(s_reduction_val, thread_sum_exp);
+    __syncthreads();
+    float sum_exp = *s_reduction_val;
+    float inv_sum_exp = (sum_exp == 0.0f || sum_exp < 1e-9f) ? 0.0f : 1.0f / sum_exp; // add small epsilon for stability
+
+    // c. Normalize s_scores (they now contain softmax probabilities)
+    for (int k_idx = tid_in_block; k_idx < current_seq_len; k_idx += block_dim_x) {
+        s_scores[k_idx] *= inv_sum_exp;
+    }
+    __syncthreads();
+
+    // --- 3. Multiply by V and accumulate to output ---
+    // Output for this head: out_for_this_head[d_out]
+    float* out_for_this_head = out + head_idx * head_dim;
+
+    for (int d_out = tid_in_block; d_out < head_dim; d_out += block_dim_x) {
+        float weighted_val = 0.0f;
+        for (int k_idx = 0; k_idx < current_seq_len; ++k_idx) { // All threads iterate full k_idx to sum contributions
+            const float* v_vec = V_layer_cache_base + ((size_t)k_idx * cache_num_kv_heads + kv_head_idx) * head_dim;
+            weighted_val += s_scores[k_idx] * v_vec[d_out];
+        }
+        out_for_this_head[d_out] = weighted_val; // Each thread writes to its assigned output dimension part
+    }
+}
+
+/**
+ * @brief Optimized wrappers using the new high-performance kernels
+ */
+
+void rmsnorm_vector_cuda_optimized(const float* x_dev, const float* weight_dev,
+                                 float* out_dev, int n, float eps,
+                                 cudaStream_t stream) {
+    if (n <= 0) return;
+    const int block_size = 256;
+    // Ensure grid_size is 1 as the kernel is designed for block-wide reduction.
+    const int grid_size = 1;
+    rmsnorm_optimized_kernel<<<grid_size, block_size, sizeof(float), stream>>>(
+        x_dev, weight_dev, out_dev, n, eps);
+    gpuErrchk(cudaGetLastError());
+}
+
+void softmax_vector_cuda_optimized(const float* x_dev, float* out_dev, int n,
+                                 cudaStream_t stream) {
+    if (n <= 0) return;
+    const int block_size = 256;
+    // Ensure grid_size is 1 as the kernel is designed for block-wide reduction.
+    const int grid_size = 1;
+    // Shared memory: 2 floats (max_val, sum_exp)
+    softmax_optimized_kernel<<<grid_size, block_size, 2 * sizeof(float), stream>>>(
+        x_dev, out_dev, n);
+    gpuErrchk(cudaGetLastError());
+}
+
+void attention_cuda_optimized(const float* Q_current_dev, const float* K_layer_cache_base,
+                             const float* V_layer_cache_base, float* out_dev,
+                             int num_heads, int current_seq_len, int head_dim,
+                             float scale, int cache_max_seq_len, int cache_num_kv_heads,
+                             cudaStream_t stream) {
+    if (current_seq_len == 0) return;
+    const int threads_per_block = 256;
+    size_t shared_mem_size = (cache_max_seq_len + 1) * sizeof(float);
+
+    attention_optimized_kernel<<<num_heads, threads_per_block, shared_mem_size, stream>>>(
+        Q_current_dev, K_layer_cache_base, V_layer_cache_base, out_dev,
+        current_seq_len, head_dim, scale, cache_num_kv_heads, num_heads);
+    gpuErrchk(cudaGetLastError());
+}
+

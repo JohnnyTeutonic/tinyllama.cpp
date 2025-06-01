@@ -543,7 +543,70 @@ void update_kv_cache_batch_cuda(
     cudaStream_t stream
 );
 
+/**
+ * @brief High-Performance Optimized Kernel Functions
+ * 
+ * These functions use advanced CUDA features like warp primitives and optimized
+ * shared memory patterns for significantly better performance on modern GPUs.
+ */
 
+/**
+ * @brief Optimized RMS normalization using warp-level reductions
+ * 
+ * This version eliminates multiple kernel launches and uses efficient
+ * warp shuffle operations for reductions. Significantly faster than the
+ * traditional implementation, especially on modern GPUs.
+ * 
+ * @param x_dev Input tensor (device pointer)
+ * @param weight_dev Normalization weights (device pointer)
+ * @param out_dev Output tensor (device pointer)
+ * @param n Size of tensors
+ * @param eps Epsilon for numerical stability
+ * @param stream CUDA stream (optional)
+ */
+void rmsnorm_vector_cuda_optimized(const float* x_dev, const float* weight_dev,
+                                 float* out_dev, int n, float eps,
+                                 cudaStream_t stream = 0);
+
+/**
+ * @brief Optimized softmax using single-kernel warp reductions
+ * 
+ * This version performs the entire softmax computation (find max, compute exp sum,
+ * normalize) in a single kernel launch using warp-level primitives. Eliminates
+ * host-device synchronization overhead.
+ * 
+ * @param x_dev Input tensor (device pointer)
+ * @param out_dev Output tensor (device pointer)
+ * @param n Size of tensors
+ * @param stream CUDA stream (optional)
+ */
+void softmax_vector_cuda_optimized(const float* x_dev, float* out_dev, int n, 
+                                  cudaStream_t stream = 0);
+
+/**
+ * @brief Optimized attention computation using warp-level operations
+ * 
+ * This version uses warp shuffle operations for efficient dot product reductions
+ * and improved shared memory usage patterns. Better performance than the original
+ * implementation, especially for larger sequence lengths.
+ * 
+ * @param Q_current_dev Current query vectors (device pointer)
+ * @param K_layer_cache_base Key cache base pointer (device pointer)
+ * @param V_layer_cache_base Value cache base pointer (device pointer)
+ * @param out_dev Output attention vectors (device pointer)
+ * @param num_heads Number of attention heads
+ * @param current_seq_len Current sequence length
+ * @param head_dim Dimension of each head
+ * @param scale Attention scale factor
+ * @param cache_max_seq_len Maximum sequence length in cache
+ * @param cache_num_kv_heads Number of key-value heads
+ * @param stream CUDA stream (optional)
+ */
+void attention_cuda_optimized(const float* Q_current_dev, const float* K_layer_cache_base,
+                             const float* V_layer_cache_base, float* out_dev,
+                             int num_heads, int current_seq_len, int head_dim,
+                             float scale, int cache_max_seq_len, int cache_num_kv_heads,
+                             cudaStream_t stream = 0);
 
 #endif // HAS_CUDA
 

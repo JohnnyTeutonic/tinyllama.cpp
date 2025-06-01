@@ -833,7 +833,13 @@ std::vector<float> TinyLlamaModel::forward_device(
     if (!lw_in_norm_dev) { 
         throw std::runtime_error("[TM::fw_dev pos=" + std::to_string(pos) + " L" + std::to_string(l_model_idx) + "] Error: input_layernorm_dev is nullptr. GPU layer cannot proceed.");
     }
-    rmsnorm_vector_cuda(x_dev_, lw_in_norm_dev, x_norm_dev_, hs, eps, stream);
+    
+    // Use optimized kernels if enabled, fallback to standard if needed
+    if (config_.use_optimized_cuda_kernels) {
+        rmsnorm_vector_cuda_optimized(x_dev_, lw_in_norm_dev, x_norm_dev_, hs, eps, stream);
+    } else {
+        rmsnorm_vector_cuda(x_dev_, lw_in_norm_dev, x_norm_dev_, hs, eps, stream);
+    }
     // Use concatenated weights for optimal performance
     ensure_f32_concatenated_weights_loaded();
     
@@ -931,19 +937,36 @@ std::vector<float> TinyLlamaModel::forward_device(
             stream
         );
     } else {
-    attention_cuda(
-        q_dev_,                            
-        attention_k_cache_ptr_dev,       
-        attention_v_cache_ptr_dev,       
-        attn_out_dev_,                    
-        config_.num_attention_heads,     
-        pos + 1,                         
-        head_dim,                        
-        current_attention_scale,         
-        kv_cache->allocated_max_seq_len, 
-        config_.num_key_value_heads,     
-        stream                           
-    );
+    // Use optimized kernels if enabled, fallback to standard if needed
+    if (config_.use_optimized_cuda_kernels) {
+        attention_cuda_optimized(
+            q_dev_,                            
+            attention_k_cache_ptr_dev,       
+            attention_v_cache_ptr_dev,       
+            attn_out_dev_,                    
+            config_.num_attention_heads,     
+            pos + 1,                         
+            head_dim,                        
+            current_attention_scale,         
+            kv_cache->allocated_max_seq_len, 
+            config_.num_key_value_heads,     
+            stream                           
+        );
+    } else {
+        attention_cuda(
+            q_dev_,                            
+            attention_k_cache_ptr_dev,       
+            attention_v_cache_ptr_dev,       
+            attn_out_dev_,                    
+            config_.num_attention_heads,     
+            pos + 1,                         
+            head_dim,                        
+            current_attention_scale,         
+            kv_cache->allocated_max_seq_len, 
+            config_.num_key_value_heads,     
+            stream                           
+        );
+    }
     }
 
     if (w_o_f32_dev_) {
@@ -958,7 +981,13 @@ std::vector<float> TinyLlamaModel::forward_device(
     gpuErrchk(cudaMemcpyAsync(x_resid2_dev_, current_x_dev, hs * sizeof(float), cudaMemcpyDeviceToDevice, stream)); 
 
     if (!lw_post_norm_dev) { Logger::error("Missing post_attention_layernorm_dev for GPU layer model_idx=" + std::to_string(l_model_idx)); return {}; }
-    rmsnorm_vector_cuda(current_x_dev, lw_post_norm_dev, x_norm_dev_, hs, eps, stream); 
+    
+    // Use optimized kernels if enabled, fallback to standard if needed
+    if (config_.use_optimized_cuda_kernels) {
+        rmsnorm_vector_cuda_optimized(current_x_dev, lw_post_norm_dev, x_norm_dev_, hs, eps, stream);
+    } else {
+        rmsnorm_vector_cuda(current_x_dev, lw_post_norm_dev, x_norm_dev_, hs, eps, stream);
+    }
 
     if (w_o_f32_dev_) {
       const float* w_o_layer_ptr = w_o_f32_dev_ + (size_t)l_gpu_idx * hs * hs;
@@ -973,7 +1002,13 @@ std::vector<float> TinyLlamaModel::forward_device(
     if (!lw_post_norm_dev) { 
       Logger::error("Missing post_attention_layernorm_dev for GPU layer model_idx=" + std::to_string(l_model_idx)); return {}; 
     }
-    rmsnorm_vector_cuda(current_x_dev, lw_post_norm_dev, x_norm_dev_, hs, eps, stream);
+    
+    // Use optimized kernels if enabled, fallback to standard if needed
+    if (config_.use_optimized_cuda_kernels) {
+        rmsnorm_vector_cuda_optimized(current_x_dev, lw_post_norm_dev, x_norm_dev_, hs, eps, stream);
+    } else {
+        rmsnorm_vector_cuda(current_x_dev, lw_post_norm_dev, x_norm_dev_, hs, eps, stream);
+    }
 
     if (w_gate_f32_dev_ && w_up_f32_dev_) {
       const float* w_gate_layer_ptr = w_gate_f32_dev_ + (size_t)l_gpu_idx * is * hs;
@@ -1001,7 +1036,12 @@ std::vector<float> TinyLlamaModel::forward_device(
     add_residual_cuda(mlp_down_dev_, x_resid2_dev_, current_x_dev, hs, stream); 
 
   }
-  rmsnorm_vector_cuda(x_dev_, final_norm_dev, x_norm_dev_, hs, eps, stream);
+  // Use optimized kernels if enabled, fallback to standard if needed
+  if (config_.use_optimized_cuda_kernels) {
+      rmsnorm_vector_cuda_optimized(x_dev_, final_norm_dev, x_norm_dev_, hs, eps, stream);
+  } else {
+      rmsnorm_vector_cuda(x_dev_, final_norm_dev, x_norm_dev_, hs, eps, stream);
+  }
   ensure_lm_head_dequantized();
   if (lm_head_dev_) { 
     matvec_bf16_f32_cuda(cublas_handle_, lm_head_dev_, x_norm_dev_, logits_dev_,
@@ -1963,9 +2003,16 @@ for (int token_idx = 0; token_idx < num_tokens_in_batch; ++token_idx) {
                     stream
                 );
             } else {
-            attention_cuda(q_token_ptr, d_layer_k_cache_ptr, d_layer_v_cache_ptr,
-                          attn_output_token_ptr, config_.num_attention_heads, current_pos + 1, head_dim,
-                          scale, kv_cache->allocated_max_seq_len, kv_cache->allocated_num_kv_heads, stream);
+            // Use optimized kernels if enabled, fallback to standard if needed
+            if (config_.use_optimized_cuda_kernels) {
+                attention_cuda_optimized(q_token_ptr, d_layer_k_cache_ptr, d_layer_v_cache_ptr,
+                              attn_output_token_ptr, config_.num_attention_heads, current_pos + 1, head_dim,
+                              scale, kv_cache->allocated_max_seq_len, kv_cache->allocated_num_kv_heads, stream);
+            } else {
+                attention_cuda(q_token_ptr, d_layer_k_cache_ptr, d_layer_v_cache_ptr,
+                             attn_output_token_ptr, config_.num_attention_heads, current_pos + 1, head_dim,
+                             scale, kv_cache->allocated_max_seq_len, kv_cache->allocated_num_kv_heads, stream);
+            }
             }
         }
 
