@@ -24,6 +24,24 @@
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 
+// Define CUDA_CHECK macro if not already defined
+#ifndef CUDA_CHECK
+#define CUDA_CHECK(call) gpuErrchk(call)
+#endif
+
+// Host conversion functions for BF16
+inline uint16_t float32_to_bf16_host(float f) {
+    union { float f32; uint32_t u32; } u = {f};
+    uint32_t rounding_bias = 0x00007FFF + ((u.u32 >> 16) & 1);
+    return (u.u32 + rounding_bias) >> 16;
+}
+
+inline float bf16_to_float32_host(uint16_t bf16) {
+    union { float f32; uint32_t u32; } u;
+    u.u32 = ((uint32_t)bf16) << 16;
+    return u.f32;
+}
+
 #endif
 
 #include <stdint.h>
@@ -78,6 +96,22 @@ __device__ inline float bf16_to_float32_device(uint16_t bf16_raw) {
   float result;
   memcpy(&result, &bits, sizeof(float));
   return result;
+#endif
+}
+
+// Add FP32 to BF16 conversion device function
+__device__ inline uint16_t float32_to_bf16_device(float fp32_val) {
+#if __CUDA_ARCH__ >= 800
+    __nv_bfloat16 bf16_val = __float2bfloat16(fp32_val);
+    uint16_t bf16_raw;
+    memcpy(&bf16_raw, &bf16_val, sizeof(uint16_t));
+    return bf16_raw;
+#else
+    // Manual conversion for older architectures
+    unsigned int bits;
+    memcpy(&bits, &fp32_val, sizeof(float));
+    // Extract upper 16 bits for BF16
+    return (uint16_t)(bits >> 16);
 #endif
 }
 
@@ -255,86 +289,167 @@ void rmsnorm_vector_cuda(const std::vector<float>& x_in_host,
  * @param stream CUDA stream for asynchronous execution
  */
 void matvec_f32_f32_cuda(cublasHandle_t handle, const float* mat_f32_dev,
-                         const float* vec_f32_dev, float* out_f32_dev, int rows,
-                         int cols, cudaStream_t stream) {
-  
-
+                         const float* vec_f32_dev, float* out_f32_dev,
+                         int rows, int cols, cudaStream_t stream) {
+  // Existing implementation of matvec_f32_f32_cuda
+  // C = A^T * B where A is mat_f32_dev (passed as KxM) and B is vec_f32_dev (KxN)
+  // M_blas = rows, N_blas = 1, K_blas = cols
+  // A is mat_f32_dev, LDA = cols (K_blas)
+  // B is vec_f32_dev, LDB = cols (K_blas)
+  // C is out_f32_dev, LDC = rows (M_blas)
   const float alpha = 1.0f;
   const float beta = 0.0f;
-  int M_blas = rows;
-  int N_blas = 1; 
-  int K_blas = cols;
-
-  cublasStatus_t status = cublasSetStream(handle, stream);
+  cublasStatus_t status = cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, 
+                                     rows, 1, cols, 
+                                     &alpha, 
+                                     mat_f32_dev, cols, 
+                                     vec_f32_dev, cols, 
+                                     &beta, 
+                                     out_f32_dev, rows);
   if (status != CUBLAS_STATUS_SUCCESS) {
-    Logger::error("cublasSetStream failed in matvec_f32_f32_cuda with error: " + std::to_string(status) + " (" + cublasGetStatusString(status) + ")");
-    throw std::runtime_error("cublasSetStream failed");
+    throw std::runtime_error("cuBLAS Sgemm failed in matvec_f32_f32_cuda: " +
+                             std::to_string(status));
   }
-  
-  status = cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, 
-                       M_blas, N_blas, K_blas, 
-                       &alpha, 
-                       mat_f32_dev, K_blas,  // LDA for A when transA=T is original number of columns of A
-                       vec_f32_dev, K_blas,  // LDB for B when transB=N is original number of rows of B
-                       &beta, 
-                       out_f32_dev, M_blas); // LDC for C is original number of rows of C
-
-  if (status != CUBLAS_STATUS_SUCCESS) {
-    Logger::error("cublasSgemm (FP32 matvec) failed with status: " + std::to_string(status) + " (" + cublasGetStatusString(status) + ")");
-    Logger::error("MatVec GEMM params: M=" + std::to_string(M_blas) + " N=" + std::to_string(N_blas) + " K=" + std::to_string(K_blas) +
-                  " LDA=" + std::to_string(K_blas) + " LDB=" + std::to_string(K_blas) + " LDC=" + std::to_string(M_blas) );
-    throw std::runtime_error("cublasSgemm (FP32 matvec) failed");
-  }
+  gpuErrchk(cudaGetLastError());
 }
+
 /**
- * @brief Implementation of matrix-vector multiplication with BF16
+ * @brief Matrix-vector multiplication with BF16 matrix and FP32 vector/output on GPU
  * 
- * This function performs matrix-vector multiplication using cuBLAS,
- * with automatic conversion from BF16 to FP32. It's optimized for
- * models using Brain Floating Point format.
+ * This function performs matrix-vector multiplication (mat * vec = out) where
+ * the matrix is in BF16 format, and the vector and output are in FP32 format.
+ * It can use BF16 Tensor Cores via cublasGemmEx if supported and enabled.
+ * Otherwise, it falls back to converting the BF16 matrix to FP32 and then
+ * using cublasSgemm.
+ * 
+ * Matrix 'mat_bf16_dev' is assumed to be in row-major format with 'rows' rows and 'cols' columns.
+ * Vector 'vec_f32_dev' is assumed to have 'cols' elements.
+ * Output 'out_f32_dev' will have 'rows' elements.
  * 
  * @param handle cuBLAS handle
- * @param mat_bf16_dev Matrix in BF16 format (device pointer)
- * @param vec_f32_dev Vector in FP32 format (device pointer)
- * @param out_f32_dev Output vector in FP32 format (device pointer)
+ * @param mat_bf16_dev BF16 matrix (device pointer, row-major, rows x cols)
+ * @param vec_f32_dev FP32 vector (device pointer, cols elements)
+ * @param out_f32_dev FP32 output vector (device pointer, rows elements)
  * @param rows Number of matrix rows
  * @param cols Number of matrix columns
- * @param stream CUDA stream for asynchronous execution
+ * @param use_tensor_cores Whether to attempt using BF16 Tensor Cores with cublasGemmEx
+ * @param stream CUDA stream (optional)
  */
-void matvec_bf16_f32_cuda(cublasHandle_t handle, const uint16_t* mat_bf16_dev,
+void matvec_bf16_f32_cuda(cublasHandle_t handle,
+                          const uint16_t* mat_bf16_dev,
                           const float* vec_f32_dev, float* out_f32_dev,
-                          int rows, int cols, cudaStream_t stream) {
-  float* mat_fp32_dev = nullptr;
-  size_t mat_size = (size_t)rows * cols;
-
-  gpuErrchk(cudaMalloc(&mat_fp32_dev, mat_size * sizeof(float)));
-
-  const int threads_per_block_convert = 256;
-  const int num_blocks_convert = (mat_size + threads_per_block_convert - 1) / threads_per_block_convert;
-  convert_bf16_to_fp32_kernel<<<num_blocks_convert, threads_per_block_convert, 0, stream>>>(mat_bf16_dev, mat_fp32_dev, mat_size);
-  gpuErrchk(cudaGetLastError()); // Check for errors after kernel launch
-
+                          int rows, int cols,
+                          bool use_tensor_cores, // New flag
+                          cudaStream_t stream) {
+  cublasStatus_t status;
   const float alpha = 1.0f;
   const float beta = 0.0f;
-  cublasStatus_t status = cublasSetStream(handle, stream);
-  if (status != CUBLAS_STATUS_SUCCESS) {
-    Logger::error("cublasSetStream failed in matvec_bf16_f32_cuda fallback");
-    gpuErrchk(cudaFree(mat_fp32_dev));
-    throw std::runtime_error("cublasSetStream failed");
+
+  // For C = A * B (row-major view) where A is mat_bf16_dev (rows x cols) and B is vec_f32_dev (cols x 1)
+  // cuBLAS expects column-major. We use A^T for op(A) to simulate row-major A.
+  // M_blas = rows (rows of C, rows of op(A))
+  // N_blas = 1   (cols of C, cols of op(B))
+  // K_blas = cols (cols of op(A), rows of op(B))
+  //
+  // If op(A) is CUBLAS_OP_T, then A is passed as K_blas x M_blas (cols x rows) column-major. LDA = K_blas = cols.
+  // If op(B) is CUBLAS_OP_N, then B is passed as K_blas x N_blas (cols x 1) column-major. LDB = K_blas = cols.
+  // C is M_blas x N_blas (rows x 1) column-major. LDC = M_blas = rows.
+
+  // Disable Tensor Cores for matrix-vector operations (N=1) as they are not supported
+  // by cublasGemmEx with mixed precision BF16->FP32 (confirmed by standalone test)
+  if (use_tensor_cores) {
+    Logger::info("[CUDA_KERNEL] matvec_bf16_f32_cuda: Tensor Cores requested, but disabling for matrix-vector (N=1) operation. Mixed precision BF16->FP32 with N=1 returns CUBLAS_STATUS_NOT_SUPPORTED in cublasGemmEx.");
+    use_tensor_cores = false;
   }
 
-  status = cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, rows, 1, cols, &alpha,
-                       mat_fp32_dev, cols, vec_f32_dev, cols, &beta,
-                       out_f32_dev, rows);
-
-  if (status != CUBLAS_STATUS_SUCCESS) {
-    Logger::error("cublasSgemm (BF16 fallback) failed with status: " +
-                  std::to_string(status));
-    gpuErrchk(cudaFree(mat_fp32_dev));
-    throw std::runtime_error("cublasSgemm (BF16 fallback) failed");
+  if (use_tensor_cores) {
+    // Set the cuBLAS stream explicitly
+    cublasStatus_t stream_status = cublasSetStream(handle, stream);
+    if (stream_status != CUBLAS_STATUS_SUCCESS) {
+      Logger::warning("[CUDA_KERNEL] cublasSetStream failed with status: " + std::to_string(stream_status) + ". Falling back to FP32 Sgemm.");
+      use_tensor_cores = false;
+    } else {
+      // Logger::debug("[CUDA_KERNEL] matvec_bf16_f32_cuda attempting cublasGemmEx with Tensor Cores.");
+      // Log all parameters for debugging
+      Logger::info("[CUDA_KERNEL] cublasGemmEx parameters: M=" + std::to_string(rows) + 
+                   ", N=1, K=" + std::to_string(cols) + 
+                   ", LDA=" + std::to_string(cols) + 
+                   ", LDB=" + std::to_string(cols) + 
+                   ", LDC=" + std::to_string(rows) +
+                   ", mat_ptr=" + std::to_string(reinterpret_cast<uintptr_t>(mat_bf16_dev)) +
+                   ", vec_ptr=" + std::to_string(reinterpret_cast<uintptr_t>(vec_f32_dev)) +
+                   ", out_ptr=" + std::to_string(reinterpret_cast<uintptr_t>(out_f32_dev)));
+      
+      // A is mat_bf16_dev (CUDA_R_16BF)
+      // B is vec_f32_dev (CUDA_R_32F)
+      // C is out_f32_dev (CUDA_R_32F)
+      // Computation type CUDA_R_32F
+      status = cublasGemmEx(handle,
+                            CUBLAS_OP_T,        // Transpose A (mat_bf16_dev)
+                            CUBLAS_OP_N,        // No transpose B (vec_f32_dev)
+                            rows,               // M
+                            1,                  // N
+                            cols,               // K
+                            &alpha,             // Alpha
+                            mat_bf16_dev,       // A
+                            CUDA_R_16BF,        // Atype
+                            cols,               // LDA (K_blas for A^T)
+                            vec_f32_dev,        // B
+                            CUDA_R_32F,         // Btype
+                            cols,               // LDB (K_blas for B_NoTrans)
+                            &beta,              // Beta
+                            out_f32_dev,        // C
+                            CUDA_R_32F,         // Ctype
+                            rows,               // LDC (M_blas)
+                            CUBLAS_COMPUTE_32F, // Compute type (use FP32 for accumulation for stability with BF16 inputs)
+                                                // For pure BF16 compute (if B was also BF16), could use CUBLAS_COMPUTE_32F_FAST_16BF
+                                                // Or CUBLAS_GEMM_DEFAULT_TENSOR_OP for algo to let cuBLAS pick
+                            CUBLAS_GEMM_DEFAULT_TENSOR_OP); // Algorithm
+    }
+    if (status != CUBLAS_STATUS_SUCCESS) {
+      Logger::warning("[CUDA_KERNEL] cublasGemmEx with Tensor Cores failed for matvec_bf16_f32_cuda: " + std::to_string(status) + ". Falling back to FP32 Sgemm.");
+      // Fallback to FP32 path
+      use_tensor_cores = false; // Ensure fallback path is taken
+    } else {
+      // Logger::debug("[CUDA_KERNEL] cublasGemmEx with Tensor Cores SUCCEEDED for matvec_bf16_f32_cuda.");
+      gpuErrchk(cudaGetLastError());
+      return; // Success with Tensor Cores
+    }
   }
 
-  gpuErrchk(cudaFree(mat_fp32_dev));
+  // Fallback path: Convert BF16 matrix to FP32 and use cublasSgemm
+  if (!use_tensor_cores) {
+    // Logger::debug("[CUDA_KERNEL] matvec_bf16_f32_cuda using fallback: BF16->FP32 conversion then Sgemm.");
+    // Set the cuBLAS stream for fallback path too
+    cublasStatus_t stream_status = cublasSetStream(handle, stream);
+    if (stream_status != CUBLAS_STATUS_SUCCESS) {
+      throw std::runtime_error("cublasSetStream failed in matvec_bf16_f32_cuda fallback: " + std::to_string(stream_status));
+    }
+    
+    float* mat_fp32_dev = nullptr;
+    size_t mat_size_elements = static_cast<size_t>(rows) * cols;
+    gpuErrchk(cudaMalloc(&mat_fp32_dev, mat_size_elements * sizeof(float)));
+
+    const int threads = 256;
+    const int blocks = (mat_size_elements + threads - 1) / threads;
+    convert_bf16_to_fp32_kernel<<<blocks, threads, 0, stream>>>(mat_bf16_dev, mat_fp32_dev, mat_size_elements);
+    gpuErrchk(cudaGetLastError());
+    // No explicit sync needed here if stream is managed correctly by caller or if Sgemm uses the same stream.
+
+    status = cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N,
+                           rows, 1, cols,
+                           &alpha,
+                           mat_fp32_dev, cols,   // A (mat_fp32_dev), LDA = K_blas = cols
+                           vec_f32_dev, cols,    // B (vec_f32_dev), LDB = K_blas = cols
+                           &beta,
+                           out_f32_dev, rows);   // C (out_f32_dev), LDC = M_blas = rows
+    
+    gpuErrchk(cudaFree(mat_fp32_dev));
+    if (status != CUBLAS_STATUS_SUCCESS) {
+      throw std::runtime_error("cuBLAS Sgemm failed in matvec_bf16_f32_cuda fallback: " + std::to_string(status));
+    }
+    gpuErrchk(cudaGetLastError());
+  }
 }
 
 void matvec_f32_f32_cuda(cublasHandle_t handle,
@@ -2420,3 +2535,184 @@ void attention_cuda_optimized(const float* Q_current_dev, const float* K_layer_c
     gpuErrchk(cudaGetLastError());
 }
 
+// New BF16 Tensor Core Matrix-Matrix Operations
+
+// Kernel for FP32 to BF16 conversion
+__global__ void convert_fp32_to_bf16_kernel(const float* __restrict__ fp32_in,
+                                            uint16_t* __restrict__ bf16_out,
+                                            size_t n_elements) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n_elements) {
+        bf16_out[idx] = float32_to_bf16_device(fp32_in[idx]);
+    }
+}
+
+// Host wrapper for FP32 to BF16 conversion
+void convert_fp32_to_bf16_cuda(const float* fp32_in_dev, uint16_t* bf16_out_dev, 
+                               size_t n_elements, cudaStream_t stream) {
+    if (n_elements == 0) return;
+    
+    const int threads = 256;
+    const int blocks = (n_elements + threads - 1) / threads;
+    
+    convert_fp32_to_bf16_kernel<<<blocks, threads, 0, stream>>>(fp32_in_dev, bf16_out_dev, n_elements);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+// BF16 x BF16 = BF16 Matrix-Matrix multiplication using Tensor Cores
+void gemm_bf16_bf16_cuda(cublasHandle_t handle, 
+                         bool transa_user, bool transb_user, 
+                         int m_user, int n_user, int k_user, 
+                         const float* alpha_user, 
+                         const uint16_t* A_bf16_user, int lda_user, 
+                         const uint16_t* B_bf16_user, int ldb_user, 
+                         const float* beta_user, 
+                         uint16_t* C_bf16_user, int ldc_user, 
+                         cudaStream_t stream) {
+    
+    cublasStatus_t status = cublasSetStream(handle, stream);
+    if (status != CUBLAS_STATUS_SUCCESS) {
+        Logger::error("cublasSetStream failed in gemm_bf16_bf16_cuda with error: " + std::to_string(status));
+        throw std::runtime_error("cublasSetStream failed");
+    }
+
+    // Log parameters for debugging
+    Logger::info("[GEMM_BF16_BF16] M=" + std::to_string(m_user) + ", N=" + std::to_string(n_user) + 
+                 ", K=" + std::to_string(k_user) + ", LDA=" + std::to_string(lda_user) + 
+                 ", LDB=" + std::to_string(ldb_user) + ", LDC=" + std::to_string(ldc_user));
+
+    cublasOperation_t opA_cublas, opB_cublas;
+    int M_cublas, N_cublas, K_cublas;
+    const uint16_t *A_cublas_ptr, *B_cublas_ptr;
+    int LDA_cublas, LDB_cublas;
+
+    // Apply the same column-major transformation as gemm_f32_f32_cuda
+    M_cublas = n_user;
+    N_cublas = m_user;
+    K_cublas = k_user;
+
+    A_cublas_ptr = B_bf16_user;    // B_user data is the first matrix for cuBLAS call
+    LDA_cublas = (transb_user) ? k_user : ldb_user;
+
+    B_cublas_ptr = A_bf16_user;    // A_user data is the second matrix for cuBLAS call
+    LDB_cublas = (transa_user) ? m_user : lda_user;
+
+    // Determine cuBLAS operations
+    if (!transa_user && !transb_user) {
+        opA_cublas = CUBLAS_OP_N; // for B_user
+        opB_cublas = CUBLAS_OP_N; // for A_user
+    } else if (transa_user && !transb_user) {
+        opA_cublas = CUBLAS_OP_N; // for B_user
+        opB_cublas = CUBLAS_OP_T; // for A_user (A^T)
+    } else if (!transa_user && transb_user) {
+        opA_cublas = CUBLAS_OP_T; // for B_user (B^T)
+        opB_cublas = CUBLAS_OP_N; // for A_user
+    } else { // transa_user && transb_user
+        opA_cublas = CUBLAS_OP_T; // for B_user (B^T)
+        opB_cublas = CUBLAS_OP_T; // for A_user (A^T)
+    }
+    
+    int LDC_cublas = ldc_user;
+
+    // Use cublasGemmEx with BF16 Tensor Cores
+    status = cublasGemmEx(handle, 
+                          opA_cublas, opB_cublas, 
+                          M_cublas, N_cublas, K_cublas, 
+                          alpha_user, 
+                          A_cublas_ptr, CUDA_R_16BF, LDA_cublas, 
+                          B_cublas_ptr, CUDA_R_16BF, LDB_cublas, 
+                          beta_user, 
+                          C_bf16_user, CUDA_R_16BF, LDC_cublas, 
+                          CUBLAS_COMPUTE_32F, // Use FP32 for accumulation for stability
+                          CUBLAS_GEMM_DEFAULT_TENSOR_OP); // Enable Tensor Cores
+
+    if (status != CUBLAS_STATUS_SUCCESS) {
+        Logger::error("cublasGemmEx BF16 failed in gemm_bf16_bf16_cuda with error: " + std::to_string(status));
+        Logger::error("GEMM params: transa=" + std::to_string(transa_user) + " transb=" + std::to_string(transb_user) + 
+                     " m=" + std::to_string(m_user) + " n=" + std::to_string(n_user) + " k=" + std::to_string(k_user));
+        throw std::runtime_error("cublasGemmEx BF16 failed");
+    }
+    
+    Logger::info("[GEMM_BF16_BF16] SUCCESS with Tensor Cores");
+}
+
+// FP32 x BF16 = FP32 Matrix-Matrix multiplication (for inputs that need to stay in FP32)
+void gemm_f32_to_bf16_f32_cuda(cublasHandle_t handle, 
+                               bool transa_user, bool transb_user, 
+                               int m_user, int n_user, int k_user, 
+                               const float* alpha_user, 
+                               const float* A_f32_user, int lda_user, 
+                               const uint16_t* B_bf16_user, int ldb_user, 
+                               const float* beta_user, 
+                               float* C_f32_user, int ldc_user, 
+                               cudaStream_t stream) {
+    
+    cublasStatus_t stream_status = cublasSetStream(handle, stream);
+    if (stream_status != CUBLAS_STATUS_SUCCESS) {
+        Logger::error("cublasSetStream failed in gemm_f32_to_bf16_f32_cuda with error: " + std::to_string(stream_status));
+        throw std::runtime_error("cublasSetStream failed");
+    }
+    
+    // Convert FP32 input A to BF16
+    size_t A_size = (size_t)m_user * k_user;
+    uint16_t* A_bf16_temp;
+    CUDA_CHECK(cudaMalloc(&A_bf16_temp, A_size * sizeof(uint16_t)));
+    convert_fp32_to_bf16_cuda(A_f32_user, A_bf16_temp, A_size, stream);
+    
+    // Allocate BF16 output buffer
+    size_t C_size = (size_t)m_user * n_user;
+    uint16_t* C_bf16_temp;
+    CUDA_CHECK(cudaMalloc(&C_bf16_temp, C_size * sizeof(uint16_t)));
+    
+    // Convert alpha and beta to BF16 for host-side pointers
+    uint16_t alpha_bf16_host = float32_to_bf16_host(*alpha_user);
+    uint16_t beta_bf16_host = float32_to_bf16_host(*beta_user);
+    
+    // DIRECT parameter mapping for cublasGemmEx
+    cublasOperation_t opA = transa_user ? CUBLAS_OP_T : CUBLAS_OP_N;
+    cublasOperation_t opB = transb_user ? CUBLAS_OP_T : CUBLAS_OP_N;
+    
+    // A is A_bf16_temp (converted from A_f32_user)
+    // B is B_bf16_user (already BF16)
+    // C is C_bf16_temp (will be converted back to C_f32_user)
+    cublasStatus_t status = cublasGemmEx(handle,
+        opA, opB,                
+        m_user, n_user, k_user, 
+        &alpha_bf16_host, // Pointer to BF16 host alpha
+        A_bf16_temp, CUDA_R_16BF, lda_user,
+        B_bf16_user, CUDA_R_16BF, ldb_user,
+        &beta_bf16_host,  // Pointer to BF16 host beta
+        C_bf16_temp, CUDA_R_16BF, ldc_user,
+        CUBLAS_COMPUTE_16F, // Compute in BF16 (A_16*B_16 -> C_16)
+        CUBLAS_GEMM_DEFAULT_TENSOR_OP
+    );
+    
+    if (status != CUBLAS_STATUS_SUCCESS) {
+        Logger::error("cublasGemmEx BF16 (A_bf16*B_bf16->C_bf16) failed in gemm_f32_to_bf16_f32_cuda with error: " + std::to_string(status));
+        Logger::error("GEMM params: transA=" + std::to_string(opA) + " transB=" + std::to_string(opB) + 
+                     " m=" + std::to_string(m_user) + " n=" + std::to_string(n_user) + " k=" + std::to_string(k_user) + 
+                     " lda=" + std::to_string(lda_user) + " ldb=" + std::to_string(ldb_user) + " ldc=" + std::to_string(ldc_user));
+        CUDA_CHECK(cudaFree(A_bf16_temp));
+        CUDA_CHECK(cudaFree(C_bf16_temp));
+        throw std::runtime_error("BF16 Tensor Core GEMM failed");
+    }
+    
+    // Convert BF16 result back to FP32
+    convert_bf16_to_fp32_cuda(C_bf16_temp, C_f32_user, C_size, stream);
+    
+    // Cleanup temporary buffers
+    CUDA_CHECK(cudaFree(A_bf16_temp));
+    CUDA_CHECK(cudaFree(C_bf16_temp));
+}
+
+// Host wrapper for BF16 to FP32 conversion
+void convert_bf16_to_fp32_cuda(const uint16_t* bf16_in_dev, float* fp32_out_dev, 
+                               size_t n_elements, cudaStream_t stream) {
+    if (n_elements == 0) return;
+    
+    const int threads = 256;
+    const int blocks = (n_elements + threads - 1) / threads;
+    
+    convert_bf16_to_fp32_kernel<<<blocks, threads, 0, stream>>>(bf16_in_dev, fp32_out_dev, n_elements);
+    CUDA_CHECK(cudaGetLastError());
+}

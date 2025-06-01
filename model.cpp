@@ -1045,7 +1045,7 @@ std::vector<float> TinyLlamaModel::forward_device(
   ensure_lm_head_dequantized();
   if (lm_head_dev_) { 
     matvec_bf16_f32_cuda(cublas_handle_, lm_head_dev_, x_norm_dev_, logits_dev_,
-                         vs, hs, stream);
+                         vs, hs, this->use_bf16_tensor_cores_, stream);
   } else {
     Logger::error("LM head (lm_head_dev_ for BF16) is null. Cannot calculate logits on GPU.");
     return {};
@@ -1584,9 +1584,9 @@ std::vector<float> TinyLlamaModel::forward_device_batch_prefill(
         ensure_f32_concatenated_weights_loaded();
         
         const float* w_q_layer_ptr = w_q_f32_dev_ + (size_t)l_gpu_idx * hidden_size * hidden_size;
-        gemm_f32_f32_cuda(cublas_handle_, false, true, num_tokens_in_batch, hidden_size, hidden_size, &alpha,
-                          d_batch_x_norm_out_attn, hidden_size, w_q_layer_ptr, hidden_size, &beta,
-                          d_batch_q_proj_out, hidden_size, stream);
+        smart_gemm_batch_cuda(false, true, num_tokens_in_batch, hidden_size, hidden_size, &alpha,
+                              d_batch_x_norm_out_attn, hidden_size, w_q_layer_ptr, hidden_size, &beta,
+                              d_batch_q_proj_out, hidden_size, stream, "Q_PROJ_GEN");
         Logger::info("[GPU_Q_PROJ] Layer=" + std::to_string(l_model_idx) + 
             ", input_ptr=" + Logger::ptrToString(d_batch_x_norm_out_attn) +
             ", weight_ptr=" + Logger::ptrToString(w_q_layer_ptr) +
@@ -1612,14 +1612,14 @@ std::vector<float> TinyLlamaModel::forward_device_batch_prefill(
         }
 
         const float* w_k_layer_ptr = w_k_f32_dev_ + (size_t)l_gpu_idx * n_kv_dim * hidden_size;
-        gemm_f32_f32_cuda(cublas_handle_, false, true, num_tokens_in_batch, n_kv_dim, hidden_size, &alpha,
-                          d_batch_x_norm_out_attn, hidden_size, w_k_layer_ptr, n_kv_dim, &beta,
-                          d_batch_k_proj_out, n_kv_dim, stream);
+        smart_gemm_batch_cuda(false, true, num_tokens_in_batch, n_kv_dim, hidden_size, &alpha,
+                              d_batch_x_norm_out_attn, hidden_size, w_k_layer_ptr, n_kv_dim, &beta,
+                              d_batch_k_proj_out, n_kv_dim, stream, "K_PROJ_GEN");
 
         const float* w_v_layer_ptr = w_v_f32_dev_ + (size_t)l_gpu_idx * n_kv_dim * hidden_size;
-        gemm_f32_f32_cuda(cublas_handle_, false, true, num_tokens_in_batch, n_kv_dim, hidden_size, &alpha,
-                          d_batch_x_norm_out_attn, hidden_size, w_v_layer_ptr, n_kv_dim, &beta,
-                          d_batch_v_proj_out, n_kv_dim, stream);
+        smart_gemm_batch_cuda(false, true, num_tokens_in_batch, n_kv_dim, hidden_size, &alpha,
+                              d_batch_x_norm_out_attn, hidden_size, w_v_layer_ptr, n_kv_dim, &beta,
+                              d_batch_v_proj_out, n_kv_dim, stream, "V_PROJ_GEN");
 
         if (l_model_idx == config_.num_cpu_offload_layers && num_tokens_in_batch > 0 && head_dim > 0) { // Existing logging condition
             int log_elements_rope = std::min(3, head_dim);
@@ -1697,9 +1697,9 @@ std::vector<float> TinyLlamaModel::forward_device_batch_prefill(
                                      kv_cache->max_seq_len_config_, config_.num_attention_heads, 
                                      config_.num_key_value_heads, head_dim, current_attention_scale, stream, nullptr);        
         const float* w_o_layer_ptr = w_o_f32_dev_ + (size_t)l_gpu_idx * hidden_size * hidden_size;
-        gemm_f32_f32_cuda(cublas_handle_, false, true, num_tokens_in_batch, hidden_size, hidden_size, &alpha,
-                          d_batch_attn_heads_concat_out, hidden_size, w_o_layer_ptr, hidden_size, &beta,
-                          d_batch_attn_final_proj_out, hidden_size, stream);
+        smart_gemm_batch_cuda(false, true, num_tokens_in_batch, hidden_size, hidden_size, &alpha,
+                              d_batch_attn_heads_concat_out, hidden_size, w_o_layer_ptr, hidden_size, &beta,
+                              d_batch_attn_final_proj_out, hidden_size, stream, "O_PROJ_GEN");
 
         if (l_model_idx == config_.num_cpu_offload_layers && num_tokens_in_batch > 1 && hidden_size > 0) { /* ... */ }
         add_residual_batch_cuda(d_batch_residual_ffn_in, d_batch_attn_final_proj_out, d_batch_residual_attn_in,
@@ -1715,17 +1715,17 @@ std::vector<float> TinyLlamaModel::forward_device_batch_prefill(
 
 
         const float* w1_layer_ptr = w_gate_f32_dev_ + (size_t)l_gpu_idx * hidden_size * ffn_intermediate_dim;
-        gemm_f32_f32_cuda(cublas_handle_, false, true, num_tokens_in_batch, ffn_intermediate_dim, hidden_size, &alpha,
-                          d_batch_x_norm_out_ffn, hidden_size, w1_layer_ptr, ffn_intermediate_dim, &beta,
-                          d_batch_ffn_gate_proj_out, ffn_intermediate_dim, stream);
+        smart_gemm_batch_cuda(false, true, num_tokens_in_batch, ffn_intermediate_dim, hidden_size, &alpha,
+                              d_batch_x_norm_out_ffn, hidden_size, w1_layer_ptr, ffn_intermediate_dim, &beta,
+                              d_batch_ffn_gate_proj_out, ffn_intermediate_dim, stream, "FFN_GATE_PROJ_GEN");
         // FFN_GATE_PROJ_OUT LOGGING (Unchanged) - Logging Point 4
         if (l_model_idx == config_.num_cpu_offload_layers && num_tokens_in_batch > 1 && ffn_intermediate_dim > 0) { /* ... */ }
 
 
         const float* w3_layer_ptr = w_up_f32_dev_ + (size_t)l_gpu_idx * hidden_size * ffn_intermediate_dim;
-        gemm_f32_f32_cuda(cublas_handle_, false, true, num_tokens_in_batch, ffn_intermediate_dim, hidden_size, &alpha,
-                          d_batch_x_norm_out_ffn, hidden_size, w3_layer_ptr, ffn_intermediate_dim, &beta,
-                          d_batch_ffn_up_proj_out, ffn_intermediate_dim, stream);
+        smart_gemm_batch_cuda(false, true, num_tokens_in_batch, ffn_intermediate_dim, hidden_size, &alpha,
+                              d_batch_x_norm_out_ffn, hidden_size, w3_layer_ptr, ffn_intermediate_dim, &beta,
+                              d_batch_ffn_up_proj_out, ffn_intermediate_dim, stream, "FFN_UP_PROJ_GEN");
         // FFN_UP_PROJ_OUT LOGGING (Unchanged) - Logging Point 5
         if (l_model_idx == config_.num_cpu_offload_layers && num_tokens_in_batch > 1 && ffn_intermediate_dim > 0) { /* ... */ }
 
@@ -1737,9 +1737,9 @@ std::vector<float> TinyLlamaModel::forward_device_batch_prefill(
 
 
         const float* w2_layer_ptr = w_down_f32_dev_ + (size_t)l_gpu_idx * ffn_intermediate_dim * hidden_size;
-        gemm_f32_f32_cuda(cublas_handle_, false, true, num_tokens_in_batch, hidden_size, ffn_intermediate_dim, &alpha,
-                          d_batch_ffn_swiglu_out, ffn_intermediate_dim, w2_layer_ptr, hidden_size, &beta,
-                          d_batch_ffn_down_proj_out, hidden_size, stream);
+        smart_gemm_batch_cuda(false, true, num_tokens_in_batch, hidden_size, ffn_intermediate_dim, &alpha,
+                              d_batch_ffn_swiglu_out, ffn_intermediate_dim, w2_layer_ptr, hidden_size, &beta,
+                              d_batch_ffn_down_proj_out, hidden_size, stream, "FFN_DOWN_PROJ_GEN");
         // FFN_DOWN_PROJ_OUT LOGGING (Unchanged) - Logging Point 7
         if (l_model_idx == config_.num_cpu_offload_layers && num_tokens_in_batch > 1 && hidden_size > 0) { /* ... */ }
         
@@ -1918,19 +1918,19 @@ std::vector<std::vector<float>> TinyLlamaModel::forward_device_batch_generation(
         ensure_f32_concatenated_weights_loaded();
         
         const float* w_q_layer_ptr = w_q_f32_dev_ + (size_t)l_gpu_idx * hidden_size * hidden_size;
-        gemm_f32_f32_cuda(cublas_handle_, false, true, num_tokens_in_batch, hidden_size, hidden_size, &alpha,
-                          d_batch_x_norm_out_attn, hidden_size, w_q_layer_ptr, hidden_size, &beta,
-                          d_batch_q_proj_out, hidden_size, stream);
+        smart_gemm_batch_cuda(false, true, num_tokens_in_batch, hidden_size, hidden_size, &alpha,
+                              d_batch_x_norm_out_attn, hidden_size, w_q_layer_ptr, hidden_size, &beta,
+                              d_batch_q_proj_out, hidden_size, stream, "Q_PROJ_GEN");
 
         const float* w_k_layer_ptr = w_k_f32_dev_ + (size_t)l_gpu_idx * n_kv_dim * hidden_size;
-        gemm_f32_f32_cuda(cublas_handle_, false, true, num_tokens_in_batch, n_kv_dim, hidden_size, &alpha,
-                          d_batch_x_norm_out_attn, hidden_size, w_k_layer_ptr, n_kv_dim, &beta,
-                          d_batch_k_proj_out, n_kv_dim, stream);
+        smart_gemm_batch_cuda(false, true, num_tokens_in_batch, n_kv_dim, hidden_size, &alpha,
+                              d_batch_x_norm_out_attn, hidden_size, w_k_layer_ptr, n_kv_dim, &beta,
+                              d_batch_k_proj_out, n_kv_dim, stream, "K_PROJ_GEN");
 
         const float* w_v_layer_ptr = w_v_f32_dev_ + (size_t)l_gpu_idx * n_kv_dim * hidden_size;
-        gemm_f32_f32_cuda(cublas_handle_, false, true, num_tokens_in_batch, n_kv_dim, hidden_size, &alpha,
-                          d_batch_x_norm_out_attn, hidden_size, w_v_layer_ptr, n_kv_dim, &beta,
-                          d_batch_v_proj_out, n_kv_dim, stream);
+        smart_gemm_batch_cuda(false, true, num_tokens_in_batch, n_kv_dim, hidden_size, &alpha,
+                              d_batch_x_norm_out_attn, hidden_size, w_v_layer_ptr, n_kv_dim, &beta,
+                              d_batch_v_proj_out, n_kv_dim, stream, "V_PROJ_GEN");
 
         for (int token_idx = 0; token_idx < num_tokens_in_batch; ++token_idx) {
             int current_pos = token_positions[token_idx];
@@ -2017,9 +2017,9 @@ for (int token_idx = 0; token_idx < num_tokens_in_batch; ++token_idx) {
         }
 
         const float* w_o_layer_ptr = w_o_f32_dev_ + (size_t)l_gpu_idx * hidden_size * hidden_size;
-        gemm_f32_f32_cuda(cublas_handle_, false, true, num_tokens_in_batch, hidden_size, hidden_size, &alpha,
-                          d_batch_attn_heads_concat_out, hidden_size, w_o_layer_ptr, hidden_size, &beta,
-                          d_batch_attn_final_proj_out, hidden_size, stream);
+        smart_gemm_batch_cuda(false, true, num_tokens_in_batch, hidden_size, hidden_size, &alpha,
+                              d_batch_attn_heads_concat_out, hidden_size, w_o_layer_ptr, hidden_size, &beta,
+                              d_batch_attn_final_proj_out, hidden_size, stream, "O_PROJ");
 
         add_residual_batch_cuda(d_batch_residual_ffn_in, d_batch_attn_final_proj_out, d_batch_residual_attn_in,
                                 num_tokens_in_batch, hidden_size, stream);
@@ -2029,22 +2029,22 @@ for (int token_idx = 0; token_idx < num_tokens_in_batch; ++token_idx) {
                            num_tokens_in_batch, hidden_size, config_.rms_norm_eps, stream);
 
         const float* w1_layer_ptr = w_gate_f32_dev_ + (size_t)l_gpu_idx * hidden_size * ffn_intermediate_dim;
-        gemm_f32_f32_cuda(cublas_handle_, false, true, num_tokens_in_batch, ffn_intermediate_dim, hidden_size, &alpha,
-                          d_batch_x_norm_out_ffn, hidden_size, w1_layer_ptr, ffn_intermediate_dim, &beta,
-                          d_batch_ffn_gate_proj_out, ffn_intermediate_dim, stream);
+        smart_gemm_batch_cuda(false, true, num_tokens_in_batch, ffn_intermediate_dim, hidden_size, &alpha,
+                              d_batch_x_norm_out_ffn, hidden_size, w1_layer_ptr, ffn_intermediate_dim, &beta,
+                              d_batch_ffn_gate_proj_out, ffn_intermediate_dim, stream, "FFN_GATE_PROJ_GEN");
 
         const float* w3_layer_ptr = w_up_f32_dev_ + (size_t)l_gpu_idx * hidden_size * ffn_intermediate_dim;
-        gemm_f32_f32_cuda(cublas_handle_, false, true, num_tokens_in_batch, ffn_intermediate_dim, hidden_size, &alpha,
-                          d_batch_x_norm_out_ffn, hidden_size, w3_layer_ptr, ffn_intermediate_dim, &beta,
-                          d_batch_ffn_up_proj_out, ffn_intermediate_dim, stream);
+        smart_gemm_batch_cuda(false, true, num_tokens_in_batch, ffn_intermediate_dim, hidden_size, &alpha,
+                              d_batch_x_norm_out_ffn, hidden_size, w3_layer_ptr, ffn_intermediate_dim, &beta,
+                              d_batch_ffn_up_proj_out, ffn_intermediate_dim, stream, "FFN_UP_PROJ_GEN");
 
         swiglu_batch_cuda(d_batch_ffn_swiglu_out, d_batch_ffn_gate_proj_out, d_batch_ffn_up_proj_out,
                           num_tokens_in_batch, ffn_intermediate_dim, stream);
 
         const float* w2_layer_ptr = w_down_f32_dev_ + (size_t)l_gpu_idx * ffn_intermediate_dim * hidden_size;
-        gemm_f32_f32_cuda(cublas_handle_, false, true, num_tokens_in_batch, hidden_size, ffn_intermediate_dim, &alpha,
-                          d_batch_ffn_swiglu_out, ffn_intermediate_dim, w2_layer_ptr, hidden_size, &beta,
-                          d_batch_ffn_down_proj_out, hidden_size, stream);
+        smart_gemm_batch_cuda(false, true, num_tokens_in_batch, hidden_size, ffn_intermediate_dim, &alpha,
+                              d_batch_ffn_swiglu_out, ffn_intermediate_dim, w2_layer_ptr, hidden_size, &beta,
+                              d_batch_ffn_down_proj_out, hidden_size, stream, "FFN_DOWN_PROJ_GEN");
 
         add_residual_batch_cuda(d_batch_layer_output, d_batch_ffn_down_proj_out, d_batch_residual_ffn_in,
                                 num_tokens_in_batch, hidden_size, stream);
@@ -2062,9 +2062,9 @@ for (int token_idx = 0; token_idx < num_tokens_in_batch; ++token_idx) {
     gpuErrchk(cudaMalloc(&d_logits_batch, (size_t)num_tokens_in_batch * vocab_size * sizeof(float)));
     
     // Use GEMM instead of individual MatVec calls for efficiency
-    gemm_f32_f32_cuda(cublas_handle_, false, true, num_tokens_in_batch, vocab_size, hidden_size, &alpha,
-                      d_batch_x_norm_out_attn, hidden_size, lm_head_f32_dev_, vocab_size, &beta,
-                      d_logits_batch, vocab_size, stream);
+    smart_gemm_batch_cuda(false, true, num_tokens_in_batch, vocab_size, hidden_size, &alpha,
+                          d_batch_x_norm_out_attn, hidden_size, lm_head_f32_dev_, vocab_size, &beta,
+                          d_logits_batch, vocab_size, stream, "LM_HEAD_GEN");
 
     // Copy logits back to host for all tokens
     std::vector<std::vector<float>> all_logits(num_tokens_in_batch, std::vector<float>(vocab_size));
@@ -2104,3 +2104,115 @@ std::vector<float> TinyLlamaModel::forward_cpu_batch(
         prompt_lengths
     );
 }
+
+// Smart GEMM wrapper that chooses between BF16 Tensor Cores and FP32 based on batch size
+void TinyLlamaModel::smart_gemm_batch_cuda(bool transa_user, bool transb_user, 
+                                           int m_user, int n_user, int k_user, 
+                                           const float* alpha_user, 
+                                           const float* A_f32_user, int lda_user, 
+                                           const float* B_f32_user, int ldb_user, 
+                                           const float* beta_user, 
+                                           float* C_f32_user, int ldc_user, 
+                                           cudaStream_t stream,
+                                           const char* operation_name) {
+    
+    // Tensor Cores are most beneficial for larger batch sizes
+    const int tensor_core_threshold = 4; // Use BF16 Tensor Cores when batch size >= 4
+    bool use_tensor_cores = use_bf16_tensor_cores_ && (m_user >= tensor_core_threshold);
+    
+    // Determine which BF16 weight to use based on operation name and weight pointer
+    uint16_t* bf16_weight_ptr = nullptr;
+    
+    if (use_tensor_cores) {
+        Logger::info("[SMART_GEMM] Using BF16 Tensor Cores for " + std::string(operation_name) + 
+                     " (batch_size=" + std::to_string(m_user) + " >= " + std::to_string(tensor_core_threshold) + ")");
+        
+        // Ensure BF16 weights are loaded
+        ensure_bf16_concatenated_weights_loaded();
+        
+        // Map F32 weight pointer to corresponding BF16 weight pointer
+        if (B_f32_user == w_q_f32_dev_) {
+            bf16_weight_ptr = w_q_bf16_dev_;
+        } else if (B_f32_user == w_k_f32_dev_) {
+            bf16_weight_ptr = w_k_bf16_dev_;
+        } else if (B_f32_user == w_v_f32_dev_) {
+            bf16_weight_ptr = w_v_bf16_dev_;
+        } else if (B_f32_user == w_o_f32_dev_) {
+            bf16_weight_ptr = w_o_bf16_dev_;
+        } else if (B_f32_user == w_gate_f32_dev_) {
+            bf16_weight_ptr = w_gate_bf16_dev_;
+        } else if (B_f32_user == w_up_f32_dev_) {
+            bf16_weight_ptr = w_up_bf16_dev_;
+        } else if (B_f32_user == w_down_f32_dev_) {
+            bf16_weight_ptr = w_down_bf16_dev_;
+        } else {
+            // Map layer-specific pointers by calculating offset from base pointer
+            size_t offset_bytes = 0;
+            bool found = false;
+            
+            // Check if it's a layer-specific pointer within the concatenated weights
+            if (B_f32_user >= w_q_f32_dev_ && B_f32_user < (w_q_f32_dev_ + config_.num_hidden_layers * config_.hidden_size * config_.hidden_size)) {
+                offset_bytes = (B_f32_user - w_q_f32_dev_) * sizeof(float);
+                bf16_weight_ptr = w_q_bf16_dev_ + (offset_bytes / sizeof(uint16_t));
+                found = true;
+            } else if (B_f32_user >= w_k_f32_dev_ && w_k_f32_dev_ && B_f32_user < (w_k_f32_dev_ + config_.num_hidden_layers * config_.hidden_size * config_.num_key_value_heads * (config_.hidden_size / config_.num_attention_heads))) {
+                offset_bytes = (B_f32_user - w_k_f32_dev_) * sizeof(float);
+                bf16_weight_ptr = w_k_bf16_dev_ + (offset_bytes / sizeof(uint16_t));
+                found = true;
+            } else if (B_f32_user >= w_v_f32_dev_ && w_v_f32_dev_ && B_f32_user < (w_v_f32_dev_ + config_.num_hidden_layers * config_.hidden_size * config_.num_key_value_heads * (config_.hidden_size / config_.num_attention_heads))) {
+                offset_bytes = (B_f32_user - w_v_f32_dev_) * sizeof(float);
+                bf16_weight_ptr = w_v_bf16_dev_ + (offset_bytes / sizeof(uint16_t));
+                found = true;
+            } else if (B_f32_user >= w_o_f32_dev_ && w_o_f32_dev_ && B_f32_user < (w_o_f32_dev_ + config_.num_hidden_layers * config_.hidden_size * config_.hidden_size)) {
+                offset_bytes = (B_f32_user - w_o_f32_dev_) * sizeof(float);
+                bf16_weight_ptr = w_o_bf16_dev_ + (offset_bytes / sizeof(uint16_t));
+                found = true;
+            } else if (B_f32_user >= w_gate_f32_dev_ && w_gate_f32_dev_ && B_f32_user < (w_gate_f32_dev_ + config_.num_hidden_layers * config_.hidden_size * config_.intermediate_size)) {
+                offset_bytes = (B_f32_user - w_gate_f32_dev_) * sizeof(float);
+                bf16_weight_ptr = w_gate_bf16_dev_ + (offset_bytes / sizeof(uint16_t));
+                found = true;
+            } else if (B_f32_user >= w_up_f32_dev_ && w_up_f32_dev_ && B_f32_user < (w_up_f32_dev_ + config_.num_hidden_layers * config_.hidden_size * config_.intermediate_size)) {
+                offset_bytes = (B_f32_user - w_up_f32_dev_) * sizeof(float);
+                bf16_weight_ptr = w_up_bf16_dev_ + (offset_bytes / sizeof(uint16_t));
+                found = true;
+            } else if (B_f32_user >= w_down_f32_dev_ && w_down_f32_dev_ && B_f32_user < (w_down_f32_dev_ + config_.num_hidden_layers * config_.intermediate_size * config_.hidden_size)) {
+                offset_bytes = (B_f32_user - w_down_f32_dev_) * sizeof(float);
+                bf16_weight_ptr = w_down_bf16_dev_ + (offset_bytes / sizeof(uint16_t));
+                found = true;
+            }
+            
+            if (!found) {
+                // If we can't identify the weight, fall back to FP32
+                Logger::warning("[SMART_GEMM] Unknown weight pointer for " + std::string(operation_name) + 
+                               ", falling back to FP32");
+                use_tensor_cores = false;
+            }
+        }
+        
+        if (use_tensor_cores && bf16_weight_ptr) {
+            try {
+                // Use mixed precision: FP32 input x BF16 weights = FP32 output
+                gemm_f32_to_bf16_f32_cuda(cublas_handle_, transa_user, transb_user, 
+                                          m_user, n_user, k_user, alpha_user, 
+                                          A_f32_user, lda_user, bf16_weight_ptr, ldb_user, 
+                                          beta_user, C_f32_user, ldc_user, stream);
+                Logger::info("[SMART_GEMM] Successfully used BF16 Tensor Cores for " + std::string(operation_name));
+                return;
+            } catch (const std::exception& e) {
+                Logger::warning("[SMART_GEMM] BF16 Tensor Cores failed for " + std::string(operation_name) + 
+                               ": " + e.what() + ". Falling back to FP32.");
+                use_tensor_cores = false;
+            }
+        }
+    }
+    
+    // Fallback to standard FP32 GEMM
+    Logger::info("[SMART_GEMM] Using FP32 GEMM for " + std::string(operation_name) + 
+                 " (batch_size=" + std::to_string(m_user) + " < " + std::to_string(tensor_core_threshold) + 
+                 " or Tensor Cores unavailable)");
+    gemm_f32_f32_cuda(cublas_handle_, transa_user, transb_user, 
+                      m_user, n_user, k_user, alpha_user, 
+                      A_f32_user, lda_user, B_f32_user, ldb_user, 
+                      beta_user, C_f32_user, ldc_user, stream);
+}
+

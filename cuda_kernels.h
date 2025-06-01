@@ -418,6 +418,7 @@ void lookup_embedding_cuda(const void* table_dev, float* output_dev,
  * @param out_f32_dev Output vector (device pointer)
  * @param rows Number of matrix rows
  * @param cols Number of matrix columns
+ * @param use_tensor_cores New flag
  * @param stream CUDA stream (optional)
  */
 void matvec_bf16_f32_cuda(cublasHandle_t handle,
@@ -425,6 +426,7 @@ void matvec_bf16_f32_cuda(cublasHandle_t handle,
                          const float* vec_f32_dev,
                          float* out_f32_dev,
                          int rows, int cols,
+                         bool use_tensor_cores,
                          cudaStream_t stream = 0);
 
 /**
@@ -607,6 +609,38 @@ void attention_cuda_optimized(const float* Q_current_dev, const float* K_layer_c
                              int num_heads, int current_seq_len, int head_dim,
                              float scale, int cache_max_seq_len, int cache_num_kv_heads,
                              cudaStream_t stream = 0);
+
+// New BF16 Tensor Core Matrix-Matrix Operations
+void gemm_bf16_bf16_cuda(cublasHandle_t handle, 
+                         bool transa_user, bool transb_user, 
+                         int m_user, int n_user, int k_user, 
+                         const float* alpha_user, 
+                         const uint16_t* A_bf16_user, int lda_user, 
+                         const uint16_t* B_bf16_user, int ldb_user, 
+                         const float* beta_user, 
+                         uint16_t* C_bf16_user, int ldc_user, 
+                         cudaStream_t stream);
+
+void gemm_f32_to_bf16_f32_cuda(cublasHandle_t handle, 
+                               bool transa_user, bool transb_user, 
+                               int m_user, int n_user, int k_user, 
+                               const float* alpha_user, 
+                               const float* A_f32_user, int lda_user, 
+                               const uint16_t* B_bf16_user, int ldb_user, 
+                               const float* beta_user, 
+                               float* C_f32_user, int ldc_user, 
+                               cudaStream_t stream);
+
+// Conversion utilities
+void convert_fp32_to_bf16_cuda(const float* fp32_in_dev, uint16_t* bf16_out_dev, 
+                               size_t n_elements, cudaStream_t stream);
+
+void convert_bf16_to_fp32_cuda(const uint16_t* bf16_in_dev, float* fp32_out_dev, 
+                               size_t n_elements, cudaStream_t stream);
+
+__global__ void convert_fp32_to_bf16_kernel(const float* __restrict__ fp32_in,
+                                            uint16_t* __restrict__ bf16_out,
+                                            size_t n_elements);
 
 #endif // HAS_CUDA
 

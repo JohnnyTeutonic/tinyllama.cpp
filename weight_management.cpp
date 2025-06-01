@@ -413,14 +413,81 @@ void TinyLlamaModel::ensure_f32_concatenated_weights_loaded() {
   }
 
   f32_concatenated_weights_loaded_ = true;
-  Logger::info("F32 concatenated weights loaded successfully on-demand with immediate memory cleanup");
+  Logger::info("Successfully loaded all concatenated F32 weights for GPU layers");
 }
-#else
-void TinyLlamaModel::ensure_f32_concatenated_weights_loaded() {
-  // CPU-only build - this function is a no-op
-  Logger::info("CPU-only build: ensure_f32_concatenated_weights_loaded is a no-op");
+
+// BF16 Tensor Core weight management functions
+void TinyLlamaModel::ensure_bf16_concatenated_weights_loaded() {
+  Logger::info("Loading concatenated BF16 weights for Tensor Core acceleration");
+  
+  int active_num_gpu_layers = config_.num_hidden_layers - config_.num_cpu_offload_layers;
+  if (bf16_concatenated_weights_loaded_ || active_num_gpu_layers == 0) {
+    return;
+  }
+
+  Logger::info("Converting F32 weights to BF16 for Tensor Core acceleration");
+
+  // Ensure F32 weights are loaded first
+  ensure_f32_concatenated_weights_loaded();
+
+  int hs = config_.hidden_size;
+  int is = config_.intermediate_size;
+  int kv_dim = (hs / config_.num_attention_heads) * config_.num_key_value_heads;
+  
+  size_t layer_q_size = (size_t)hs*hs;
+  size_t layer_k_size = (size_t)kv_dim*hs; 
+  size_t layer_v_size = (size_t)kv_dim*hs;
+  size_t layer_o_size = (size_t)hs*hs;
+  size_t layer_gate_size = (size_t)is*hs;
+  size_t layer_up_size = (size_t)is*hs;
+  size_t layer_down_size = (size_t)hs*is;
+
+  // Convert F32 weights to BF16 on GPU
+  auto convert_f32_to_bf16 = [&](float* f32_dev_ptr, uint16_t*& bf16_dev_ptr, size_t total_elements, const std::string& weight_name) {
+    if (f32_dev_ptr && total_elements > 0) {
+      if (bf16_dev_ptr) { cudaFree(bf16_dev_ptr); bf16_dev_ptr = nullptr; }
+      gpuErrchk(cudaMalloc(&bf16_dev_ptr, total_elements * sizeof(uint16_t)));
+      convert_fp32_to_bf16_cuda(f32_dev_ptr, bf16_dev_ptr, total_elements, 0);
+      gpuErrchk(cudaDeviceSynchronize());
+      Logger::info("Converted " + weight_name + " from F32 to BF16 on GPU for Tensor Cores");
+    }
+  };
+
+  size_t total_q_elements = active_num_gpu_layers * layer_q_size;
+  size_t total_k_elements = active_num_gpu_layers * layer_k_size;
+  size_t total_v_elements = active_num_gpu_layers * layer_v_size;
+  size_t total_o_elements = active_num_gpu_layers * layer_o_size;
+  size_t total_gate_elements = active_num_gpu_layers * layer_gate_size;
+  size_t total_up_elements = active_num_gpu_layers * layer_up_size;
+  size_t total_down_elements = active_num_gpu_layers * layer_down_size;
+
+  convert_f32_to_bf16(w_q_f32_dev_, w_q_bf16_dev_, total_q_elements, "Q Proj");
+  convert_f32_to_bf16(w_k_f32_dev_, w_k_bf16_dev_, total_k_elements, "K Proj");
+  convert_f32_to_bf16(w_v_f32_dev_, w_v_bf16_dev_, total_v_elements, "V Proj");
+  convert_f32_to_bf16(w_o_f32_dev_, w_o_bf16_dev_, total_o_elements, "O Proj");
+  convert_f32_to_bf16(w_gate_f32_dev_, w_gate_bf16_dev_, total_gate_elements, "Gate Proj");
+  convert_f32_to_bf16(w_up_f32_dev_, w_up_bf16_dev_, total_up_elements, "Up Proj");
+  convert_f32_to_bf16(w_down_f32_dev_, w_down_bf16_dev_, total_down_elements, "Down Proj");
+
+  bf16_concatenated_weights_loaded_ = true;
+  Logger::info("Successfully loaded all concatenated BF16 weights for Tensor Core acceleration");
 }
-#endif // HAS_CUDA
+
+void TinyLlamaModel::free_bf16_concatenated_weights() {
+  if (!bf16_concatenated_weights_loaded_) return;
+  
+  Logger::info("Freeing BF16 concatenated weights");
+  if (w_q_bf16_dev_) { cudaFree(w_q_bf16_dev_); w_q_bf16_dev_ = nullptr; }
+  if (w_k_bf16_dev_) { cudaFree(w_k_bf16_dev_); w_k_bf16_dev_ = nullptr; }
+  if (w_v_bf16_dev_) { cudaFree(w_v_bf16_dev_); w_v_bf16_dev_ = nullptr; }
+  if (w_o_bf16_dev_) { cudaFree(w_o_bf16_dev_); w_o_bf16_dev_ = nullptr; }
+  if (w_gate_bf16_dev_) { cudaFree(w_gate_bf16_dev_); w_gate_bf16_dev_ = nullptr; }
+  if (w_up_bf16_dev_) { cudaFree(w_up_bf16_dev_); w_up_bf16_dev_ = nullptr; }
+  if (w_down_bf16_dev_) { cudaFree(w_down_bf16_dev_); w_down_bf16_dev_ = nullptr; }
+  
+  bf16_concatenated_weights_loaded_ = false;
+  Logger::info("Successfully freed all BF16 concatenated weights");
+}
 
 void TinyLlamaModel::ensure_layer_weights_on_gpu(int layer_idx) {
 #ifdef HAS_CUDA
@@ -866,4 +933,20 @@ void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
                std::to_string(num_tensors) + " tensors processed successfully (errors: " + 
                std::to_string(error_count.load()) + ") with ultra-optimized parallel mapping");
 }
+
+#else // HAS_CUDA
+
+void TinyLlamaModel::ensure_f32_concatenated_weights_loaded() {
+  Logger::info("CPU-only build: ensure_f32_concatenated_weights_loaded is a no-op");
+}
+
+void TinyLlamaModel::ensure_bf16_concatenated_weights_loaded() {
+  Logger::info("CPU-only build: ensure_bf16_concatenated_weights_loaded is a no-op");
+}
+
+void TinyLlamaModel::free_bf16_concatenated_weights() {
+  Logger::info("CPU-only build: free_bf16_concatenated_weights is a no-op");
+}
+
+#endif // HAS_CUDA
 

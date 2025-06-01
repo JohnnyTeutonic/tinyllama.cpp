@@ -338,6 +338,22 @@ class TinyLlamaModel {
   void free_layer_gpu_weights(int layer_idx);
   void clear_layer_dequantized_weights(int layer_idx);
   void initialize_gpu_and_rope();
+
+  // BF16 Tensor Core weight management
+  void ensure_bf16_concatenated_weights_loaded();
+  void free_bf16_concatenated_weights();
+  
+  // Smart GEMM wrapper that chooses between BF16 Tensor Cores and FP32 based on batch size
+  void smart_gemm_batch_cuda(bool transa_user, bool transb_user, 
+                             int m_user, int n_user, int k_user, 
+                             const float* alpha_user, 
+                             const float* A_f32_user, int lda_user, 
+                             const float* B_f32_user, int ldb_user, 
+                             const float* beta_user, 
+                             float* C_f32_user, int ldc_user, 
+                             cudaStream_t stream,
+                             const char* operation_name = "GEMM");
+
 #ifdef HAS_CUDA
   /**
    * @brief Performs forward pass on GPU for the layers designated to run on GPU.
@@ -462,6 +478,7 @@ class TinyLlamaModel {
 
  private:
   ModelConfig config_;
+  bool use_bf16_tensor_cores_ = false;
 
   std::vector<uint16_t> embed_tokens;
   std::vector<uint16_t> lm_head;
@@ -521,6 +538,17 @@ class TinyLlamaModel {
   size_t selective_dequant_buffer_size_ = 0;         // Size of selective buffers in elements
 
   // GPU workspace buffers
+
+  // BF16 weight device pointers for Tensor Core acceleration
+  uint16_t* w_q_bf16_dev_ = nullptr;
+  uint16_t* w_k_bf16_dev_ = nullptr;
+  uint16_t* w_v_bf16_dev_ = nullptr;
+  uint16_t* w_o_bf16_dev_ = nullptr;
+  uint16_t* w_gate_bf16_dev_ = nullptr;
+  uint16_t* w_up_bf16_dev_ = nullptr;
+  uint16_t* w_down_bf16_dev_ = nullptr;
+  bool bf16_concatenated_weights_loaded_ = false;
+
 #endif
 
   std::vector<std::pair<float, float>> precomputed_freqs_cis_;

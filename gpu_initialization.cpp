@@ -94,6 +94,27 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
         throw std::runtime_error("Failed to initialize cuBLAS: " + std::to_string(cublas_status));
     }
     Logger::info("cuBLAS handle created successfully.");
+
+    // Check for BF16 Tensor Core support
+    this->use_bf16_tensor_cores_ = false; // Default to false
+    cudaDeviceProp props;
+    int current_device;
+    gpuErrchk(cudaGetDevice(&current_device));
+    gpuErrchk(cudaGetDeviceProperties(&props, current_device));
+
+    bool has_bf16_tensor_core_hw = ((props.major == 7 && props.minor == 5) || props.major >= 8);
+    bool dimensions_ok_for_tensor_cores = (config_.hidden_size % 8 == 0) && (config_.vocab_size % 4 == 0);
+
+    if (has_bf16_tensor_core_hw) {
+        if (dimensions_ok_for_tensor_cores) {
+            Logger::info("GPU " + std::string(props.name) + " (CC " + std::to_string(props.major) + "." + std::to_string(props.minor) + ") supports BF16 Tensor Cores AND model dimensions (hs: " + std::to_string(config_.hidden_size) + ", vs: " + std::to_string(config_.vocab_size) + ") are compatible. Enabling Tensor Core path for matvec_bf16_f32.");
+            this->use_bf16_tensor_cores_ = true;
+        } else {
+            Logger::info("GPU " + std::string(props.name) + " (CC " + std::to_string(props.major) + "." + std::to_string(props.minor) + ") supports BF16 Tensor Cores, BUT model dimensions (hs: " + std::to_string(config_.hidden_size) + " (must be div by 8), vs: " + std::to_string(config_.vocab_size) + " (must be div by 4)) are NOT compatible. Disabling Tensor Core path for matvec_bf16_f32.");
+        }
+    } else {
+        Logger::info("GPU " + std::string(props.name) + " (CC " + std::to_string(props.major) + "." + std::to_string(props.minor) + ") does not meet criteria for BF16 Tensor Core use (requires CC >= 7.5). Disabling Tensor Core path for matvec_bf16_f32.");
+    }
   }
 
   if (final_norm_f32.empty() && !final_norm.empty()) {
@@ -498,6 +519,10 @@ void TinyLlamaModel::initialize_gpu_and_rope() {
   
   SAFE_CUDA_FREE(w_q_f32_dev_); SAFE_CUDA_FREE(w_k_f32_dev_); SAFE_CUDA_FREE(w_v_f32_dev_); SAFE_CUDA_FREE(w_o_f32_dev_);
   SAFE_CUDA_FREE(w_gate_f32_dev_); SAFE_CUDA_FREE(w_up_f32_dev_); SAFE_CUDA_FREE(w_down_f32_dev_);
+
+  // Free BF16 concatenated weights
+  SAFE_CUDA_FREE(w_q_bf16_dev_); SAFE_CUDA_FREE(w_k_bf16_dev_); SAFE_CUDA_FREE(w_v_bf16_dev_); SAFE_CUDA_FREE(w_o_bf16_dev_);
+  SAFE_CUDA_FREE(w_gate_bf16_dev_); SAFE_CUDA_FREE(w_up_bf16_dev_); SAFE_CUDA_FREE(w_down_bf16_dev_);
 
   Logger::info("Finished deferring concatenated F32 weight processing for GPU layers.");
 
