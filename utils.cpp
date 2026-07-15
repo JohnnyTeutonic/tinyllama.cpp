@@ -706,6 +706,27 @@ void silu_cpu(const std::vector<float>& x, std::vector<float>& out) {
   }
 }
 
+void gelu_cpu(const std::vector<float>& x, std::vector<float>& out) {
+  if (x.size() != out.size()) out.resize(x.size());
+  const float sqrt_2_inv = 0.7071067811865476f;  // 1/sqrt(2)
+#pragma omp parallel for
+  for (int64_t i = 0; i < static_cast<int64_t>(x.size()); ++i) {
+    out[i] = x[i] * 0.5f * (1.0f + std::erf(x[i] * sqrt_2_inv));
+  }
+}
+
+void gelu_new_cpu(const std::vector<float>& x, std::vector<float>& out) {
+  if (x.size() != out.size()) out.resize(x.size());
+  const float sqrt_2_pi = 0.7978845608028654f;  // sqrt(2/pi)
+  const float coeff = 0.044715f;
+#pragma omp parallel for
+  for (int64_t i = 0; i < static_cast<int64_t>(x.size()); ++i) {
+    float x_val = x[i];
+    float x_cubed = x_val * x_val * x_val;
+    out[i] = x_val * 0.5f * (1.0f + std::tanh(sqrt_2_pi * (x_val + coeff * x_cubed)));
+  }
+}
+
 void matmul_f32_f32_batch_cpu(
     const std::vector<float>& mat_weights,
     const std::vector<float>& batch_input_activations,

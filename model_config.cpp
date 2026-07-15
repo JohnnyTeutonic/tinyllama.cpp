@@ -148,13 +148,26 @@ ModelConfig parse_model_config_from_gguf(const GGUFData& gguf) {
 
   config.vocab_size = get_meta_value("tokenizer.ggml.vocab_size",
                                      get_meta_value("llama.vocab_size", 32000));
-  config.hidden_size = get_meta_value("llama.embedding_length", 4096);
-  config.intermediate_size = get_meta_value("llama.feed_forward_length", 11008);
-  config.num_attention_heads = get_meta_value("llama.attention.head_count", 32);
-  config.num_hidden_layers = get_meta_value("llama.block_count", 32);
+  // Model dimensions with fallbacks for different architectures (llama.*, phi.*, mistral.*)
+  config.hidden_size = get_meta_value("llama.embedding_length", 
+                       get_meta_value("phi.embedding_length",
+                       get_meta_value("mistral.embedding_length", 4096)));
+  config.intermediate_size = get_meta_value("llama.feed_forward_length",
+                             get_meta_value("phi.feed_forward_length",
+                             get_meta_value("mistral.feed_forward_length", 11008)));
+  config.num_attention_heads = get_meta_value("llama.attention.head_count",
+                               get_meta_value("phi.attention.head_count",
+                               get_meta_value("mistral.attention.head_count", 32)));
+  config.num_hidden_layers = get_meta_value("llama.block_count",
+                             get_meta_value("phi.block_count",
+                             get_meta_value("mistral.block_count", 32)));
   config.num_key_value_heads = get_meta_value("llama.attention.head_count_kv",
-                                              config.num_attention_heads);
-  config.max_position_embeddings = get_meta_value("llama.context_length", 4096);
+                               get_meta_value("phi.attention.head_count_kv",
+                               get_meta_value("mistral.attention.head_count_kv",
+                                              config.num_attention_heads)));
+  config.max_position_embeddings = get_meta_value("llama.context_length",
+                                   get_meta_value("phi.context_length",
+                                   get_meta_value("mistral.context_length", 4096)));
   if (config.max_position_embeddings == 0 ||
       config.max_position_embeddings > 8192) {
     Logger::warning("max_position_embeddings from GGUF is " +
@@ -163,9 +176,28 @@ ModelConfig parse_model_config_from_gguf(const GGUFData& gguf) {
     config.max_position_embeddings = 2048;
   }
   config.rms_norm_eps =
-      get_meta_value("llama.attention.layer_norm_rms_epsilon", 1e-5f);
-  config.rope_theta = get_meta_value("llama.rope.freq_base", 10000.0f);
-  config.hidden_act = "silu";
+      get_meta_value("llama.attention.layer_norm_rms_epsilon",
+      get_meta_value("phi.attention.layer_norm_rms_epsilon",
+      get_meta_value("mistral.attention.layer_norm_rms_epsilon", 1e-5f)));
+  config.rope_theta = get_meta_value("llama.rope.freq_base",
+                      get_meta_value("phi.rope.freq_base",
+                      get_meta_value("mistral.rope.freq_base", 10000.0f)));
+  
+  // Read hidden_act from metadata, with architecture-based defaults
+  std::string arch = get_meta_string("general.architecture", "llama");
+  config.hidden_act = get_meta_string("llama.hidden_act",
+                      get_meta_string("phi.hidden_act",
+                      get_meta_string("mistral.hidden_act", "")));
+  if (config.hidden_act.empty()) {
+    // Architecture-based defaults: Phi uses gelu_new, Llama/Mistral use silu
+    if (arch.find("phi") != std::string::npos || arch.find("Phi") != std::string::npos) {
+      config.hidden_act = "gelu_new";
+      Logger::info("[parse_gguf_config] Phi architecture detected, defaulting hidden_act to 'gelu_new'");
+    } else {
+      config.hidden_act = "silu";
+    }
+  }
+  Logger::info("[parse_gguf_config] hidden_act = '" + config.hidden_act + "'");
   config.bos_token_id = get_meta_value("tokenizer.ggml.bos_token_id", -1);
   config.eos_token_id = get_meta_value("tokenizer.ggml.eos_token_id", -1);
   config.unk_token_id = get_meta_value("tokenizer.ggml.unk_token_id", -1);
@@ -194,7 +226,14 @@ ModelConfig parse_model_config_from_gguf(const GGUFData& gguf) {
                  ", has_merges=" + std::string(has_merges ? "Y":"N") +
                  ", ggml_tokenizer_model_key='" + ggml_tokenizer_model + "' (is_tiktoken_style: " + std::string(is_tiktoken_style_tokenizer_model ? "Y":"N") + ")" );
 
-  if (has_merges && is_llama3_vocab_size && is_tiktoken_style_tokenizer_model) {
+  if (ggml_tokenizer_model == "word") {
+    // transformer_cpp export: word-level vocabulary (whitespace split,
+    // lowercased whole-word lookup). Must be checked before the
+    // architecture-based branches — these GGUFs also declare arch "llama".
+    config.tokenizer_family = ModelConfig::TokenizerFamily::WORD_LEVEL;
+    Logger::info("[parse_gguf_config] Result: Identified WORD_LEVEL tokenizer "
+                 "(tokenizer.ggml.model='word'; transformer_cpp export).");
+  } else if (has_merges && is_llama3_vocab_size && is_tiktoken_style_tokenizer_model) {
     config.tokenizer_family = ModelConfig::TokenizerFamily::LLAMA3_TIKTOKEN;
     Logger::info("[parse_gguf_config] Result: Identified LLAMA3_TIKTOKEN (merges + vocab_size + ggml_tokenizer_model='gpt2'). Architecture string was: '" + config.architecture + "'");
     if (!is_llama3_arch_hint && config.architecture == "llama") {

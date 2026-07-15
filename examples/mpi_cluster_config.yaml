@@ -1,0 +1,148 @@
+# Example MPI cluster configurations for TinyLlama distributed inference
+
+# Configuration 1: Small development cluster (4 nodes)
+small_cluster:
+  nodes: 4
+  master_node: 0
+  worker_nodes: [1, 2, 3]
+  model_path: "./models/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"
+  tokenizer_path: "./models/tokenizer.model"
+  gpu_layers: -1  # Use all GPU layers
+  role: "worker"  # All non-master nodes are workers
+  
+  # MPI command
+  command: |
+    mpirun -np 4 \
+      --hostfile hostfile \
+      ./tinyllama_distributed \
+      ./models/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf \
+      ./models/tokenizer.model \
+      worker \
+      -1
+
+# Configuration 2: Medium production cluster (8 nodes)
+medium_cluster:
+  nodes: 8
+  master_node: 0
+  worker_nodes: [1, 2, 3, 4, 5, 6, 7]
+  model_path: "./models/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"
+  tokenizer_path: "./models/tokenizer.model"
+  gpu_layers: 32  # Partial GPU offloading
+  role: "hybrid"  # All nodes can be master or worker
+  
+  # MPI command with resource binding
+  command: |
+    mpirun -np 8 \
+      --bind-to core \
+      --map-by ppr:1:node \
+      --hostfile hostfile \
+      ./tinyllama_distributed \
+      ./models/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf \
+      ./models/tokenizer.model \
+      hybrid \
+      32
+
+# Configuration 3: Large HPC cluster (16 nodes)
+large_cluster:
+  nodes: 16
+  master_node: 0
+  worker_nodes: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  model_path: "/shared/models/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"
+  tokenizer_path: "/shared/models/tokenizer.model"
+  gpu_layers: -1
+  role: "worker"
+  
+  # SLURM integration
+  slurm_script: |
+    #!/bin/bash
+    #SBATCH --job-name=tinyllama-distributed
+    #SBATCH --nodes=16
+    #SBATCH --ntasks-per-node=1
+    #SBATCH --gres=gpu:1
+    #SBATCH --time=02:00:00
+    #SBATCH --partition=gpu
+    
+    module load mpi/mpich
+    module load cuda
+    
+    mpirun ./tinyllama_distributed \
+      /shared/models/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf \
+      /shared/models/tokenizer.model \
+      worker \
+      -1
+
+# Configuration 4: CPU-only cluster (no GPU)
+cpu_cluster:
+  nodes: 6
+  master_node: 0
+  worker_nodes: [1, 2, 3, 4, 5]
+  model_path: "./models/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"
+  tokenizer_path: "./models/tokenizer.model"
+  gpu_layers: 0   # CPU-only inference
+  role: "worker"
+  
+  # CPU-optimized command
+  command: |
+    mpirun -np 6 \
+      --bind-to core \
+      --map-by ppr:2:node \
+      ./tinyllama_distributed \
+      ./models/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf \
+      ./models/tokenizer.model \
+      worker \
+      0
+
+# Host file examples
+hostfiles:
+  # Simple hostfile for local testing
+  local_hostfile: |
+    localhost slots=4
+  
+  # Multi-node hostfile
+  cluster_hostfile: |
+    node01 slots=2
+    node02 slots=2
+    node03 slots=2
+    node04 slots=2
+  
+  # HPC hostfile with specific resource allocation
+  hpc_hostfile: |
+    gpu-node01.cluster.local slots=1 max_slots=1
+    gpu-node02.cluster.local slots=1 max_slots=1
+    gpu-node03.cluster.local slots=1 max_slots=1
+    gpu-node04.cluster.local slots=1 max_slots=1
+
+# Environment variables for different scenarios
+environment:
+  development:
+    TINYLLAMA_LOG_LEVEL: "DEBUG"
+    OMP_NUM_THREADS: "4"
+    CUDA_VISIBLE_DEVICES: "0"
+  
+  production:
+    TINYLLAMA_LOG_LEVEL: "INFO"
+    OMP_NUM_THREADS: "8"
+    CUDA_VISIBLE_DEVICES: "0"
+  
+  hpc:
+    TINYLLAMA_LOG_LEVEL: "WARNING"
+    OMP_NUM_THREADS: "16"
+    CUDA_VISIBLE_DEVICES: "0,1,2,3"
+
+# Performance tuning recommendations
+performance_tuning:
+  small_models:
+    gpu_layers: -1
+    batch_size: 8
+    max_tokens: 512
+  
+  large_models:
+    gpu_layers: 32
+    batch_size: 4
+    max_tokens: 256
+  
+  cpu_only:
+    gpu_layers: 0
+    batch_size: 2
+    max_tokens: 128
+    threads_per_node: 8

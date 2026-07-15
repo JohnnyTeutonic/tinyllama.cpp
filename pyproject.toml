@@ -11,7 +11,10 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "tinyllama-cpp"
-dynamic = ["version"]
+# Static in this workspace: the project lives inside the research-portfolio
+# git repo, so setuptools_scm would derive versions from unrelated tags.
+# (Matches manage.ps1's $DefaultReleaseVersion.)
+version = "0.1.0"
 description = "Python bindings for the tinyllama.cpp inference engine"
 readme = "README.md"
 license = {text = "MIT"}
@@ -60,7 +63,7 @@ Changelog = "https://github.com/JohnnyTeutonic/tinyllama.cpp/releases"
 
 [tool.scikit-build]
 cmake.build-type = "Release"
-cmake.verbose = true
+build.verbose = true
 wheel.expand-macos-universal-tags = true
 wheel.install-dir = "tinyllama_cpp"
 wheel.packages = ["tinyllama_cpp"]

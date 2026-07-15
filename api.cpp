@@ -466,8 +466,16 @@ std::string TinyLlamaSession::generate(const std::string& user_prompt, int steps
   Logger::info("[Generate API] Configured tokenizer_family: " + family_log_str);
 
   // New Priority Logic:
+  // Priority 0: WORD_LEVEL models (transformer_cpp exports) are raw word-level
+  // LMs: "Q:"/"A:" wrappers are OOV noise that shift every position, and any
+  // chat formatting ("user: ... assistant:") is the caller's contract.
+  if (config_.tokenizer_family == ModelConfig::TokenizerFamily::WORD_LEVEL) {
+    Logger::info("[Generate API] WORD_LEVEL tokenizer: using raw prompt (no Q/A or chat template).");
+    final_prompt_for_encoding = user_prompt;
+    used_chat_template = false;
+  }
   // Priority 1 (NEW): Legacy Q/A formatting if CLI hint is true
-  if (apply_q_a_format_cli_hint) {
+  else if (apply_q_a_format_cli_hint) {
     Logger::info("[Generate API] Using legacy Q/A formatting (CLI Hint is true - Priority 1).");
     std::string temp_prompt = user_prompt;
     if (!system_prompt_arg.empty()) {

@@ -711,23 +711,41 @@ std::vector<float> TinyLlamaModel::forward(
     else if(!lw.up_proj.empty()) matvec_bf16_f32_vector_cpu(lw.up_proj, x_norm_vec2, up_vec, is, hs);
     else throw std::runtime_error("Layer " + std::to_string(l) + ": No Up proj weights (f32, q8k, q8, q4k, q6k, bf16) for CPU");
 
-    std::vector<float> silu_out_vec(is);
-    silu_cpu(gate_vec, silu_out_vec);
-
-    std::vector<float> swiglu_result_vec(is);
-    for(size_t i=0; i<is; ++i) swiglu_result_vec[i] = silu_out_vec[i] * up_vec[i];
+    // Activation dispatch based on config_.hidden_act
+    std::vector<float> activation_out_vec(is);
+    std::vector<float> mlp_intermediate_vec(is);
+    
+    if (config_.hidden_act == "gelu" || config_.hidden_act == "gelu_new" || 
+        config_.hidden_act == "gelu_fast" || config_.hidden_act == "gelu_pytorch_tanh") {
+      // GELU-based activation (Phi models) - no gate projection, just up_proj with GELU
+      // Note: For true Phi support, we'd need to handle missing gate_proj differently
+      // For now, treat as GeGLU (GELU + gate) if gate_proj exists
+      if (!lw.gate_proj_f32.empty() || !lw.gate_proj_q8_0.empty() || !lw.gate_proj_q4k.empty() || 
+          !lw.gate_proj_q6k.empty() || !lw.gate_proj_q8k.empty() || !lw.gate_proj.empty()) {
+        // GeGLU: GELU(gate) * up
+        gelu_new_cpu(gate_vec, activation_out_vec);
+        for(size_t i=0; i<is; ++i) mlp_intermediate_vec[i] = activation_out_vec[i] * up_vec[i];
+      } else {
+        // Standard GELU without gating (true Phi-style)
+        gelu_new_cpu(up_vec, mlp_intermediate_vec);
+      }
+    } else {
+      // Default: SiLU/SwiGLU activation (Llama/Mistral models)
+      silu_cpu(gate_vec, activation_out_vec);
+      for(size_t i=0; i<is; ++i) mlp_intermediate_vec[i] = activation_out_vec[i] * up_vec[i];
+    }
 
     std::vector<float> mlp_out_vec(hs);
     // Down-projection
     Logger::info("[CPU_FWD_MEM] Layer " + std::to_string(l) + ": About to ensure_down_proj_dequantized");
     ensure_down_proj_dequantized(l);
     Logger::info("[CPU_FWD_MEM] Layer " + std::to_string(l) + ": ensure_down_proj_dequantized completed");
-    if(!lw.down_proj_f32.empty()) matvec_f32_f32_vector_cpu(lw.down_proj_f32, swiglu_result_vec, mlp_out_vec, hs, is);
-    else if (!lw.down_proj_q8k.empty() && config_.is_gguf_file_loaded) matvec_q8k_f32_vector_cpu(lw.down_proj_q8k, swiglu_result_vec, mlp_out_vec, hs, is, enable_debug_logging);
-    else if (!lw.down_proj_q8_0.empty() && config_.is_gguf_file_loaded) matvec_q8_0_f32_vector_cpu(lw.down_proj_q8_0, swiglu_result_vec, mlp_out_vec, hs, is, enable_debug_logging);
-    else if (!lw.down_proj_q4k.empty() && config_.is_gguf_file_loaded) matvec_q4k_f32_vector_cpu(lw.down_proj_q4k, swiglu_result_vec, mlp_out_vec, hs, is, enable_debug_logging);
-    else if (!lw.down_proj_q6k.empty() && config_.is_gguf_file_loaded) matvec_q6k_f32_vector_cpu(lw.down_proj_q6k, swiglu_result_vec, mlp_out_vec, hs, is, enable_debug_logging);
-    else if(!lw.down_proj.empty()) matvec_bf16_f32_vector_cpu(lw.down_proj, swiglu_result_vec, mlp_out_vec, hs, is);
+    if(!lw.down_proj_f32.empty()) matvec_f32_f32_vector_cpu(lw.down_proj_f32, mlp_intermediate_vec, mlp_out_vec, hs, is);
+    else if (!lw.down_proj_q8k.empty() && config_.is_gguf_file_loaded) matvec_q8k_f32_vector_cpu(lw.down_proj_q8k, mlp_intermediate_vec, mlp_out_vec, hs, is, enable_debug_logging);
+    else if (!lw.down_proj_q8_0.empty() && config_.is_gguf_file_loaded) matvec_q8_0_f32_vector_cpu(lw.down_proj_q8_0, mlp_intermediate_vec, mlp_out_vec, hs, is, enable_debug_logging);
+    else if (!lw.down_proj_q4k.empty() && config_.is_gguf_file_loaded) matvec_q4k_f32_vector_cpu(lw.down_proj_q4k, mlp_intermediate_vec, mlp_out_vec, hs, is, enable_debug_logging);
+    else if (!lw.down_proj_q6k.empty() && config_.is_gguf_file_loaded) matvec_q6k_f32_vector_cpu(lw.down_proj_q6k, mlp_intermediate_vec, mlp_out_vec, hs, is, enable_debug_logging);
+    else if(!lw.down_proj.empty()) matvec_bf16_f32_vector_cpu(lw.down_proj, mlp_intermediate_vec, mlp_out_vec, hs, is);
     else throw std::runtime_error("Layer " + std::to_string(l) + ": No Down proj weights (f32, q8k, q8, q4k, q6k, bf16) for CPU");
 
     for(size_t i=0; i<input.size(); ++i) input[i] = x_resid2_vec[i] + mlp_out_vec[i]; // Update input by reference
@@ -2105,10 +2123,11 @@ std::vector<float> TinyLlamaModel::forward_cpu_batch(
     );
 }
 
+#ifdef HAS_CUDA
 // Smart GEMM wrapper that chooses between BF16 Tensor Cores and FP32 based on batch size
-void TinyLlamaModel::smart_gemm_batch_cuda(bool transa_user, bool transb_user, 
-                                           int m_user, int n_user, int k_user, 
-                                           const float* alpha_user, 
+void TinyLlamaModel::smart_gemm_batch_cuda(bool transa_user, bool transb_user,
+                                           int m_user, int n_user, int k_user,
+                                           const float* alpha_user,
                                            const float* A_f32_user, int lda_user, 
                                            const float* B_f32_user, int ldb_user, 
                                            const float* beta_user, 
@@ -2210,9 +2229,10 @@ void TinyLlamaModel::smart_gemm_batch_cuda(bool transa_user, bool transb_user,
     Logger::info("[SMART_GEMM] Using FP32 GEMM for " + std::string(operation_name) + 
                  " (batch_size=" + std::to_string(m_user) + " < " + std::to_string(tensor_core_threshold) + 
                  " or Tensor Cores unavailable)");
-    gemm_f32_f32_cuda(cublas_handle_, transa_user, transb_user, 
-                      m_user, n_user, k_user, alpha_user, 
-                      A_f32_user, lda_user, B_f32_user, ldb_user, 
+    gemm_f32_f32_cuda(cublas_handle_, transa_user, transb_user,
+                      m_user, n_user, k_user, alpha_user,
+                      A_f32_user, lda_user, B_f32_user, ldb_user,
                       beta_user, C_f32_user, ldc_user, stream);
 }
+#endif // HAS_CUDA
 

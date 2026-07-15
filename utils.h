@@ -95,6 +95,8 @@ void rmsnorm_vector_cpu(const std::vector<float>& x,
 
 void softmax_vector_cpu(const std::vector<float>& x, std::vector<float>& out);
 void silu_cpu(const std::vector<float>& x, std::vector<float>& out);
+void gelu_cpu(const std::vector<float>& x, std::vector<float>& out);  // For Phi models
+void gelu_new_cpu(const std::vector<float>& x, std::vector<float>& out);  // gelu_new variant
 
 // Batch matrix multiplication
 void matmul_f32_f32_batch_cpu(const std::vector<float>& mat_weights,

@@ -75,6 +75,64 @@ find_package(Threads REQUIRED)
 find_package(OpenMP REQUIRED)
 
 find_package(Boost 1.70.0 REQUIRED COMPONENTS regex)
+
+# MPICH Support for Distributed Inference
+OPTION(HAS_MPI "Enable MPI support for distributed inference (requires MPICH)" OFF)
+
+set(MPI_ENABLED FALSE)
+set(MPI_SOURCES "")
+
+if(HAS_MPI)
+    # Try to find MPI first
+    find_package(MPI QUIET)
+    
+    if(NOT MPI_FOUND)
+        message(STATUS "MPI not found via find_package. Fetching MPICH with FetchContent.")
+        
+        # Fetch MPICH using FetchContent
+        FetchContent_Declare(
+            mpich
+            URL        https://github.com/pmodels/mpich/archive/refs/tags/v4.1.2.tar.gz
+            URL_HASH   SHA256=3492e98adab62b597ef0d292fb2459b6123bc80070a8aa0a30be6952c00ebde2
+        )
+        
+        # Set MPICH build options
+        set(MPICH_ENABLE_SHARED ON CACHE BOOL "Build shared libraries")
+        set(MPICH_ENABLE_STATIC OFF CACHE BOOL "Build static libraries")
+        set(MPICH_ENABLE_CXX ON CACHE BOOL "Enable C++ bindings")
+        set(MPICH_ENABLE_FORTRAN OFF CACHE BOOL "Disable Fortran bindings")
+        set(MPICH_ENABLE_ROMIO OFF CACHE BOOL "Disable ROMIO MPI-IO")
+        set(MPICH_ENABLE_DEBUGINFO OFF CACHE BOOL "Disable debug info")
+        
+        FetchContent_MakeAvailable(mpich)
+        
+        # Set MPI variables for the fetched MPICH
+        set(MPI_C_FOUND TRUE)
+        set(MPI_CXX_FOUND TRUE)
+        set(MPI_C_INCLUDE_DIRS "${mpich_SOURCE_DIR}/src/include;${mpich_BINARY_DIR}/src/include")
+        set(MPI_CXX_INCLUDE_DIRS "${mpich_SOURCE_DIR}/src/include;${mpich_BINARY_DIR}/src/include")
+        set(MPI_C_LIBRARIES "mpi")
+        set(MPI_CXX_LIBRARIES "mpi")
+        
+        message(STATUS "MPICH fetched and configured via FetchContent")
+        message(STATUS "MPI include directories: ${MPI_C_INCLUDE_DIRS}")
+    else()
+        message(STATUS "Found system MPI installation")
+        message(STATUS "MPI C compiler: ${MPI_C_COMPILER}")
+        message(STATUS "MPI CXX compiler: ${MPI_CXX_COMPILER}")
+    endif()
+    
+    if(MPI_C_FOUND AND MPI_CXX_FOUND)
+        message(STATUS "MPI found and enabled. Will define HAS_MPI for distributed inference.")
+        set(MPI_ENABLED TRUE)
+        set(MPI_SOURCES distributed_coordinator.cpp)
+    else()
+        message(WARNING "HAS_MPI option is ON, but MPI not found. Disabling MPI support.")
+        set(HAS_MPI FALSE)
+    endif()
+else()
+    message(STATUS "HAS_MPI option is OFF. Building without distributed inference support.")
+endif()
 if(Boost_FOUND)
     message(STATUS "Found Boost version: ${Boost_VERSION_STRING}")
     message(STATUS "Boost include directories: ${Boost_INCLUDE_DIRS}")
@@ -231,6 +289,7 @@ add_library(tinyllama_core STATIC
     quantization.cpp
     model_constants.h
     ${CUDA_SOURCES} # Conditionally include CUDA source file
+    ${MPI_SOURCES}  # Conditionally include MPI source files
 )
 
 set_target_properties(tinyllama_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
@@ -250,6 +309,14 @@ target_link_libraries(tinyllama_core PRIVATE
     OpenMP::OpenMP_CXX
     Boost::regex # Add Boost regex library target
 )
+
+# Conditionally add MPI definition and link MPI libs for the library
+if(MPI_ENABLED)
+    target_compile_definitions(tinyllama_core PUBLIC HAS_MPI)
+    target_include_directories(tinyllama_core PUBLIC ${MPI_CXX_INCLUDE_DIRS})
+    target_link_libraries(tinyllama_core PRIVATE ${MPI_CXX_LIBRARIES})
+    message(STATUS "Added MPI support to tinyllama_core library")
+endif()
 
 # Conditionally add CUDA definition and link CUDA libs for the library
 if(CUDA_ENABLED)
@@ -326,6 +393,22 @@ add_executable(tinyllama
 
 target_link_libraries(tinyllama PRIVATE tinyllama_core)
 
+# Distributed inference executable (only if MPI is enabled)
+if(MPI_ENABLED)
+    add_executable(tinyllama_distributed
+        distributed_main.cpp
+    )
+    
+    target_link_libraries(tinyllama_distributed PRIVATE tinyllama_core)
+    
+    if(MPI_ENABLED)
+        target_include_directories(tinyllama_distributed PRIVATE ${MPI_CXX_INCLUDE_DIRS})
+        target_link_libraries(tinyllama_distributed PRIVATE ${MPI_CXX_LIBRARIES})
+    endif()
+    
+    message(STATUS "Added tinyllama_distributed executable with MPI support")
+endif()
+
 if(NOT SKBUILD)
     add_executable(tinyllama_server
         server.cpp
@@ -396,6 +479,11 @@ if (MSVC)
   # Add tinyllama_server only if it was actually created (when NOT SKBUILD)
   if(NOT SKBUILD AND TARGET tinyllama_server)
     list(APPEND MSVC_TARGETS tinyllama_server)
+  endif()
+  
+  # Add tinyllama_distributed only if MPI is enabled
+  if(MPI_ENABLED AND TARGET tinyllama_distributed)
+    list(APPEND MSVC_TARGETS tinyllama_distributed)
   endif()
   
   foreach(target ${MSVC_TARGETS})

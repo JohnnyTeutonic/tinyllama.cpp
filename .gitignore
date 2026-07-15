@@ -1,5 +1,4 @@
 .qodo
-*.md
 data/
 build/
 *.bin

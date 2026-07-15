@@ -112,7 +112,9 @@ struct ModelConfig {
     enum class TokenizerFamily {
         UNKNOWN,
         LLAMA_SENTENCEPIECE, // For Llama 2 and similar SentencePiece BPE
-        LLAMA3_TIKTOKEN      // For Llama 3's Tiktoken-based BPE
+        LLAMA3_TIKTOKEN,     // For Llama 3's Tiktoken-based BPE
+        WORD_LEVEL           // transformer_cpp GGUFs (tokenizer.ggml.model=="word"):
+                             // whitespace split, lowercase, whole-word lookup, <unk> fallback
     };
     TokenizerFamily tokenizer_family = TokenizerFamily::UNKNOWN;
 };
@@ -343,16 +345,18 @@ class TinyLlamaModel {
   void ensure_bf16_concatenated_weights_loaded();
   void free_bf16_concatenated_weights();
   
+#ifdef HAS_CUDA
   // Smart GEMM wrapper that chooses between BF16 Tensor Cores and FP32 based on batch size
-  void smart_gemm_batch_cuda(bool transa_user, bool transb_user, 
-                             int m_user, int n_user, int k_user, 
-                             const float* alpha_user, 
-                             const float* A_f32_user, int lda_user, 
-                             const float* B_f32_user, int ldb_user, 
-                             const float* beta_user, 
-                             float* C_f32_user, int ldc_user, 
+  void smart_gemm_batch_cuda(bool transa_user, bool transb_user,
+                             int m_user, int n_user, int k_user,
+                             const float* alpha_user,
+                             const float* A_f32_user, int lda_user,
+                             const float* B_f32_user, int ldb_user,
+                             const float* beta_user,
+                             float* C_f32_user, int ldc_user,
                              cudaStream_t stream,
                              const char* operation_name = "GEMM");
+#endif // HAS_CUDA
 
 #ifdef HAS_CUDA
   /**

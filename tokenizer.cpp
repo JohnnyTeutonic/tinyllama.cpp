@@ -1159,9 +1159,27 @@ std::vector<int> Tokenizer::encode(const std::string& text, bool add_bos,
   Logger::debug(log_ss_main.str());
 
   
+  if (tokenizer_family_ == ModelConfig::TokenizerFamily::WORD_LEVEL) {
+    // transformer_cpp word-level GGUF: whitespace split -> lowercase ->
+    // whole-word lookup -> <unk> fallback. BOS/EOS are intentionally NOT
+    // injected regardless of flags: training streams were raw word sequences
+    // and low token ids may be ordinary vocabulary words.
+    Logger::debug("[ENCODE] Using WORD_LEVEL (whole-word lookup) path.");
+    std::istringstream word_iss(text);
+    std::string word;
+    while (word_iss >> word) {
+      std::transform(word.begin(), word.end(), word.begin(),
+                     [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+      auto it = token_to_id_.find(word);
+      final_ids.push_back(it != token_to_id_.end() ? it->second
+                                                   : this->unk_token_id_);
+    }
+    return final_ids;
+  }
+
   if (tokenizer_family_ == ModelConfig::TokenizerFamily::LLAMA3_TIKTOKEN) {
     Logger::debug("[ENCODE] Using LLAMA3_TIKTOKEN (bpe_tokenize_to_ids) path.");
-    
+
     if (add_bos && this->bos_token_id_ != -1) {
         // Check if the text already starts with the BOS token string
         if (this->bos_token_.empty() || text.rfind(this->bos_token_, 0) != 0) {
@@ -1394,6 +1412,23 @@ std::vector<int> Tokenizer::encode(const std::string& text, bool add_bos,
 std::string Tokenizer::decode(const std::vector<int>& ids,
                               bool skip_special_tokens) const {
     // Dispatch based on tokenizer family
+    if (tokenizer_family_ == ModelConfig::TokenizerFamily::WORD_LEVEL) {
+        // transformer_cpp word-level GGUF: ids are whole words; join with
+        // single spaces, skipping specials (pad/unk/bos/eos) when requested.
+        std::stringstream wss;
+        bool first = true;
+        for (int id : ids) {
+            if (id < 0 || static_cast<size_t>(id) >= id_to_token_.size()) continue;
+            if (skip_special_tokens &&
+                (id == bos_token_id_ || id == eos_token_id_ ||
+                 id == pad_token_id_ || id == unk_token_id_)) continue;
+            if (!first) wss << " ";
+            wss << id_to_token_[id];
+            first = false;
+        }
+        return wss.str();
+    }
+
     if (tokenizer_family_ == ModelConfig::TokenizerFamily::LLAMA_SENTENCEPIECE) {
         // Use the dedicated SentencePiece decoding logic
         return decode_sentencepiece(ids, skip_special_tokens);

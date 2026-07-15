@@ -651,9 +651,14 @@ void TinyLlamaModel::free_layer_gpu_weights(int layer_idx) {
 #endif
 }
 
+#endif // HAS_CUDA (GPU weight-management implementations)
+
+// NOTE: map_gguf_weights is required by BOTH CUDA and CPU builds (it maps
+// GGUF tensors into host-side model fields). It was previously trapped inside
+// the HAS_CUDA block opened far above, which broke CPU-only linking.
 void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
   Logger::info("Mapping GGUF weights to model fields (ULTRA-OPTIMIZED VERSION)...");
-    
+
   const uint8_t* actual_data_block_start = nullptr;
   
   // Determine which data source to use
@@ -863,6 +868,7 @@ void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
               case GGMLType::GGML_TYPE_Q6_K: FAST_COPY_WEIGHT(layer.q_proj_q6k, block_q6_K); break;
               case GGMLType::GGML_TYPE_Q8_K: FAST_COPY_WEIGHT(layer.q_proj_q8k, block_q8_K); break;
               case GGMLType::GGML_TYPE_BF16: FAST_COPY_WEIGHT(layer.q_proj, uint16_t); break;
+              case GGMLType::GGML_TYPE_F32: FAST_COPY_WEIGHT(layer.q_proj_f32, float); break; // transformer_cpp fp32 exports
             }
           } else if (name.find("attn_k.weight") != std::string::npos) {
             switch (info.type) {
@@ -871,6 +877,7 @@ void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
               case GGMLType::GGML_TYPE_Q6_K: FAST_COPY_WEIGHT(layer.k_proj_q6k, block_q6_K); break;
               case GGMLType::GGML_TYPE_Q8_K: FAST_COPY_WEIGHT(layer.k_proj_q8k, block_q8_K); break;
               case GGMLType::GGML_TYPE_BF16: FAST_COPY_WEIGHT(layer.k_proj, uint16_t); break;
+              case GGMLType::GGML_TYPE_F32: FAST_COPY_WEIGHT(layer.k_proj_f32, float); break; // transformer_cpp fp32 exports
             }
           } else if (name.find("attn_v.weight") != std::string::npos) {
             switch (info.type) {
@@ -879,6 +886,7 @@ void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
               case GGMLType::GGML_TYPE_Q6_K: FAST_COPY_WEIGHT(layer.v_proj_q6k, block_q6_K); break;
               case GGMLType::GGML_TYPE_Q8_K: FAST_COPY_WEIGHT(layer.v_proj_q8k, block_q8_K); break;
               case GGMLType::GGML_TYPE_BF16: FAST_COPY_WEIGHT(layer.v_proj, uint16_t); break;
+              case GGMLType::GGML_TYPE_F32: FAST_COPY_WEIGHT(layer.v_proj_f32, float); break; // transformer_cpp fp32 exports
             }
           } else if (name.find("attn_output.weight") != std::string::npos) {
             switch (info.type) {
@@ -887,6 +895,7 @@ void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
               case GGMLType::GGML_TYPE_Q6_K: FAST_COPY_WEIGHT(layer.o_proj_q6k, block_q6_K); break;
               case GGMLType::GGML_TYPE_Q8_K: FAST_COPY_WEIGHT(layer.o_proj_q8k, block_q8_K); break;
               case GGMLType::GGML_TYPE_BF16: FAST_COPY_WEIGHT(layer.o_proj, uint16_t); break;
+              case GGMLType::GGML_TYPE_F32: FAST_COPY_WEIGHT(layer.o_proj_f32, float); break; // transformer_cpp fp32 exports
             }
           } else if (name.find("attn_norm.weight") != std::string::npos && info.type == GGMLType::GGML_TYPE_F32) {
             FAST_COPY_WEIGHT(layer.input_layernorm_f32, float);
@@ -899,6 +908,7 @@ void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
               case GGMLType::GGML_TYPE_Q6_K: FAST_COPY_WEIGHT(layer.gate_proj_q6k, block_q6_K); break;
               case GGMLType::GGML_TYPE_Q8_K: FAST_COPY_WEIGHT(layer.gate_proj_q8k, block_q8_K); break;
               case GGMLType::GGML_TYPE_BF16: FAST_COPY_WEIGHT(layer.gate_proj, uint16_t); break;
+              case GGMLType::GGML_TYPE_F32: FAST_COPY_WEIGHT(layer.gate_proj_f32, float); break; // transformer_cpp fp32 exports
             }
           } else if (name.find("ffn_up.weight") != std::string::npos) {
             switch (info.type) {
@@ -907,6 +917,7 @@ void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
               case GGMLType::GGML_TYPE_Q6_K: FAST_COPY_WEIGHT(layer.up_proj_q6k, block_q6_K); break;
               case GGMLType::GGML_TYPE_Q8_K: FAST_COPY_WEIGHT(layer.up_proj_q8k, block_q8_K); break;
               case GGMLType::GGML_TYPE_BF16: FAST_COPY_WEIGHT(layer.up_proj, uint16_t); break;
+              case GGMLType::GGML_TYPE_F32: FAST_COPY_WEIGHT(layer.up_proj_f32, float); break; // transformer_cpp fp32 exports
             }
           } else if (name.find("ffn_down.weight") != std::string::npos) {
             switch (info.type) {
@@ -915,6 +926,7 @@ void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
               case GGMLType::GGML_TYPE_Q6_K: FAST_COPY_WEIGHT(layer.down_proj_q6k, block_q6_K); break;
               case GGMLType::GGML_TYPE_Q8_K: FAST_COPY_WEIGHT(layer.down_proj_q8k, block_q8_K); break;
               case GGMLType::GGML_TYPE_BF16: FAST_COPY_WEIGHT(layer.down_proj, uint16_t); break;
+              case GGMLType::GGML_TYPE_F32: FAST_COPY_WEIGHT(layer.down_proj_f32, float); break; // transformer_cpp fp32 exports
             }
           } else if (name.find("ffn_norm.weight") != std::string::npos && info.type == GGMLType::GGML_TYPE_F32) {
             FAST_COPY_WEIGHT(layer.post_attention_layernorm_f32, float);
@@ -934,7 +946,7 @@ void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
                std::to_string(error_count.load()) + ") with ultra-optimized parallel mapping");
 }
 
-#else // HAS_CUDA
+#ifndef HAS_CUDA
 
 void TinyLlamaModel::ensure_f32_concatenated_weights_loaded() {
   Logger::info("CPU-only build: ensure_f32_concatenated_weights_loaded is a no-op");
