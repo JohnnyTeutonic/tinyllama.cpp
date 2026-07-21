@@ -15,6 +15,29 @@ The GGUF format support includes loading models with various tensor types such a
 *   Built-in web server (`cpp-httplib`) for easy interaction via a web UI.
 *   Minimal external dependencies managed via CMake.
 *   Cross-platform (tested on Linux, Windows - requires C++17 compiler).
+*   **Word-level tiny models** (2026-07): serves models trained by the
+    companion from-scratch trainer
+    ([transformer](https://github.com/JohnnyTeutonic/transformer)) — word-level
+    tokenizer GGUFs bypass BPE and chat-template wrapping automatically; the
+    web server detects dialogue-trained vocabularies and applies
+    `user:`/`assistant:` turn formatting with reply truncation, and the web UI
+    threads a sliding window of conversation history into each prompt.
+
+### Recent engine changes (2026-07)
+
+*   CTRL-style repetition penalty over recently generated tokens (default 1.3;
+    tiny word-level models loop without it). CLI: `--rep-penalty` (1.0
+    disables).
+*   `--raw-prompt` CLI flag: suppress the legacy `Q: ... A:` wrap — on
+    word-level models whose vocab lacks those tokens the wrap would inject
+    UNKs exactly at the answer boundary.
+*   `TINYLLAMA_TOPK_DEBUG=1`: dump the top-10 candidate (id, logit) pairs at
+    every sampled position to stderr — the decoding-side differential-debug
+    counterpart of the trainer's activation traces.
+*   Memory-saving layer clearing is now recoverability-guarded: F32-native
+    layer weights (no quantized source to re-dequantize from) are never
+    cleared. Before this fix, multi-layer F32 GGUFs silently produced garbage
+    logits after the first forward pass.
 
 ## Dependencies and Setup
 

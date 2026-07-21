@@ -106,6 +106,12 @@ class TinyLlamaSession {
   const ModelConfig& get_config() const { return config_; }
   KVCache& get_kv_cache() { return kv_cache_; }
 
+  // Repetition penalty applied to recently generated tokens during sampling
+  // (CTRL-style; 1.0 disables). Default 1.3: tiny word-level models loop
+  // hard without it.
+  void set_repetition_penalty(float p) { repetition_penalty_ = p; }
+  float get_repetition_penalty() const { return repetition_penalty_; }
+
  private:
   TinyLlamaSession(const TinyLlamaSession&) = delete;
   TinyLlamaSession& operator=(const TinyLlamaSession&) = delete;
@@ -126,6 +132,7 @@ class TinyLlamaSession {
   KVCache kv_cache_;
   int eos_token_id_;
   std::mt19937 rng_{std::random_device{}()};  // RNG for sampling
+  float repetition_penalty_ = 1.3f;           // see set_repetition_penalty
   int threads_;
   bool use_batch_generation_; // Enable batch generation
   std::stringstream generated_stream_; // Added for streaming output

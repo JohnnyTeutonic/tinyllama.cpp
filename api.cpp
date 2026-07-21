@@ -79,6 +79,40 @@ static int argmax(const std::vector<float>& v) {
   return std::distance(v.begin(), std::max_element(v.begin(), v.end()));
 }
 
+// CTRL-style repetition penalty over recently generated tokens. Tiny
+// word-level models fall into short degenerate cycles ("you are very kind."
+// x12, 2026-07-19); penalizing the last window of generated ids breaks the
+// cycle while leaving fresh vocabulary untouched.
+static void apply_repetition_penalty(std::vector<float>& logits,
+                                     const std::vector<int>& generated,
+                                     float penalty, size_t window = 64) {
+  if (penalty <= 1.0f || generated.empty()) return;
+  size_t start = generated.size() > window ? generated.size() - window : 0;
+  for (size_t i = start; i < generated.size(); ++i) {
+    int id = generated[i];
+    if (id < 0 || static_cast<size_t>(id) >= logits.size()) continue;
+    float& l = logits[id];
+    l = (l > 0.0f) ? l / penalty : l * penalty;
+  }
+}
+
+// TINYLLAMA_TOPK_DEBUG=1: dump the top-10 candidates (id, logit) at every
+// sampled position to stderr. The decoder-side counterpart of the trainer's
+// [TRACE] dumps — for asking "was the dropped word 2nd by a hair, or absent?"
+static void debug_dump_topk(const std::vector<float>& logits) {
+  static const bool on = std::getenv("TINYLLAMA_TOPK_DEBUG") != nullptr;
+  if (!on) return;
+  std::vector<int> idx(logits.size());
+  for (size_t i = 0; i < idx.size(); ++i) idx[i] = static_cast<int>(i);
+  std::partial_sort(idx.begin(), idx.begin() + std::min<size_t>(10, idx.size()),
+                    idx.end(), [&](int a, int b) { return logits[a] > logits[b]; });
+  std::ostringstream os;
+  os << "[TOPK]";
+  for (size_t r = 0; r < std::min<size_t>(10, idx.size()); ++r)
+    os << " " << idx[r] << ":" << logits[idx[r]];
+  fprintf(stderr, "%s\n", os.str().c_str());
+}
+
 static int sample_top_k_top_p_temperature(const std::vector<float>& logits,
                                           float temperature, int top_k,
                                           float top_p, std::mt19937& rng) {
@@ -631,6 +665,8 @@ if (prefill_enabled) {
           Logger::error("Prefill: Logits are empty after prefill processing.");
           return ""; // Critical error
       }
+      apply_repetition_penalty(logits, generated_token_ids, repetition_penalty_);
+      debug_dump_topk(logits);
       next_token_id = sample_top_k_top_p_temperature(logits, temperature, top_k, top_p, rng_);
       generated_token_ids.push_back(next_token_id); // Track generated token
       generated_count++;
@@ -719,6 +755,8 @@ if (prefill_enabled) {
 
     // Sampling logic: Only sample if we're at the last prompt token or generating
     if (pos == num_prompt_tokens - 1 || pos >= num_prompt_tokens) {
+      apply_repetition_penalty(logits, generated_token_ids, repetition_penalty_);
+      debug_dump_topk(logits);
       next_token_id = sample_top_k_top_p_temperature(logits, temperature, top_k, top_p, rng_);
       
       // Only add to generated tokens if we're actually generating (not just finishing prompt)

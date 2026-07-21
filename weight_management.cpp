@@ -64,7 +64,25 @@ void TinyLlamaModel::clear_layer_dequantized_weights(int layer_idx) {
         Logger::warning("clear_layer_dequantized_weights: Invalid layer index " + std::to_string(layer_idx));
         return;
     }
-    
+
+    // For F32-native models (transformer_cpp exports) the f32 vectors ARE
+    // the master weights — there is no quantized/BF16 source to re-derive
+    // them from, so clearing is permanent destruction, not a memory
+    // optimization. This path was dormant for every 2-layer model (the
+    // trigger is l >= 2 in the forward loop) and first fired on the 4-layer
+    // mid model (2026-07-20): second forward pass threw "No Q proj weights".
+    {
+        const auto& lw = layers[layer_idx];
+        bool recoverable = !lw.q_proj_q6k.empty() || !lw.q_proj_q4k.empty() ||
+                           !lw.q_proj_q8k.empty() || !lw.q_proj_q8_0.empty() ||
+                           !lw.q_proj.empty();
+        if (!recoverable) {
+            Logger::info("clear_layer_dequantized_weights: layer " + std::to_string(layer_idx) +
+                         " is F32-native (no quantized source) — skipping clear.");
+            return;
+        }
+    }
+
     Logger::info("Clearing dequantized weights for layer " + std::to_string(layer_idx) + " to save memory.");
     
     auto& layer = layers[layer_idx];
@@ -868,7 +886,15 @@ void map_gguf_weights(const GGUFData& gguf, TinyLlamaModel& model) {
               case GGMLType::GGML_TYPE_Q6_K: FAST_COPY_WEIGHT(layer.q_proj_q6k, block_q6_K); break;
               case GGMLType::GGML_TYPE_Q8_K: FAST_COPY_WEIGHT(layer.q_proj_q8k, block_q8_K); break;
               case GGMLType::GGML_TYPE_BF16: FAST_COPY_WEIGHT(layer.q_proj, uint16_t); break;
-              case GGMLType::GGML_TYPE_F32: FAST_COPY_WEIGHT(layer.q_proj_f32, float); break; // transformer_cpp fp32 exports
+              case GGMLType::GGML_TYPE_F32: FAST_COPY_WEIGHT(layer.q_proj_f32, float);
+                Logger::info("[MAP_DEBUG] " + name + " F32 copied, elems=" +
+                             std::to_string(layer.q_proj_f32.size()) +
+                             " into layer_idx=" + std::to_string(layer_idx));
+                break; // transformer_cpp fp32 exports
+              default:
+                Logger::info("[MAP_DEBUG] " + name + " UNHANDLED type=" +
+                             std::to_string(static_cast<int>(info.type)));
+                break;
             }
           } else if (name.find("attn_k.weight") != std::string::npos) {
             switch (info.type) {

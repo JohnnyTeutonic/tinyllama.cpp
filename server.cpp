@@ -39,8 +39,9 @@
 #pragma warning(pop)
 #endif
 
-#include <filesystem>         
-#include <memory>             
+#include <algorithm>
+#include <filesystem>
+#include <memory>
 #include <nlohmann/json.hpp>  
 #include <string>
 #include <thread>  
@@ -141,6 +142,40 @@ int main(int argc, char** argv) {
 
           if (config.is_gguf_file_loaded) {
         prompt_for_session_generate = user_input_from_client;
+            // WORD_LEVEL models (transformer_cpp exports) understand their
+            // training format, not free-form chat. Probe the embedded vocab
+            // once to tell dialogue models (DailyDialog: has "assistant:")
+            // from story models (TinyStories-Instruct), then wrap natural
+            // input in the matching template. Power users typing explicit
+            // "summary:/words:/story:/user:" prompts pass through verbatim.
+            if (config.tokenizer_family == ModelConfig::TokenizerFamily::WORD_LEVEL) {
+                static int dialogue_model = -1;  // -1 unknown, probed once
+                if (dialogue_model < 0 && tokenizer) {
+                    auto ids = tokenizer->encode("assistant:", false, false);
+                    int unk = 0;  // word-level UNK id
+                    dialogue_model = (!ids.empty() && ids[0] != unk) ? 1 : 0;
+                    Logger::info(std::string("WORD_LEVEL model type probed: ") +
+                                 (dialogue_model ? "dialogue" : "story"));
+                }
+                std::string lower = user_input_from_client;
+                std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+                bool has_field = lower.find("story:") != std::string::npos ||
+                                 lower.find("summary:") != std::string::npos ||
+                                 lower.find("words:") != std::string::npos ||
+                                 lower.rfind("once upon", 0) == 0 ||
+                                 lower.rfind("user:", 0) == 0;
+                if (!has_field) {
+                    if (dialogue_model == 1) {
+                        prompt_for_session_generate =
+                            "user: " + user_input_from_client + " assistant:";
+                        Logger::info("WORD_LEVEL: wrapped input as dialogue turn.");
+                    } else {
+                        prompt_for_session_generate =
+                            "summary: " + user_input_from_client + " story:";
+                        Logger::info("WORD_LEVEL: wrapped free-form input as story request.");
+                    }
+                }
+            }
             // Check for Llama 3 tokenizer family to disable Q&A for it
             if (config.tokenizer_family == ModelConfig::TokenizerFamily::LLAMA3_TIKTOKEN) {
                 use_q_a_format_for_session_generate = false;
@@ -172,6 +207,14 @@ int main(int argc, char** argv) {
           std::string reply = session->generate(
           prompt_for_session_generate, max_new_tokens, temperature, top_k, top_p, "",
           use_q_a_format_for_session_generate);
+          // Dialogue models continue the whole transcript (both speakers):
+          // cut the reply at the next turn marker so the UI shows one turn.
+          {
+              size_t cut = reply.find("user:");
+              if (cut != std::string::npos && cut > 0) {
+                  reply = reply.substr(0, cut);
+              }
+          }
           Logger::info("Generated reply: " + reply.substr(0, 50) + "...");
 
           json res_json;

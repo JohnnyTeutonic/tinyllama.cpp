@@ -132,6 +132,8 @@ int main(int argc, char** argv) {
   float temperature = 0.1f; // Default temperature
   int top_k = 40;           // Default top-k sampling parameter
   float top_p = 0.9f;       // Default top-p/nucleus sampling parameter
+  float rep_penalty = -1.0f; // <=0: keep the engine default (1.3); 1.0 disables
+  bool raw_prompt = false;   // --raw-prompt: no internal Q&A wrap (see below)
 
   int current_arg_idx = 5;
   while(current_arg_idx < argc) {
@@ -184,6 +186,15 @@ int main(int argc, char** argv) {
             catch (const std::exception& e) { Logger::error("Invalid top_p: " + std::string(argv[current_arg_idx+1])); }
             current_arg_idx += 2;
         } else { std::cerr << "ERROR: --top-p requires a value." << std::endl; return 1;}
+    } else if (arg == "--raw-prompt") {
+        raw_prompt = true;
+        current_arg_idx += 1;
+    } else if (arg == "--rep-penalty" || arg == "-rp") {
+        if (current_arg_idx + 1 < argc) {
+            try { rep_penalty = std::stof(argv[current_arg_idx+1]); }
+            catch (const std::exception& e) { Logger::error("Invalid rep_penalty: " + std::string(argv[current_arg_idx+1])); }
+            current_arg_idx += 2;
+        } else { std::cerr << "ERROR: --rep-penalty requires a value." << std::endl; return 1;}
     } else if (arg == "--use-kv-quant" || arg == "-kvq") {
          if (current_arg_idx + 1 < argc) {
             std::string kvq_str_val = argv[current_arg_idx+1];
@@ -256,6 +267,10 @@ int main(int argc, char** argv) {
     
     tinyllama::TinyLlamaSession session(model_path_or_dir, tokenizer_path, num_threads, n_gpu_layers, use_mmap, use_kv_quant, session_use_batch_generation, session_max_batch_size);
     Logger::info("TinyLlamaSession initialized successfully.");
+    if (rep_penalty > 0.0f) {
+        session.set_repetition_penalty(rep_penalty);
+        Logger::info("Repetition penalty overridden to " + std::to_string(rep_penalty));
+    }
 
     const ModelConfig& config = session.get_config();
     bool apply_qa_formatting_decision; // This will be true if no advanced template is used
@@ -267,6 +282,14 @@ int main(int argc, char** argv) {
     } else {
         apply_qa_formatting_decision = true; // Default for other models without GGUF template
         Logger::info("[Main.cpp] Non-Llama 3 model and no GGUF chat template. Internal Q&A prompt formatting will be ENABLED.");
+    }
+    if (raw_prompt) {
+        // The legacy "Q: ... \nA:" wrap injects UNKs at the answer boundary on
+        // word-level models whose vocab lacks "Q:"/"A:" (found 2026-07-21:
+        // TinyChat evals conditioned on garbage exactly where the reply
+        // starts). --raw-prompt sends the prompt verbatim.
+        apply_qa_formatting_decision = false;
+        Logger::info("[Main.cpp] --raw-prompt: internal Q&A formatting DISABLED.");
     }
 
     Logger::info("[Main.cpp] Mode: '" + mode_str + "'. Final decision for apply_qa_formatting_decision: " + std::string(apply_qa_formatting_decision ? "true" : "false"));

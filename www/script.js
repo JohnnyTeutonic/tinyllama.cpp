@@ -7,7 +7,9 @@ document.addEventListener('DOMContentLoaded', () => {
     let conversationHistory = []; // Store history as {role: 'user'/'assistant', content: '...'} 
 
     function addMessageToHistory(role, text, isError = false) {
-        conversationHistory.push({ role: role, content: text });
+        if (!isError) {  // error banners must not enter the model's prompt
+            conversationHistory.push({ role: role, content: text });
+        }
         const messageDiv = document.createElement('div');
         messageDiv.classList.add('message', role === 'user' ? 'user-message' : 'server-message');
         if (isError) {
@@ -20,10 +22,31 @@ document.addEventListener('DOMContentLoaded', () => {
         historyDiv.scrollTop = historyDiv.scrollHeight; // Scroll to the bottom
     }
 
+    // Build a multi-turn prompt from recent history. The word-level models
+    // have a 128-word context window, so keep the prompt to a sliding window
+    // of the most recent turns under a word budget (leaving room to reply).
+    function buildPrompt(latestUserText) {
+        const WORD_BUDGET = 80;
+        const turns = conversationHistory
+            .map(t => (t.role === 'user' ? 'user: ' : 'assistant: ') + t.content)
+            .concat(['user: ' + latestUserText, 'assistant:']);
+        // Take turns from the end until the budget is filled
+        let words = 0;
+        const kept = [];
+        for (let i = turns.length - 1; i >= 0; i--) {
+            const w = turns[i].split(/\s+/).length;
+            if (words + w > WORD_BUDGET && kept.length > 1) break;
+            kept.unshift(turns[i]);
+            words += w;
+        }
+        return kept.join(' ');
+    }
+
     async function sendMessage() {
         const messageText = messageInput.value.trim();
         if (!messageText) return; // Don't send empty messages
 
+        const prompt = buildPrompt(messageText);
         addMessageToHistory('user', messageText);
         messageInput.value = ''; // Clear input field
 
@@ -33,10 +56,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 headers: {
                     'Content-Type': 'application/json',
                 },
-                body: JSON.stringify({ 
-                    user_input: messageText,
-                    temperature: 0.1,  // Low temperature for focused responses
-                    max_new_tokens: 60,
+                body: JSON.stringify({
+                    user_input: prompt,
+                    temperature: 0.7,  // Tiny models at 0.1 collapse to their most generic phrases
+                    max_new_tokens: 45,
                     top_k: 40,        // Limit to top 40 tokens
                     top_p: 0.9        // Sample from 90% of probability mass
                 })
