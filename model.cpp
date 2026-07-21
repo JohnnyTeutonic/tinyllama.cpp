@@ -749,7 +749,20 @@ std::vector<float> TinyLlamaModel::forward(
     else throw std::runtime_error("Layer " + std::to_string(l) + ": No Down proj weights (f32, q8k, q8, q4k, q6k, bf16) for CPU");
 
     for(size_t i=0; i<input.size(); ++i) input[i] = x_resid2_vec[i] + mlp_out_vec[i]; // Update input by reference
-    
+
+    // TINYLLAMA_LAYER_TRACE=1: per-sub-op L2s, format-matched to the
+    // trainer's TCPP_LAYER_TRACE [SUBOP] lines — diff the two on identical
+    // tokens to localize CPU-forward divergence (golden-batch suite).
+    if (std::getenv("TINYLLAMA_LAYER_TRACE") != nullptr) {
+      auto l2 = [](const std::vector<float>& v) {
+        double s = 0.0;
+        for (float x : v) s += double(x) * x;
+        return std::sqrt(s);
+      };
+      fprintf(stderr, "[ENG_SUBOP] L%d pos=%d ln1=%g attn=%g res1=%g ln2=%g ffn=%g out=%g\n",
+              l, n_tokens, l2(x_norm_vec1), l2(attn_proj_vec), l2(x_resid2_vec),
+              l2(x_norm_vec2), l2(mlp_out_vec), l2(input));
+    }
 
     if (log_this_layer) {
       Logger::info("[CPU_FWD] ------ END Layer " + std::to_string(l) +
