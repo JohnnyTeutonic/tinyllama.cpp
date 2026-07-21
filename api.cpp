@@ -100,6 +100,16 @@ static void apply_repetition_penalty(std::vector<float>& logits,
 // sampled position to stderr. The decoder-side counterpart of the trainer's
 // [TRACE] dumps — for asking "was the dropped word 2nd by a hair, or absent?"
 static void debug_dump_topk(const std::vector<float>& logits) {
+  // TINYLLAMA_LOGITS_DUMP=<path>: append the FULL logit vector at every
+  // sampled position (one space-joined line each). The engine half of the
+  // golden-batch GGUF-parity test — compare against the trainer's
+  // golden_batch_test --dump rows with compare_golden_logits.py.
+  static const char* dump_path = std::getenv("TINYLLAMA_LOGITS_DUMP");
+  if (dump_path) {
+    std::ofstream f(dump_path, std::ios::app);
+    for (size_t i = 0; i < logits.size(); ++i) f << (i ? " " : "") << logits[i];
+    f << "\n";
+  }
   static const bool on = std::getenv("TINYLLAMA_TOPK_DEBUG") != nullptr;
   if (!on) return;
   std::vector<int> idx(logits.size());
