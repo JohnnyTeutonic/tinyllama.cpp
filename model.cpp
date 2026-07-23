@@ -759,8 +759,8 @@ std::vector<float> TinyLlamaModel::forward(
         for (float x : v) s += double(x) * x;
         return std::sqrt(s);
       };
-      fprintf(stderr, "[ENG_SUBOP] L%d pos=%d ln1=%g attn=%g res1=%g ln2=%g ffn=%g out=%g\n",
-              l, n_tokens, l2(x_norm_vec1), l2(attn_proj_vec), l2(x_resid2_vec),
+      fprintf(stderr, "[ENG_SUBOP] L%d pos=%d ln1=%g Vraw=%g attnout=%g attn=%g res1=%g ln2=%g ffn=%g out=%g\n",
+              l, n_tokens, l2(x_norm_vec1), l2(v_vec), l2(attn_out_vec), l2(attn_proj_vec), l2(x_resid2_vec),
               l2(x_norm_vec2), l2(mlp_out_vec), l2(input));
     }
 
